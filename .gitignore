@@ -1,0 +1,66 @@
+# ── Python ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+
+# ── Virtual environments ────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Build / packaging output ────────────────────────────────────────
+build/
+dist/
+*.spec.bak
+release/
+installer/output/
+
+# ── PyInstaller runtime leftovers ───────────────────────────────────
+*.manifest
+
+# ── IDE / editor ────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── OS ──────────────────────────────────────────────────────────────
+desktop.ini
+
+# ── Lyra-specific ───────────────────────────────────────────────────
+# Heavy reference captures — study material, not source of Lyra.
+# If the eesdr3_refs tree is ever needed on another machine, keep
+# it in a separate private repo or a NAS mount.
+docs/eesdr3_refs/
+
+# Local IQ recordings and scratch data files at the project root.
+# If any of these are meant to ship as test fixtures, move them into
+# tests/fixtures/ and carve out an exception here.
+/ft8_gain19.npy
+/test_40m_ft8.npy
+*.iq
+
+# Scratch files created by the OS / file explorer
+New Text Document.txt
+New Text Document*.txt
+
+# QSettings backups
+*.ini.bak
+
+# Runtime logs
+*.log
+logs/
