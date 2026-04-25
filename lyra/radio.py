@@ -129,6 +129,7 @@ class Radio(QObject):
     # widget instances exist.
     waterfall_palette_changed  = Signal(str)           # palette name
     spectrum_db_range_changed  = Signal(float, float)  # (min_db, max_db)
+    spectrum_auto_scale_changed = Signal(bool)          # auto-fit on/off
     waterfall_db_range_changed = Signal(float, float)  # (min_db, max_db)
     # RX filter passband (for panadapter overlay) — (low_offset_hz, high_offset_hz)
     # relative to the tuned center frequency. Recomputed whenever mode or
@@ -414,6 +415,18 @@ class Radio(QObject):
         self._waterfall_palette = "Classic"
         self._spectrum_min_db   = -110.0
         self._spectrum_max_db   = -20.0
+        # Auto-fit the dB scale to current band conditions when on.
+        # Engineering: every AUTO_SCALE_INTERVAL_TICKS, recompute
+        # (noise_floor - 10) .. (peak + 5) and call set_spectrum_db_range.
+        # Operator's manual drag turns this OFF (so a deliberate scale
+        # isn't immediately overwritten — single source of truth).
+        self._spectrum_auto_scale = False
+        self._auto_scale_tick_counter = 0
+        # Rolling-max history of FFT-frame peaks. Filled per-tick in
+        # _tick_fft when auto-scale is enabled; used to set the high
+        # end of the dB range so transient spikes don't overshoot the
+        # display the way a single-frame max does.
+        self._auto_scale_peak_history: list[float] = []
         self._waterfall_min_db  = -110.0
         self._waterfall_max_db  = -30.0
         # Zoom (panadapter scaling). 1.0 = full sample-rate span;
@@ -1637,14 +1650,51 @@ class Radio(QObject):
     def spectrum_db_range(self) -> tuple[float, float]:
         return (self._spectrum_min_db, self._spectrum_max_db)
 
-    def set_spectrum_db_range(self, min_db: float, max_db: float):
-        # Guarantee a sane >=3 dB span so the trace doesn't collapse
-        # to a flat line if the user drags sliders past each other.
+    def set_spectrum_db_range(self, min_db: float, max_db: float,
+                              from_user: bool = True):
+        """Apply a new spectrum dB range.
+
+        `from_user=True` (default) means a manual / interactive change
+        (slider drag, reset button, Y-axis right-edge drag) — that
+        also turns auto-scale OFF, so a deliberate scale isn't
+        immediately overwritten by the next auto tick. Internal calls
+        from the auto-scale tick pass `from_user=False` to update the
+        scale without flipping the auto flag off."""
         lo, hi = float(min_db), float(max_db)
         if hi - lo < 3.0:
             hi = lo + 3.0
         self._spectrum_min_db, self._spectrum_max_db = lo, hi
+        if from_user and self._spectrum_auto_scale:
+            # Manual change — turn off auto. Single source of truth:
+            # whoever last touched the scale wins until something
+            # explicit changes it.
+            self._spectrum_auto_scale = False
+            self.spectrum_auto_scale_changed.emit(False)
         self.spectrum_db_range_changed.emit(lo, hi)
+
+    # ── Spectrum auto-scale ──────────────────────────────────────────
+    AUTO_SCALE_INTERVAL_TICKS = 60   # ~2 sec at 30 fps; ~1 sec at 60 fps
+    AUTO_SCALE_NOISE_HEADROOM_DB = 15.0   # margin BELOW noise floor
+    AUTO_SCALE_PEAK_HEADROOM_DB  = 15.0   # margin ABOVE strongest signal
+    # Rolling-max window so a momentary peak from the last few
+    # seconds keeps the ceiling raised even after the transient
+    # fades. Without this, a strong intermittent signal would have
+    # peaks at the very top edge (or off-scale entirely) every time
+    # the scale was recomputed between transients.
+    AUTO_SCALE_PEAK_WINDOW_TICKS = 300    # ~10 sec at 30 fps
+    AUTO_SCALE_MIN_SPAN_DB = 50.0         # never collapse below this
+
+    @property
+    def spectrum_auto_scale(self) -> bool:
+        return self._spectrum_auto_scale
+
+    def set_spectrum_auto_scale(self, on: bool):
+        on = bool(on)
+        if on == self._spectrum_auto_scale:
+            return
+        self._spectrum_auto_scale = on
+        self._auto_scale_tick_counter = 0   # fire on next FFT tick
+        self.spectrum_auto_scale_changed.emit(on)
 
     @property
     def waterfall_db_range(self) -> tuple[float, float]:
@@ -2260,6 +2310,58 @@ class Radio(QObject):
             if self._nf_emit_counter >= 5:
                 self._nf_emit_counter = 0
                 self.noise_floor_changed.emit(float(self._noise_floor_db))
+
+        # Spectrum auto range scaling. Every AUTO_SCALE_INTERVAL_TICKS,
+        # rebuild the dB range to:
+        #   low edge  = noise_floor − 15 dB
+        #   high edge = (rolling max of peaks over ~10 sec) + 15 dB
+        #   guarantee at least AUTO_SCALE_MIN_SPAN_DB total span
+        # Operator's manual drag turns the auto flag off (handled
+        # in set_spectrum_db_range, from_user=True path).
+        #
+        # Rolling-max design rationale: a single-frame max kept the
+        # scale chasing transients — strong intermittent signals
+        # would briefly spike above the recently-fitted top, then
+        # the next auto-fit would catch up. With a 10-sec rolling
+        # window, recent spikes "stick" to the ceiling until they
+        # age out, eliminating the off-scale-then-catch-up cycle.
+        if self._spectrum_auto_scale:
+            # Track per-tick peak so we have a rolling history.
+            self._auto_scale_peak_history.append(float(np.max(spec_db)))
+            if len(self._auto_scale_peak_history) > self.AUTO_SCALE_PEAK_WINDOW_TICKS:
+                self._auto_scale_peak_history.pop(0)
+            self._auto_scale_tick_counter += 1
+            if self._auto_scale_tick_counter >= self.AUTO_SCALE_INTERVAL_TICKS:
+                self._auto_scale_tick_counter = 0
+                # Use noise_floor_db if we've been computing it; else
+                # fall back to the 20th percentile of the current FFT.
+                if self._noise_floor_db is not None:
+                    nf = float(self._noise_floor_db)
+                else:
+                    nf = float(np.percentile(spec_db, 20))
+                # Rolling max — the strongest peak in the last
+                # ~10 seconds, NOT just the current frame.
+                pk_max = max(self._auto_scale_peak_history)
+                target_lo = nf - self.AUTO_SCALE_NOISE_HEADROOM_DB
+                target_hi = pk_max + self.AUTO_SCALE_PEAK_HEADROOM_DB
+                # Guarantee a comfortably wide scale even on bands
+                # with vanishingly small dynamic range (very weak
+                # signals on a quiet noise floor) — without this,
+                # the auto-fit could produce a 10-15 dB display
+                # span that left no room for stronger signals to
+                # appear above the current peaks.
+                if target_hi - target_lo < self.AUTO_SCALE_MIN_SPAN_DB:
+                    target_hi = target_lo + self.AUTO_SCALE_MIN_SPAN_DB
+                # Final clamp to display bounds.
+                target_lo = max(-150.0, min(-3.0, target_lo))
+                target_hi = max(target_lo + 30.0, min(0.0, target_hi))
+                # Internal call — preserve auto flag.
+                self.set_spectrum_db_range(
+                    target_lo, target_hi, from_user=False)
+        elif self._auto_scale_peak_history:
+            # Auto turned off — drop the history so it doesn't grow
+            # unbounded if the operator never re-enables.
+            self._auto_scale_peak_history = []
 
         # Zoom = crop to centered subset of bins. Widgets infer span
         # from the `effective_rate` we report here, so their freq axis

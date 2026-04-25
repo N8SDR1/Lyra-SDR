@@ -1111,11 +1111,52 @@ class VisualsSettingsTab(QWidget):
         self._wf_min.valueChanged.connect(self._on_db_changed)
         self._wf_max.valueChanged.connect(self._on_db_changed)
 
+        # Listen for spectrum range changes from the Radio side too
+        # — auto-scale's periodic re-fit fires through this path, and
+        # we want the sliders here to track so the dialog stays in
+        # sync if it happens to be open during an auto-fit.
+        radio.spectrum_db_range_changed.connect(self._sync_spec_sliders)
+        radio.waterfall_db_range_changed.connect(self._sync_wf_sliders)
+
         # "Reset" button restores the pre-settings defaults
         reset_btn = QPushButton("Reset to defaults")
         reset_btn.setFixedWidth(150)
         reset_btn.clicked.connect(self._reset_db_ranges)
         gd.addWidget(reset_btn, 4, 0, 1, 3, Qt.AlignLeft)
+
+        # Spectrum auto-scale toggle. Periodic auto-fit of the
+        # spectrum dB range to (noise floor − 10) .. (peak + 5).
+        # Useful when band conditions change drastically — switching
+        # from a quiet 30m to a noisy 40m without manual rescaling.
+        # Manual slider drag (above) or Y-axis right-edge drag on
+        # the panadapter turns auto-scale OFF so a deliberate
+        # adjustment isn't immediately overwritten.
+        # Placed at row 10 (after the existing peak-markers controls
+        # which occupy rows 6-9) — keep it visually grouped with
+        # the dB range section it affects.
+        self.auto_scale_chk = QCheckBox(
+            "Auto range scaling (spectrum dB scale fits to band)")
+        self.auto_scale_chk.setChecked(radio.spectrum_auto_scale)
+        self.auto_scale_chk.setToolTip(
+            "Continuously fits the spectrum dB range to current\n"
+            "band conditions:\n"
+            "   low edge  = noise floor − 15 dB\n"
+            "   high edge = strongest peak (rolling 10 sec) + 15 dB\n"
+            "Updates every ~2 sec.\n\n"
+            "Rolling-max ceiling: a strong intermittent signal\n"
+            "keeps the top edge raised until ~10 s after it last\n"
+            "appeared, so transient peaks don't overshoot the\n"
+            "display.\n\n"
+            "Manual scale drag (the sliders above, or the panadapter\n"
+            "right-edge Y-axis zone) turns this OFF — your deliberate\n"
+            "scale wins until you re-enable auto here.")
+        self.auto_scale_chk.toggled.connect(
+            self.radio.set_spectrum_auto_scale)
+        # Keep checkbox in sync if Radio turns it off (manual drag)
+        radio.spectrum_auto_scale_changed.connect(
+            lambda on: self.auto_scale_chk.setChecked(on)
+            if self.auto_scale_chk.isChecked() != on else None)
+        gd.addWidget(self.auto_scale_chk, 10, 0, 1, 3, Qt.AlignLeft)
 
         # Noise-floor marker toggle sits with the other spectrum
         # appearance controls. Default on — it's a quiet, informative
@@ -1475,6 +1516,31 @@ class VisualsSettingsTab(QWidget):
         self._wf_max_lbl.setText(f"{wf_hi:+d} dBFS")
         self.radio.set_spectrum_db_range(sp_lo, sp_hi)
         self.radio.set_waterfall_db_range(wf_lo, wf_hi)
+
+    def _sync_spec_sliders(self, lo: float, hi: float):
+        """Spectrum dB range changed at the Radio side (auto-scale,
+        Y-axis drag on the panadapter, etc.) — keep our sliders +
+        labels in sync. Block signals during setValue so we don't
+        bounce back into Radio.set_spectrum_db_range."""
+        for slider, val in ((self._spec_min, int(lo)),
+                            (self._spec_max, int(hi))):
+            if slider.value() != val:
+                slider.blockSignals(True)
+                slider.setValue(val)
+                slider.blockSignals(False)
+        self._spec_min_lbl.setText(f"{int(lo):+d} dBFS")
+        self._spec_max_lbl.setText(f"{int(hi):+d} dBFS")
+
+    def _sync_wf_sliders(self, lo: float, hi: float):
+        """Same as _sync_spec_sliders but for the waterfall pair."""
+        for slider, val in ((self._wf_min, int(lo)),
+                            (self._wf_max, int(hi))):
+            if slider.value() != val:
+                slider.blockSignals(True)
+                slider.setValue(val)
+                slider.blockSignals(False)
+        self._wf_min_lbl.setText(f"{int(lo):+d} dBFS")
+        self._wf_max_lbl.setText(f"{int(hi):+d} dBFS")
 
     def _make_color_swatch(self, key: str, label_text: str,
                            current_hex: str, default_hex: str, on_pick):

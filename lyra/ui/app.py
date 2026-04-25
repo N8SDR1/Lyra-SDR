@@ -599,6 +599,9 @@ class MainWindow(QMainWindow):
             try: r.set_af_gain_db(int(s.value("af_gain_db")))
             except (TypeError, ValueError): pass
         if s.contains("audio_output"):  r.set_audio_output(str(s.value("audio_output")))
+        if s.contains("spectrum_auto_scale"):
+            r.set_spectrum_auto_scale(
+                s.value("spectrum_auto_scale") in (True, "true", "True", 1, "1"))
         if s.contains("pc_audio_device"):
             v = s.value("pc_audio_device")
             try:
@@ -781,6 +784,7 @@ class MainWindow(QMainWindow):
         s.setValue("volume", r.volume)
         s.setValue("af_gain_db", r.af_gain_db)
         s.setValue("audio_output", r.audio_output)
+        s.setValue("spectrum_auto_scale", r.spectrum_auto_scale)
         # PC Soundcard device index — None = auto, int = specific
         # PortAudio device. Stored as string "auto" or the int as
         # str so QSettings round-trips cleanly across platforms.
