@@ -135,8 +135,9 @@ QSlider::handle:horizontal {{
 QSlider::handle:horizontal:hover {{ background: {qss_color(ACCENT2)}; }}
 
 /* Per-purpose colored slider variants. Set the objectName on the
-   slider to one of the names below to get its color. EESDR3-style
-   color language: green volume, amber gain, blue AGC, red drive. */
+   slider to one of the names below to get its color. Standard
+   ham-radio color language: green volume, amber gain, blue AGC,
+   red drive. */
 QSlider#vol_slider::handle:horizontal {{
     background: #39ff14;
     border: 1px solid #0a3010;

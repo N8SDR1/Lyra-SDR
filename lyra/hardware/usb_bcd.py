@@ -2,18 +2,18 @@
 
 The HL2 has no native BCD band-data output. To drive a linear amp's
 auto-bandswitch input (Yaesu BCD standard, also used by SPE, ACOM,
-Elecraft KPA1500, Burst, etc.) reference clients use an external FTDI cable in
-synchronous bit-bang mode that exposes 8 output pins. A single byte
-write sets the parallel pin state; the cable's wiring carries that to
-the amp's BAND DATA input.
+Elecraft KPA1500, Burst, etc.) the common community solution is an
+external FTDI cable in synchronous bit-bang mode that exposes 8
+output pins. A single byte write sets the parallel pin state; the
+cable's wiring carries that to the amp's BAND DATA input.
 
-Mirrors the reference HPSDR client's `UsbBCDCable.cs`:
+Implementation parameters (FTDI synchronous bit-bang):
     FTDI driver       D2XX (Windows) via the `ftd2xx` Python wrapper
     Bit mode          0x40 SYNC_BITBANG, 8-bit mask
     Baud rate         921 600
     Per-write payload one byte = BCD band number
 
-Yaesu BCD band numbers (matches the reference HPSDR client `SetBCDbyBand`):
+Yaesu BCD band-number standard:
     GEN / 60m / 2m / WWV / VHF /BC : 0   (no signal — amp bypasses)
     160 m : 1     80 m : 2     40 m : 3
     30  m : 4     20 m : 5     17 m : 6
@@ -52,8 +52,8 @@ def bcd_for_band(band_name: str, sixty_as_forty: bool = False) -> int:
     allocations, so there's no assigned code. Most linear amps use the
     40 m filter for 60 m operation. When this flag is True, 60 m maps
     to BCD 3 (the 40 m code) so the amp switches to its 40 m filter.
-    When False (default), 60 m maps to 0 (amp bypasses) — matching
-    the reference HPSDR client's unmapped behavior for band 60 m.
+    When False (default), 60 m maps to 0 (amp bypasses) — the safest
+    default since it forces an explicit operator decision per amp.
     """
     if sixty_as_forty and band_name == "60m":
         return 3

@@ -1,6 +1,6 @@
 """HPSDR Protocol 1 discovery for Hermes Lite 2 / 2+.
 
-Reference: the reference HPSDR client clsRadioDiscovery.cs (MW0LGE / MI0BOT).
+Implements the public HPSDR Protocol 1 discovery handshake.
 Board ID 6 = HermesLite family. HL2+ reports the same board ID; we
 distinguish it later via gateware version / EEPROM config.
 """
@@ -16,7 +16,7 @@ DISCOVERY_PORT = 1024
 DISCOVERY_PACKET_LEN = 63
 BOARD_HERMES_LITE = 6
 
-# Board IDs per the reference HPSDR client mapP1DeviceType
+# Board IDs per the public HPSDR Protocol 1 device-type table
 BOARD_NAMES = {
     0: "Atlas",
     1: "Hermes",

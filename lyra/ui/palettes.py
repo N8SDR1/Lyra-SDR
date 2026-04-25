@@ -132,7 +132,6 @@ DEFAULT_PALETTE = "Classic"
 # up existing QSettings. Keep this as a simple migration table rather
 # than handle it in app.py.
 _ALIASES: dict[str, str] = {
-    "thetis":   "Classic",      # historical default
     "default":  "Classic",      # renamed 2026-04-24 (was near-duplicate)
     "classic":  "Classic",      # lowercase convenience
     # Former "Classic" was the rainbow — reroute any saved "classic"

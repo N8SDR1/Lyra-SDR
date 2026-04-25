@@ -390,7 +390,7 @@ class FrequencyDisplay(QWidget):
         delta_units = event.angleDelta().y() // 120
         if delta_units == 0:
             return
-        # Two-tier wheel behavior (matches Thetis / ExpertSDR3):
+        # Two-tier wheel behavior (the typical SDR-client convention):
         #
         # 1. If the cursor is HOVERING a specific digit, that digit's
         #    place value (10^digit_index) wins. Lets the operator

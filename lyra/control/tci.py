@@ -1,8 +1,12 @@
 """TCI (Transceiver Control Interface) v1.9 WebSocket server.
 
-Exposes Lyra to external software (WSJT-X, log4OM, N1MM+, MixW, JS8Call,
-RCKRtty, etc.) via the ExpertSDR3 TCI protocol. The server binds to the
-central Radio controller:
+The TCI protocol was created and is maintained by EESDR Expert
+Electronics as an open specification for SDR transceiver control.
+Lyra implements it server-side so external software (WSJT-X, log4OM,
+N1MM+, MixW, JS8Call, RCKRtty, etc.) can drive frequency, mode,
+filters, PTT, and receive spectrum / IQ data over WebSocket.
+
+The server binds to the central Radio controller:
 - Radio state changes → broadcast to all connected clients
 - Inbound TCI commands → call Radio setters
 - On new connection → send initialization commands + current state
@@ -10,9 +14,9 @@ central Radio controller:
 Uses Qt's built-in QWebSocketServer (no extra dependencies) so signal
 plumbing stays native.
 
-Reference: D:/sdrprojects/TCI Protocol.pdf (v2.0, backward-compatible
-with 1.9). Implements the command subset that external logging/keying
-apps actually use. More commands can be added as needed.
+Implements the command subset that external logging / keying / digital
+apps actually use; additional commands from the published TCI v1.9 /
+v2.0 spec can be added as needed.
 """
 from __future__ import annotations
 
@@ -37,8 +41,10 @@ _CTY_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "cty.dat"
 _dxcc_lookup = DxccLookup(_CTY_PATH)
 
 
-# HPSDR convention: 50001. ExpertSDR3 native uses 40001. 50001 is what
-# log4OM / WSJT-X default TCI configs expect.
+# Standard TCI server port for HPSDR-family rigs: 50001. (The TCI
+# spec also defines 40001 as the EESDR-native default; 50001 is what
+# log4OM, WSJT-X, and most other clients ship with as the default
+# TCI port for non-EESDR transceivers.)
 TCI_DEFAULT_PORT = 50001
 
 
@@ -305,8 +311,8 @@ class TciServer(QObject):
         if not self._clients:
             return
         # Per-command rate limit: drop updates that arrive faster than the
-        # configured rate_limit_hz for the same command type. some reference clients have
-        # the same protection to stop flooding clients.
+        # configured rate_limit_hz for the same command type. TCI clients
+        # generally implement the same protection to stop flooding.
         import time
         key = msg.split(":", 1)[0]
         min_interval_ns = int(1e9 / max(self.rate_limit_hz, 1))

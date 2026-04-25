@@ -141,7 +141,7 @@ class NotchFilter:
 
     Parameter is **width_hz** (notch -3 dB bandwidth in Hz), not Q.
     Operators think in absolute width ("kill a 100 Hz wide chunk")
-    not in Q values; matches Thetis / ExpertSDR3 mental model.
+    not in Q values — the SDR-client convention operators expect.
     Internally the iirnotch design uses Q = freq / width.
 
     Two filter modes selected by `freq_hz` proximity to DC:

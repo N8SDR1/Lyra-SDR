@@ -1,8 +1,8 @@
 """Settings dialog — tabbed, extensible.
 
-First tab: Network / TCI (matches the reference HPSDR client's Network tab organization).
-Future tabs: Audio, DSP, Visuals, Keyer, etc. — additive, each a QWidget
-that reads from / writes to the Radio or a subsystem.
+First tab: Network / TCI. Subsequent tabs: Audio, DSP, Visuals,
+Keyer, etc. — additive, each a QWidget that reads from / writes to
+the Radio or a subsystem.
 """
 from __future__ import annotations
 
@@ -250,9 +250,9 @@ class TciSettingsTab(QWidget):
         v.addWidget(spots)
 
         # ── CW / keying over TCI (placeholder — needs TX path) ──────
-        # the reference HPSDR client exposes: "CW Skimmer send via TCI", CW keyer keying
-        # enable, PTT authorization per-client. We park these as
-        # disabled controls so the structure is visible and filling
+        # Planned controls: "CW Skimmer send via TCI", CW keyer keying
+        # enable, PTT authorization per-client. Parked as disabled
+        # placeholders so the dialog structure is visible and filling
         # them in when TX ships is a mechanical job, not a redesign.
         cwg = QGroupBox("CW / Keying over TCI  (TX path not yet implemented)")
         cwg.setEnabled(False)
@@ -532,8 +532,8 @@ class HardwareSettingsTab(QWidget):
 
         hint = QLabel(
             "Drives the 7 OC outputs on HL2's J16 to switch the filter "
-            "board's relays per band. Mirrors the reference HPSDR client's \"N2ADR Filter\" "
-            "preset.")
+            "board's relays per band. Implements the standard N2ADR "
+            "filter-board preset.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #8a9aac;")
         gn.addWidget(hint, 1, 0, 1, 3)
@@ -663,7 +663,8 @@ class HardwareSettingsTab(QWidget):
         self.ftdi_combo.blockSignals(False)
 
         # Safety: operator cannot enable BCD output unless the cable is
-        # physically present and enumerated — matches the reference HPSDR client behavior.
+        # physically present and enumerated. Prevents accidental "amp
+        # in TX with wrong filter selected" scenarios.
         if hasattr(self, "bcd_toggle"):
             self.bcd_toggle.setEnabled(has_device)
             self.bcd_toggle.setToolTip(

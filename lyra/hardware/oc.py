@@ -15,9 +15,10 @@ J16 pin → N2ADR relay mapping:
     Pin 6 (bit 5) — 12 / 10 m LPF
     Pin 7 (bit 6) — 3 MHz HPF (RX only, on bands above 80 m)
 
-Patterns below mirror the reference client's "N2ADR Filter / Hercules Amp" preset
-for HERMESLITE (setup.cs `chkHERCULES_CheckedChanged`). RX patterns
-include the HPF bit for bands above 160 m; TX patterns do not.
+Patterns below implement the standard N2ADR filter board / Hercules
+Amp preset for the HL2: RX patterns include the HPF bit for bands
+above 160 m; TX patterns do not. Pin assignments are public J16
+documentation from the HL2 / N2ADR filter board reference.
 """
 from __future__ import annotations
 

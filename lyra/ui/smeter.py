@@ -1,6 +1,4 @@
-"""Analog multi-scale S-meter modelled on the ExpertSDR3 popout meter.
-
-Reference: `docs/eesdr3_refs/p129_meter_crop.png`.
+"""Analog multi-scale S-meter — classic concentric-arc design.
 
 Design features:
 - Deep black background.
@@ -32,10 +30,11 @@ from . import theme
 
 
 class AnalogMeter(QWidget):
-    """EESDR3-style multi-scale analog meter."""
+    """Multi-scale analog meter (concentric S / PWR / SWR / MIC arcs)."""
 
-    # EESDR3-accurate palette: black dial with white numerals, vivid
-    # red for over-S9 zone, green peak needle, amber LCD freq readout.
+    # Classic ham-radio-meter palette: black dial with white numerals,
+    # vivid red for over-S9 zone, green peak needle, amber LCD freq
+    # readout. Easy to read at a glance under bright shack lighting.
     BG          = QColor(6, 6, 8)
     FACE_RIM    = QColor(30, 30, 36)
     SCALE_WHITE = QColor(235, 235, 235)    # bright white numerals
@@ -49,9 +48,9 @@ class AnalogMeter(QWidget):
     BAND_FG     = QColor(80, 200, 255)
     MODE_FG     = QColor(90, 230, 110)
 
-    # Shallow-arc geometry — mimics the EESDR3 popout meter where
-    # the four concentric scales appear as gently-curved bands across
-    # the top, and the pivot is far below the visible dial area.
+    # Shallow-arc geometry — four concentric scales appear as gently-
+    # curved bands across the top of the dial, with the pivot point
+    # placed far below the visible dial area.
     SWEEP_HALF_DEG = 35.0        # total arc sweep = 70° (35° each side)
     SIDE_MARGIN_FRAC = 0.06      # outer arc leaves this much side margin
 

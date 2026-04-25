@@ -24,8 +24,8 @@ not actively working notches.
 ## Width-based, not Q-based
 
 Lyra describes each notch by its **−3 dB bandwidth in Hz**, not by a
-dimensionless Q value. That matches Thetis, ExpertSDR3, and how
-operators naturally think about notches ("kill that 100 Hz wide
+dimensionless Q value. That matches how operators naturally think
+about notches ("kill that 100 Hz wide
 chunk" vs. "make a Q=30 notch and hope it's wide enough").
 
 Each notch carries:
