@@ -168,7 +168,54 @@ edge of the spectrum (above) is usually faster than opening Settings.
 
 If signals are slamming the top of the scale, either raise `max` a
 few dB to see detail above the peaks, or reduce RF gain via the LNA
-slider on the [DSP & AUDIO panel](panel:dsp).
+slider on the [DSP & AUDIO panel](panel:dsp). **Or** turn on Auto
+range scaling (next section) and let Lyra fit the scale for you.
+
+## Auto range scaling
+
+A checkbox at the bottom of **Settings → Visuals → Signal range**:
+**"Auto range scaling (spectrum dB scale fits to band)"**.
+
+When on, the spectrum dB range continuously fits to current band
+conditions:
+
+- **Low edge** = noise floor − 15 dB
+- **High edge** = strongest peak (rolling 10 sec) + 15 dB
+- **At least 50 dB total span** guaranteed
+
+Updates every ~2 seconds. Eliminates the manual "drag the Y-axis
+every time I switch from a quiet 30m to a noisy 40m" workflow.
+
+### Rolling-max ceiling
+
+Critically, the high edge is the strongest peak across the **last
+~10 seconds**, not just the current frame. Without this, a strong
+intermittent signal would briefly spike above the recently-fitted
+top, then the next auto-fit would catch up — producing the visible
+"peaks at top edge / off-scale on stronger hits" symptom. The
+rolling window keeps the ceiling raised until the spike is ~10 sec
+old, so transients have comfortable headroom.
+
+### Manual override
+
+Any manual dB-scale adjustment turns auto scaling **OFF**:
+
+- Settings sliders (Spectrum min/max)
+- Spectrum widget's right-edge Y-axis drag
+- "Reset to defaults" button
+
+The single-source-of-truth principle: whoever last touched the
+scale wins until you explicitly re-enable auto via the checkbox.
+
+### When to use
+
+- **Use auto** when band-hopping a lot, when conditions are
+  changing during the day, or when you don't want to think about
+  the scale at all.
+- **Use manual** when comparing signal strengths over time (auto
+  rescaling messes up the visual reference), or when you want to
+  see something specific (e.g., the noise floor squashed at the
+  bottom for clean S/N comparisons).
 
 ## Colors
 

@@ -35,14 +35,33 @@
 - **File → DSP…** — AGC / NR / NB / EQ
 - **Toolbar TCI indicator** — click to open Network/TCI settings
 
-## Frequency display
+## Frequency display (LED readout)
 
-| Key             | Action                                     |
-|-----------------|--------------------------------------------|
-| **↑ / ↓**       | Tune ±1 at the selected digit              |
-| **Page Up/Dn**  | Tune ±10 at the selected digit             |
-| **← / →**       | Move selection to next/prev digit          |
-| **Home / End**  | Jump selection to MHz / Hz digit           |
+| Action                              | What it does                                           |
+|-------------------------------------|--------------------------------------------------------|
+| **Click a digit**                   | Select it (small tick appears); arrow keys + wheel will tune at that digit's place value |
+| **Double-click anywhere on LED**    | Open inline edit field — type a freq + Enter to commit; Esc cancels |
+| **Mouse wheel (over a digit)**      | Tune ±1 at THAT digit's place value (precision aim wins) |
+| **Mouse wheel (off the digits)**    | Tune by the **Step combo's** current value (default 1 kHz) |
+| **↑ / ↓ keys**                      | Tune ±1 at the selected digit                          |
+| **Page Up / Page Down**             | Tune ±10 at the selected digit                         |
+| **← / → keys**                      | Move selection to next/prev digit                      |
+| **Home / End**                      | Jump selection to MHz / Hz digit                       |
+
+### Direct entry formats
+
+The double-click edit field accepts these formats — type whatever
+matches your habit:
+
+| Type | Result |
+|---|---|
+| `7.125` | 7.125 MHz (single dot = decimal) |
+| `7,125` | 7.125 MHz (Euro decimal) |
+| `7.125.000` | 7.125 MHz (display format — multi-dot = thousand sep) |
+| `7,125,000` | 7.125 MHz (multi-comma = thousand sep) |
+| `7125000` | 7.125 MHz (raw Hz) |
+| `7125` | 7.125 MHz (mid-range bare → kHz) |
+| `7` | 7 MHz (small bare → MHz) |
 
 ## Spectrum / waterfall (mouse)
 
