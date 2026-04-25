@@ -11,7 +11,8 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QMenu,
-    QPushButton, QSlider, QStackedWidget, QVBoxLayout, QWidget,
+    QPushButton, QSizePolicy, QSlider, QStackedWidget, QVBoxLayout,
+    QWidget,
 )
 
 from lyra.radio import Radio
@@ -1569,6 +1570,13 @@ class SMeterPanel(GlassPanel):
         super().__init__("METERS", parent, help_topic="smeter")
         self.radio = radio
 
+        # Allow this whole panel to shrink horizontally to whatever
+        # the meter widgets allow (200 px). Without this explicit min,
+        # the parent dock honors the LAYOUT's computed minimum which
+        # is dominated by the header chip-row's preferred width — and
+        # the operator can't drag the splitter narrower than that.
+        self.setMinimumWidth(200)
+
         # All three meter widgets live in the stack; we just swap visibility.
         self.litarc_meter = LitArcMeter()
         self.led_meter    = LedBarMeter()
@@ -1578,6 +1586,7 @@ class SMeterPanel(GlassPanel):
         self.stack.addWidget(self.litarc_meter)   # index 0
         self.stack.addWidget(self.led_meter)      # index 1
         self.stack.addWidget(self.analog_meter)   # index 2
+        self.stack.setMinimumWidth(200)
 
         # Header — style picker as a row of small toggle chips.
         # Compact + the active style is visually obvious without
@@ -1594,6 +1603,14 @@ class SMeterPanel(GlassPanel):
             # like "Lit-Arc" / "Analog" — too short.
             btn.setFixedHeight(24)
             btn.setObjectName("dsp_btn")
+            # Shrink-friendly: chips report a small minimum so the
+            # panel can be docked narrow. Qt elides chip text only as
+            # a last resort; with normal panel widths all three labels
+            # render in full, but at the absolute narrowest the chip
+            # row clips/elides rather than blocking the panel from
+            # shrinking.
+            btn.setMinimumWidth(0)
+            btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             btn.setToolTip(
                 f"Switch to the '{self._STYLE_LABELS[key]}' meter style")
             btn.clicked.connect(
