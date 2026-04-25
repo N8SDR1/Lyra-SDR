@@ -1541,7 +1541,17 @@ class VisualsSettingsTab(QWidget):
         self.fps_label.setStyleSheet(
             "color: #cdd9e5; font-family: Consolas, monospace;")
         gr.addWidget(self.fps_label, 1, 2, Qt.AlignLeft)
-        self.fps_slider.valueChanged.connect(self._on_fps_changed)
+        # Debounced commit — see same pattern in panels.py.ViewPanel
+        # for why this matters. Drag value just updates the label
+        # locally; the radio doesn't see the new fps until the slider
+        # has been quiet for 75 ms.
+        from PySide6.QtCore import QTimer as _QTimer
+        self._fps_debounce = _QTimer(self)
+        self._fps_debounce.setSingleShot(True)
+        self._fps_debounce.setInterval(75)
+        self._fps_debounce.timeout.connect(
+            lambda: self.radio.set_spectrum_fps(self.fps_slider.value()))
+        self.fps_slider.valueChanged.connect(self._on_fps_slider_drag)
         # Two-way sync: if the front-panel FPS slider moves (or QSettings
         # load, or any future TCI hook), reflect it here. Without this
         # the Settings tab can drift out of sync with the live Radio
@@ -1576,7 +1586,15 @@ class VisualsSettingsTab(QWidget):
         self.wf_label.setStyleSheet(
             "color: #cdd9e5; font-family: Consolas, monospace;")
         gr.addWidget(self.wf_label, 2, 2, Qt.AlignLeft)
-        self.wf_slider.valueChanged.connect(self._on_wf_slider_changed)
+        # Same debounce as the FPS slider above — committing the new
+        # multiplier per pixel during a fast drag makes the FFT loop
+        # emit wildly varying numbers of waterfall_ready signals,
+        # blowing up the main-thread queue.
+        self._wf_debounce = _QTimer(self)
+        self._wf_debounce.setSingleShot(True)
+        self._wf_debounce.setInterval(75)
+        self._wf_debounce.timeout.connect(self._commit_wf_value)
+        self.wf_slider.valueChanged.connect(self._on_wf_slider_drag_setting)
         # Sync back: if the front-panel slider moves, reflect it here.
         radio.waterfall_divider_changed.connect(self._sync_wf_slider)
         radio.waterfall_multiplier_changed.connect(self._sync_wf_slider)
@@ -1843,11 +1861,19 @@ class VisualsSettingsTab(QWidget):
                     self.zoom_combo.blockSignals(False)
                 return
 
+    def _on_fps_slider_drag(self, fps: int):
+        """Slider value changed (every pixel of drag) — refresh
+        labels locally + bump the debounce timer. Radio is updated
+        only when motion has been quiet for 75 ms."""
+        self.fps_label.setText(f"{fps} fps")
+        self.wf_label.setText(self._wf_label_text())
+        self._fps_debounce.start()
+
+    # Backward-compat — anything that called _on_fps_changed by name
+    # still works (commits immediately, no debounce).
     def _on_fps_changed(self, fps: int):
         self.fps_label.setText(f"{fps} fps")
         self.radio.set_spectrum_fps(fps)
-        # Waterfall rows/sec depends on spec FPS too; keep the
-        # rows/sec label honest when the operator drags the FPS slider.
         self.wf_label.setText(self._wf_label_text())
 
     def _sync_fps_slider(self, fps: int):
@@ -1887,8 +1913,19 @@ class VisualsSettingsTab(QWidget):
         mult = max(1, self.radio.waterfall_multiplier)
         return f"{fps * mult / div:.1f} rows/s"
 
+    def _on_wf_slider_drag_setting(self, _v: int):
+        """Slider dragged — refresh label locally + bump debounce."""
+        self.wf_label.setText(self._wf_label_text())
+        self._wf_debounce.start()
+
+    def _commit_wf_value(self):
+        """Debounced commit of the waterfall slider value to Radio."""
+        div, mult = self._wf_slider_to_state(self.wf_slider.value())
+        self.radio.set_waterfall_divider(div)
+        self.radio.set_waterfall_multiplier(mult)
+
+    # Backward-compat — preserved for any code still calling by name.
     def _on_wf_slider_changed(self, v: int):
-        """User dragged the slider — decode → Radio setters."""
         div, mult = self._wf_slider_to_state(v)
         self.radio.set_waterfall_divider(div)
         self.radio.set_waterfall_multiplier(mult)

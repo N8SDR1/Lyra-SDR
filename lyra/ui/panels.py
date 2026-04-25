@@ -459,7 +459,18 @@ class ViewPanel(GlassPanel):
         self.fps_slider.setValue(radio.spectrum_fps)
         self.fps_slider.setFixedWidth(130)
         self._refresh_fps_tooltip(radio.spectrum_fps)
-        self.fps_slider.valueChanged.connect(self._on_fps_changed)
+        # Debounce slider drags — committing the new value to Radio
+        # on every pixel of mouse motion was hammering the FFT timer's
+        # setInterval() hundreds of times per drag and could lock the
+        # main thread visibly. Now valueChanged just bumps a 75 ms
+        # one-shot timer; only the value present when the timer fires
+        # gets pushed to Radio. Slider drag stays smooth visually.
+        from PySide6.QtCore import QTimer as _QTimer
+        self._fps_debounce = _QTimer(self)
+        self._fps_debounce.setSingleShot(True)
+        self._fps_debounce.setInterval(75)
+        self._fps_debounce.timeout.connect(self._commit_fps_value)
+        self.fps_slider.valueChanged.connect(self._on_fps_slider_drag)
         h.addWidget(self.fps_slider)
 
         # Waterfall rate — unified slider covering multiplier (fast)
@@ -485,7 +496,16 @@ class ViewPanel(GlassPanel):
             radio.waterfall_divider, radio.waterfall_multiplier))
         self.wf_slider.setFixedWidth(140)
         self._refresh_wf_tooltip()
-        self.wf_slider.valueChanged.connect(self._on_wf_changed)
+        # Same debounce as the FPS slider — the waterfall multiplier
+        # is even MORE harmful when hammered during drag because
+        # increasing multiplier increases the number of waterfall
+        # paint events per FFT tick (multiplier=10 = 10× the paint
+        # rate). Per-pixel valueChanged could blow up the queue.
+        self._wf_debounce = _QTimer(self)
+        self._wf_debounce.setSingleShot(True)
+        self._wf_debounce.setInterval(75)
+        self._wf_debounce.timeout.connect(self._commit_wf_value)
+        self.wf_slider.valueChanged.connect(self._on_wf_slider_drag)
         h.addWidget(self.wf_slider)
 
         h.addStretch(1)
@@ -574,6 +594,32 @@ class ViewPanel(GlassPanel):
                 break
         self.radio.set_zoom(zoom)
 
+    # ── Debounced slider commit ─────────────────────────────────────
+    # valueChanged → just refresh the tooltip (cheap) and (re)start
+    # the 75 ms one-shot debounce. The radio doesn't see the new value
+    # until the slider has been quiet for 75 ms, so a drag that fires
+    # 200 valueChanged events results in ONE radio update, not 200.
+    # Mouse release naturally triggers the final commit because no
+    # more valueChanged events arrive after release.
+    def _on_fps_slider_drag(self, fps: int):
+        self._refresh_fps_tooltip(fps)
+        self._refresh_wf_tooltip()
+        self._fps_debounce.start()
+
+    def _commit_fps_value(self):
+        self.radio.set_spectrum_fps(self.fps_slider.value())
+
+    def _on_wf_slider_drag(self, _v: int):
+        self._refresh_wf_tooltip()
+        self._wf_debounce.start()
+
+    def _commit_wf_value(self):
+        div, mult = self._wf_slider_to_state(self.wf_slider.value())
+        self.radio.set_waterfall_divider(div)
+        self.radio.set_waterfall_multiplier(mult)
+
+    # Backward-compat aliases (in case anything else calls these by
+    # the old names).
     def _on_fps_changed(self, fps: int):
         self.radio.set_spectrum_fps(fps)
         self._refresh_fps_tooltip(fps)
