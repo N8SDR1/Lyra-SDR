@@ -180,8 +180,11 @@ class MainWindow(QMainWindow):
             "tuning", "Tuning", self.pnl_tuning)
         self.docks["mode"] = self._make_dock(
             "mode_filter", "Mode + Filter", self.pnl_mode)
+        # Title is "Display" (was "View") — the old name collided with
+        # the menu bar's View menu. Internal dict key stays "view" for
+        # QSettings compat; only the user-facing title changed.
         self.docks["view"] = self._make_dock(
-            "view", "View", self.pnl_view)
+            "view", "Display", self.pnl_view)
         self.docks["band"] = self._make_dock(
             "band", "Band", self.pnl_band)
         self.docks["meters"] = self._make_dock(

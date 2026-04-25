@@ -326,7 +326,7 @@ you selected.
 ## Update rates and zoom
 
 Three independent controls in **Settings → Visuals → Update rates
-and zoom**. Changes are live — no restart needed. Front-panel **VIEW**
+and zoom**. Changes are live — no restart needed. Front-panel **DISPLAY**
 strip (Zoom / Spec / WF sliders) mirrors these settings both ways —
 adjust in either place, the other updates.
 
@@ -341,7 +341,7 @@ Two ways to switch:
 - **Mouse wheel** on empty spectrum (not over a notch rectangle) — each
   tick steps one level. Up = zoom in, down = zoom out.
 - **Settings → Visuals → Panadapter zoom** combo, or the front-panel
-  **VIEW** Zoom slider.
+  **DISPLAY** Zoom slider.
 
 At 16× zoom on a 48 kHz sample rate, you're seeing 3 kHz of span —
 about a single SSB channel wide. Great for zeroing CW or watching

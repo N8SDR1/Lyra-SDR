@@ -85,7 +85,8 @@ class AnalogMeter(QWidget):
         self._band_label = ""
         self._mode_label = ""
 
-        self.setMinimumSize(290, 160)
+        # Min relaxed so the Meters panel can dock narrow.
+        self.setMinimumSize(200, 140)
         self.setMaximumWidth(420)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         # Transparent background — the scales/needles float on whatever
@@ -666,7 +667,13 @@ class LitArcMeter(QWidget):
         self._decay_timer.timeout.connect(self._tick_decay)
         self._decay_timer.start(50)
 
-        self.setMinimumSize(290, 170)
+        # Minimum size kept conservative so operators can dock the
+        # Meters panel into a narrow column. The arc geometry is
+        # bounded against label-edge fit (see _build_geometry), so
+        # going below this min just shrinks the arc — segments and
+        # labels still fit cleanly. Old min was 290×170, which made
+        # the Meters panel hard to make compact.
+        self.setMinimumSize(200, 140)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.setAutoFillBackground(False)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
@@ -1090,7 +1097,9 @@ class LedBarMeter(QWidget):
 
         # 5 rows × ROW_H + top legend + bottom margin
         ideal_h = self.LEGEND_H + 5 * self.ROW_H + 10
-        self.setMinimumSize(280, ideal_h)
+        # Min width relaxed to 200 so operators can dock the Meters
+        # panel into a narrow column. Bar segments scale with width.
+        self.setMinimumSize(200, ideal_h)
         self.setMaximumHeight(ideal_h + 10)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         # Transparent background so the meter floats on the panel color

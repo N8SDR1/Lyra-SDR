@@ -83,6 +83,20 @@ QMainWindow, QWidget {{
     color: {qss_color(TEXT_PRIMARY)};
 }}
 QLabel {{ color: {qss_color(TEXT_MUTED)}; }}
+
+/* Tooltips — without this rule Qt falls back to OS defaults, which
+   on a dark UI render as white-on-white (Win11 light tooltip on a
+   dark widget) and become unreadable. The notch counter on the
+   DSP+Audio panel was the worst offender — its multiline tooltip
+   describing the right-click menu was effectively invisible. */
+QToolTip {{
+    background: {qss_color(BG_PANEL)};
+    color: {qss_color(TEXT_PRIMARY)};
+    border: 1px solid {qss_color(BORDER_HI)};
+    padding: 4px 6px;
+    /* opacity is set as a separate Qt property attr in code if we
+       ever want translucent tooltips; default is fully opaque. */
+}}
 QLineEdit, QComboBox, QDoubleSpinBox {{
     background: {qss_color(BG_CTRL)};
     color: {qss_color(TEXT_PRIMARY)};

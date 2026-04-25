@@ -383,7 +383,12 @@ class ViewPanel(GlassPanel):
     """
 
     def __init__(self, radio: Radio, parent=None):
-        super().__init__("VIEW", parent, help_topic="spectrum")
+        # Panel header reads "DISPLAY" rather than "VIEW" — the latter
+        # was confusing operators because it collides with the menu
+        # bar's "View" menu (panel toggles, layout reset, etc.). The
+        # internal class name stays ViewPanel and the QSettings dock
+        # key stays "view" so existing saved layouts keep working.
+        super().__init__("DISPLAY", parent, help_topic="spectrum")
         self.radio = radio
 
         h = QHBoxLayout()
@@ -1583,7 +1588,11 @@ class SMeterPanel(GlassPanel):
         for key in self._STYLE_ORDER:
             btn = QPushButton(self._STYLE_LABELS[key])
             btn.setCheckable(True)
-            btn.setFixedHeight(20)
+            # 24 px is the minimum that lets descenders ("g", "y" etc.)
+            # plus the QPushButton's internal padding render without
+            # clipping the bottom of letters. Old 20 px clipped chrs
+            # like "Lit-Arc" / "Analog" — too short.
+            btn.setFixedHeight(24)
             btn.setObjectName("dsp_btn")
             btn.setToolTip(
                 f"Switch to the '{self._STYLE_LABELS[key]}' meter style")
