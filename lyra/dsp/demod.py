@@ -162,13 +162,23 @@ class NotchFilter:
     """
 
     def __init__(self, rate: int, freq_hz: float, width_hz: float,
-                 dc_blocker: bool = False):
+                 dc_blocker: bool = False, deep: bool = False):
+        """Build a stateful notch.
+
+        `deep=True` cascades the same biquad twice in sequence, which
+        roughly DOUBLES the dB attenuation at every frequency offset
+        (and tightens the −3 dB BW by ~30%). Costs 2× the per-block
+        compute and 2× the transient settling time on a fresh state.
+        Useful for stubborn carriers where a single iirnotch leaks 3-6
+        dB at the edges of the kill region.
+        """
         if not _HAVE_SCIPY:
             raise RuntimeError("scipy required")
         self.rate = rate
         self.freq_hz = freq_hz
         self.width_hz = width_hz
         self.dc_blocker = dc_blocker
+        self.deep = deep
         if dc_blocker:
             from scipy.signal import butter
             # High-pass corner at width/2 so the visible notch extent
@@ -183,14 +193,28 @@ class NotchFilter:
             q = max(freq_hz / max(width_hz, 0.5), 0.5)
             w0 = freq_hz / (rate / 2.0)
             self.b, self.a = iirnotch(w0, q)
-        self.state_i = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float32)
-        self.state_q = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float32)
+        order = max(len(self.a), len(self.b)) - 1
+        self.state_i = np.zeros(order, dtype=np.float32)
+        self.state_q = np.zeros(order, dtype=np.float32)
+        # Second-stage state for the cascade. Only allocated when
+        # `deep=True` so normal notches stay cheap.
+        if self.deep:
+            self.state2_i = np.zeros(order, dtype=np.float32)
+            self.state2_q = np.zeros(order, dtype=np.float32)
 
     def process(self, iq: np.ndarray) -> np.ndarray:
         if iq.size == 0:
             return iq
         i_out, self.state_i = lfilter(self.b, self.a, iq.real, zi=self.state_i)
         q_out, self.state_q = lfilter(self.b, self.a, iq.imag, zi=self.state_q)
+        if self.deep:
+            # Second pass with its own state — cascading the same
+            # filter twice in sequence. Doubles the dB attenuation
+            # at every offset.
+            i_out, self.state2_i = lfilter(
+                self.b, self.a, i_out, zi=self.state2_i)
+            q_out, self.state2_q = lfilter(
+                self.b, self.a, q_out, zi=self.state2_q)
         return (i_out + 1j * q_out).astype(np.complex64)
 
 

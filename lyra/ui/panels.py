@@ -795,15 +795,19 @@ class DspPanel(GlassPanel):
             "Notch Filter — manual per-frequency notches.\n"
             "Toggle on/off via the NF button on the DSP row below.\n\n"
             "On the spectrum or waterfall (NF must be ON):\n"
-            "  • Right-click          — menu (Add / Toggle this /\n"
-            "                            Remove nearest / Clear all /\n"
-            "                            Default width / Disable)\n"
+            "  • Right-click          — menu (Add / Disable this /\n"
+            "                            Make DEEP / Remove nearest /\n"
+            "                            Clear all / Default width)\n"
             "  • Shift + right-click  — quick-remove nearest notch\n"
             "  • Left-drag a notch    — adjust that notch's width\n"
             "  • Wheel over a notch   — adjust that notch's width\n"
             "                            (down = wider, up = narrower)\n\n"
-            "Counter format: '3 notches  [50, 80*, 200 Hz]  (1 off)'\n"
-            "  — widths in Hz, asterisk marks an inactive notch.\n\n"
+            "Counter format:\n"
+            "  '3 notches  [50, 80*, 200^ Hz]  (1 off, 1 deep)'\n"
+            "  Widths in Hz; markers:  *=inactive  ^=deep (cascade).\n\n"
+            "Deep notches cascade the filter twice for ~2× dB\n"
+            "attenuation — useful for stubborn carriers, costs 2×\n"
+            "CPU and 2× settle time on placement.\n\n"
             "When NF is OFF, right-click shows a single 'Enable Notch\n"
             "Filter' item — right-click stays reserved for other\n"
             "spectrum features until you turn NF on.")
@@ -1088,24 +1092,32 @@ class DspPanel(GlassPanel):
             "Right-click: change profile.")
 
     def _on_notches_changed(self, items):
-        # items is list[(freq_hz, width_hz, active)]. Compact counter
-        # only — gesture hints live on the NF button's tooltip so the
-        # row stays tight. Shows widths in Hz so the operator can
-        # verify shape at a glance. Inactive notches noted with a
-        # trailing asterisk so they're visible in the count.
+        # items is list[(freq_hz, width_hz, active, deep)]. Compact
+        # counter only — gesture hints live on the NF button's
+        # tooltip. Shows widths in Hz so shape is readable at a
+        # glance. Markers:
+        #   *  inactive (bypassed, kept for A/B)
+        #   ^  deep (cascaded for ~2× attenuation)
         n = len(items)
         if not items:
             self.notch_info.setText("0 notches")
             return
-        widths = [
-            f"{int(round(w))}{'*' if not active else ''}"
-            for _, w, active in items
-        ]
-        n_active = sum(1 for _, _, a in items if a)
-        n_off = n - n_active
-        suffix = ""
+        widths = []
+        for _, w, active, deep in items:
+            mark = ""
+            if not active:
+                mark += "*"
+            if deep:
+                mark += "^"
+            widths.append(f"{int(round(w))}{mark}")
+        n_off = sum(1 for _, _, a, _ in items if not a)
+        n_deep = sum(1 for _, _, _, d in items if d)
+        suffix_parts = []
         if n_off:
-            suffix = f"  ({n_off} off)"
+            suffix_parts.append(f"{n_off} off")
+        if n_deep:
+            suffix_parts.append(f"{n_deep} deep")
+        suffix = f"  ({', '.join(suffix_parts)})" if suffix_parts else ""
         self.notch_info.setText(
             f"{n} notch{'es' if n != 1 else ''}  "
             f"[{', '.join(widths)} Hz]{suffix}")
@@ -1340,22 +1352,38 @@ def _build_notch_menu(parent_widget, radio, freq_hz: float) -> QMenu:
 
     have_any = bool(radio.notch_details)
 
-    # If there's a notch near the click, expose per-notch toggle +
+    # If there's a notch near the click, expose per-notch toggles +
     # remove. Lookup tolerance is generous so the operator doesn't
     # need pixel-precise aim.
     nearest_idx = radio._find_nearest_notch_idx(
         float(freq_hz), tolerance_hz=2000.0)
     if nearest_idx is not None:
         nearest = radio._notches[nearest_idx]
+        flag_str = []
+        if not nearest.active:
+            flag_str.append("OFF")
+        if nearest.deep:
+            flag_str.append("DEEP")
+        flags = f" — {' / '.join(flag_str)}" if flag_str else ""
+        # Active-state toggle
         toggle_label = ("Disable this notch" if nearest.active
                         else "Enable this notch")
         toggle_act = QAction(
             f"{toggle_label}  ({nearest.abs_freq_hz/1e6:.4f} MHz, "
-            f"{int(round(nearest.width_hz))} Hz)", menu)
+            f"{int(round(nearest.width_hz))} Hz{flags})", menu)
         toggle_act.triggered.connect(
             lambda _=False, f=nearest.abs_freq_hz:
                 radio.toggle_notch_active_at(f))
         menu.addAction(toggle_act)
+        # Deep-mode toggle (cascade)
+        deep_label = ("Make this notch normal (1× iirnotch)"
+                      if nearest.deep else
+                      "Make this notch DEEP (cascade — ~2× attenuation)")
+        deep_act = QAction(deep_label, menu)
+        deep_act.triggered.connect(
+            lambda _=False, f=nearest.abs_freq_hz:
+                radio.toggle_notch_deep_at(f))
+        menu.addAction(deep_act)
 
     rm_act = QAction("Remove nearest notch", menu)
     rm_act.setEnabled(have_any)

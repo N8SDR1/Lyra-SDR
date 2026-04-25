@@ -47,13 +47,19 @@ class Notch:
     in dimensionless Q values. Internal filter design converts
     width_hz to whatever the underlying scipy call needs.
 
-    Per-notch `active` flag means an operator can disable a notch
-    (greys out on the spectrum, bypassed in DSP) without losing
-    the placement — useful for A/B-ing whether a notch is helping.
+    Flags:
+    - `active`: bypass the notch in DSP without removing the
+      placement. Lets you A/B whether the notch is helping. Inactive
+      notches render in grey on the spectrum.
+    - `deep`: cascade the IIR filter (apply twice in series), roughly
+      doubling the dB attenuation at every offset. For stubborn
+      carriers where a single notch leaks audibly at the edges of
+      the kill region. Costs 2× CPU and 2× settling time.
     """
     abs_freq_hz: float          # absolute sky frequency of notch center
     width_hz: float             # -3 dB bandwidth in Hz
     active: bool                # individually enableable; False = bypass
+    deep: bool                  # cascade for ~2× dB attenuation
     filter: NotchFilter         # the actual DSP object
 
 
@@ -532,11 +538,16 @@ class Radio(QObject):
         """Just the absolute centre frequencies, for legacy callers."""
         return [n.abs_freq_hz for n in self._notches]
     @property
-    def notch_details(self) -> list[tuple[float, float, bool]]:
-        """(freq_hz, width_hz, active) tuples — what's emitted on
-        notches_changed. Stable shape so UI/TCI can subscribe without
-        depending on the Notch dataclass internals."""
-        return [(n.abs_freq_hz, n.width_hz, n.active) for n in self._notches]
+    def notch_details(self) -> list[tuple[float, float, bool, bool]]:
+        """(freq_hz, width_hz, active, deep) tuples — emitted on
+        notches_changed. Stable shape so UI/TCI subscribers don't
+        depend on the Notch dataclass internals. The `deep` flag
+        lets the visualization show cascaded notches with a thicker
+        outline."""
+        return [
+            (n.abs_freq_hz, n.width_hz, n.active, n.deep)
+            for n in self._notches
+        ]
     @property
     def notch_enabled(self): return self._notch_enabled
     @property
@@ -643,14 +654,15 @@ class Radio(QObject):
         """Re-design every notch's underlying filter — needed when
         sample rate or VFO frequency changes (since both affect the
         baseband offset that the filter is centered on). Preserves
-        each notch's width and active flag."""
+        each notch's width, active flag, and deep flag."""
         rebuilt = []
         for n in self._notches:
-            nf = self._make_notch_filter(n.abs_freq_hz, n.width_hz)
+            nf = self._make_notch_filter(
+                n.abs_freq_hz, n.width_hz, deep=n.deep)
             if nf:
                 rebuilt.append(Notch(
                     abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
-                    active=n.active, filter=nf,
+                    active=n.active, deep=n.deep, filter=nf,
                 ))
         self._notches = rebuilt
         if self._notch_enabled:
@@ -1388,19 +1400,25 @@ class Radio(QObject):
 
     def add_notch(self, abs_freq_hz: float,
                   width_hz: float | None = None,
-                  active: bool = True):
+                  active: bool = True,
+                  deep: bool = False):
         """Place a new notch. Width defaults to the current
         notch_default_width_hz. Auto-enables the notch bank if it's
         currently off, on the assumption that an operator placing a
-        notch wants to hear the result."""
+        notch wants to hear the result.
+
+        `deep=True` cascades the IIR filter for ~2× attenuation —
+        normally toggled per-notch via the right-click menu after
+        placement, but accepted here for programmatic use (TCI,
+        QSettings restore, tests)."""
         w = width_hz if width_hz is not None else self._notch_default_width_hz
         w = max(self.NOTCH_WIDTH_MIN_HZ, min(self.NOTCH_WIDTH_MAX_HZ, float(w)))
-        nf = self._make_notch_filter(abs_freq_hz, w)
+        nf = self._make_notch_filter(abs_freq_hz, w, deep=bool(deep))
         if nf is None:
             return
         self._notches.append(Notch(
             abs_freq_hz=float(abs_freq_hz), width_hz=w,
-            active=bool(active), filter=nf,
+            active=bool(active), deep=bool(deep), filter=nf,
         ))
         if not self._notch_enabled:
             self.set_notch_enabled(True)
@@ -1432,12 +1450,12 @@ class Radio(QObject):
                 min(self.NOTCH_WIDTH_MAX_HZ, float(new_width_hz)))
         if n.width_hz > 0 and abs(w - n.width_hz) / n.width_hz < 0.04:
             return False
-        nf = self._make_notch_filter(n.abs_freq_hz, w)
+        nf = self._make_notch_filter(n.abs_freq_hz, w, deep=n.deep)
         if nf is None:
             return False
         self._notches[idx] = Notch(
             abs_freq_hz=n.abs_freq_hz, width_hz=w,
-            active=n.active, filter=nf,
+            active=n.active, deep=n.deep, filter=nf,
         )
         self.notches_changed.emit(self.notch_details)
         return True
@@ -1456,7 +1474,7 @@ class Radio(QObject):
             return True
         self._notches[idx] = Notch(
             abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
-            active=bool(active), filter=n.filter,
+            active=bool(active), deep=n.deep, filter=n.filter,
         )
         self.notches_changed.emit(self.notch_details)
         return True
@@ -1469,6 +1487,39 @@ class Radio(QObject):
         n = self._notches[idx]
         return self.set_notch_active_at(
             n.abs_freq_hz, not n.active, tolerance_hz)
+
+    def set_notch_deep_at(self, abs_freq_hz: float, deep: bool,
+                          tolerance_hz: float | None = None) -> bool:
+        """Toggle one notch's cascade-depth mode. Rebuilds the
+        underlying filter (since the cascade allocates a second
+        biquad-state pair internally). Spectrum overlay renders deep
+        notches with a thicker outline so the operator can see at a
+        glance which notches are running cascaded."""
+        idx = self._find_nearest_notch_idx(abs_freq_hz, tolerance_hz)
+        if idx is None:
+            return False
+        n = self._notches[idx]
+        if n.deep == bool(deep):
+            return True
+        nf = self._make_notch_filter(
+            n.abs_freq_hz, n.width_hz, deep=bool(deep))
+        if nf is None:
+            return False
+        self._notches[idx] = Notch(
+            abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
+            active=n.active, deep=bool(deep), filter=nf,
+        )
+        self.notches_changed.emit(self.notch_details)
+        return True
+
+    def toggle_notch_deep_at(self, abs_freq_hz: float,
+                             tolerance_hz: float | None = None) -> bool:
+        idx = self._find_nearest_notch_idx(abs_freq_hz, tolerance_hz)
+        if idx is None:
+            return False
+        n = self._notches[idx]
+        return self.set_notch_deep_at(
+            n.abs_freq_hz, not n.deep, tolerance_hz)
 
     def clear_notches(self):
         self._notches.clear()
@@ -2045,7 +2096,8 @@ class Radio(QObject):
             self._demods = {}
 
     def _make_notch_filter(self, abs_freq_hz: float,
-                           width_hz: float) -> NotchFilter | None:
+                           width_hz: float,
+                           deep: bool = False) -> NotchFilter | None:
         """Design one notch filter at the given sky frequency with the
         given -3 dB bandwidth. The DSP pipeline runs at a fixed
         48 kHz (decimation happens before notching) — coefficients
@@ -2060,6 +2112,9 @@ class Radio(QObject):
         - **Off-DC**: standard iirnotch centered at the offset, with
           bandwidth = width Hz. Right tool for FT8 tones, RTTY pairs,
           heterodynes, etc.
+
+        `deep=True` cascades the resulting filter twice for ~2× dB
+        attenuation on stubborn carriers.
         """
         NOTCH_RATE = 48000
         offset = abs_freq_hz - self._freq_hz
@@ -2073,8 +2128,9 @@ class Radio(QObject):
         try:
             if eff_freq < (width_hz * 0.5 + 10.0):
                 return NotchFilter(NOTCH_RATE, eff_freq, width_hz,
-                                   dc_blocker=True)
-            return NotchFilter(NOTCH_RATE, eff_freq, width_hz)
+                                   dc_blocker=True, deep=deep)
+            return NotchFilter(NOTCH_RATE, eff_freq, width_hz,
+                               deep=deep)
         except Exception as e:
             self.status_message.emit(f"Notch error: {e}", 3000)
             return None

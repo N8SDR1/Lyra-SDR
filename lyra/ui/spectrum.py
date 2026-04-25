@@ -61,12 +61,14 @@ class SpectrumWidget(_PaintedWidget):
         self._max_db = -20.0
         self._center_hz = 0.0
         self._span_hz = 48000.0
-        # Notches: list of (abs_freq_hz, width_hz, active) tuples.
-        # Width is the -3 dB bandwidth in Hz; visualized as a filled
-        # rectangle spanning ±width/2 around the center frequency.
-        # Active=False notches render in a desaturated grey so the
-        # operator can A/B without losing placement.
-        self._notches: list[tuple[float, float, bool]] = []
+        # Notches: list of (abs_freq_hz, width_hz, active, deep) tuples.
+        # Visualization:
+        #   active=True            → saturated red filled rectangle
+        #   active=False           → desaturated grey rectangle
+        #   deep=True (cascade)    → thicker outline + "^" suffix on
+        #                            the width label, signaling 2×
+        #                            attenuation
+        self._notches: list[tuple[float, float, bool, bool]] = []
         self._spots: list[dict] = []
         # Used for the age-fade on spot boxes (newer spots at full alpha,
         # older ones fading toward 30%). Kept in sync with Radio via
@@ -367,13 +369,21 @@ class SpectrumWidget(_PaintedWidget):
                 self._spot_mode_filter = out
         self.update()
 
-    def set_notches(self, items: list[tuple[float, float, bool]]):
+    def set_notches(self, items):
         """Receive the notch list from Radio. Items are
-        (abs_freq_hz, width_hz, active) tuples — same shape that
-        Radio.notch_details emits."""
-        self._notches = [
-            (float(f), float(w), bool(a)) for (f, w, a) in items
-        ]
+        (abs_freq_hz, width_hz, active, deep) tuples — same shape
+        that Radio.notch_details emits. Tolerates 3-tuples (no deep
+        flag) for backwards compat with any callers that haven't
+        been updated yet."""
+        norm = []
+        for it in items:
+            if len(it) == 4:
+                f, w, a, d = it
+            else:
+                f, w, a = it
+                d = False
+            norm.append((float(f), float(w), bool(a), bool(d)))
+        self._notches = norm
         self.update()
 
     def _freq_at_x(self, x: float) -> float:
@@ -394,14 +404,14 @@ class SpectrumWidget(_PaintedWidget):
         visual_half = int(width_hz * 0.5 / hz_per_px)
         return max(self.NOTCH_HIT_PX, visual_half)
 
-    def _nearest_notch_at_x(self, x: float) -> tuple[float, float, bool] | None:
-        """Return (freq, width, active) of the nearest notch whose
-        visible rectangle contains x, or None."""
+    def _nearest_notch_at_x(self, x: float):
+        """Return (freq, width, active, deep) of the nearest notch
+        whose visible rectangle contains x, or None."""
         if not self._notches or self._span_hz <= 0:
             return None
         best = None
         best_px = None
-        for freq, width_hz, active in self._notches:
+        for freq, width_hz, active, deep in self._notches:
             nf = (freq - self._center_hz) / self._span_hz + 0.5
             if not (0.0 <= nf <= 1.0):
                 continue
@@ -410,7 +420,7 @@ class SpectrumWidget(_PaintedWidget):
             hit_radius = self._notch_half_px(width_hz)
             if px <= hit_radius and (best_px is None or px < best_px):
                 best_px = px
-                best = (freq, width_hz, active)
+                best = (freq, width_hz, active, deep)
         return best
 
     def mousePressEvent(self, event):
@@ -490,7 +500,7 @@ class SpectrumWidget(_PaintedWidget):
         # convention. Multiplicative so the response feels uniform
         # across width ranges. 1.5% per pixel after a 4 px deadzone.
         if self._drag_notch is not None:
-            freq, start_width, _active = self._drag_notch
+            freq, start_width, _active, _deep = self._drag_notch
             dy = self._drag_start_y - int(event.position().y())
             if abs(dy) < 4:
                 return
@@ -915,7 +925,7 @@ class SpectrumWidget(_PaintedWidget):
         # NOTCH_HIT_PX wide so the smallest notches stay grabbable.
         if self._notches and self._span_hz > 0:
             hz_per_px = self._span_hz / max(1, w)
-            for freq, width_hz, active in self._notches:
+            for freq, width_hz, active, deep in self._notches:
                 nf = (freq - self._center_hz) / self._span_hz + 0.5
                 if not (0.0 <= nf <= 1.0):
                     continue
@@ -940,16 +950,23 @@ class SpectrumWidget(_PaintedWidget):
                 p.setPen(Qt.NoPen)
                 p.setBrush(fill)
                 p.drawRect(x_start, 0, x_end - x_start, h)
+                # Edge outlines: thicker for deep (cascade) notches so
+                # the operator can see at a glance which notches are
+                # running cascaded for ~2× attenuation.
+                edge_width = 3 if deep else 1
+                p.setPen(QPen(line, edge_width, Qt.SolidLine))
+                p.drawLine(x_start, 0, x_start, h)
+                p.drawLine(x_end,   0, x_end,   h)
                 # Center hairline for precise targeting
                 p.setPen(QPen(line, 1, Qt.SolidLine))
                 p.drawLine(nx, 0, nx, h)
                 # Width label, drawn just to the right of the notch
-                # if there's room. Don't draw on very narrow notches
-                # or near right edge to avoid label collision.
+                # if there's room. "^" suffix marks deep notches.
                 if half_px >= 8 and nx + half_px + 60 < w:
+                    suffix = "^" if deep else ""
                     p.setPen(label_color)
                     p.drawText(nx + half_px + 4, 14,
-                               f"{int(round(width_hz))} Hz")
+                               f"{int(round(width_hz))}{suffix} Hz")
 
         # Frequency scale on bottom
         p.setPen(QPen(AXIS, 1))
@@ -1106,9 +1123,9 @@ class WaterfallWidget(_PaintedWidget):
         self._max_db = -30.0
         self._center_hz = 0.0
         self._span_hz = 48000.0
-        # See SpectrumWidget for the (freq, width_hz, active) shape.
-        self._notches: list[tuple[float, float, bool]] = []
-        self._drag_notch: tuple[float, float, bool] | None = None
+        # See SpectrumWidget for the (freq, width_hz, active, deep) shape.
+        self._notches: list[tuple[float, float, bool, bool]] = []
+        self._drag_notch: tuple[float, float, bool, bool] | None = None
         self._drag_start_y: int = 0
         # Palette is looked up by name so the Visuals tab can hot-swap
         # it without reconstructing the widget. Name is persisted via
@@ -1123,13 +1140,19 @@ class WaterfallWidget(_PaintedWidget):
         self._center_hz = center_hz
         self._span_hz = span_hz
 
-    def set_notches(self, items: list[tuple[float, float, bool]]):
+    def set_notches(self, items):
         """Receive notches from Radio. Items are
-        (abs_freq_hz, width_hz, active) tuples — same shape Radio
-        emits in `notch_details`."""
-        self._notches = [
-            (float(f), float(w), bool(a)) for (f, w, a) in items
-        ]
+        (abs_freq_hz, width_hz, active, deep) tuples. Tolerates
+        legacy 3-tuples for backwards compat."""
+        norm = []
+        for it in items:
+            if len(it) == 4:
+                f, w, a, d = it
+            else:
+                f, w, a = it
+                d = False
+            norm.append((float(f), float(w), bool(a), bool(d)))
+        self._notches = norm
         self.update()
 
     def _freq_at_x(self, x: float) -> float:
@@ -1143,18 +1166,18 @@ class WaterfallWidget(_PaintedWidget):
         hz_per_px = self._span_hz / self.width()
         return max(self.NOTCH_HIT_PX, int(width_hz * 0.5 / hz_per_px))
 
-    def _nearest_notch_at_x(self, x: float) -> tuple[float, float, bool] | None:
+    def _nearest_notch_at_x(self, x: float):
         if not self._notches or self._span_hz <= 0:
             return None
         best, best_px = None, None
-        for freq, width_hz, active in self._notches:
+        for freq, width_hz, active, deep in self._notches:
             nf = (freq - self._center_hz) / self._span_hz + 0.5
             if not (0.0 <= nf <= 1.0):
                 continue
             px = abs(nf * self.width() - x)
             hit_radius = self._notch_half_px(width_hz)
             if px <= hit_radius and (best_px is None or px < best_px):
-                best, best_px = (freq, width_hz, active), px
+                best, best_px = (freq, width_hz, active, deep), px
         return best
 
     def mousePressEvent(self, event):
@@ -1178,7 +1201,7 @@ class WaterfallWidget(_PaintedWidget):
     def mouseMoveEvent(self, event):
         if self._drag_notch is None:
             return
-        freq, start_width, _active = self._drag_notch
+        freq, start_width, _active, _deep = self._drag_notch
         dy = self._drag_start_y - int(event.position().y())
         if abs(dy) < 4:  # dead zone
             return
@@ -1270,12 +1293,13 @@ class WaterfallWidget(_PaintedWidget):
 
         # Notch markers — match the spectrum widget's filled-rectangle
         # style (Thetis convention). Inactive notches render in grey
-        # so the operator can A/B without losing placement.
+        # so the operator can A/B without losing placement. Deep
+        # notches get thicker edge outlines.
         if self._notches and self._span_hz > 0:
             w = self.width()
             h = self.height()
             hz_per_px = self._span_hz / max(1, w)
-            for freq, width_hz, active in self._notches:
+            for freq, width_hz, active, deep in self._notches:
                 nf = (freq - self._center_hz) / self._span_hz + 0.5
                 if not (0.0 <= nf <= 1.0):
                     continue
@@ -1291,5 +1315,11 @@ class WaterfallWidget(_PaintedWidget):
                 p.setPen(Qt.NoPen)
                 p.setBrush(fill)
                 p.drawRect(nx - half_px, 0, 2 * half_px, h)
+                # Thicker edge outlines on deep notches so they're
+                # visually distinct from normal ones.
+                edge_width = 3 if deep else 1
+                p.setPen(QPen(line, edge_width, Qt.SolidLine))
+                p.drawLine(nx - half_px, 0, nx - half_px, h)
+                p.drawLine(nx + half_px, 0, nx + half_px, h)
                 p.setPen(QPen(line, 1, Qt.SolidLine))
                 p.drawLine(nx, 0, nx, h)
