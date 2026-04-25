@@ -459,17 +459,23 @@ class ViewPanel(GlassPanel):
         self.fps_slider.setValue(radio.spectrum_fps)
         self.fps_slider.setFixedWidth(130)
         self._refresh_fps_tooltip(radio.spectrum_fps)
-        # Debounce slider drags — committing the new value to Radio
-        # on every pixel of mouse motion was hammering the FFT timer's
-        # setInterval() hundreds of times per drag and could lock the
-        # main thread visibly. Now valueChanged just bumps a 75 ms
-        # one-shot timer; only the value present when the timer fires
-        # gets pushed to Radio. Slider drag stays smooth visually.
+        # FPS slider commit policy:
+        #   - while mouse is held (drag): just refresh tooltip, NO radio update
+        #   - on mouse release: commit immediately
+        #   - click-jump / keyboard / programmatic setValue: commit through
+        #     a 75 ms debounce (since no press/release events fire for those)
+        # The earlier debounce-only pattern was less responsive than expected
+        # — operator dragged the slider and didn't see the spectrum change
+        # until 75 ms after the last move. The press/release pattern commits
+        # the moment the operator lets go, which feels instant.
         from PySide6.QtCore import QTimer as _QTimer
+        self._fps_dragging = False
         self._fps_debounce = _QTimer(self)
         self._fps_debounce.setSingleShot(True)
         self._fps_debounce.setInterval(75)
         self._fps_debounce.timeout.connect(self._commit_fps_value)
+        self.fps_slider.sliderPressed.connect(self._on_fps_slider_press)
+        self.fps_slider.sliderReleased.connect(self._on_fps_slider_release)
         self.fps_slider.valueChanged.connect(self._on_fps_slider_drag)
         h.addWidget(self.fps_slider)
 
@@ -496,11 +502,7 @@ class ViewPanel(GlassPanel):
             radio.waterfall_divider, radio.waterfall_multiplier))
         self.wf_slider.setFixedWidth(140)
         self._refresh_wf_tooltip()
-        # Same debounce as the FPS slider — the waterfall multiplier
-        # is even MORE harmful when hammered during drag because
-        # increasing multiplier increases the number of waterfall
-        # paint events per FFT tick (multiplier=10 = 10× the paint
-        # rate). Per-pixel valueChanged could blow up the queue.
+        # Debounce — works fine for the WF slider (operator confirmed)
         self._wf_debounce = _QTimer(self)
         self._wf_debounce.setSingleShot(True)
         self._wf_debounce.setInterval(75)
@@ -601,15 +603,38 @@ class ViewPanel(GlassPanel):
     # 200 valueChanged events results in ONE radio update, not 200.
     # Mouse release naturally triggers the final commit because no
     # more valueChanged events arrive after release.
+    def _on_fps_slider_press(self):
+        """Mouse-down on the FPS slider — drag begins."""
+        self._fps_dragging = True
+        self._fps_debounce.stop()
+
+    def _on_fps_slider_release(self):
+        """Mouse-up — drag complete. Commit the final value RIGHT NOW
+        (no debounce wait) so the operator sees the spectrum trace
+        update the instant they let go."""
+        self._fps_dragging = False
+        self._fps_debounce.stop()
+        self._commit_fps_value()
+
     def _on_fps_slider_drag(self, fps: int):
+        """valueChanged fires constantly during drag AND for click-
+        jumps / keyboard / programmatic setValue. While the mouse is
+        actively held, only the tooltip updates — radio is left alone
+        so the FFT timer's setInterval isn't hammered. Non-drag
+        changes (no preceding sliderPressed) fall through to the
+        75 ms debounce path."""
         self._refresh_fps_tooltip(fps)
         self._refresh_wf_tooltip()
+        if self._fps_dragging:
+            return
         self._fps_debounce.start()
 
     def _commit_fps_value(self):
         self.radio.set_spectrum_fps(self.fps_slider.value())
 
     def _on_wf_slider_drag(self, _v: int):
+        """Drag → refresh tooltip + bump debounce timer. Radio commits
+        only after 75 ms of quiet."""
         self._refresh_wf_tooltip()
         self._wf_debounce.start()
 

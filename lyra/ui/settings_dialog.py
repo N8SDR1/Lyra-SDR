@@ -1013,7 +1013,26 @@ class VisualsSettingsTab(QWidget):
         super().__init__(parent)
         self.radio = radio
 
-        v = QVBoxLayout(self)
+        # Two-column layout. The Visuals tab has eight grouped sections
+        # (graphics backend, palette, signal range + auto-scale, peak
+        # markers, colors, spectrum cal, S-meter cal, update rates) —
+        # stacking them in a single column made the dialog unreadably
+        # tall even on a 27" monitor. Side-by-side columns keep
+        # everything visible without scrolling.
+        outer = QHBoxLayout(self)
+        outer.setSpacing(12)
+        col_left = QVBoxLayout()
+        col_right = QVBoxLayout()
+        col_left.setSpacing(8)
+        col_right.setSpacing(8)
+        outer.addLayout(col_left, 1)
+        outer.addLayout(col_right, 1)
+        # Backwards-compat alias so all the existing
+        # `v.addWidget(grp_xxx)` calls below land in the LEFT column
+        # by default. Sections that should go in the right column
+        # are reassigned later (see "right-column reassignments"
+        # at the end of this method).
+        v = col_left
 
         # ── Graphics backend ──────────────────────────────────────
         from lyra.ui.gfx import (
@@ -1316,7 +1335,9 @@ class VisualsSettingsTab(QWidget):
         btn_row.addWidget(reset_colors_btn)
         gc_outer.addLayout(btn_row)
 
-        v.addWidget(grp_col)
+        # → right column (Colors is one of the taller groups; pairing
+        # it with Signal range on the right balances the two columns)
+        col_right.addWidget(grp_col)
 
         # Aim the first swatch by default so clicking a preset "just
         # works" even before the user taps a swatch. Visible cyan
@@ -1388,7 +1409,8 @@ class VisualsSettingsTab(QWidget):
             self.radio.set_peak_markers_show_db)
         gd.addWidget(self.peak_show_db_chk, 9, 0, 1, 3, Qt.AlignLeft)
 
-        v.addWidget(grp_db)
+        # → right column (Signal range is one of the taller groups)
+        col_right.addWidget(grp_db)
 
         # ── Spectrum cal trim ─────────────────────────────────────
         # Per-rig calibration offset added to every FFT bin before
@@ -1541,16 +1563,20 @@ class VisualsSettingsTab(QWidget):
         self.fps_label.setStyleSheet(
             "color: #cdd9e5; font-family: Consolas, monospace;")
         gr.addWidget(self.fps_label, 1, 2, Qt.AlignLeft)
-        # Debounced commit — see same pattern in panels.py.ViewPanel
-        # for why this matters. Drag value just updates the label
-        # locally; the radio doesn't see the new fps until the slider
-        # has been quiet for 75 ms.
+        # FPS slider — sliderPressed/Released pattern. See panels.py
+        # ViewPanel for the rationale. Commits ONLY on release (or
+        # on debounce expiration for click-jumps / keyboard).
         from PySide6.QtCore import QTimer as _QTimer
+        self._fps_dragging = False
         self._fps_debounce = _QTimer(self)
         self._fps_debounce.setSingleShot(True)
         self._fps_debounce.setInterval(75)
         self._fps_debounce.timeout.connect(
             lambda: self.radio.set_spectrum_fps(self.fps_slider.value()))
+        self.fps_slider.sliderPressed.connect(
+            lambda: (setattr(self, '_fps_dragging', True),
+                     self._fps_debounce.stop()))
+        self.fps_slider.sliderReleased.connect(self._on_fps_slider_release)
         self.fps_slider.valueChanged.connect(self._on_fps_slider_drag)
         # Two-way sync: if the front-panel FPS slider moves (or QSettings
         # load, or any future TCI hook), reflect it here. Without this
@@ -1586,10 +1612,9 @@ class VisualsSettingsTab(QWidget):
         self.wf_label.setStyleSheet(
             "color: #cdd9e5; font-family: Consolas, monospace;")
         gr.addWidget(self.wf_label, 2, 2, Qt.AlignLeft)
-        # Same debounce as the FPS slider above — committing the new
-        # multiplier per pixel during a fast drag makes the FFT loop
-        # emit wildly varying numbers of waterfall_ready signals,
-        # blowing up the main-thread queue.
+        # Plain debounce — operator confirmed waterfall slider works
+        # fine with this; over-engineering with sliderPressed/Released
+        # was unnecessary.
         self._wf_debounce = _QTimer(self)
         self._wf_debounce.setSingleShot(True)
         self._wf_debounce.setInterval(75)
@@ -1602,6 +1627,9 @@ class VisualsSettingsTab(QWidget):
         v.addWidget(grp_rate)
 
         v.addStretch(1)
+        # Right column gets a stretch too so its groups don't expand
+        # vertically to fill the column height.
+        col_right.addStretch(1)
 
     # ── Helpers ──────────────────────────────────────────────────
     @staticmethod
@@ -1861,12 +1889,20 @@ class VisualsSettingsTab(QWidget):
                     self.zoom_combo.blockSignals(False)
                 return
 
+    def _on_fps_slider_release(self):
+        """Mouse released — commit immediately (no debounce wait)."""
+        self._fps_dragging = False
+        self._fps_debounce.stop()
+        self.radio.set_spectrum_fps(self.fps_slider.value())
+
     def _on_fps_slider_drag(self, fps: int):
-        """Slider value changed (every pixel of drag) — refresh
-        labels locally + bump the debounce timer. Radio is updated
-        only when motion has been quiet for 75 ms."""
+        """valueChanged — refresh labels locally; commit only when
+        operator releases the mouse (or via debounce on click-jump /
+        keyboard, which don't fire press/release)."""
         self.fps_label.setText(f"{fps} fps")
         self.wf_label.setText(self._wf_label_text())
+        if getattr(self, "_fps_dragging", False):
+            return
         self._fps_debounce.start()
 
     # Backward-compat — anything that called _on_fps_changed by name
@@ -1914,12 +1950,12 @@ class VisualsSettingsTab(QWidget):
         return f"{fps * mult / div:.1f} rows/s"
 
     def _on_wf_slider_drag_setting(self, _v: int):
-        """Slider dragged — refresh label locally + bump debounce."""
+        """Drag → refresh label + bump debounce timer."""
         self.wf_label.setText(self._wf_label_text())
         self._wf_debounce.start()
 
     def _commit_wf_value(self):
-        """Debounced commit of the waterfall slider value to Radio."""
+        """Commit the current waterfall slider value to Radio."""
         div, mult = self._wf_slider_to_state(self.wf_slider.value())
         self.radio.set_waterfall_divider(div)
         self.radio.set_waterfall_multiplier(mult)
@@ -1954,7 +1990,12 @@ class SettingsDialog(QDialog):
     def __init__(self, radio, tci_server: TciServer, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Lyra — Settings")
-        self.resize(640, 560)
+        # Open wide by default — at 640×560 the dense Visuals tab in
+        # particular was cramped even on a 27" display. The dialog
+        # remains resizable so operators on smaller monitors can pull
+        # it tighter; minimum keeps it from collapsing into nothing.
+        self.resize(1100, 760)
+        self.setMinimumSize(640, 480)
 
         v = QVBoxLayout(self)
 
