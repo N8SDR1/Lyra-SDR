@@ -18,7 +18,7 @@ from lyra.radio import Radio
 from lyra.protocol.stream import SAMPLE_RATES
 from lyra.ui.panel import GlassPanel
 from lyra.ui.spectrum import SpectrumWidget, WaterfallWidget
-from lyra.ui.smeter import SMeter, AnalogMeter, LedBarMeter
+from lyra.ui.smeter import SMeter, AnalogMeter, LedBarMeter, LitArcMeter
 from lyra.control.tci import TciServer, TCI_DEFAULT_PORT
 from lyra.bands import AMATEUR_BANDS, BROADCAST_BANDS, GEN_SLOTS, band_for_freq
 from lyra.ui.led_freq import FrequencyDisplay
@@ -1535,41 +1535,74 @@ class DspPanel(GlassPanel):
 class SMeterPanel(GlassPanel):
     """Meter panel with switchable visual style.
 
-    Two implementations share the same signal level input:
-      - `AnalogMeter`  (classic radio-dial arc, 4 concentric scales)
-      - `LedBarMeter`  (compact LED segmented bar)
-    User toggles with the A / LED button in the panel header. Choice
-    persists across launches via QSettings.
+    Three meter implementations share the same signal-level input:
+      - `LitArcMeter`  (NEW default — analog-curve face with NO needle;
+                        a row of LED-style segments lights cumulatively
+                        along the arc; click-the-mode-chip switches
+                        between S / dBm / AGC scales with per-mode color)
+      - `LedBarMeter`  (compact stacked LED bars)
+      - `AnalogMeter`  (legacy classic dial with needle — kept as
+                        fallback during the LitArcMeter rollout, will be
+                        removed once the new meter is settled)
+
+    Operator picks via the small style chip-row in the panel header.
+    Choice persists via QSettings (key: meters/style).
     """
+
+    # Stack indices for the three meter styles.
+    STYLE_LITARC = "litarc"
+    STYLE_LED    = "led"
+    STYLE_ANALOG = "analog"
+    _STYLE_ORDER = (STYLE_LITARC, STYLE_LED, STYLE_ANALOG)
+    _STYLE_LABELS = {
+        STYLE_LITARC: "Lit-Arc",
+        STYLE_LED:    "LED",
+        STYLE_ANALOG: "Analog",
+    }
+
     def __init__(self, radio: Radio, parent=None):
         super().__init__("METERS", parent, help_topic="smeter")
         self.radio = radio
 
-        # Both widgets instantiated; we just swap which one is visible.
+        # All three meter widgets live in the stack; we just swap visibility.
+        self.litarc_meter = LitArcMeter()
+        self.led_meter    = LedBarMeter()
         self.analog_meter = AnalogMeter(title="S")
-        self.led_meter = LedBarMeter()
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(self.analog_meter)   # index 0
+        self.stack.addWidget(self.litarc_meter)   # index 0
         self.stack.addWidget(self.led_meter)      # index 1
+        self.stack.addWidget(self.analog_meter)   # index 2
 
-        # Header row with style toggle
+        # Header — style picker as a row of small toggle chips.
+        # Compact + the active style is visually obvious without
+        # opening a combo, click any chip to switch instantly.
         header = QHBoxLayout()
-        self.style_btn = QPushButton("LED")
-        self.style_btn.setCheckable(True)
-        self.style_btn.setFixedWidth(50)
-        self.style_btn.setToolTip(
-            "Toggle meter style (off = classic analog, on = LED bar)")
-        self.style_btn.toggled.connect(self._on_style_toggled)
-        header.addWidget(self.style_btn)
+        header.setSpacing(4)
+        self._style_btns: dict[str, QPushButton] = {}
+        for key in self._STYLE_ORDER:
+            btn = QPushButton(self._STYLE_LABELS[key])
+            btn.setCheckable(True)
+            btn.setFixedHeight(20)
+            btn.setObjectName("dsp_btn")
+            btn.setToolTip(
+                f"Switch to the '{self._STYLE_LABELS[key]}' meter style")
+            btn.clicked.connect(
+                lambda _checked=False, k=key: self.set_style(k))
+            header.addWidget(btn)
+            self._style_btns[key] = btn
         header.addStretch(1)
 
         self.content_layout().addLayout(header)
         self.content_layout().addWidget(self.stack)
 
-        # Shared wiring — both meters receive the same signal updates
-        radio.smeter_level.connect(self.analog_meter.set_level_dbfs)
+        # Shared signal wiring — every meter sees every update so the
+        # operator can swap styles mid-session without losing any data
+        # streams.
+        radio.smeter_level.connect(self.litarc_meter.set_level_dbfs)
         radio.smeter_level.connect(self.led_meter.set_level_dbfs)
+        radio.smeter_level.connect(self.analog_meter.set_level_dbfs)
+        radio.agc_action_db.connect(self.litarc_meter.set_agc_db)
         radio.freq_changed.connect(self._on_freq_changed)
         radio.mode_changed.connect(self.analog_meter.set_mode)
 
@@ -1577,16 +1610,26 @@ class SMeterPanel(GlassPanel):
         self.analog_meter.set_mode(radio.mode)
         self._on_freq_changed(radio.freq_hz)
 
+        # Default to the new lit-arc meter; load_settings() will
+        # restore the operator's saved preference before they see it.
+        self.set_style(self.STYLE_LITARC)
+
     @property
     def style(self) -> str:
-        return "led" if self.style_btn.isChecked() else "analog"
+        for key, btn in self._style_btns.items():
+            if btn.isChecked():
+                return key
+        return self.STYLE_LITARC
 
     def set_style(self, s: str):
-        self.style_btn.setChecked(s == "led")
-
-    def _on_style_toggled(self, on: bool):
-        self.stack.setCurrentIndex(1 if on else 0)
-        self.style_btn.setText("Analog" if on else "LED")
+        if s not in self._STYLE_ORDER:
+            s = self.STYLE_LITARC
+        idx = self._STYLE_ORDER.index(s)
+        self.stack.setCurrentIndex(idx)
+        for key, btn in self._style_btns.items():
+            btn.blockSignals(True)
+            btn.setChecked(key == s)
+            btn.blockSignals(False)
 
     def _on_freq_changed(self, hz: int):
         self.analog_meter.set_freq_hz(hz)

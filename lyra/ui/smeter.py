@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPen,
     QPolygonF, QRadialGradient,
@@ -526,6 +526,473 @@ class AnalogMeter(QWidget):
         else:
             self._peak = self._value
         self.update()
+
+
+# ── Lit-arc segment meter (no needle — segments light along the arc) ──
+class LitArcMeter(QWidget):
+    """Curved analog-style meter face with NO needle — instead a row of
+    radial LED-style segments traces the arc and lights up cumulatively
+    from the left up to the current value.
+
+    Why no needle:
+      - Needle position is quantized by pixel resolution; segments give
+        explicit count-of-divisions accuracy
+      - Sub-tick FFT updates can flick the segment count smoothly without
+        the visual "tremor" a fast-jittering needle has
+      - Peak-hold becomes a single brighter segment that trails the bar
+        — visually obvious, no second needle needed
+
+    Mode switching via click-the-scale-label gesture: each mode label
+    in the row above the arc is a hit target. Active mode is rendered
+    in its own color; clicking another label switches modes. The arc's
+    color gradient and scale numerals re-render to match.
+
+    Modes implemented now:
+      S       — signal strength in S-units (S0..S9+30)
+      dBm     — same data, dBm scale label (-127..-43 dBm)
+      AGC     — current AGC gain in dB (0..60 dB scale)
+
+    Future modes (placeholders ready, wire up when TX ships):
+      MIC     — microphone input level
+      PWR     — RF output power, watts
+      SWR     — VSWR during TX
+
+    Per-mode color palette (operator-distinct so a glance tells you
+    which mode the meter is in without reading the label):
+      S/dBm  — deep green → light green → amber → red
+      AGC    — deep blue → cyan → white-blue (cool palette)
+      MIC    — slate → light amber → bright amber (TX warming)
+      PWR    — deep red → orange → yellow (TX energy)
+      SWR    — green at 1:1, climbing sharply to red past 2:1
+    """
+
+    # ── Mode definitions ─────────────────────────────────────────────
+    MODE_S    = "S"
+    MODE_DBM  = "dBm"
+    MODE_AGC  = "AGC"
+    # Future:
+    MODE_MIC  = "MIC"
+    MODE_PWR  = "PWR"
+    MODE_SWR  = "SWR"
+
+    # Modes available right now (RX-only). TX modes added when TX ships.
+    AVAILABLE_MODES = (MODE_S, MODE_DBM, MODE_AGC)
+
+    # Per-mode color stops — list of (fraction_along_arc, QColor).
+    # paint() interpolates between adjacent stops for each segment.
+    _S_GRADIENT = [
+        (0.00, QColor(  0, 110,  40)),   # deep green   (S0)
+        (0.40, QColor( 60, 220,  80)),   # bright green (S5)
+        (0.65, QColor(180, 240,  60)),   # lime         (S9)
+        (0.80, QColor(255, 200,  60)),   # amber        (+10)
+        (0.92, QColor(255, 140,  40)),   # orange       (+20)
+        (1.00, QColor(255,  60,  60)),   # red          (+30)
+    ]
+    _AGC_GRADIENT = [
+        (0.00, QColor( 30,  60, 130)),   # deep blue
+        (0.50, QColor(  0, 180, 255)),   # cyan
+        (1.00, QColor(220, 240, 255)),   # near-white blue
+    ]
+    _MIC_GRADIENT = [
+        (0.00, QColor( 90, 100, 110)),   # slate
+        (0.60, QColor(220, 180,  60)),   # amber
+        (1.00, QColor(255, 220,  80)),   # bright amber
+    ]
+    _PWR_GRADIENT = [
+        (0.00, QColor(120,   0,   0)),   # deep red
+        (0.50, QColor(255, 130,  40)),   # orange
+        (1.00, QColor(255, 240,  80)),   # yellow
+    ]
+    _SWR_GRADIENT = [
+        (0.00, QColor( 60, 220,  80)),   # green at 1.0:1
+        (0.30, QColor(180, 240,  60)),   # lime up to 1.5:1
+        (0.50, QColor(255, 200,  60)),   # amber at 2:1
+        (1.00, QColor(255,  60,  60)),   # red beyond 2.5:1
+    ]
+
+    @classmethod
+    def _gradient_for(cls, mode: str):
+        return {
+            cls.MODE_S:    cls._S_GRADIENT,
+            cls.MODE_DBM:  cls._S_GRADIENT,    # same physical signal
+            cls.MODE_AGC:  cls._AGC_GRADIENT,
+            cls.MODE_MIC:  cls._MIC_GRADIENT,
+            cls.MODE_PWR:  cls._PWR_GRADIENT,
+            cls.MODE_SWR:  cls._SWR_GRADIENT,
+        }.get(mode, cls._S_GRADIENT)
+
+    # ── Geometry ─────────────────────────────────────────────────────
+    NUM_SEGMENTS    = 80         # divisions along the arc
+    SEG_GAP_DEG     = 0.10       # tiny gap between adjacent segments
+    SWEEP_HALF_DEG  = 38.0       # arc sweep = 76° (38° each side)
+    SIDE_MARGIN_PX  = 12
+
+    # ── Visual style ─────────────────────────────────────────────────
+    BG          = QColor(6, 6, 8)
+    UNLIT_DIM   = QColor(38, 42, 50)        # unlit segment background
+    PEAK_GLOW   = QColor(255, 255, 255)     # peak-hold marker overlay
+    SCALE_LBL   = QColor(225, 230, 240)
+    SCALE_DIM   = QColor(140, 145, 155)
+    READOUT_FG  = QColor(255, 200, 80)      # numeric readout (amber LCD)
+    MODE_ACTIVE = QColor(255, 200, 80)
+    MODE_IDLE   = QColor(110, 120, 135)
+
+    # Signal — emits when operator clicks a mode label.
+    mode_changed = Signal(str)
+
+    def __init__(self, parent=None, mode: str = MODE_S):
+        super().__init__(parent)
+        self._mode = mode if mode in self.AVAILABLE_MODES else self.MODE_S
+        # Live values — held in their respective natural units.
+        self._dbfs       = -160.0    # raw RX peak from radio.smeter_level
+        self._peak_dbfs  = -160.0    # peak-hold trace
+        self._agc_db     = 0.0       # current AGC applied gain in dB
+        # dBFS → dBm offset (matches the S-meter cal post true-dBFS fix)
+        self._dbfs_to_dbm_offset = -19.0
+        # Peak-hold decay rate (dB / s). Tunable via setter / right-click.
+        self._peak_decay_dB_per_s = 6.0
+
+        # Mode-label hit boxes filled in paint(), used by mousePressEvent
+        self._mode_hitboxes: dict[str, QRectF] = {}
+
+        # Cached arc geometry — recomputed on resize, NOT per frame.
+        self._geom_dirty = True
+        self._segments: list[QPolygonF] = []
+        self._scale_ticks: list[tuple[float, str, bool]] = []   # (frac, label, is_major)
+        self._readout_rect = QRectF()
+
+        # Decay timer — drives the peak-hold trace down over time.
+        self._decay_timer = QTimer(self)
+        self._decay_timer.timeout.connect(self._tick_decay)
+        self._decay_timer.start(50)
+
+        self.setMinimumSize(290, 170)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+
+    # ── Public setters (panel wires Radio signals here) ──────────────
+    def set_level_dbfs(self, dbfs: float):
+        """Drive the S / dBm modes from the radio's smeter_level signal."""
+        self._dbfs = float(dbfs)
+        if self._dbfs > self._peak_dbfs:
+            self._peak_dbfs = self._dbfs
+        self.update()
+
+    def set_agc_db(self, db: float):
+        """Drive the AGC mode from the radio's current AGC gain action."""
+        self._agc_db = float(db)
+        self.update()
+
+    def set_mode(self, mode: str):
+        if mode not in self.AVAILABLE_MODES:
+            return
+        if mode == self._mode:
+            return
+        self._mode = mode
+        # Reset peak when switching modes — old peak is meaningless
+        # in the new scale.
+        self._peak_dbfs = self._dbfs
+        self.update()
+        self.mode_changed.emit(mode)
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    def set_peak_decay_dbps(self, dbps: float):
+        self._peak_decay_dB_per_s = max(0.0, float(dbps))
+
+    # ── Internal: per-mode value-to-fraction mapping ─────────────────
+    # Each mode reports a (current_fraction, peak_fraction, readout_string)
+    # triple — the painter doesn't care which mode it is.
+    def _value_state(self) -> tuple[float, float, str]:
+        m = self._mode
+        if m == self.MODE_S or m == self.MODE_DBM:
+            # S0 = -127 dBm = -73 - 54; S9+30 = -43 dBm
+            dbm_now  = self._dbfs + self._dbfs_to_dbm_offset
+            dbm_peak = self._peak_dbfs + self._dbfs_to_dbm_offset
+            f_now  = (dbm_now  + 127.0) / (-43.0 - -127.0)
+            f_peak = (dbm_peak + 127.0) / (-43.0 - -127.0)
+            f_now  = max(0.0, min(1.0, f_now))
+            f_peak = max(0.0, min(1.0, f_peak))
+            if m == self.MODE_S:
+                readout = self._dbm_to_s_string(dbm_now)
+            else:
+                readout = f"{dbm_now:+.0f} dBm"
+            return f_now, f_peak, readout
+        if m == self.MODE_AGC:
+            # 0..60 dB AGC range
+            f_now = max(0.0, min(1.0, self._agc_db / 60.0))
+            return f_now, f_now, f"{self._agc_db:+.1f} dB"
+        # Future TX modes — no live data yet, return zero
+        return 0.0, 0.0, "—"
+
+    @staticmethod
+    def _dbm_to_s_string(dbm: float) -> str:
+        """Format a dBm value as an S-unit reading (S0..S9+30 dB)."""
+        if dbm >= -73.0:
+            over = dbm - -73.0
+            if over < 0.5:
+                return "S9"
+            return f"S9+{int(round(over))}"
+        # below S9: each S-unit is 6 dB
+        s = max(0, int(round((dbm - -127.0) / 6.0)))
+        return f"S{min(s, 9)}"
+
+    # ── Geometry caching ─────────────────────────────────────────────
+    def resizeEvent(self, _event):
+        self._geom_dirty = True
+        super().resizeEvent(_event)
+
+    def _build_geometry(self):
+        """Compute arc segment polygons + scale tick positions ONCE per
+        size change. Called lazily from paint() when geom_dirty."""
+        from PySide6.QtCore import QPointF
+        w, h = self.width(), self.height()
+        # Reserve top strip for the mode labels, bottom for the readout
+        mode_strip_h    = 22
+        readout_strip_h = 30
+        arc_top    = mode_strip_h
+        arc_bottom = h - readout_strip_h - 6
+
+        # Pivot well below the visible arc to make the arc appear
+        # gently curved rather than a tight half-circle.
+        usable_w = max(60, w - 2 * self.SIDE_MARGIN_PX)
+        usable_h = max(40, arc_bottom - arc_top)
+        # Outer radius derived so the arc spans usable_w at its widest
+        sweep = math.radians(self.SWEEP_HALF_DEG)
+        # half-width of arc at outer radius = R * sin(sweep)
+        # we want that = usable_w/2
+        R_outer = (usable_w / 2.0) / math.sin(sweep)
+        # arc top is at center.y - R*cos(sweep), and we want it == arc_top
+        center_x = w / 2.0
+        center_y = arc_top + R_outer * math.cos(sweep)
+
+        # Segment thickness — about 14 px deep
+        seg_thick = 16.0
+        R_inner = R_outer - seg_thick
+        # Scale labels live OUTSIDE the segments
+        R_label = R_outer + 12.0
+
+        # Build segment polygons. Each is a small wedge between two
+        # angles, from R_inner to R_outer.
+        n = self.NUM_SEGMENTS
+        gap = math.radians(self.SEG_GAP_DEG)
+        # Total angular span = 2 * sweep, divided into n segments
+        seg_span = (2 * sweep - n * gap) / n
+        # Angle 0 = straight up; positive = clockwise (right side)
+        # We want segment 0 at the LEFT (angle = -sweep + gap/2)
+        self._segments.clear()
+        for i in range(n):
+            a0 = -sweep + gap / 2 + i * (seg_span + gap)
+            a1 = a0 + seg_span
+            poly = QPolygonF()
+            # Inner-left, outer-left, outer-right, inner-right
+            poly.append(QPointF(center_x + R_inner * math.sin(a0),
+                                center_y - R_inner * math.cos(a0)))
+            poly.append(QPointF(center_x + R_outer * math.sin(a0),
+                                center_y - R_outer * math.cos(a0)))
+            poly.append(QPointF(center_x + R_outer * math.sin(a1),
+                                center_y - R_outer * math.cos(a1)))
+            poly.append(QPointF(center_x + R_inner * math.sin(a1),
+                                center_y - R_inner * math.cos(a1)))
+            self._segments.append(poly)
+
+        # Scale ticks. The label set depends on mode; cache positions
+        # per-mode would be over-engineering — paint() rebuilds the
+        # label list on the fly using these (fraction, label, is_major)
+        # tuples. We only need the ANGULAR positions cached here; the
+        # actual labels come from the active mode.
+        self._scale_label_geom = (center_x, center_y, R_label, sweep)
+
+        # Readout text rect
+        self._readout_rect = QRectF(
+            0, h - readout_strip_h - 2, w, readout_strip_h)
+        # Mode-label strip rect
+        self._mode_strip_rect = QRectF(0, 0, w, mode_strip_h)
+
+        self._geom_dirty = False
+
+    # ── Mode-label tick definitions per mode ─────────────────────────
+    def _scale_labels(self) -> list[tuple[float, str, bool]]:
+        """Return list of (fraction_0_to_1, label_text, is_major)."""
+        m = self._mode
+        if m == self.MODE_S:
+            # S0..S9 every 6 dB, then +10/+20/+30 above
+            ticks = []
+            for s_unit in range(0, 10):
+                # Each S-unit = 6 dB. Scale spans -127..-43 (84 dB).
+                # S0 = 0, S9 = -73 - -127 = 54 / 84 = 0.643
+                dbm = -127.0 + s_unit * 6.0
+                frac = (dbm + 127.0) / 84.0
+                lbl = f"S{s_unit}" if s_unit % 3 == 0 else ""
+                ticks.append((frac, lbl, s_unit % 3 == 0))
+            for over in (10, 20, 30):
+                dbm = -73.0 + over
+                frac = (dbm + 127.0) / 84.0
+                ticks.append((frac, f"+{over}", True))
+            return ticks
+        if m == self.MODE_DBM:
+            return [
+                (0.000, "-127", True),
+                (0.250, "-106", False),
+                (0.500, "-85", True),
+                (0.643, "-73", True),    # S9 reference
+                (0.750, "-64", False),
+                (1.000, "-43", True),
+            ]
+        if m == self.MODE_AGC:
+            # 0..60 dB
+            ticks = []
+            for db in range(0, 61, 10):
+                ticks.append((db / 60.0, str(db), True))
+            return ticks
+        return []
+
+    # ── Paint ────────────────────────────────────────────────────────
+    def paintEvent(self, _event):
+        if self._geom_dirty:
+            self._build_geometry()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), self.BG)
+
+        f_now, f_peak, readout = self._value_state()
+        gradient = self._gradient_for(self._mode)
+
+        # ── Arc segments ────────────────────────────────────────────
+        n = len(self._segments)
+        # Index of the "currently lit" boundary — segments [0..lit_idx)
+        # render in their gradient color, segments [lit_idx..) render dim.
+        lit_idx = int(round(f_now * n))
+        peak_idx = int(round(f_peak * n))
+        for i, poly in enumerate(self._segments):
+            frac = (i + 0.5) / n
+            if i < lit_idx:
+                col = self._sample_gradient(gradient, frac)
+            else:
+                col = self.UNLIT_DIM
+            p.setBrush(col)
+            p.setPen(Qt.NoPen)
+            p.drawPolygon(poly)
+        # Peak-hold marker — overlay a brighter version of the gradient
+        # color on the peak segment (only if peak is ahead of current).
+        if 0 <= peak_idx < n and peak_idx >= lit_idx:
+            peak_col = self._sample_gradient(gradient, (peak_idx + 0.5) / n)
+            # Brighten: blend toward white
+            r, g, b = peak_col.red(), peak_col.green(), peak_col.blue()
+            peak_col = QColor(min(255, r + 80),
+                              min(255, g + 80),
+                              min(255, b + 80))
+            p.setBrush(peak_col)
+            p.drawPolygon(self._segments[peak_idx])
+
+        # ── Scale labels around the outside ─────────────────────────
+        center_x, center_y, R_label, sweep = self._scale_label_geom
+        scale_font = QFont()
+        scale_font.setFamilies(["Consolas", "Courier New"])
+        scale_font.setPointSize(8)
+        scale_font.setBold(True)
+        p.setFont(scale_font)
+        fm = QFontMetrics(scale_font)
+        for frac, lbl, is_major in self._scale_labels():
+            angle = -sweep + frac * (2 * sweep)
+            x = center_x + R_label * math.sin(angle)
+            y = center_y - R_label * math.cos(angle)
+            if is_major:
+                p.setPen(QPen(self.SCALE_LBL, 1))
+            else:
+                p.setPen(QPen(self.SCALE_DIM, 1))
+            if lbl:
+                tw = fm.horizontalAdvance(lbl)
+                p.drawText(QPointF(x - tw / 2, y + fm.ascent() / 2 - 2), lbl)
+            else:
+                # tick mark instead of label — small dot
+                p.setBrush(self.SCALE_DIM)
+                p.setPen(Qt.NoPen)
+                p.drawEllipse(QPointF(x, y), 1.4, 1.4)
+
+        # ── Mode picker chips along the top ─────────────────────────
+        self._mode_hitboxes.clear()
+        chip_font = QFont()
+        chip_font.setFamilies(["Segoe UI", "Arial"])
+        chip_font.setPointSize(9)
+        chip_font.setBold(True)
+        p.setFont(chip_font)
+        cfm = QFontMetrics(chip_font)
+        chip_pad = 12
+        x = 8
+        y = 4
+        for mode in self.AVAILABLE_MODES:
+            tw = cfm.horizontalAdvance(mode) + chip_pad
+            rect = QRectF(x, y, tw, self._mode_strip_rect.height() - 8)
+            self._mode_hitboxes[mode] = rect
+            is_active = (mode == self._mode)
+            if is_active:
+                # Filled chip in the mode's primary color
+                grad = self._gradient_for(mode)
+                fill_col = self._sample_gradient(grad, 0.7)
+                fill_col = QColor(fill_col.red(), fill_col.green(),
+                                  fill_col.blue(), 220)
+                p.setBrush(fill_col)
+                p.setPen(QPen(self.MODE_ACTIVE, 1))
+                p.drawRoundedRect(rect, 4, 4)
+                p.setPen(QPen(QColor(0, 0, 0), 1))
+            else:
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(self.MODE_IDLE, 1))
+                p.drawRoundedRect(rect, 4, 4)
+                p.setPen(QPen(self.MODE_IDLE, 1))
+            p.drawText(rect, Qt.AlignCenter, mode)
+            x += tw + 6
+
+        # ── Numeric readout at the bottom ───────────────────────────
+        readout_font = QFont()
+        readout_font.setFamilies(["Consolas", "Courier New"])
+        readout_font.setPointSize(16)
+        readout_font.setBold(True)
+        p.setFont(readout_font)
+        p.setPen(QPen(self.READOUT_FG, 1))
+        p.drawText(self._readout_rect, Qt.AlignCenter, readout)
+
+    # ── Gradient sampling helper ─────────────────────────────────────
+    @staticmethod
+    def _sample_gradient(stops: list, frac: float) -> QColor:
+        """Linear-interpolate the gradient stop list at `frac` (0..1)."""
+        frac = max(0.0, min(1.0, frac))
+        if frac <= stops[0][0]:
+            return stops[0][1]
+        if frac >= stops[-1][0]:
+            return stops[-1][1]
+        for i in range(len(stops) - 1):
+            f0, c0 = stops[i]
+            f1, c1 = stops[i + 1]
+            if f0 <= frac <= f1:
+                t = (frac - f0) / (f1 - f0) if f1 > f0 else 0.0
+                return QColor(
+                    int(round(c0.red()   + t * (c1.red()   - c0.red()))),
+                    int(round(c0.green() + t * (c1.green() - c0.green()))),
+                    int(round(c0.blue()  + t * (c1.blue()  - c0.blue()))),
+                )
+        return stops[-1][1]
+
+    # ── Decay tick + mode click ──────────────────────────────────────
+    def _tick_decay(self):
+        if self._peak_dbfs > self._dbfs:
+            self._peak_dbfs -= self._peak_decay_dB_per_s * 0.05
+            if self._peak_dbfs < self._dbfs:
+                self._peak_dbfs = self._dbfs
+        self.update()
+
+    def mousePressEvent(self, event):
+        pos = event.position()
+        for mode, rect in self._mode_hitboxes.items():
+            if rect.contains(pos):
+                self.set_mode(mode)
+                event.accept()
+                return
+        super().mousePressEvent(event)
 
 
 # ── Multi-bar LED meter (S / PWR / SWR / MIC / AGC stacked) ───────────
