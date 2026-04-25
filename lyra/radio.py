@@ -139,6 +139,7 @@ class Radio(QObject):
     # widget instances exist.
     waterfall_palette_changed  = Signal(str)           # palette name
     spectrum_db_range_changed  = Signal(float, float)  # (min_db, max_db)
+    spectrum_cal_db_changed    = Signal(float)         # operator cal trim, dB
     spectrum_auto_scale_changed = Signal(bool)          # auto-fit on/off
     waterfall_db_range_changed = Signal(float, float)  # (min_db, max_db)
     # RX filter passband (for panadapter overlay) — (low_offset_hz, high_offset_hz)
@@ -159,6 +160,15 @@ class Radio(QObject):
     # Mute + Auto-LNA (levels-side automation)
     muted_changed      = Signal(bool)        # True = muted
     lna_auto_changed   = Signal(bool)        # True = auto-adjusting
+    # Emitted whenever Auto-LNA actually changes the gain (not on
+    # every tick — only on real adjustments). Payload dict:
+    #   delta_db    : signed dB step applied (negative for back-off)
+    #   peak_dbfs   : ADC peak that triggered the adjustment
+    #   new_gain_db : the LNA value AFTER the adjustment
+    #   when_local  : "HH:MM:SS" string for the UI badge
+    # The UI uses this to flash the slider + show a "last event"
+    # badge so operators can SEE Auto working in real time.
+    lna_auto_event     = Signal(dict)
     lna_peak_dbfs      = Signal(float)       # live ADC peak, for UI readout
     lna_rms_dbfs       = Signal(float)       # live ADC RMS, companion to peak
 
@@ -455,11 +465,15 @@ class Radio(QObject):
         # as USB or LSB rather than the generic "SSB".
         self._spot_mode_filter_csv = ""
 
-        # Visuals — defaults match the pre-settings hardcoded values so
-        # upgraders see no visual change until they open Visuals tab.
+        # Visuals — dB-range defaults are set for the post-cal-fix
+        # spectrum (true dBFS, where a unit-amplitude tone reads
+        # 0 dBFS and the noise floor on a quiet band lands around
+        # -130 dBFS). Old-scale saved settings (min > -90) get
+        # auto-shifted by the SPECTRUM_OLD_SCALE_DB_SHIFT migration
+        # in app.py:_load_settings so existing users see continuity.
         self._waterfall_palette = "Classic"
-        self._spectrum_min_db   = -110.0
-        self._spectrum_max_db   = -20.0
+        self._spectrum_min_db   = -140.0
+        self._spectrum_max_db   = -50.0
         # Auto-fit the dB scale to current band conditions when on.
         # Engineering: every AUTO_SCALE_INTERVAL_TICKS, recompute
         # (noise_floor - 10) .. (peak + 5) and call set_spectrum_db_range.
@@ -472,8 +486,8 @@ class Radio(QObject):
         # end of the dB range so transient spikes don't overshoot the
         # display the way a single-frame max does.
         self._auto_scale_peak_history: list[float] = []
-        self._waterfall_min_db  = -110.0
-        self._waterfall_max_db  = -30.0
+        self._waterfall_min_db  = -140.0
+        self._waterfall_max_db  = -60.0
         # Zoom (panadapter scaling). 1.0 = full sample-rate span;
         # higher values crop to centered bins and report a reduced
         # rate so SpectrumWidget + WaterfallWidget auto-scale their
@@ -548,7 +562,27 @@ class Radio(QObject):
         # ── FFT ring buffer ───────────────────────────────────────────
         self._fft_size = 4096
         self._window = np.hanning(self._fft_size).astype(np.float32)
-        self._win_norm = float(np.sum(self._window ** 2))
+        # True-dBFS normalization for a windowed FFT. For a windowed
+        # complex sinusoid of unit amplitude the FFT bin magnitude is
+        # `N * mean(window)` (the window's coherent gain). Squaring
+        # that gives the power-spectrum normalization that makes a
+        # full-scale tone read exactly 0 dBFS:
+        #
+        #   spec_dBFS = 10 · log10( |X[k]|² / (N · mean(w))² )
+        #
+        # Old normalization (sum of squared window samples) gave a
+        # PSD-style scale that ran ~34 dB hot relative to dBFS — the
+        # noise floor sat at -100ish when it should have been at
+        # -134ish for true dBFS. This is the "cal offset" cleanup.
+        self._win_coherent_gain = float(np.mean(self._window))   # ≈ 0.5 for Hanning
+        self._win_norm = (self._fft_size * self._win_coherent_gain) ** 2
+        # Operator-adjustable cal trim, in dB. Added to every
+        # spec_db sample so the operator can compensate for per-rig
+        # losses (preselector loss, antenna efficiency, internal
+        # cable loss, cal against a known signal generator, etc.).
+        # Default 0 = pure theoretical dBFS based on the math above.
+        # Settings → Visuals exposes a slider; persisted to QSettings.
+        self._spectrum_cal_db = 0.0
         self._sample_ring: deque = deque(maxlen=self._fft_size * 4)
         self._ring_lock = threading.Lock()
 
@@ -1350,10 +1384,21 @@ class Radio(QObject):
                      min(self.LNA_MAX_DB, self._gain_db + step))
         if new_db == self._gain_db:
             return
+        old_db = self._gain_db
         self.set_gain_db(new_db)
         self.status_message.emit(
             f"Auto-LNA: peak {peak_dbfs:+.1f} dBFS → LNA {new_db:+d} dB",
             2000)
+        # Structured event for the UI so it can flash the slider +
+        # show a "last event" badge (signal-driven, not status-bar
+        # polling — status messages disappear after 2 s).
+        from datetime import datetime as _dt
+        self.lna_auto_event.emit({
+            "delta_db":    int(new_db - old_db),
+            "peak_dbfs":   float(peak_dbfs),
+            "new_gain_db": int(new_db),
+            "when_local":  _dt.now().strftime("%H:%M:%S"),
+        })
         self._lna_peaks = []
         self._lna_rms = []
 
@@ -1795,6 +1840,26 @@ class Radio(QObject):
             return
         self._waterfall_palette = name
         self.waterfall_palette_changed.emit(name)
+
+    # ── Spectrum cal trim ──────────────────────────────────────────
+    # Operator-adjustable per-rig calibration offset (dB) added to
+    # every FFT bin before display. Use to compensate for known
+    # pre-LNA losses (preselector, cable, antenna efficiency) or to
+    # match the panadapter readings to a known reference signal.
+    SPECTRUM_CAL_MIN_DB = -40.0
+    SPECTRUM_CAL_MAX_DB = +40.0
+
+    @property
+    def spectrum_cal_db(self) -> float:
+        return float(self._spectrum_cal_db)
+
+    def set_spectrum_cal_db(self, db: float):
+        v = max(self.SPECTRUM_CAL_MIN_DB,
+                min(self.SPECTRUM_CAL_MAX_DB, float(db)))
+        if abs(v - self._spectrum_cal_db) < 0.01:
+            return
+        self._spectrum_cal_db = v
+        self.spectrum_cal_db_changed.emit(v)
 
     @property
     def spectrum_db_range(self) -> tuple[float, float]:
@@ -2439,7 +2504,11 @@ class Radio(QObject):
         # also makes click-to-tune, notch placement, spot markers,
         # and the RX filter passband overlay all agree visually.
         f = f[::-1]
-        spec_db = 10.0 * np.log10((np.abs(f) ** 2) / self._win_norm + 1e-20)
+        # 10·log10(|X|²/N²·CG²)  —  windowed-FFT dBFS, plus the
+        # operator's per-rig cal trim. Float32 throughout to keep
+        # the ~6 Hz FFT loop cheap.
+        spec_db = (10.0 * np.log10((np.abs(f) ** 2) / self._win_norm + 1e-20)
+                   + self._spectrum_cal_db)
 
         # S-meter uses the full (un-zoomed) spectrum — it must measure
         # the tuned signal regardless of display zoom. Bins are now in

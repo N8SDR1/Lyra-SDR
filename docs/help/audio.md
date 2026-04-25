@@ -66,6 +66,49 @@ signals push the ADC into clipping. Watch the **ADC peak readout**
 on the toolbar (color-coded green = sweet spot, orange = hot, red
 = clipping).
 
+The LNA dB readout to the right of the slider is **color-coded**
+to reflect the AD9866 PGA's linearity:
+
+| Zone | Range | When to use |
+|------|-------|-------------|
+| **GREEN — sweet spot** | −12 .. +20 dB | Normal HF operating, contests, anywhere there's any decent signal level. Lowest IMD, cleanest dynamic range. |
+| **YELLOW — high gain** | +20 .. +28 dB | Quieter bands (10 m, 6 m), weak-signal modes (FT8/WSPR), low-noise antennas. Watch for IMD on bands with strong adjacent signals. |
+| **ORANGE — IMD risk** | +28 .. +31 dB | Only when you really need every dB — e.g. EME, weak meteor scatter, very quiet portable setups. The PGA approaches its compression knee here; nearby strong signals can fold into your passband as ghost products. |
+
+Above +31 dB the AD9866 stops giving usable additional gain and
+just compresses the ADC, so Lyra hard-caps the slider at +31. You
+**can't** accidentally drive the chip into the unusable region.
+
+#### Auto-LNA — overload protection (back-off only)
+
+The **Auto** button next to the LNA slider enables a back-off-only
+control loop:
+
+| ADC peak | Auto action |
+|---|---|
+| > −3 dBFS  | drop 3 dB (urgent — clipping imminent) |
+| > −10 dBFS | drop 2 dB (hot — leave headroom) |
+| otherwise  | leave the operator's setting alone |
+
+**It does NOT raise gain** — that's deliberate. You set the baseline
+LNA for the band you're on; Auto only kicks in when a transient
+strong signal threatens to overload the ADC. When it fires, three
+visual cues appear so you can see Auto working:
+
+1. The **slider moves** to the new (lower) gain value.
+2. A small amber **"↓2 dB  HH:MM:SS"** badge appears next to the
+   Auto button showing the most recent event. Hover for a tooltip
+   with the ADC peak that triggered the adjustment.
+3. The **slider track briefly flashes amber** (~800 ms) so the eye
+   catches the change even if you're not looking right at the
+   slider.
+
+If you've enabled Auto and never seen it fire, that means your
+antenna isn't delivering signals strong enough to need the
+protection — which is the common case under normal HF conditions.
+A strong AM broadcast bleed, a nearby contest station, or a quiet
+band suddenly opening with a big DX signal are typical triggers.
+
 ### AF Gain — makeup gain (post-AGC, pre-Volume)
 
 Slider on the DSP + Audio panel, range 0 to +50 dB. Linear (1 tick =

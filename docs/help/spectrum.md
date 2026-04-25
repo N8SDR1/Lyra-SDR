@@ -155,8 +155,8 @@ you're not actively working notches.
 Four sliders (spectrum min/max + waterfall min/max, each −150 … 0
 dBFS) live in **Settings → Visuals → Signal range**. Defaults:
 
-- **Spectrum:** −110 to −20 dBFS
-- **Waterfall:** −110 to −30 dBFS
+- **Spectrum:** −140 to −50 dBFS
+- **Waterfall:** −140 to −60 dBFS
 
 Moving a slider updates the display in real time. Span is clamped to
 ≥ 3 dB so you can't accidentally collapse the trace to a flat line
@@ -170,6 +170,56 @@ If signals are slamming the top of the scale, either raise `max` a
 few dB to see detail above the peaks, or reduce RF gain via the LNA
 slider on the [DSP & AUDIO panel](panel:dsp). **Or** turn on Auto
 range scaling (next section) and let Lyra fit the scale for you.
+
+## Spectrum calibration — what `0 dBFS` means
+
+Lyra's FFT is normalized for **true dBFS**: a unit-amplitude
+full-scale sinusoid landing on the matching FFT bin reads exactly
+**0 dBFS** at the bin peak. The noise floor on a quiet HF band
+typically lands somewhere between −130 and −120 dBFS depending on
+LNA setting, antenna, and band conditions.
+
+**If you upgraded from an earlier Lyra build**, your spectrum used
+to read about **34 dB hotter** because the old normalization summed
+window-squared (a PSD-style normalization that's off by the
+window's coherent-gain² factor). On first launch after the upgrade
+the noise floor will appear lower on the Y-axis than you remember
+— that's correct now, not a bug. Lyra automatically migrates your
+saved dB-range slider positions on first launch (any saved range
+whose top edge is above −45 dBFS gets shifted down 34 dB) so the
+visual scale stays continuous.
+
+If your saved range *doesn't* migrate cleanly (rare), the **Reset
+to defaults** button restores the factory range.
+
+### Spectrum cal trim — Settings → Visuals → Spectrum calibration
+
+A single slider (range −40…+40 dB, default 0) adds an offset to
+every spectrum bin before display. Use it to compensate for known
+losses in the path between antenna and ADC that the FFT math can't
+know about:
+
+- **Preselector / front-end filter insertion loss** (typical ~2–4 dB)
+- **Antenna efficiency** vs. an isotropic reference
+- **Cable / connector loss** (significant on UHF, less so on HF)
+- **Cal against a known-amplitude signal generator** through the
+  full chain
+
+Bumping the cal up by, say, +6 dB shifts every bin in the panadapter
+up by 6 dB — useful when you've measured your path loss with a
+signal generator and want the on-air readings to reflect dBFS at
+the antenna instead of dBFS at the ADC.
+
+**Tips:**
+- **Double-click** the cal slider to snap it back to 0.
+- Cal interacts with the S-meter — the dBm-equivalent calibration
+  was tuned against `cal = 0`. If you set a non-zero cal trim, the
+  S-meter reading shifts by the same amount (signals get reported
+  as proportionally stronger / weaker in dBm).
+- If you don't have measured path loss for your station, leave cal
+  at 0 — that's pure theoretical dBFS at the ADC, and it's still
+  internally consistent for relative measurements (a 10 dB
+  improvement in noise floor is still 10 dB regardless of cal).
 
 ## Auto range scaling
 

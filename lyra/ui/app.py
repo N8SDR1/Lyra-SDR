@@ -1252,15 +1252,56 @@ class MainWindow(QMainWindow):
         # already explains).
         if s.contains("visuals/waterfall_palette"):
             r.set_waterfall_palette(str(s.value("visuals/waterfall_palette")))
+        # ── Cal-fix migration ──────────────────────────────────────
+        # The 0.0.2 release fixed the FFT normalization to be true
+        # dBFS — every reading drops by ~34 dB compared to earlier
+        # builds. Without migrating saved spectrum/waterfall ranges,
+        # operators upgrading would see a flat-line trace at the top
+        # of the display ("nothing's showing!") because their saved
+        # range still spans -110..-20 (now far above where any real
+        # signal lives).
+        #
+        # Discriminator: in true-dBFS, no real RX signal lives above
+        # ~-40 dBFS (a clipping ADC peak is around -3, but persistent
+        # signals are much lower). A saved max_db > -45 is therefore
+        # the unmistakable signature of the pre-cal-fix scale where
+        # operators kept the top of the range near -20 dBFS to show
+        # strong signals.
+        SPECTRUM_OLD_SCALE_DB_SHIFT = -34.0
+        SPECTRUM_OLD_SCALE_HI_THRESHOLD = -45.0
+
+        def _migrate_range(min_key: str, max_key: str):
+            """Auto-shift saved range if it looks like pre-cal-fix.
+            Idempotent — once migrated, the new max_db is well below
+            the threshold so a second pass leaves it untouched."""
+            if not (s.contains(min_key) and s.contains(max_key)):
+                return None
+            try:
+                lo = float(s.value(min_key))
+                hi = float(s.value(max_key))
+            except (TypeError, ValueError):
+                return None
+            if hi > SPECTRUM_OLD_SCALE_HI_THRESHOLD:
+                # Pre-cal-fix saved value — shift both edges down
+                # so the visual scale stays aligned with the signal.
+                lo += SPECTRUM_OLD_SCALE_DB_SHIFT
+                hi += SPECTRUM_OLD_SCALE_DB_SHIFT
+                # Persist immediately so we don't re-migrate next launch.
+                s.setValue(min_key, lo)
+                s.setValue(max_key, hi)
+            return (lo, hi)
+
         try:
-            if s.contains("visuals/spectrum_min_db") and s.contains("visuals/spectrum_max_db"):
-                r.set_spectrum_db_range(
-                    float(s.value("visuals/spectrum_min_db")),
-                    float(s.value("visuals/spectrum_max_db")))
-            if s.contains("visuals/waterfall_min_db") and s.contains("visuals/waterfall_max_db"):
-                r.set_waterfall_db_range(
-                    float(s.value("visuals/waterfall_min_db")),
-                    float(s.value("visuals/waterfall_max_db")))
+            spec_range = _migrate_range(
+                "visuals/spectrum_min_db", "visuals/spectrum_max_db")
+            if spec_range is not None:
+                r.set_spectrum_db_range(*spec_range)
+            wf_range = _migrate_range(
+                "visuals/waterfall_min_db", "visuals/waterfall_max_db")
+            if wf_range is not None:
+                r.set_waterfall_db_range(*wf_range)
+            if s.contains("visuals/spectrum_cal_db"):
+                r.set_spectrum_cal_db(float(s.value("visuals/spectrum_cal_db")))
             if s.contains("visuals/zoom"):
                 r.set_zoom(float(s.value("visuals/zoom")))
             if s.contains("visuals/spectrum_fps"):
@@ -1399,6 +1440,7 @@ class MainWindow(QMainWindow):
         s.setValue("visuals/waterfall_min_db", wf_lo)
         s.setValue("visuals/waterfall_max_db", wf_hi)
         s.setValue("visuals/zoom",              r.zoom)
+        s.setValue("visuals/spectrum_cal_db",   r.spectrum_cal_db)
         s.setValue("visuals/spectrum_fps",      r.spectrum_fps)
         s.setValue("visuals/waterfall_divider",   r.waterfall_divider)
         s.setValue("visuals/waterfall_multiplier", r.waterfall_multiplier)

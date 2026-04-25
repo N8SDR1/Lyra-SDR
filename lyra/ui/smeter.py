@@ -72,7 +72,13 @@ class AnalogMeter(QWidget):
         self._value = db_min
         self._peak = db_min
         self._peak_decay_dB_per_s = 5.0
-        self._dbfs_to_dbm_offset = -53.0  # -20 dBFS ≈ S9
+        # dBFS → dBm conversion. With Lyra's true-dBFS spectrum
+        # math (FFT normalized for coherent gain), a typical S9
+        # signal reads near -54 dBFS at the bin peak, and S9 is
+        # defined as -73 dBm — so the offset is -73 − (-54) = -19.
+        # If you ever switch back to the old PSD-style "hot" math,
+        # this offset needs to drop by ~34 to match.
+        self._dbfs_to_dbm_offset = -19.0
 
         # Readout state (driven by the owning panel via setters)
         self._freq_hz = 0

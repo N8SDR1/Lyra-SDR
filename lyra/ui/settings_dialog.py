@@ -1390,6 +1390,63 @@ class VisualsSettingsTab(QWidget):
 
         v.addWidget(grp_db)
 
+        # ── Spectrum cal trim ─────────────────────────────────────
+        # Per-rig calibration offset added to every FFT bin before
+        # display. Lyra's FFT math is normalized for true dBFS by
+        # default — a unit-amplitude full-scale tone reads exactly
+        # 0 dBFS — but the path from the antenna to the ADC has
+        # losses that vary by station: preselector insertion loss,
+        # antenna efficiency, internal cable loss, LNA cal drift.
+        # The cal slider lets the operator dial in a per-rig offset
+        # so on-air signal levels match a known reference.
+        grp_cal = QGroupBox("Spectrum calibration")
+        gc = QGridLayout(grp_cal)
+        gc.setColumnStretch(1, 1)
+
+        cal_help = QLabel(
+            "Per-rig dB offset added to every spectrum bin before "
+            "display. Use to compensate for known pre-LNA losses or "
+            "to match a reference signal generator. Default = 0 dB "
+            "(true dBFS — a full-scale tone reads as 0).")
+        cal_help.setWordWrap(True)
+        cal_help.setStyleSheet("color: #8a9aac; font-size: 10px;")
+        gc.addWidget(cal_help, 0, 0, 1, 3)
+
+        gc.addWidget(QLabel("Cal"), 1, 0)
+        self._cal_slider = QSlider(Qt.Horizontal)
+        self._cal_slider.setRange(
+            int(radio.SPECTRUM_CAL_MIN_DB),
+            int(radio.SPECTRUM_CAL_MAX_DB))
+        self._cal_slider.setValue(int(round(radio.spectrum_cal_db)))
+        self._cal_slider.setTickPosition(QSlider.TicksBelow)
+        self._cal_slider.setTickInterval(10)
+        self._cal_slider.setFixedWidth(280)
+        self._cal_slider.setToolTip(
+            "Spectrum cal — per-rig dB offset.\n\n"
+            "Lyra's FFT is normalized so a unit-amplitude tone reads\n"
+            "as 0 dBFS by default. The path from antenna to ADC adds\n"
+            "losses (preselector, cable, antenna efficiency, LNA cal\n"
+            "drift) that can shift readings by tens of dB depending\n"
+            "on your station. Dial in an offset here so on-air signal\n"
+            "levels match a known reference (e.g. signal generator at\n"
+            "a known dBm + path loss).\n\n"
+            "Range: -40 to +40 dB. Default 0 = pure theoretical dBFS.\n"
+            "Double-click to snap back to zero.")
+        self._cal_slider.valueChanged.connect(self._on_cal_changed)
+        # Double-click on the slider track resets to zero
+        self._cal_slider.mouseDoubleClickEvent = (
+            lambda _e: self._cal_slider.setValue(0))
+        gc.addWidget(self._cal_slider, 1, 1)
+        self._cal_lbl = QLabel(f"{radio.spectrum_cal_db:+.1f} dB")
+        self._cal_lbl.setFixedWidth(80)
+        self._cal_lbl.setStyleSheet(
+            "color: #cdd9e5; font-family: Consolas, monospace;")
+        gc.addWidget(self._cal_lbl, 1, 2, Qt.AlignLeft)
+        # Two-way sync — Radio can also change cal (e.g. QSettings load)
+        radio.spectrum_cal_db_changed.connect(self._on_radio_cal_changed)
+
+        v.addWidget(grp_cal)
+
         # ── Update rates + panadapter zoom ────────────────────────
         # Zoom crops to centered FFT bins; spectrum FPS drives the
         # refresh timer; waterfall divider decouples the scrolling
@@ -1517,6 +1574,21 @@ class VisualsSettingsTab(QWidget):
         self._wf_max_lbl.setText(f"{wf_hi:+d} dBFS")
         self.radio.set_spectrum_db_range(sp_lo, sp_hi)
         self.radio.set_waterfall_db_range(wf_lo, wf_hi)
+
+    def _on_cal_changed(self, val: int):
+        """Cal slider drag — push to Radio + repaint label."""
+        self._cal_lbl.setText(f"{val:+.1f} dB")
+        self.radio.set_spectrum_cal_db(float(val))
+
+    def _on_radio_cal_changed(self, db: float):
+        """Radio.spectrum_cal_db_changed — keep slider + label in sync
+        without re-firing our own valueChanged into Radio."""
+        target = int(round(db))
+        if self._cal_slider.value() != target:
+            self._cal_slider.blockSignals(True)
+            self._cal_slider.setValue(target)
+            self._cal_slider.blockSignals(False)
+        self._cal_lbl.setText(f"{db:+.1f} dB")
 
     def _sync_spec_sliders(self, lo: float, hi: float):
         """Spectrum dB range changed at the Radio side (auto-scale,

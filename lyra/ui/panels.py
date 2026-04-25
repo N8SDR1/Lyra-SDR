@@ -722,26 +722,79 @@ class DspPanel(GlassPanel):
         self.lna_slider.setRange(Radio.LNA_MIN_DB, Radio.LNA_MAX_DB)
         self.lna_slider.setValue(radio.gain_db)
         self.lna_slider.setFixedWidth(180)
+        # Tick marks at the zone boundaries so the operator can see
+        # at a glance where "sweet spot" ends and "high-gain / IMD
+        # risk" begins. Combined with the per-zone color on the LNA
+        # value label below, the slider becomes self-documenting.
+        self.lna_slider.setTickPosition(QSlider.TicksBelow)
+        self.lna_slider.setTickInterval(10)
+        self.lna_slider.setToolTip(
+            "LNA — RF input gain on the HL2's AD9866 PGA.\n\n"
+            "Linearity zones (the LNA dB readout is colored):\n"
+            "  GREEN   −12 .. +20 dB   sweet spot — clean, low IMD\n"
+            "  YELLOW  +20 .. +28 dB   high gain — fine on quiet bands\n"
+            "  ORANGE  +28 .. +31 dB   IMD risk — only for very weak\n"
+            "                          signals on otherwise quiet bands\n"
+            "                          where you really need every dB\n\n"
+            "Above +31 dB the AD9866 PGA stops giving real gain and\n"
+            "drives the ADC into compression — Lyra hard-caps the\n"
+            "slider at +31 to prevent that.")
         self.lna_slider.valueChanged.connect(self.radio.set_gain_db)
         levels.addWidget(self.lna_slider)
         self.lna_label = QLabel(f"{radio.gain_db:+d} dB")
         self.lna_label.setFixedWidth(60)
+        # Initial color zone (green/yellow/orange depending on the
+        # restored gain). Refreshed in _on_gain_changed on every
+        # gain change — manual or Auto-LNA.
+        self._refresh_lna_label_color(radio.gain_db)
         levels.addWidget(self.lna_label)
 
-        # Auto-LNA toggle. Lit = control loop is actively nudging LNA
-        # gain every 1.5 s to keep the ADC peak near −15 dBFS (±3 dB
-        # deadband). Operator can still drag the slider to override —
-        # Auto will walk back toward target next tick.
+        # Auto-LNA toggle. Behavior is BACK-OFF-ONLY: when an
+        # incoming signal pushes the ADC peak above ~-10 dBFS, the
+        # loop drops gain by 2-3 dB to leave headroom. It does NOT
+        # raise gain on its own — the operator sets a baseline and
+        # Auto only protects against transient overload.
         self.auto_lna_btn = QPushButton("Auto")
         self.auto_lna_btn.setObjectName("dsp_btn")    # orange when on
         self.auto_lna_btn.setCheckable(True)
         self.auto_lna_btn.setFixedWidth(50)
         self.auto_lna_btn.setChecked(radio.lna_auto)
         self.auto_lna_btn.setToolTip(
-            "Auto-LNA: continuously adjusts LNA gain to keep ADC peak "
-            "near −15 dBFS. Override anytime by dragging the slider.")
+            "Auto-LNA — overload protection (back-off only).\n\n"
+            "When ON, Lyra drops LNA gain when the ADC peak exceeds\n"
+            "  > -3 dBFS  → drop 3 dB (urgent, near clipping)\n"
+            "  > -10 dBFS → drop 2 dB (hot, leave margin)\n\n"
+            "It does NOT raise gain — that's deliberate. Set your\n"
+            "baseline LNA manually for the band you're on; Auto only\n"
+            "kicks in when a strong signal threatens to overload the\n"
+            "ADC. If you've never seen Auto fire, your antenna isn't\n"
+            "delivering signals strong enough to need it (which is\n"
+            "the common-case in normal HF conditions).")
         self.auto_lna_btn.toggled.connect(self.radio.set_lna_auto)
         levels.addWidget(self.auto_lna_btn)
+
+        # "Last Auto-LNA event" badge — shows the most recent
+        # back-off Auto applied (e.g. "↓2 dB 14:23:01") so the
+        # operator can see Auto IS working, even if the event is
+        # transient. Empty until Auto first fires; cleared when Auto
+        # is toggled off.
+        self.lna_auto_event_lbl = QLabel("")
+        self.lna_auto_event_lbl.setFixedWidth(120)
+        self.lna_auto_event_lbl.setStyleSheet(
+            "color: #ffab47; font-family: Consolas, monospace; "
+            "font-size: 10px;")
+        self.lna_auto_event_lbl.setToolTip(
+            "Most recent Auto-LNA back-off event. Updates whenever "
+            "Auto drops gain; persists between events so you can see "
+            "what Auto last did.")
+        levels.addWidget(self.lna_auto_event_lbl)
+        # Subscribe to Radio's new lna_auto_event signal (added below).
+        radio.lna_auto_event.connect(self._on_lna_auto_event)
+        # Brief slider flash after an Auto event — handled by a
+        # one-shot QTimer that resets the slider's stylesheet.
+        self._lna_flash_timer = QTimer(self)
+        self._lna_flash_timer.setSingleShot(True)
+        self._lna_flash_timer.timeout.connect(self._clear_lna_flash)
 
         levels.addSpacing(20)
 
@@ -1124,12 +1177,67 @@ class DspPanel(GlassPanel):
         self.vol_label.setText(f"{slider_val}%")
         self.radio.set_volume(self._slider_to_volume(slider_val))
 
+    # ── LNA linearity zones ─────────────────────────────────────
+    # AD9866 PGA linearity behaviour (HL2 community consensus):
+    #   -12 .. +20 dB   sweet spot — clean conversion, low IMD
+    #   +20 .. +28 dB   high gain  — fine on quiet bands, watch IMD
+    #   +28 .. +31 dB   IMD risk   — only if you really need every dB
+    # Above +31 dB the PGA stops contributing real gain and starts
+    # compressing the ADC; Lyra hard-caps the slider at +31 in
+    # Radio.set_gain_db so the operator cannot enter that region.
+    _LNA_ZONE_GREEN_MAX  = 20    # green if db <= this
+    _LNA_ZONE_YELLOW_MAX = 28    # yellow if db <= this; orange above
+    _LNA_COLOR_GREEN  = "#39ff14"
+    _LNA_COLOR_YELLOW = "#ffd54f"
+    _LNA_COLOR_ORANGE = "#ff8c3a"
+
+    @classmethod
+    def _lna_zone_color(cls, db: int) -> str:
+        if db <= cls._LNA_ZONE_GREEN_MAX:
+            return cls._LNA_COLOR_GREEN
+        if db <= cls._LNA_ZONE_YELLOW_MAX:
+            return cls._LNA_COLOR_YELLOW
+        return cls._LNA_COLOR_ORANGE
+
+    def _refresh_lna_label_color(self, db: int):
+        color = self._lna_zone_color(db)
+        self.lna_label.setStyleSheet(
+            f"color: {color}; font-family: Consolas, monospace; "
+            "font-weight: 700;")
+
     def _on_gain_changed(self, db: int):
         self.lna_label.setText(f"{db:+d} dB")
+        self._refresh_lna_label_color(db)
         if self.lna_slider.value() != db:
             self.lna_slider.blockSignals(True)
             self.lna_slider.setValue(db)
             self.lna_slider.blockSignals(False)
+
+    def _on_lna_auto_event(self, payload: dict):
+        """Radio.lna_auto_event — Auto-LNA just adjusted gain.
+        Show a 'last event' badge and briefly flash the slider so
+        the operator can SEE Auto working in real time (the slider
+        movement alone can be missed if you're not looking at it)."""
+        delta = payload.get("delta_db", 0)
+        when = payload.get("when_local", "")
+        peak = payload.get("peak_dbfs", 0.0)
+        arrow = "↓" if delta < 0 else "↑"
+        self.lna_auto_event_lbl.setText(
+            f"{arrow}{abs(delta)} dB  {when}")
+        self.lna_auto_event_lbl.setToolTip(
+            f"Auto-LNA fired at {when}\n"
+            f"ADC peak was {peak:+.1f} dBFS\n"
+            f"Gain change: {arrow}{abs(delta)} dB")
+        # Brief amber flash on the slider so the eye catches it.
+        self.lna_slider.setStyleSheet(
+            "QSlider::groove:horizontal { "
+            "background: #ffab47; border-radius: 3px; }"
+        )
+        self._lna_flash_timer.start(800)
+
+    def _clear_lna_flash(self):
+        """Reset the LNA slider stylesheet after the post-Auto flash."""
+        self.lna_slider.setStyleSheet("")
 
     def _on_volume_changed(self, v: float):
         """Radio volume changed elsewhere — convert multiplier back
@@ -1207,11 +1315,16 @@ class DspPanel(GlassPanel):
             self.mute_btn.blockSignals(False)
 
     def _on_lna_auto_changed(self, on: bool):
-        """Radio Auto-LNA state changed — keep the button in sync."""
+        """Radio Auto-LNA state changed — keep the button in sync.
+        Clear the 'last event' badge when Auto turns off (otherwise
+        the stale event text sits there indefinitely)."""
         if self.auto_lna_btn.isChecked() != on:
             self.auto_lna_btn.blockSignals(True)
             self.auto_lna_btn.setChecked(on)
             self.auto_lna_btn.blockSignals(False)
+        if not on:
+            self.lna_auto_event_lbl.setText("")
+            self.lna_auto_event_lbl.setToolTip("")
 
     # ── NR (Noise Reduction) ────────────────────────────────────
     _NR_PROFILE_LABELS = {
