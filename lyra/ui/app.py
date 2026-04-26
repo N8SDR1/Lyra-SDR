@@ -411,6 +411,19 @@ class MainWindow(QMainWindow):
         telem_probe_act.triggered.connect(self._open_telem_probe)
         help_menu.addAction(telem_probe_act)
 
+        # Network Discovery Probe — diagnostic for "auto-discover
+        # didn't find my HL2." Lists local IP interfaces, runs
+        # broadcast / unicast discovery with full diagnostic logging,
+        # offers copy-to-clipboard so testers can paste the log into
+        # a bug report without hand-typing it.
+        net_probe_act = QAction("&Network Discovery Probe…", self)
+        net_probe_act.setToolTip(
+            "Diagnose 'HL2 not found' issues. Shows your local "
+            "network interfaces and runs discovery with full "
+            "diagnostic logging — copy-to-clipboard for support.")
+        net_probe_act.triggered.connect(self._open_discover_probe)
+        help_menu.addAction(net_probe_act)
+
         # Test entry point for the OpenGL upsell dialog. Mostly useful
         # to operators who already enabled OpenGL but want to see what
         # the prompt looks like (otherwise the suppression rule hides
@@ -1395,6 +1408,12 @@ class MainWindow(QMainWindow):
         thread, compares versions, and shows the result."""
         from lyra.ui.update_check import CheckForUpdatesDialog
         CheckForUpdatesDialog(parent=self).exec()
+
+    def _open_discover_probe(self):
+        """Help → Network Discovery Probe… — opens the diagnostic
+        dialog for 'auto-discover didn't find my HL2' issues."""
+        from lyra.ui.discover_probe import NetworkDiscoveryProbeDialog
+        NetworkDiscoveryProbeDialog(parent=self).exec()
 
     def _open_telem_probe(self):
         """Help → HL2 Telemetry Probe. Opens the diagnostic dialog

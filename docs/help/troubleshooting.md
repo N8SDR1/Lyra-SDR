@@ -1,9 +1,40 @@
 # Troubleshooting
 
+## Auto-discover doesn't find my HL2
+
+**Open Help → Network Discovery Probe…** That dialog:
+
+- Lists every IPv4 network interface on your PC (so you can see
+  what subnet your Lyra machine is on)
+- Runs discovery with full diagnostic logging — shows which
+  interfaces it broadcast on, whether any replies came back, and
+  parses any HL2 responses
+- Lets you try a **unicast probe** to a specific IP (bypasses
+  broadcast entirely — useful when you know the HL2's IP from
+  the rig's display or from your router)
+- Has a **Copy log to clipboard** button so you can paste the
+  diagnostic output into a bug report
+
+Common causes (and what the probe shows):
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| No replies on broadcast, but unicast to known IP works | PC and HL2 on different subnets, OR Wi-Fi-vs-Ethernet routing mismatch | Move both to same subnet, or tell Lyra the IP directly via Settings → Radio |
+| No replies even on unicast | Firewall blocking inbound UDP 1024, or HL2 not powered, or HL2 on a separate VLAN | Allow `python.exe` / `Lyra.exe` in Windows Defender Firewall; check HL2 power + cable |
+| Reply with `BUSY` flag | Another SDR client (Thetis, SparkSDR) already connected | Close the other client first |
+| Reply but wrong board name | Multiple HL2-family devices on the network | Use unicast to target the specific one you want |
+
+Lyra now broadcasts on **every** local IP interface in parallel
+(fixed in v0.0.4 — earlier builds only used the OS's preferred
+interface, which broke multi-NIC laptops with Wi-Fi + Ethernet).
+If you previously had to manually enter an IP, try ▶ Start now —
+auto-discover should work.
+
 ## No signal / blank spectrum after Start
 
 1. **Status dot green?** — if still gray, the HL2 isn't replying.
-   Check the IP in Settings → Radio; try **Discover**.
+   Check the IP in Settings → Radio; try **Discover** or open
+   **Help → Network Discovery Probe** for diagnostics.
 2. **Firewall** — Windows Defender may be blocking inbound UDP 1024
    for `python.exe`. Allow it.
 3. **Duplex bit** — Lyra sets C4 bit 2 (full-duplex) automatically.

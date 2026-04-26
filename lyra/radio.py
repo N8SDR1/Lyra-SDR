@@ -2300,10 +2300,22 @@ class Radio(QObject):
         self.stream_state_changed.emit(False)
 
     def discover(self):
+        """Auto-discover an HL2 on any local network interface.
+        On failure, suggest the diagnostic probe so the operator can
+        see EXACTLY which interfaces were tried + what came back."""
         from lyra.protocol.discovery import discover
-        radios = discover(timeout_s=1.0, attempts=2)
+        log: list[str] = []
+        radios = discover(timeout_s=1.0, attempts=2, debug_log=log)
+        # Always print the discovery log to console so tester reports
+        # can include the lines without needing to re-run via the
+        # probe dialog.
+        for line in log:
+            print(f"[discover] {line}")
         if not radios:
-            self.status_message.emit("No radios found.", 3000)
+            self.status_message.emit(
+                "No radios found. Try Help → Network Discovery Probe "
+                "for details, or enter the IP manually in Settings → Radio.",
+                8000)
             return
         r = radios[0]
         self.set_ip(r.ip)

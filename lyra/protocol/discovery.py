@@ -98,46 +98,156 @@ def _parse_reply(data: bytes, sender_ip: str) -> Optional[RadioInfo]:
     return info
 
 
+def list_local_ipv4_addresses() -> List[str]:
+    """Return every IPv4 address bound to a local network interface
+    on this machine, EXCLUDING loopback (127.x.x.x) and link-local
+    (169.254.x.x) ranges. Used by `discover()` to walk every NIC
+    when a target_ip isn't specified.
+
+    Without this, multi-homed hosts (laptop with Wi-Fi + Ethernet,
+    desktop with two NICs) silently lose discovery because
+    `socket.bind('0.0.0.0')` lets the OS pick exactly one
+    interface for the broadcast — usually the highest-priority
+    route, which may not be the one the HL2 is wired to.
+    """
+    addrs: list[str] = []
+    try:
+        # Best-effort: ask the OS for all addresses associated with
+        # this hostname. Works on Windows / Linux / macOS.
+        infos = socket.getaddrinfo(
+            socket.gethostname(), None, socket.AF_INET)
+        for info in infos:
+            ip = info[4][0]
+            if ip.startswith("127.") or ip.startswith("169.254."):
+                continue
+            if ip not in addrs:
+                addrs.append(ip)
+    except socket.gaierror:
+        pass
+    # Belt-and-suspenders: on some Windows configurations
+    # gethostname() returns only the primary IP. Try the
+    # connect-to-public-IP trick to flush out other adapters.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(0.1)
+            # Doesn't actually send a packet — just consults the
+            # routing table to find the source IP it WOULD use to
+            # reach 8.8.8.8 (Google DNS).
+            s.connect(("8.8.8.8", 1))
+            primary = s.getsockname()[0]
+            if primary not in addrs:
+                addrs.insert(0, primary)
+    except OSError:
+        pass
+    return addrs
+
+
 def discover(
     timeout_s: float = 1.5,
     attempts: int = 2,
     local_bind: str = "0.0.0.0",
     target_ip: Optional[str] = None,
+    debug_log: Optional[list] = None,
 ) -> List[RadioInfo]:
     """Broadcast a Protocol 1 discovery and collect replies.
 
     Args:
         timeout_s: total wall time to wait for replies per attempt.
         attempts: how many times to resend the discovery packet.
-        local_bind: local IP to bind the socket to (0.0.0.0 = all NICs).
+        local_bind: local IP to bind the socket to. The default
+            behavior changed:
+            - "0.0.0.0" (default) → broadcast on EVERY local
+              interface in turn (fixes the multi-NIC blind spot)
+            - any specific IP → broadcast only from that interface
         target_ip: if set, unicast to this IP instead of broadcasting.
+        debug_log: optional list to append diagnostic strings into.
+            Used by the Network Discovery Probe dialog to show the
+            operator exactly which interfaces were tried, what
+            packets went out, what came back, etc.
     """
     found: dict[str, RadioInfo] = {}
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((local_bind, 0))
-    sock.settimeout(0.1)
+    def _log(msg: str):
+        if debug_log is not None:
+            debug_log.append(msg)
+
+    # Decide which interfaces to broadcast through.
+    # Unicast (target_ip set): single socket bound to 0.0.0.0,
+    # let the OS route normally to the target.
+    # Multi-NIC broadcast: enumerate all local IPv4 addrs, bind a
+    # socket to each one, broadcast through each. Catches HL2s
+    # that are on any interface — Wi-Fi, Ethernet, USB-Ethernet,
+    # whatever.
+    # Specific bind IP: just use that one (operator override).
+    if target_ip:
+        bind_ips = ["0.0.0.0"]
+        _log(f"Mode: unicast to {target_ip}")
+    elif local_bind == "0.0.0.0":
+        bind_ips = list_local_ipv4_addresses()
+        if not bind_ips:
+            bind_ips = ["0.0.0.0"]   # fallback if enumeration failed
+        _log(f"Mode: broadcast on {len(bind_ips)} local interface(s):"
+             f" {', '.join(bind_ips)}")
+    else:
+        bind_ips = [local_bind]
+        _log(f"Mode: broadcast from operator-specified bind IP {local_bind}")
 
     packet = _build_discovery_packet_p1()
     destination = target_ip if target_ip else "255.255.255.255"
 
+    sockets: list[socket.socket] = []
     try:
-        for _ in range(attempts):
-            sock.sendto(packet, (destination, DISCOVERY_PORT))
+        # Open one socket per bind IP. Set broadcast + reuse so
+        # multiple sockets on the same port don't collide.
+        for bind_ip in bind_ips:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((bind_ip, 0))
+                s.settimeout(0.1)
+                sockets.append(s)
+                _log(f"  socket bound to {bind_ip}:{s.getsockname()[1]}")
+            except OSError as e:
+                _log(f"  could NOT bind to {bind_ip}: {e}")
+
+        if not sockets:
+            _log("ERROR: no sockets could be bound; discovery aborted")
+            return []
+
+        for attempt in range(attempts):
+            _log(f"Attempt {attempt + 1}/{attempts}: sending {len(packet)}-byte "
+                 f"discovery packet to {destination}:{DISCOVERY_PORT}")
+            for s in sockets:
+                try:
+                    s.sendto(packet, (destination, DISCOVERY_PORT))
+                except OSError as e:
+                    _log(f"  send via {s.getsockname()[0]} failed: {e}")
+            # Listen on EVERY socket for the full deadline window.
             deadline = time.monotonic() + timeout_s
             while time.monotonic() < deadline:
-                try:
-                    data, addr = sock.recvfrom(2048)
-                except socket.timeout:
-                    continue
-                info = _parse_reply(data, addr[0])
-                if info and info.mac not in found:
-                    found[info.mac] = info
+                for s in sockets:
+                    try:
+                        data, addr = s.recvfrom(2048)
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        continue
+                    _log(f"  reply from {addr[0]}: {len(data)} bytes "
+                         f"(via socket bound to {s.getsockname()[0]})")
+                    info = _parse_reply(data, addr[0])
+                    if info and info.mac not in found:
+                        found[info.mac] = info
+                        _log(f"    parsed: MAC={info.mac} board={info.board_name} "
+                             f"busy={info.is_busy}")
+                    elif info is None:
+                        _log(f"    NOT a valid HPSDR reply (header mismatch / too short)")
     finally:
-        sock.close()
+        for s in sockets:
+            try: s.close()
+            except OSError: pass
 
+    _log(f"Discovery complete: {len(found)} radio(s) found")
     return list(found.values())
 
 
