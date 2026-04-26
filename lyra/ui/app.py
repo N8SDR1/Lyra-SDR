@@ -1770,13 +1770,18 @@ class MainWindow(QMainWindow):
             p_trace = _ms("p_trace")
             p_spots = _ms("p_spots")
 
+            emit_pure = _ms("emit_pure")
+
             # Inline format — keep stage names short so the line
             # doesn't push the version label off-screen on narrow
-            # status bars.
+            # status bars. emit/pure shows total emit stage AND just
+            # the bare spectrum_ready.emit() so the OpenGL-update gap
+            # is visible.
             self._perf_label.setText(
                 f"ring {ring:4.2f} · fft {fft:4.2f} · db {db:4.2f} · "
                 f"smt {smt:4.2f} · nf {nf:4.2f} · scale {scale:4.2f} · "
-                f"emit {emit:4.2f} ms · tick {tick:5.2f} | "
+                f"emit {emit:4.2f}/pure {emit_pure:4.2f} ms · "
+                f"tick {tick:5.2f} | "
                 f"spec {p_spec:4.2f} (trace {p_trace:4.2f} spots "
                 f"{p_spots:4.2f}) · water {p_water:4.2f} ms · "
                 f"{rate:4.1f} Hz"
@@ -1802,7 +1807,8 @@ class MainWindow(QMainWindow):
                 _fmt("smt",   "smt"),
                 _fmt("nf",    "nf"),
                 _fmt("scale", "scale"),
-                _fmt("emit",  "emit"),
+                _fmt("emit",      "emit"),
+                _fmt("emit_pure", "  emit_pure"),
                 "",
                 "  ── Paint stages (sync inside emit) ──",
                 _fmt("p_spec",  "spec"),
@@ -1857,7 +1863,8 @@ class MainWindow(QMainWindow):
             "─" * 60,
             f"  {'stage':6s}  {'avg':>7s}  {'min':>7s}  {'max':>7s}    ms",
         ]
-        order = ("ring", "fft", "db", "smt", "nf", "scale", "emit",
+        order = ("ring", "fft", "db", "smt", "nf", "scale",
+                 "emit", "emit_pure",
                  "p_spec", "p_trace", "p_spots", "p_water")
         for k in order:
             d = snap.get(k, {})

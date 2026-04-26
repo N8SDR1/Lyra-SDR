@@ -678,15 +678,22 @@ class Radio(QObject):
         # signal emit?). Names chosen to fit a one-line status-bar
         # display: "ring 6.2 · fft 0.1 · db 1.4 · smt 0.1 · nf 0.4 ·
         # scale 0.0 · emit 1.9 ms · tick 10.2 · 13 Hz".
-        self._perf_fft_timer    = _perf_get("fft")
-        self._perf_tick_timer   = _perf_get("tick")
-        self._perf_ring_timer   = _perf_get("ring")
-        self._perf_db_timer     = _perf_get("db")
-        self._perf_smeter_timer = _perf_get("smt")
-        self._perf_nf_timer     = _perf_get("nf")
-        self._perf_scale_timer  = _perf_get("scale")
-        self._perf_emit_timer   = _perf_get("emit")
-        self._perf_emit_counter = 0
+        self._perf_fft_timer       = _perf_get("fft")
+        self._perf_tick_timer      = _perf_get("tick")
+        self._perf_ring_timer      = _perf_get("ring")
+        self._perf_db_timer        = _perf_get("db")
+        self._perf_smeter_timer    = _perf_get("smt")
+        self._perf_nf_timer        = _perf_get("nf")
+        self._perf_scale_timer     = _perf_get("scale")
+        self._perf_emit_timer      = _perf_get("emit")
+        # "emit_pure" wraps ONLY the bare spectrum_ready.emit() call
+        # so we can distinguish "the emit itself" from "everything in
+        # the emit stage" (zoom + waterfall logic + signal emit). On
+        # OpenGL backend, update() inside the connected slot does
+        # synchronous GL context prep — that cost shows up in
+        # emit_pure but not in the paint timers themselves.
+        self._perf_emit_pure_timer = _perf_get("emit_pure")
+        self._perf_emit_counter    = 0
 
     # ── Read-only properties ──────────────────────────────────────────
     @property
@@ -2965,7 +2972,15 @@ class Radio(QObject):
             spec_out = spec_db
             eff_rate = int(self._rate)
 
+        # Wrap JUST the bare spectrum_ready.emit call so we can isolate
+        # the cost of the emit + connected-slot dispatch from the
+        # zoom-crop + waterfall logic surrounding it. Diagnostic for
+        # the "emit-vs-paint gap" we're investigating on OpenGL backend.
+        if _perf: _emit_pure_t0 = _t.perf_counter()
         self.spectrum_ready.emit(spec_out, float(self._freq_hz), eff_rate)
+        if _perf:
+            self._perf_emit_pure_timer.observe_ms(
+                (_t.perf_counter() - _emit_pure_t0) * 1000.0)
 
         # Waterfall fires on its own cadence (1 row per N FFT ticks)
         # and can burst M rows per push for fast-scroll mode.
