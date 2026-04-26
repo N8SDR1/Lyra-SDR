@@ -76,7 +76,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor, QSurfaceFormat
 from PySide6.QtOpenGL import (
     QOpenGLBuffer, QOpenGLFunctions_4_3_Core, QOpenGLShader,
-    QOpenGLShaderProgram, QOpenGLVertexArrayObject,
+    QOpenGLShaderProgram, QOpenGLTexture, QOpenGLVertexArrayObject,
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
@@ -486,6 +486,14 @@ class WaterfallGpuWidget(QOpenGLWidget):
         self._prog: Optional[QOpenGLShaderProgram] = None
         self._vbo: Optional[QOpenGLBuffer] = None
         self._vao: Optional[QOpenGLVertexArrayObject] = None
+        # QOpenGLTexture wrapper used for creation + binding. We need
+        # this because PySide6's QOpenGLFunctions_4_3_Core does NOT
+        # expose glGenTextures (every other texture function is there).
+        # Per-row uploads still go through raw glTexSubImage2D — it's
+        # more efficient than QOpenGLTexture.setData for sub-region
+        # updates. We grab textureId() once after creation for those
+        # raw calls.
+        self._tex: Optional[QOpenGLTexture] = None
         self._tex_id: int = 0
         # Cached locations.
         self._loc_position: int = -1
@@ -639,89 +647,91 @@ class WaterfallGpuWidget(QOpenGLWidget):
         self._vao.release()
         self._vbo.release()
 
-        # ── Texture ───────────────────────────────────────────────
-        # R8 single-channel texture. Width = MAX_BINS so any spectrum
-        # size up to that fits without re-allocating. Height = ROW_COUNT.
-        # Allocated empty; glTexSubImage2D fills rows as push_row fires.
+        # ── Texture (R8 single-channel, MAX_BINS × ROW_COUNT) ─────
+        # Created via QOpenGLTexture because PySide6 doesn't expose
+        # glGenTextures. Allocated empty; per-row uploads happen via
+        # raw glTexSubImage2D calls in paintGL (more efficient than
+        # QOpenGLTexture.setData for sub-region updates).
         gl = self._gl
-        # Generate one texture name. PySide's binding for glGenTextures
-        # returns the name when called with a count of 1.
-        ids = []
-        # PySide6 idiom: pre-allocate result list, pass to glGenTextures
-        import array
-        names = array.array('I', [0])
-        gl.glGenTextures(1, names)
-        self._tex_id = int(names[0])
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1)   # tight rows
 
-        gl.glBindTexture(GL_TEXTURE_2D, self._tex_id)
-        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1)   # tight rows (no padding)
-        # Allocate texture storage. The `None` data pointer means
-        # "allocate but don't upload" — content is undefined until
-        # we push rows.
-        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_R8,
-                        MAX_BINS, self.ROW_COUNT,
-                        0, GL_RED, GL_UNSIGNED_BYTE, None)
-        # Linear filtering smooths the visual when zooming; nearest
-        # would give a blockier look. Wrap doesn't matter for our
-        # scheme but CLAMP_TO_EDGE is the safe default.
-        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-        gl.glBindTexture(GL_TEXTURE_2D, 0)
+        if self._tex is not None:
+            self._tex.destroy()
+            self._tex = None
+        self._tex = QOpenGLTexture(QOpenGLTexture.Target.Target2D)
+        self._tex.setFormat(QOpenGLTexture.TextureFormat.R8_UNorm)
+        self._tex.setSize(MAX_BINS, self.ROW_COUNT)
+        self._tex.setMinificationFilter(QOpenGLTexture.Filter.Linear)
+        self._tex.setMagnificationFilter(QOpenGLTexture.Filter.Linear)
+        self._tex.setWrapMode(QOpenGLTexture.WrapMode.ClampToEdge)
+        # allocateStorage with explicit src format/type ensures the
+        # storage is in the format we'll be uploading. Initial content
+        # is undefined — first frames are blank-by-design (we suppress
+        # draws until at least one row has been pushed).
+        self._tex.allocateStorage(
+            QOpenGLTexture.PixelFormat.Red,
+            QOpenGLTexture.PixelType.UInt8)
+        self._tex_id = int(self._tex.textureId())
 
+        # Suppress drawing the textured quad until a row is pushed.
         self._row_pending = False
 
     def resizeGL(self, w: int, h: int) -> None:
         pass
 
     def paintGL(self) -> None:
-        if self._gl is None or self._prog is None:
+        if self._gl is None or self._prog is None or self._tex is None:
             return
-
-        # Synthetic mode generates fake data on the timer, then this
-        # path uploads + draws.
         gl = self._gl
 
-        # Upload a pending row if push_row was called since last frame.
+        # ── Upload a pending row ──────────────────────────────────
+        # We bind via QOpenGLTexture (which both binds AND activates
+        # the texture unit) then issue a raw glTexSubImage2D for the
+        # one-row sub-region update. The sub-image upload is more
+        # efficient than QOpenGLTexture.setData for partial updates.
         if getattr(self, "_row_pending", False) and self._last_row_n > 0:
-            gl.glBindTexture(GL_TEXTURE_2D, self._tex_id)
+            self._tex.bind(0)
+            data = self._row_bytes[:self._last_row_n].tobytes()
             gl.glTexSubImage2D(
                 GL_TEXTURE_2D, 0,
-                0, self._write_row,             # x, y in texture
-                self._last_row_n, 1,             # width, height (one row)
+                0, self._write_row,           # x, y in texture
+                self._last_row_n, 1,           # width, height (one row)
                 GL_RED, GL_UNSIGNED_BYTE,
-                bytes(self._row_bytes[:self._last_row_n].tobytes()),
+                data,
             )
-            gl.glBindTexture(GL_TEXTURE_2D, 0)
+            self._tex.release(0)
             self._row_pending = False
 
-        # Clear + draw fullscreen quad.
+        # ── Clear ─────────────────────────────────────────────────
         gl.glClearColor(_BG_R, _BG_G, _BG_B, 1.0)
         gl.glClear(GL_COLOR_BUFFER_BIT)
 
-        # Don't draw the textured quad until at least a few rows
-        # have been pushed — otherwise we'd display undefined GPU
-        # memory contents (could look like garbage TV static).
+        # Don't draw until at least one row has been pushed —
+        # otherwise we'd display undefined GPU memory contents.
         if self._rows_pushed < 1:
             return
 
+        # ── Draw the fullscreen quad ─────────────────────────────
         self._prog.bind()
-        # Bind texture to unit 0 + tell sampler uniform.
-        gl.glActiveTexture(GL_TEXTURE0)
-        gl.glBindTexture(GL_TEXTURE_2D, self._tex_id)
+        # Bind the texture to unit 0. QOpenGLTexture.bind(0) handles
+        # glActiveTexture(GL_TEXTURE0) + glBindTexture for us.
+        self._tex.bind(0)
+        # Sampler uniform MUST be set with the int-specific overload —
+        # the generic setUniformValue routes Python int through the
+        # float overload, which leaves the sampler in an undefined
+        # state and triggers GL_INVALID_OPERATION on draw.
         if self._loc_sampler >= 0:
-            self._prog.setUniformValue(self._loc_sampler, 0)
+            self._prog.setUniformValue1i(self._loc_sampler, 0)
         if self._loc_row_offset >= 0:
-            self._prog.setUniformValue(
+            self._prog.setUniformValue1f(
                 self._loc_row_offset, float(self._write_row))
         if self._loc_row_count >= 0:
-            self._prog.setUniformValue(
+            self._prog.setUniformValue1f(
                 self._loc_row_count, float(self.ROW_COUNT))
         self._vao.bind()
         gl.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
         self._vao.release()
-        gl.glBindTexture(GL_TEXTURE_2D, 0)
+        self._tex.release(0)
         self._prog.release()
 
     # ── Internal: synthetic data generator (Phase A test only) ─────
