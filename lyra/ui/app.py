@@ -418,18 +418,16 @@ class MainWindow(QMainWindow):
         help_menu.addAction(opengl_dialog_act)
 
         help_menu.addSeparator()
-        # Check for updates — placeholder for the installer-build
-        # release pipeline. When the PyInstaller / Inno Setup work
-        # lands we'll wire this to query the GitHub Releases API for
-        # the latest tag, compare to lyra.__version__, and show a
-        # "0.0.3 available — Open release page" dialog if newer.
-        # The action is greyed out for now so operators see it exists
-        # without it firing on a not-yet-implemented endpoint.
-        update_act = QAction("Check for &Updates…  (coming soon)", self)
-        update_act.setEnabled(False)
+        # Check for updates — queries the GitHub releases API for the
+        # latest tag, compares against the running lyra.__version__,
+        # and shows a friendly dialog with the result. Background
+        # thread for the network call so the UI doesn't freeze.
+        update_act = QAction("Check for &Updates…", self)
         update_act.setToolTip(
-            "Will query GitHub Releases for a newer Lyra version. "
-            "Wired up in the installer-build release.")
+            "Check the GitHub repo for a newer Lyra release. "
+            "Single GET to the public releases API — no telemetry, "
+            "no account, no data sent.")
+        update_act.triggered.connect(self._on_check_for_updates)
         help_menu.addAction(update_act)
 
         # ☕ Support Lyra — opens the User Guide directly to the
@@ -1363,6 +1361,13 @@ class MainWindow(QMainWindow):
         from .settings_backup import snapshots_dir
         d = snapshots_dir()
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
+
+    def _on_check_for_updates(self):
+        """Help → Check for Updates… — open the update-check dialog
+        which queries GitHub for the latest release in a worker
+        thread, compares versions, and shows the result."""
+        from .update_check import CheckForUpdatesDialog
+        CheckForUpdatesDialog(parent=self).exec()
 
     def _open_telem_probe(self):
         """Help → HL2 Telemetry Probe. Opens the diagnostic dialog
