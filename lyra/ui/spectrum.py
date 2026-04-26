@@ -901,37 +901,33 @@ class SpectrumWidget(_PaintedWidget):
         grad.setColorAt(1.0, grad_bot)
 
         # ── Paint timer: trace fill + line ───────────────────────
-        # Phase 1a.4 batching fix. Old code did:
-        #   - w-vertex QPolygonF append loop (Python → C++ once each)
-        #   - w-1 individual drawLine calls (Python → C++ once each)
-        # On a 1500-px-wide widget that was ~3000 Python→C++ round
-        # trips per paint, dominated paint cost (~2.7 ms measured).
-        #
-        # New code: build the trace points list ONCE, construct one
-        # QPolygonF from it, draw the fill via drawPolygon (with the
-        # two baseline corners appended) and the line via drawPolyline
-        # (a single Qt call processing all vertices at once). Same
-        # visual output, ~10x fewer Qt boundary crossings.
+        # REVERTED Phase 1a.4 — drawPolyline replacement was
+        # catastrophic in QPainter (software) mode: p_trace went
+        # from ~1 ms to ~296 ms because Qt's CPU rasterizer treats
+        # an antialiased 1500-segment polyline as one continuous
+        # path and falls into a much slower scan-conversion code
+        # path than 1499 individual drawLine calls. The "batching"
+        # win in OpenGL turned into a 100x regression in software,
+        # so the original per-pixel loop is back. Real fix has to
+        # come from the WATERFALL push_row buffer scroll (the
+        # actual bottleneck that Phase 1a.3 data revealed) or from
+        # an OpenGL panadapter — not from this trace draw.
         if _perf: _trace_t0 = _time.perf_counter()
         from PySide6.QtGui import QPolygonF
         from PySide6.QtCore import QPointF
-        # One pass through the y-coords. Construct QPointF objects
-        # once and reuse for both the fill polygon and the trace line.
-        trace_pts = [QPointF(i, float(ys[i])) for i in range(w)]
-        trace_poly = QPolygonF(trace_pts)
-        # Fill polygon = trace + baseline corners. Constructed from
-        # the trace points list (not by re-iterating ys) so we keep
-        # the single-pass property.
-        fill_poly = QPolygonF(
-            [QPointF(0, h)] + trace_pts + [QPointF(w - 1, h)])
+        poly = QPolygonF()
+        poly.append(QPointF(0, h))
+        for i in range(w):
+            poly.append(QPointF(i, ys[i]))
+        poly.append(QPointF(w - 1, h))
         p.setBrush(grad)
         p.setPen(Qt.NoPen)
-        p.drawPolygon(fill_poly)
+        p.drawPolygon(poly)
 
-        # Trace line — single drawPolyline call instead of w-1
-        # drawLine calls. This is the meat of the optimization.
+        # Trace line (same color, full opacity)
         p.setPen(QPen(trace_color, 1.2))
-        p.drawPolyline(trace_poly)
+        for i in range(w - 1):
+            p.drawLine(i, int(ys[i]), i + 1, int(ys[i + 1]))
         if _perf:
             _perf_get("p_trace").observe_ms(
                 (_time.perf_counter() - _trace_t0) * 1000.0)
