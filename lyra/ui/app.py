@@ -1759,32 +1759,13 @@ class MainWindow(QMainWindow):
             tick  = _ms("tick")
             rate  = stats.get("tick", {}).get("rate_hz", 0.0)
 
-            # Phase 1a.3 paint stages. p_spec / p_water are the two
-            # widget paintEvents synchronously triggered by the
-            # spectrum_ready / waterfall_ready emits — they should
-            # together account for most of the "emit" stage time.
-            # p_trace and p_spots are the two most likely culprits
-            # within the spectrum paint.
-            p_spec  = _ms("p_spec")
-            p_water = _ms("p_water")
-            p_trace = _ms("p_trace")
-            p_spots = _ms("p_spots")
-
-            emit_pure = _ms("emit_pure")
-
             # Inline format — keep stage names short so the line
             # doesn't push the version label off-screen on narrow
-            # status bars. emit/pure shows total emit stage AND just
-            # the bare spectrum_ready.emit() so the OpenGL-update gap
-            # is visible.
+            # status bars.
             self._perf_label.setText(
                 f"ring {ring:4.2f} · fft {fft:4.2f} · db {db:4.2f} · "
                 f"smt {smt:4.2f} · nf {nf:4.2f} · scale {scale:4.2f} · "
-                f"emit {emit:4.2f}/pure {emit_pure:4.2f} ms · "
-                f"tick {tick:5.2f} | "
-                f"spec {p_spec:4.2f} (trace {p_trace:4.2f} spots "
-                f"{p_spots:4.2f}) · water {p_water:4.2f} ms · "
-                f"{rate:4.1f} Hz"
+                f"emit {emit:4.2f} ms · tick {tick:5.2f} · {rate:4.1f} Hz"
             )
 
             # Tooltip: tabular form so a screenshot can be pasted into
@@ -1800,21 +1781,13 @@ class MainWindow(QMainWindow):
             tip_lines = [
                 "DSP performance breakdown (averages over last ~2 sec)",
                 "",
-                "  ── FFT loop (radio.py _tick_fft) ──",
                 _fmt("ring",  "ring"),
                 _fmt("fft",   "fft"),
                 _fmt("db",    "db"),
                 _fmt("smt",   "smt"),
                 _fmt("nf",    "nf"),
                 _fmt("scale", "scale"),
-                _fmt("emit",      "emit"),
-                _fmt("emit_pure", "  emit_pure"),
-                "",
-                "  ── Paint stages (sync inside emit) ──",
-                _fmt("p_spec",  "spec"),
-                _fmt("p_trace", " trace"),
-                _fmt("p_spots", " spots"),
-                _fmt("p_water", "water"),
+                _fmt("emit",  "emit"),
                 "  " + "─" * 50,
                 _fmt("tick",  "tick"),
                 "",
@@ -1863,13 +1836,11 @@ class MainWindow(QMainWindow):
             "─" * 60,
             f"  {'stage':6s}  {'avg':>7s}  {'min':>7s}  {'max':>7s}    ms",
         ]
-        order = ("ring", "fft", "db", "smt", "nf", "scale",
-                 "emit", "emit_pure",
-                 "p_spec", "p_trace", "p_spots", "p_water")
+        order = ("ring", "fft", "db", "smt", "nf", "scale", "emit")
         for k in order:
             d = snap.get(k, {})
             lines.append(
-                f"  {k:7s}  {d.get('avg_ms', 0.0):7.2f}  "
+                f"  {k:6s}  {d.get('avg_ms', 0.0):7.2f}  "
                 f"{d.get('min_ms', 0.0):7.2f}  "
                 f"{d.get('max_ms', 0.0):7.2f}    ms")
         lines.append("  " + "─" * 35)
@@ -1879,7 +1850,7 @@ class MainWindow(QMainWindow):
             f"{d.get('min_ms', 0.0):7.2f}  "
             f"{d.get('max_ms', 0.0):7.2f}    ms")
         lines.append(
-            f"  rate    {snap.get('tick', {}).get('rate_hz', 0.0):7.2f}    "
+            f"  rate     {snap.get('tick', {}).get('rate_hz', 0.0):7.2f}    "
             f"Hz")
         return "\n".join(lines)
 

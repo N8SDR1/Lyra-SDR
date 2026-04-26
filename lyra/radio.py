@@ -661,15 +661,9 @@ class Radio(QObject):
         # the perf_stats_changed emission to ~1 Hz regardless of FFT
         # rate so the UI doesn't get spammed.
         from PySide6.QtCore import QSettings as _QS
-        from lyra.dsp import perf as _perf_mod
         from lyra.dsp.perf import get_or_create as _perf_get
-        # Process-wide flag in lyra.dsp.perf is the canonical source —
-        # paint-stage timers in spectrum.py read the same flag, so one
-        # View menu toggle instruments BOTH the FFT loop here AND the
-        # panadapter paint chain there.
         self._perf_enabled = (str(_QS("N8SDR", "Lyra").value(
             "perf/enabled", "false")).lower() == "true")
-        _perf_mod.set_enabled(self._perf_enabled)
         # Stage timers — Phase 1a.2 fine-grained breakdown. The "fft"
         # and "tick" timers are kept first so the existing UI code
         # works unchanged; the per-stage timers add detail for the
@@ -678,22 +672,15 @@ class Radio(QObject):
         # signal emit?). Names chosen to fit a one-line status-bar
         # display: "ring 6.2 · fft 0.1 · db 1.4 · smt 0.1 · nf 0.4 ·
         # scale 0.0 · emit 1.9 ms · tick 10.2 · 13 Hz".
-        self._perf_fft_timer       = _perf_get("fft")
-        self._perf_tick_timer      = _perf_get("tick")
-        self._perf_ring_timer      = _perf_get("ring")
-        self._perf_db_timer        = _perf_get("db")
-        self._perf_smeter_timer    = _perf_get("smt")
-        self._perf_nf_timer        = _perf_get("nf")
-        self._perf_scale_timer     = _perf_get("scale")
-        self._perf_emit_timer      = _perf_get("emit")
-        # "emit_pure" wraps ONLY the bare spectrum_ready.emit() call
-        # so we can distinguish "the emit itself" from "everything in
-        # the emit stage" (zoom + waterfall logic + signal emit). On
-        # OpenGL backend, update() inside the connected slot does
-        # synchronous GL context prep — that cost shows up in
-        # emit_pure but not in the paint timers themselves.
-        self._perf_emit_pure_timer = _perf_get("emit_pure")
-        self._perf_emit_counter    = 0
+        self._perf_fft_timer    = _perf_get("fft")
+        self._perf_tick_timer   = _perf_get("tick")
+        self._perf_ring_timer   = _perf_get("ring")
+        self._perf_db_timer     = _perf_get("db")
+        self._perf_smeter_timer = _perf_get("smt")
+        self._perf_nf_timer     = _perf_get("nf")
+        self._perf_scale_timer  = _perf_get("scale")
+        self._perf_emit_timer   = _perf_get("emit")
+        self._perf_emit_counter = 0
 
     # ── Read-only properties ──────────────────────────────────────────
     @property
@@ -2744,11 +2731,9 @@ class Radio(QObject):
         from PySide6.QtCore import QSettings as _QS
         _QS("N8SDR", "Lyra").setValue(
             "perf/enabled", "true" if self._perf_enabled else "false")
-        # Flip the process-wide flag so paint timers in spectrum.py
-        # come on/off in lockstep with FFT timers here. set_enabled
-        # handles the reset_all() on off→on transition.
-        from lyra.dsp import perf as _perf_mod
-        _perf_mod.set_enabled(self._perf_enabled)
+        if self._perf_enabled:
+            from lyra.dsp.perf import reset_all as _reset
+            _reset()
 
     # ── FFT tick → spectrum + S-meter signals ─────────────────────────
     def _tick_fft(self):
@@ -2764,10 +2749,7 @@ class Radio(QObject):
         # guessing where the bottleneck lives — the whole point of
         # Phase 1a is to MEASURE before optimizing.
         import time as _t
-        # Read the canonical module flag (paint timers in spectrum.py
-        # check the same flag, so one toggle gates everything).
-        from lyra.dsp import perf as _perf_mod
-        _perf = _perf_mod.enabled
+        _perf = self._perf_enabled
         _tick_t0 = _t.perf_counter() if _perf else 0.0
 
         # ── Stage 1: ring fetch ──────────────────────────────────
@@ -2972,15 +2954,7 @@ class Radio(QObject):
             spec_out = spec_db
             eff_rate = int(self._rate)
 
-        # Wrap JUST the bare spectrum_ready.emit call so we can isolate
-        # the cost of the emit + connected-slot dispatch from the
-        # zoom-crop + waterfall logic surrounding it. Diagnostic for
-        # the "emit-vs-paint gap" we're investigating on OpenGL backend.
-        if _perf: _emit_pure_t0 = _t.perf_counter()
         self.spectrum_ready.emit(spec_out, float(self._freq_hz), eff_rate)
-        if _perf:
-            self._perf_emit_pure_timer.observe_ms(
-                (_t.perf_counter() - _emit_pure_t0) * 1000.0)
 
         # Waterfall fires on its own cadence (1 row per N FFT ticks)
         # and can burst M rows per push for fast-scroll mode.
