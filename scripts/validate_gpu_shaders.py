@@ -44,8 +44,16 @@ def _build_context() -> tuple[QOffscreenSurface, QOpenGLContext]:
     of any shader compilation calls — Python GC them and the context
     becomes invalid mid-compile.
     """
+    # OpenGL 4.3 core is the project's GPU floor — chosen for Win10/11
+    # baseline (covers every NVIDIA / AMD / modern Intel GPU from 2013
+    # onward, drops only Intel HD 4000-era hardware that's effectively
+    # extinct in active use). 4.3 also gives us compute shaders, debug
+    # output, and SSBOs as future-feature options without another bump
+    # later. The individual shader sources stay at `#version 330 core`
+    # until they need newer features — this is a context floor, not a
+    # shader-language ceiling.
     fmt = QSurfaceFormat()
-    fmt.setVersion(3, 3)
+    fmt.setVersion(4, 3)
     fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
     fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
 
@@ -55,14 +63,14 @@ def _build_context() -> tuple[QOffscreenSurface, QOpenGLContext]:
     if not surface.isValid():
         raise RuntimeError(
             "Could not create offscreen GL surface — your driver may "
-            "not expose OpenGL 3.3 core profile in headless mode.")
+            "not expose OpenGL 4.3 core profile in headless mode.")
 
     ctx = QOpenGLContext()
     ctx.setFormat(fmt)
     if not ctx.create():
         raise RuntimeError(
             "Could not create OpenGL context. Check that your GPU "
-            "driver supports OpenGL 3.3+.")
+            "driver supports OpenGL 4.3+ core profile.")
     if not ctx.makeCurrent(surface):
         raise RuntimeError("Could not make OpenGL context current.")
     return surface, ctx
