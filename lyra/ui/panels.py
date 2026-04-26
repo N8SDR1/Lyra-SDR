@@ -135,9 +135,11 @@ class TuningPanel(GlassPanel):
         logo_container.addSpacing(6)          # fixed top padding
         logo_container.addStretch(1)          # flex above
         self.logo_label = QLabel()
-        from pathlib import Path as _Path
         from PySide6.QtGui import QPixmap as _QPixmap
-        logo_path = (_Path(__file__).resolve().parents[2] /
+        from lyra import resource_root
+        # resource_root() handles both dev-tree and PyInstaller-frozen
+        # paths so the logo loads correctly when running from the .exe.
+        logo_path = (resource_root() /
                      "assets" / "logo" / "lyra-icon-256.png")
         if logo_path.is_file():
             pix = _QPixmap(str(logo_path))

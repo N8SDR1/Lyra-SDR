@@ -1,3 +1,11 @@
+# ── PyInstaller build artifacts ─────────────────────────────────────
+# Temp build scratch (warn-*.txt, xref-*.html, .toc, intermediate
+# .pyz, etc.). PyInstaller drops these alongside the spec file.
+# Keep build/lyra.spec, build/installer.iss, build/build.cmd,
+# build/README.md tracked — those are the build INPUTS.
+build/lyra/
+build/installer/
+
 # ── Python ──────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
@@ -19,8 +27,10 @@ venv/
 env/
 ENV/
 
-# ── Build / packaging output ────────────────────────────────────────
-build/
+# ── Packaging output (build inputs are tracked; only outputs ignored)
+# build/lyra/ and build/installer/ already ignored at the top of
+# this file. Don't blanket-ignore build/ — that would hide the
+# build inputs (lyra.spec, installer.iss, build.cmd, README.md).
 dist/
 *.spec.bak
 release/

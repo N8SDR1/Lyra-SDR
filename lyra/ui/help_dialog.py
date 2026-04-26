@@ -34,17 +34,29 @@ from PySide6.QtWidgets import (
 
 
 def _help_root() -> Path:
-    """Locate the `docs/help` folder. Walk up from this file until we
-    find it — robust across dev layout vs PyInstaller / zipped
-    deployments."""
+    """Locate the `docs/help` folder.
+
+    Two layouts:
+    - Dev tree: walk up from this file looking for docs/help
+    - PyInstaller frozen bundle: lyra.resource_root() returns
+      sys._MEIPASS, where build/lyra.spec copied docs/ into the
+      bundle.
+
+    The dialog handles the "no topics found" case gracefully if the
+    folder is missing for any reason (deployment misconfig, etc.).
+    """
+    from lyra import resource_root
+    primary = resource_root() / "docs" / "help"
+    if primary.is_dir():
+        return primary
+    # Walk-up fallback for unusual layouts (someone running Lyra
+    # from a wonky relocated install).
     here = Path(__file__).resolve()
     for parent in (here.parent, *here.parents):
         candidate = parent / "docs" / "help"
         if candidate.is_dir():
             return candidate
-    # Fallback: return the expected path even if missing — the dialog
-    # handles the "no topics found" case gracefully.
-    return here.parents[2] / "docs" / "help"
+    return primary  # missing-folder error path
 
 
 def _topic_title(md_path: Path) -> str:

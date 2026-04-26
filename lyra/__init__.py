@@ -32,3 +32,27 @@ def version_string() -> str:
     if __build_date__ == "dev":
         return f"{base} (dev build)"
     return f"{base}  ({__build_date__})"
+
+
+def resource_root():
+    """Return the directory that holds Lyra's bundled resources
+    (`docs/`, `assets/`, `data/`).
+
+    Two layouts to handle:
+
+    - **Development tree** (running `python -m lyra.ui.app`):
+      `__file__` lives at `<repo>/lyra/__init__.py`, so resources
+      are at `<repo>/`. We walk one parent up.
+
+    - **PyInstaller frozen bundle** (`Lyra.exe`):
+      PyInstaller sets `sys._MEIPASS` to the bundle directory where
+      `datas` were copied. In folder-mode bundles this is
+      `<install>/_internal/`; in onefile bundles it's a temp dir.
+      Either way, `_MEIPASS / 'docs'` and `_MEIPASS / 'assets'`
+      are where our build/lyra.spec puts them.
+    """
+    import sys
+    from pathlib import Path
+    if hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parent.parent

@@ -44,9 +44,11 @@ class MainWindow(QMainWindow):
         # Alt+Tab preview, and the rounded "pin to start" tile on
         # Windows 11. Loaded from the multi-res .ico so Windows picks
         # the right size for each context automatically.
-        from pathlib import Path
         from PySide6.QtGui import QIcon
-        ico = Path(__file__).resolve().parents[2] / "assets" / "logo" / "lyra.ico"
+        from lyra import resource_root
+        # resource_root() handles both dev-tree and PyInstaller-frozen
+        # paths so the icon loads correctly from the .exe install dir.
+        ico = resource_root() / "assets" / "logo" / "lyra.ico"
         if ico.is_file():
             self._app_icon = QIcon(str(ico))
             self.setWindowIcon(self._app_icon)
@@ -139,7 +141,7 @@ class MainWindow(QMainWindow):
         # Wrapped in try/except: a snapshot failure is annoying but
         # should never prevent Lyra from launching.
         try:
-            from .settings_backup import auto_snapshot
+            from lyra.ui.settings_backup import auto_snapshot
             auto_snapshot(reason="launch")
         except Exception as _e:
             # Don't crash on permissions / disk-full / etc.
@@ -1223,7 +1225,7 @@ class MainWindow(QMainWindow):
         the auto-snapshots in one easy-to-browse place."""
         from PySide6.QtWidgets import QFileDialog, QMessageBox
         from datetime import datetime
-        from .settings_backup import snapshots_dir, export_settings
+        from lyra.ui.settings_backup import snapshots_dir, export_settings
         # Auto-save first so the JSON has the latest UI state
         # (window geometry, dock positions, splitter widths) — the
         # operator's expectation is "I'm exporting WHAT I SEE NOW."
@@ -1257,7 +1259,7 @@ class MainWindow(QMainWindow):
         was wrong. Layout-affecting changes need a restart to fully
         take effect — we surface that in the success dialog."""
         from PySide6.QtWidgets import QFileDialog, QMessageBox
-        from .settings_backup import snapshots_dir, import_settings
+        from lyra.ui.settings_backup import snapshots_dir, import_settings
         path, _ = QFileDialog.getOpenFileName(
             self, "Import Lyra settings",
             str(snapshots_dir()), "JSON files (*.json);;All files (*)")
@@ -1301,7 +1303,7 @@ class MainWindow(QMainWindow):
         directory. Each entry is a clickable action that restores
         that snapshot (with the same safety-snapshot-first behavior
         as the regular Import action)."""
-        from .settings_backup import list_snapshots, snapshot_summary
+        from lyra.ui.settings_backup import list_snapshots, snapshot_summary
         self.snapshots_menu.clear()
         snaps = list_snapshots()
         if not snaps:
@@ -1326,7 +1328,7 @@ class MainWindow(QMainWindow):
         """Restore from one of the snapshot files in the Snapshots
         submenu. Same flow as Import (with safety snapshot first)."""
         from PySide6.QtWidgets import QMessageBox
-        from .settings_backup import import_settings
+        from lyra.ui.settings_backup import import_settings
         reply = QMessageBox.question(
             self, "Restore snapshot",
             f"Restore Lyra settings from this snapshot?\n\n"
@@ -1358,7 +1360,7 @@ class MainWindow(QMainWindow):
         archive snapshot files manually."""
         from PySide6.QtCore import QUrl
         from PySide6.QtGui import QDesktopServices
-        from .settings_backup import snapshots_dir
+        from lyra.ui.settings_backup import snapshots_dir
         d = snapshots_dir()
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
 
@@ -1366,7 +1368,7 @@ class MainWindow(QMainWindow):
         """Help → Check for Updates… — open the update-check dialog
         which queries GitHub for the latest release in a worker
         thread, compares versions, and shows the result."""
-        from .update_check import CheckForUpdatesDialog
+        from lyra.ui.update_check import CheckForUpdatesDialog
         CheckForUpdatesDialog(parent=self).exec()
 
     def _open_telem_probe(self):
@@ -1374,7 +1376,7 @@ class MainWindow(QMainWindow):
         that captures live C&C bytes and shows per-address summaries
         so we can verify the correct telemetry mapping for this HL2
         firmware without guessing through public docs."""
-        from .telem_probe import TelemetryProbeDialog
+        from lyra.ui.telem_probe import TelemetryProbeDialog
         TelemetryProbeDialog(self.radio, parent=self).exec()
 
     def _open_settings(self, tab: str | None = None):
