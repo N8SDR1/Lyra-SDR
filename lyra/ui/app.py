@@ -150,11 +150,22 @@ class MainWindow(QMainWindow):
             "color: #4a8f7e; font-family: Consolas, monospace; "
             "padding: 0 8px;")
         self._perf_label.setToolTip(
-            "DSP performance — FFT time per frame · full tick time · "
-            "achieved rate. Toggle via View → Show DSP Performance.")
+            "DSP performance — per-stage timing breakdown. "
+            "Right-click for Copy to clipboard.")
         self._perf_label.setVisible(False)
         self.statusBar().addPermanentWidget(self._perf_label)
         self.radio.perf_stats_changed.connect(self._on_perf_stats)
+        # Right-click → Copy perf breakdown. Tooltips on status-bar
+        # widgets vanish the instant you try to screenshot them
+        # (focus shifts to the snipping tool, tooltip dies). The
+        # context menu is the screenshot-friendly path: right-click,
+        # pick Copy, paste anywhere. Stash the latest snapshot dict
+        # so the menu has fresh data without re-querying perf.
+        self._perf_last_snapshot: dict = {}
+        from PySide6.QtCore import Qt as _Qt
+        self._perf_label.setContextMenuPolicy(_Qt.CustomContextMenu)
+        self._perf_label.customContextMenuRequested.connect(
+            self._show_perf_context_menu)
         # Sync visibility with Radio's persisted perf_enabled setting.
         if self.radio.perf_enabled:
             self._perf_label.setVisible(True)
@@ -1729,6 +1740,12 @@ class MainWindow(QMainWindow):
         no FFT optimization can help — needs an OpenGL panadapter).
         """
         try:
+            # Stash for the right-click "Copy to clipboard" handler so
+            # it can rebuild the tabular form on demand without us
+            # having to re-snapshot perf state (which would race the
+            # next emission).
+            self._perf_last_snapshot = dict(stats)
+
             def _ms(key: str) -> float:
                 return stats.get(key, {}).get("avg_ms", 0.0)
 
@@ -1780,6 +1797,62 @@ class MainWindow(QMainWindow):
         except Exception:
             # Defensive — never let a status-bar update kill the UI.
             self._perf_label.setText("")
+
+    def _show_perf_context_menu(self, pos):
+        """Right-click on the perf label → menu with Copy. Tooltips
+        die during screenshot so we need a screenshot-free path for
+        operators to capture the breakdown."""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QGuiApplication
+        menu = QMenu(self)
+        copy_act = menu.addAction("Copy DSP performance breakdown")
+        also_log = menu.addAction("Print to console")
+        action = menu.exec(self._perf_label.mapToGlobal(pos))
+        if action is None:
+            return
+        text = self._format_perf_breakdown_for_share()
+        if action is copy_act:
+            QGuiApplication.clipboard().setText(text)
+            self.statusBar().showMessage(
+                "DSP performance breakdown copied to clipboard.", 3000)
+        elif action is also_log:
+            print("\n" + text + "\n")
+            self.statusBar().showMessage(
+                "DSP performance breakdown printed to console.", 3000)
+
+    def _format_perf_breakdown_for_share(self) -> str:
+        """Render the latest perf snapshot in a tabular text form
+        suitable for pasting into a bug report or chat. Includes
+        version + timestamp at the top so context is preserved."""
+        from datetime import datetime
+        from lyra import __version__ as _ver
+        snap = self._perf_last_snapshot or {}
+        if not snap:
+            return ("(No DSP perf data yet — start a stream and "
+                    "wait for the first ~1 sec emission.)")
+        lines = [
+            f"Lyra v{_ver}  DSP perf breakdown  "
+            f"({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})",
+            "─" * 60,
+            f"  {'stage':6s}  {'avg':>7s}  {'min':>7s}  {'max':>7s}    ms",
+        ]
+        order = ("ring", "fft", "db", "smt", "nf", "scale", "emit")
+        for k in order:
+            d = snap.get(k, {})
+            lines.append(
+                f"  {k:6s}  {d.get('avg_ms', 0.0):7.2f}  "
+                f"{d.get('min_ms', 0.0):7.2f}  "
+                f"{d.get('max_ms', 0.0):7.2f}    ms")
+        lines.append("  " + "─" * 35)
+        d = snap.get("tick", {})
+        lines.append(
+            f"  {'tick':6s}  {d.get('avg_ms', 0.0):7.2f}  "
+            f"{d.get('min_ms', 0.0):7.2f}  "
+            f"{d.get('max_ms', 0.0):7.2f}    ms")
+        lines.append(
+            f"  rate    {snap.get('tick', {}).get('rate_hz', 0.0):7.2f}    "
+            f"Hz")
+        return "\n".join(lines)
 
     # ── Persistence ──────────────────────────────────────────────────
     def _migrate_legacy_settings(self):
