@@ -147,14 +147,20 @@ class MainWindow(QMainWindow):
             # Don't crash on permissions / disk-full / etc.
             print(f"Lyra: auto-snapshot on launch failed: {_e}")
 
-        # OpenGL upsell — fire shortly after the main window is fully
-        # painted so the modal dialog reliably appears on top instead
-        # of being parented to a half-shown window (which on Windows
-        # can occasionally hide the dialog behind the main one). 600ms
-        # is "human-perceptible delay-free" but lets Qt finish window
-        # construction + first paint pass.
+        # OpenGL upsell — fire well after the main window is fully
+        # painted, activated, and presented to the operator. Earlier
+        # 600 ms wasn't enough on slower test machines (testers
+        # reported the dialog never appeared on first launch); 2000 ms
+        # gives Qt + the OS compositor + any antivirus first-launch
+        # scan time to settle before the modal opens. The dialog
+        # explicitly raise_()'s and activateWindow()'s itself in
+        # _show_opengl_dialog so it can't get hidden behind the
+        # main window even if the timing slips. Console log so we
+        # can confirm in tester reports whether the nag actually
+        # fired or was suppressed by the dismiss/already-on-OpenGL
+        # rules.
         from PySide6.QtCore import QTimer as _QTimer
-        _QTimer.singleShot(600, self._maybe_show_opengl_nag)
+        _QTimer.singleShot(2000, self._maybe_show_opengl_nag)
 
     # ── Layout ───────────────────────────────────────────────────────
     def _build_layout(self):
@@ -994,10 +1000,20 @@ class MainWindow(QMainWindow):
         backend setting.
         """
         from lyra.ui.gfx import ACTIVE_BACKEND, BACKEND_SOFTWARE
+        # Diagnostic log so we can correlate tester reports against
+        # what actually happened. ALL three branches print so a
+        # tester saying "I never saw the dialog" lets us see WHY in
+        # their console output.
         if ACTIVE_BACKEND != BACKEND_SOFTWARE:
+            print(f"Lyra: OpenGL nag suppressed — already on backend "
+                  f"{ACTIVE_BACKEND!r}")
             return
         if self._settings.value("ui/opengl_nag_dismissed", False, type=bool):
+            print("Lyra: OpenGL nag suppressed — operator chose "
+                  "'Don't show again' on a previous launch")
             return
+        print("Lyra: showing OpenGL suggestion dialog (first launch / "
+              "operator hasn't dismissed yet)")
         self._show_opengl_dialog(force=False)
 
     def _show_opengl_dialog(self, force: bool):
@@ -1062,6 +1078,15 @@ class MainWindow(QMainWindow):
         h.addWidget(open_btn)
         v.addLayout(h)
 
+        # Force the dialog to the foreground. Without these calls
+        # the dialog can land BEHIND the main window on Windows when
+        # the main window has just been activated by show() — Qt's
+        # modal grab is set on a window that's still settling its
+        # Z-order. This bit testers on first launch.
+        dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
         result = dlg.exec()
 
         # Persist dismissal independent of which button was pressed —

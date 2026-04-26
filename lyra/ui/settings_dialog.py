@@ -1176,9 +1176,13 @@ class VisualsSettingsTab(QWidget):
             "keeps the top edge raised until ~10 s after it last\n"
             "appeared, so transient peaks don't overshoot the\n"
             "display.\n\n"
-            "Manual scale drag (the sliders above, or the panadapter\n"
-            "right-edge Y-axis zone) turns this OFF — your deliberate\n"
-            "scale wins until you re-enable auto here.")
+            "Manual scale changes (the sliders above, or the panadapter\n"
+            "right-edge Y-axis drag) set BOUNDS for auto-scale — auto\n"
+            "is allowed to move within them but never escapes them.\n"
+            "Auto-scale stays ON until you uncheck this box.\n\n"
+            "Tip: drag the Y-axis to set your preferred ceiling /\n"
+            "floor, then leave auto on — it'll auto-fit within your\n"
+            "chosen window without ever wandering off-scale.")
         self.auto_scale_chk.toggled.connect(
             self.radio.set_spectrum_auto_scale)
         # Keep checkbox in sync if Radio turns it off (manual drag)

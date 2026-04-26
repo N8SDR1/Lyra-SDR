@@ -476,11 +476,21 @@ class Radio(QObject):
         self._waterfall_palette = "Classic"
         self._spectrum_min_db   = -140.0
         self._spectrum_max_db   = -50.0
+        # Operator-set BOUNDS for the spectrum range. Auto-scale is
+        # allowed to move the live display range (`_spectrum_min/max_db`
+        # above) within these bounds, but never outside. Set by any
+        # `set_spectrum_db_range(from_user=True)` call (Y-axis drag,
+        # Settings sliders, etc.). Defaults match the live range so
+        # the bounds are inert until the operator intentionally
+        # narrows them.
+        self._user_range_min_db = self._spectrum_min_db
+        self._user_range_max_db = self._spectrum_max_db
         # Auto-fit the dB scale to current band conditions when on.
         # Engineering: every AUTO_SCALE_INTERVAL_TICKS, recompute
-        # (noise_floor - 10) .. (peak + 5) and call set_spectrum_db_range.
-        # Operator's manual drag turns this OFF (so a deliberate scale
-        # isn't immediately overwritten — single source of truth).
+        # (noise_floor - 15) .. (peak + 15), CLAMP to user range,
+        # and call set_spectrum_db_range. Auto-scale is ONLY toggled
+        # by the explicit checkbox — manual range changes update the
+        # bounds but no longer flip the auto flag (operator request).
         self._spectrum_auto_scale = False
         self._auto_scale_tick_counter = 0
         # Rolling-max history of FFT-frame peaks. Filled per-tick in
@@ -1460,22 +1470,89 @@ class Radio(QObject):
         self.notch_enabled_changed.emit(self._notch_enabled)
 
     # ── Per-band memory ───────────────────────────────────────────────
+    # Factory default auto-scale BOUNDS per band group. Different
+    # bands have very different noise floor + dynamic range, so a
+    # one-size-fits-all set of bounds either runs too tight on quiet
+    # bands (10m / 6m, missing weak DX) or too wide on noisy ones
+    # (160m, leaving the floor pegged to the bottom).
+    # Operators can override these per-band — these are just the
+    # starting point for any band the operator hasn't tweaked yet.
+    _DEFAULT_BAND_RANGE_DB = {
+        # Noisy LF/MF/lower-HF: noise often -100 to -110 dBFS
+        "160m": (-130.0, -30.0),
+        "80m":  (-130.0, -30.0),
+        "60m":  (-130.0, -35.0),
+        "40m":  (-130.0, -30.0),
+        # Mid-HF: typical conditions
+        "30m":  (-135.0, -40.0),
+        "20m":  (-135.0, -40.0),
+        "17m":  (-135.0, -40.0),
+        # Quiet upper HF + 6m: weak signals, low noise floor
+        "15m":  (-140.0, -50.0),
+        "12m":  (-140.0, -50.0),
+        "10m":  (-140.0, -50.0),
+        "6m":   (-145.0, -55.0),
+    }
+
     def _save_current_band_memory(self):
         band = band_for_freq(self._freq_hz)
         if band is None:
             return
-        self._band_memory[band.name] = {
+        # Preserve any existing band-specific range bounds; we only
+        # update the freq/mode/gain on every save (those change with
+        # ordinary tuning). Range bounds change only when the
+        # operator explicitly sets them, so we read-modify-write to
+        # avoid clobbering on every freq tweak.
+        existing = self._band_memory.get(band.name, {})
+        existing.update({
             "freq_hz": self._freq_hz,
             "mode":    self._mode,
             "gain_db": self._gain_db,
-        }
+        })
+        self._band_memory[band.name] = existing
+
+    def _save_current_band_range(self):
+        """Save the operator's current spectrum range as the bounds
+        for whichever band we're currently tuned to. Called whenever
+        set_spectrum_db_range fires with from_user=True."""
+        band = band_for_freq(self._freq_hz)
+        if band is None:
+            return
+        existing = self._band_memory.get(band.name, {})
+        existing["range_min_db"] = float(self._user_range_min_db)
+        existing["range_max_db"] = float(self._user_range_max_db)
+        self._band_memory[band.name] = existing
+
+    def _apply_band_range(self, band_name: str):
+        """Pull the saved range bounds for `band_name` (or the factory
+        default for that band group) and apply them as the auto-scale
+        bounds. Called from recall_band on band change so auto-scale
+        re-fits within the new band's appropriate window."""
+        memory = self._band_memory.get(band_name, {})
+        if "range_min_db" in memory and "range_max_db" in memory:
+            lo, hi = memory["range_min_db"], memory["range_max_db"]
+        elif band_name in self._DEFAULT_BAND_RANGE_DB:
+            lo, hi = self._DEFAULT_BAND_RANGE_DB[band_name]
+        else:
+            # Unknown band (broadcast-only / GEN sub-segment) — leave
+            # bounds at whatever they currently are, no change.
+            return
+        # Update bounds + display range. from_user=True so the user
+        # bounds are stored; the band's saved range becomes the new
+        # baseline for auto.
+        self.set_spectrum_db_range(lo, hi, from_user=True)
 
     def recall_band(self, band_name: str, defaults_freq: int,
                     defaults_mode: str):
         """Restore freq/mode/gain saved for `band_name` if present, else
-        tune to the band's defaults. Suppresses the auto-save during
-        the apply so we don't immediately overwrite the memory we just
-        loaded with intermediate tuning steps."""
+        tune to the band's defaults. Also applies the band's saved
+        spectrum range bounds (or factory defaults for that band group)
+        so auto-scale re-fits within an appropriate window for the
+        band's typical noise floor + signal levels.
+
+        Suppresses the auto-save during the apply so we don't
+        immediately overwrite the memory we just loaded with
+        intermediate tuning steps."""
         memory = self._band_memory.get(band_name)
         self._suppress_band_save = True
         try:
@@ -1486,6 +1563,10 @@ class Radio(QObject):
             else:
                 self.set_freq_hz(defaults_freq)
                 self.set_mode(defaults_mode)
+            # Apply per-band range bounds AFTER freq/mode are set so
+            # band_for_freq() returns the right band for the
+            # downstream save.
+            self._apply_band_range(band_name)
         finally:
             self._suppress_band_save = False
         # Save (now that the dust has settled) so the next reactivation
@@ -1947,21 +2028,34 @@ class Radio(QObject):
         """Apply a new spectrum dB range.
 
         `from_user=True` (default) means a manual / interactive change
-        (slider drag, reset button, Y-axis right-edge drag) — that
-        also turns auto-scale OFF, so a deliberate scale isn't
-        immediately overwritten by the next auto tick. Internal calls
-        from the auto-scale tick pass `from_user=False` to update the
-        scale without flipping the auto flag off."""
+        (slider drag, reset button, Y-axis right-edge drag). The
+        operator-supplied range becomes a CLAMP for the auto-scale
+        loop — auto-fit is allowed to move the displayed range INSIDE
+        these bounds but never outside. Auto-scale stays ON until the
+        operator explicitly unchecks the auto-scale checkbox.
+
+        This replaces an earlier "manual change → auto OFF" rule that
+        caused operator pain: the right-edge Y-axis drag fires this
+        on EVERY pixel of mouse motion, so even a 1-pixel jitter
+        during a click flipped auto off. Now auto-scale is ONLY
+        disabled by the explicit checkbox toggle.
+
+        Internal calls from the auto-scale tick pass `from_user=False`
+        — those update only the live display range, not the user
+        bounds.
+        """
         lo, hi = float(min_db), float(max_db)
         if hi - lo < 3.0:
             hi = lo + 3.0
         self._spectrum_min_db, self._spectrum_max_db = lo, hi
-        if from_user and self._spectrum_auto_scale:
-            # Manual change — turn off auto. Single source of truth:
-            # whoever last touched the scale wins until something
-            # explicit changes it.
-            self._spectrum_auto_scale = False
-            self.spectrum_auto_scale_changed.emit(False)
+        if from_user:
+            # Operator just set their preferred range — store as the
+            # bounds within which auto-scale is allowed to move, AND
+            # save them as this band's preferred bounds so switching
+            # to another band and back restores them.
+            self._user_range_min_db = lo
+            self._user_range_max_db = hi
+            self._save_current_band_range()
         self.spectrum_db_range_changed.emit(lo, hi)
 
     # ── Spectrum auto-scale ──────────────────────────────────────────
@@ -2686,10 +2780,27 @@ class Radio(QObject):
                 # appear above the current peaks.
                 if target_hi - target_lo < self.AUTO_SCALE_MIN_SPAN_DB:
                     target_hi = target_lo + self.AUTO_SCALE_MIN_SPAN_DB
-                # Final clamp to display bounds.
+                # Clamp to operator-set bounds (the user range)
+                # before the global -150..0 dBFS safety clamp.
+                # If the operator narrowed the visible range, auto-
+                # scale moves WITHIN that window but never escapes
+                # it — the operator's deliberate choice wins. If
+                # they've never narrowed (default state), the user
+                # range matches the live range so this clamp is a
+                # no-op.
+                target_lo = max(target_lo, self._user_range_min_db)
+                target_hi = min(target_hi, self._user_range_max_db)
+                # If the clamp inverted the range (user range narrower
+                # than the auto target's span), preserve the user
+                # range as-is and skip this auto update — auto can't
+                # do anything meaningful inside a too-tight window.
+                if target_hi - target_lo < 3.0:
+                    return
+                # Final safety clamp to global -150..0 dBFS.
                 target_lo = max(-150.0, min(-3.0, target_lo))
-                target_hi = max(target_lo + 30.0, min(0.0, target_hi))
-                # Internal call — preserve auto flag.
+                target_hi = max(target_lo + 3.0, min(0.0, target_hi))
+                # Internal call — `from_user=False` updates only the
+                # live display range, NOT the user bounds.
                 self.set_spectrum_db_range(
                     target_lo, target_hi, from_user=False)
         elif self._auto_scale_peak_history:

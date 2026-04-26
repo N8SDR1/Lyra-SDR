@@ -246,26 +246,60 @@ top, then the next auto-fit would catch up — producing the visible
 rolling window keeps the ceiling raised until the spike is ~10 sec
 old, so transients have comfortable headroom.
 
-### Manual override
+### Manual range = bounds, not disable
 
-Any manual dB-scale adjustment turns auto scaling **OFF**:
+Manual dB-scale adjustments (Settings sliders, the panadapter's
+right-edge Y-axis drag) **DO NOT turn auto scaling off**. Instead,
+they set the **bounds** that auto-scale is allowed to operate
+within:
 
-- Settings sliders (Spectrum min/max)
-- Spectrum widget's right-edge Y-axis drag
-- "Reset to defaults" button
+- Drag the Y-axis ceiling down to −40 dBFS → auto-scale will never
+  pull the top above −40, even if a strong transient appears
+- Drag the floor up to −135 dBFS → auto-scale will never push the
+  bottom below −135, even on a very quiet band
 
-The single-source-of-truth principle: whoever last touched the
-scale wins until you explicitly re-enable auto via the checkbox.
+Auto-scale still continuously fits within whatever window you've
+set, so you get the best of both: your preferred ceiling/floor as
+hard limits, plus the auto loop tracking band conditions inside
+those limits.
+
+The **only** thing that toggles auto-scale on/off is the checkbox
+itself.
+
+### Per-band bounds memory
+
+Spectrum range bounds are saved **per band**. When you change band
+(via the Band panel buttons or by tuning across a band edge), Lyra
+restores the bounds you last set for that band, OR a sensible
+factory default for that band's typical noise environment if
+you've never set bounds for it:
+
+| Band group | Factory default range |
+|---|---|
+| 160m–60m–40m | −130 to −30 dBFS (noisy, atmospheric) |
+| 30m–20m–17m | −135 to −40 dBFS (mid-HF) |
+| 15m–12m–10m | −140 to −50 dBFS (quieter upper HF) |
+| 6m | −145 to −55 dBFS (quietest) |
+
+So your 40m bounds won't follow you to 6m. Drag the Y-axis on 6m
+to fit a weak meteor-scatter ping → that becomes your 6m bounds.
+Switch to 40m → 40m's bounds are restored. Switch back to 6m →
+your meteor-scatter bounds come back.
+
+This is automatic — no setup, no per-band UI to configure.
+Operators who don't care about per-band tuning never notice;
+operators who do get exactly what they want.
 
 ### When to use
 
 - **Use auto** when band-hopping a lot, when conditions are
   changing during the day, or when you don't want to think about
-  the scale at all.
-- **Use manual** when comparing signal strengths over time (auto
-  rescaling messes up the visual reference), or when you want to
-  see something specific (e.g., the noise floor squashed at the
-  bottom for clean S/N comparisons).
+  the scale at all. Per-band bounds + auto = "set it and forget
+  it" across the entire HF spectrum.
+- **Use manual** (uncheck auto) when comparing signal strengths
+  over time and you want the scale absolutely locked, or when
+  you want a specific custom range that doesn't fit any auto-fit
+  algorithm.
 
 ## Colors
 
