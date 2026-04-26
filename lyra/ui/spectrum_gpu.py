@@ -606,10 +606,18 @@ class WaterfallGpuWidget(QOpenGLWidget):
         # Row buffer used by push_row to convert dB → byte. Pre-
         # allocated to MAX_BINS so push_row never allocates.
         self._row_bytes = np.zeros(MAX_BINS, dtype=np.uint8)
-        # Number of bins in the most-recent push (used for partial
-        # texture uploads when the spectrum has fewer bins than the
-        # texture is wide).
+        # Number of bins in the most-recent push.
         self._last_row_n: int = 0
+        # Pending-rows queue. push_row APPENDS each new row + the
+        # texture-row position it should land at; paintGL processes
+        # the entire queue so no rows get dropped between paints.
+        # Without this, when waterfall_ready fires faster than the
+        # paint cadence (e.g., 110 rows/sec data + 60 Hz paint), only
+        # the LATEST row would be uploaded — earlier rows would just
+        # get their write-pointer position bumped without ever
+        # writing data, leaving black gaps in the rendered waterfall.
+        # Each entry: (write_row_index, bytes-of-length-n, n).
+        self._pending_uploads: list[tuple[int, bytes, int]] = []
 
         # Synthetic mode for self-test without a spectrum source.
         # Default False — see constructor docstring.
@@ -673,12 +681,21 @@ class WaterfallGpuWidget(QOpenGLWidget):
                            min_db: float, max_db: float) -> None:
         """The actual data pipeline shared between the public
         push_row and the synthetic-mode timer. Doesn't touch the
-        synthetic-active flag or the synthetic timer."""
+        synthetic-active flag or the synthetic timer.
+
+        APPENDS a new row + its destination position to the pending
+        queue. paintGL drains the queue in one batch — all rows get
+        uploaded, none get dropped, regardless of paint cadence.
+        """
         n = int(min(spec_db.shape[0], MAX_BINS))
         if n < 2:
             return
         span = max(1e-6, max_db - min_db)
-        # Clip + scale to 0..255 byte range.
+        # Clip + scale to 0..255 byte range. Compute into the
+        # pre-allocated _row_bytes scratch, then COPY the prefix
+        # into a fresh bytes object for the queue (we need a
+        # snapshot — _row_bytes will be overwritten on the next
+        # push, but the queue might still hold the previous row).
         norm = ((spec_db[:n].astype(np.float32) - min_db) / span)
         np.clip(norm, 0.0, 1.0, out=norm)
         self._row_bytes[:n] = (norm * 255.0).astype(np.uint8)
@@ -689,9 +706,22 @@ class WaterfallGpuWidget(QOpenGLWidget):
         self._write_row = (self._write_row - 1) % self.ROW_COUNT
         self._rows_pushed = min(self._rows_pushed + 1, self.ROW_COUNT)
 
-        # Mark a pending upload — actual glTexSubImage2D happens in
-        # paintGL where the GL context is current.
-        self._row_pending = True
+        # Snapshot the row data + its target position into the queue.
+        # paintGL will upload the entire queue. tobytes() copies, so
+        # subsequent pushes overwriting _row_bytes won't disturb the
+        # snapshot.
+        self._pending_uploads.append(
+            (self._write_row, self._row_bytes[:n].tobytes(), n))
+        # Cap queue depth — if paintGL falls way behind (e.g., during
+        # a long Settings dialog open), don't let the queue grow
+        # unbounded. ROW_COUNT is the natural cap (more pending rows
+        # than total texture rows would just overwrite each other).
+        if len(self._pending_uploads) > self.ROW_COUNT:
+            # Drop oldest rows — they'd be invisible anyway since
+            # they'll be overwritten by newer ones at the same
+            # texture positions on wraparound.
+            del self._pending_uploads[
+                : len(self._pending_uploads) - self.ROW_COUNT]
         self.update()
 
     # ── QOpenGLWidget overrides ────────────────────────────────────
@@ -881,23 +911,26 @@ class WaterfallGpuWidget(QOpenGLWidget):
             self._palette_tex.release(1)
             self._palette_dirty = False
 
-        # ── Upload a pending row ──────────────────────────────────
-        # We bind via QOpenGLTexture (which both binds AND activates
-        # the texture unit) then issue a raw glTexSubImage2D for the
-        # one-row sub-region update. The sub-image upload is more
-        # efficient than QOpenGLTexture.setData for partial updates.
-        if getattr(self, "_row_pending", False) and self._last_row_n > 0:
+        # ── Drain the pending-row queue ───────────────────────────
+        # All rows accumulated since the last paintGL get uploaded
+        # in order. Each row goes to its OWN target texture position
+        # (_pending_uploads carries (row, bytes, n) tuples). Without
+        # this loop, fast push_row callers (waterfall_ready firing
+        # at >60 Hz with paint capped to 60 Hz vsync) would lose
+        # every other row — write pointer would advance but only
+        # the latest data would actually land in the texture.
+        if self._pending_uploads:
             self._tex.bind(0)
-            data = self._row_bytes[:self._last_row_n].tobytes()
-            gl.glTexSubImage2D(
-                GL_TEXTURE_2D, 0,
-                0, self._write_row,           # x, y in texture
-                self._last_row_n, 1,           # width, height (one row)
-                GL_RED, GL_UNSIGNED_BYTE,
-                data,
-            )
+            for write_row, data_bytes, n in self._pending_uploads:
+                gl.glTexSubImage2D(
+                    GL_TEXTURE_2D, 0,
+                    0, write_row,             # x, y in texture
+                    n, 1,                      # width, height
+                    GL_RED, GL_UNSIGNED_BYTE,
+                    data_bytes,
+                )
             self._tex.release(0)
-            self._row_pending = False
+            self._pending_uploads.clear()
 
         # ── Clear ─────────────────────────────────────────────────
         gl.glClearColor(_BG_R, _BG_G, _BG_B, 1.0)
