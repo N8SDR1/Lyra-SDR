@@ -87,7 +87,7 @@ the original one.
 
 The version you're running is shown in three places:
 
-- The window title bar (`Lyra v0.0.2 — Hermes Lite 2+ SDR Transceiver`)
+- The window title bar (`Lyra v{{ version }} — Hermes Lite 2+ SDR Transceiver`)
 - A permanent label on the right side of the status bar
 - **Help → About Lyra…**
 

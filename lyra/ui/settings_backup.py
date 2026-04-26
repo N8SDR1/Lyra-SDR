@@ -27,7 +27,7 @@ The on-disk JSON is human-readable so an operator can inspect / hand-edit
 a snapshot if they need to:
 
   {
-    "lyra_version":   "0.0.2",
+    "lyra_version":   "0.0.3",
     "schema_version": 1,
     "exported_at":    "2026-04-25T14:23:01.123456",
     "settings": {

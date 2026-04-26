@@ -154,10 +154,18 @@ class HelpDialog(QDialog):
         body.setSpacing(6)
 
         # Left column: topic list + path note.
+        # Width bounds: min 240, max 360 — was 220..300 which clipped
+        # longer topic titles like "Noise Reduction (NR)" + the
+        # vertical scrollbar gutter on first paint. 360 leaves comfy
+        # room and `setTextElideMode(ElideRight)` is a safety net so
+        # any future long title gets an ellipsis instead of being
+        # silently chopped at the right edge.
+        from PySide6.QtCore import Qt as _Qt
         left = QVBoxLayout()
         self.topic_list = QListWidget()
-        self.topic_list.setMinimumWidth(220)
-        self.topic_list.setMaximumWidth(300)
+        self.topic_list.setMinimumWidth(240)
+        self.topic_list.setMaximumWidth(360)
+        self.topic_list.setTextElideMode(_Qt.ElideRight)
         self.topic_list.currentItemChanged.connect(self._on_topic_selected)
         left.addWidget(self.topic_list, 1)
 
@@ -279,8 +287,8 @@ class HelpDialog(QDialog):
         """Substitute {{ var }} placeholders with current app metadata.
 
         Supported placeholders:
-          {{ version }}       e.g. "0.0.2"
-          {{ version_full }}  e.g. "0.0.2 — Banner & Telemetry (dev build)"
+          {{ version }}       e.g. "0.0.3"
+          {{ version_full }}  e.g. "0.0.3 — First Tester Build  (2026-04-25)"
           {{ repo_url }}      "https://github.com/N8SDR1/Lyra-SDR"
 
         Unknown placeholders are left untouched so a typo in a

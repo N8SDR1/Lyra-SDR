@@ -1,6 +1,6 @@
 # Lyra — Qt6 SDR Transceiver for Hermes Lite 2 / 2+
 
-**Current version: 0.0.2 — "Banner & Telemetry"**
+**Current version: 0.0.3 — "First Tester Build"** *(2026-04-25)*
 
 Modern PySide6 desktop SDR for Steve Haynal's Hermes Lite 2 and HL2+.
 Native Python HPSDR Protocol 1, TCI v1.9 server, glassy UI with
@@ -24,6 +24,41 @@ The version string above is the single source of truth maintained in
 
 Bumping the version is a one-line edit in `lyra/__init__.py`; every
 display surface follows automatically.
+
+## What's in 0.0.3 — "First Tester Build"
+
+The first packaged installer release. Notable additions since 0.0.2:
+
+- **True dBFS spectrum calibration** — FFT math fixed so 0 dBFS is a
+  full-scale tone; per-rig cal trim slider for known path losses
+- **S-meter cal + Peak/Average response mode** — right-click meter
+  for one-click "Calibrate to S9 (-73 dBm)" + steady time-averaged
+  reading
+- **Lit-Arc meter widget** — segmented arc-bar meter with no needle
+  (less jittery than analog dial), three modes (S / dBm / AGC)
+- **Top-banner toolbar** — large local + UTC clocks, live HL2
+  hardware telemetry (T / V), CPU% (matches Task Manager), GPU%
+  (NVIDIA via NVML or any vendor via Win32 PDH)
+- **Settings backup / import / export + auto-snapshots** — JSON
+  snapshot of every preference taken on each launch, last 10 kept;
+  one-click rollback via File → Snapshots
+- **Layout safeguards** — Lock Panels (Ctrl+L), always-factory
+  Reset Panel Layout, sanity check refusing to save degenerate
+  layouts on close
+- **Click-and-drag spectrum tuning** — pan the panadapter like a
+  Google Maps view
+- **Fine-zoom slider** + click-the-scale-label gestures
+- **Stereo balance slider** with center detentation, working on both
+  PC Soundcard and AK4951 outputs
+- **HL2 Telemetry Probe** dialog under Help — diagnose firmware-
+  variant decode mismatches against your specific HL2
+
+Plus extensive performance work to eliminate spectrum/waterfall
+stutter (slider debounce, hidden meter timer pause, waterfall
+bilinear smoothing, spectrum FPS press/release pattern).
+
+See `docs/help/getting-started.md` for the full guided tour or
+press F1 inside the app for the in-app User Guide.
 
 ## Features so far
 

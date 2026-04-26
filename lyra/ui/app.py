@@ -432,6 +432,26 @@ class MainWindow(QMainWindow):
             "Wired up in the installer-build release.")
         help_menu.addAction(update_act)
 
+        # ☕ Support Lyra — opens the User Guide directly to the
+        # support / donation topic. Single click for operators who
+        # want to chip in via PayPal.
+        support_act = QAction("☕ &Support Lyra…", self)
+        support_act.setToolTip(
+            "Open the User Guide → Support topic. Lyra is free and "
+            "open-source; if it's been useful for your station, "
+            "consider a small donation to keep development going.")
+        support_act.triggered.connect(
+            lambda: self.show_help("support"))
+        help_menu.addAction(support_act)
+
+        license_act = QAction("&License (MIT)…", self)
+        license_act.setToolTip(
+            "Open the User Guide → License topic. MIT — "
+            "permissive, ham-radio-friendly, no warranty.")
+        license_act.triggered.connect(
+            lambda: self.show_help("license"))
+        help_menu.addAction(license_act)
+
         about_act = QAction("&About Lyra…", self)
         about_act.setToolTip(
             "Version, build info, repo link, and license summary.")
