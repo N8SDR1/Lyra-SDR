@@ -167,11 +167,17 @@ class HelpDialog(QDialog):
         # any future long title gets an ellipsis instead of being
         # silently chopped at the right edge.
         from PySide6.QtCore import Qt as _Qt
+        from PySide6.QtGui import QFont as _QFont
         left = QVBoxLayout()
         self.topic_list = QListWidget()
         self.topic_list.setMinimumWidth(240)
         self.topic_list.setMaximumWidth(360)
         self.topic_list.setTextElideMode(_Qt.ElideRight)
+        # Same +1.5 pt bump as the content view — keeps the topic
+        # list and the content visually consistent when read together.
+        list_font = _QFont(self.topic_list.font())
+        list_font.setPointSizeF(list_font.pointSizeF() + 1.5)
+        self.topic_list.setFont(list_font)
         self.topic_list.currentItemChanged.connect(self._on_topic_selected)
         left.addWidget(self.topic_list, 1)
 
@@ -190,6 +196,16 @@ class HelpDialog(QDialog):
         self.view.setOpenExternalLinks(False)
         self.view.setOpenLinks(False)  # we handle every click manually
         self.view.anchorClicked.connect(self._on_anchor)
+        # Bump the rendered-content font slightly for comfortable
+        # reading (operator request). Default Qt size felt cramped
+        # against the dense ham-radio reference material; +1.5 pt
+        # gives noticeable breathing room without breaking layouts.
+        # Applied via the view's font (not stylesheet) so headings,
+        # tables, lists, and code blocks all scale proportionally.
+        from PySide6.QtGui import QFont as _QFont
+        body_font = _QFont(self.view.font())
+        body_font.setPointSizeF(body_font.pointSizeF() + 1.5)
+        self.view.setFont(body_font)
         body.addWidget(self.view, 1)
 
         outer.addLayout(body, 1)
