@@ -1739,6 +1739,8 @@ class MainWindow(QMainWindow):
                 r.set_spectrum_cal_db(float(s.value("visuals/spectrum_cal_db")))
             if s.contains("visuals/smeter_cal_db"):
                 r.set_smeter_cal_db(float(s.value("visuals/smeter_cal_db")))
+            if s.contains("smeter_mode"):
+                r.set_smeter_mode(str(s.value("smeter_mode")))
             if s.contains("visuals/zoom"):
                 r.set_zoom(float(s.value("visuals/zoom")))
             if s.contains("visuals/spectrum_fps"):
@@ -1889,6 +1891,7 @@ class MainWindow(QMainWindow):
         s.setValue("visuals/zoom",              r.zoom)
         s.setValue("visuals/spectrum_cal_db",   r.spectrum_cal_db)
         s.setValue("visuals/smeter_cal_db",     r.smeter_cal_db)
+        s.setValue("smeter_mode",               r.smeter_mode)
         s.setValue("visuals/spectrum_fps",      r.spectrum_fps)
         s.setValue("visuals/waterfall_divider",   r.waterfall_divider)
         s.setValue("visuals/waterfall_multiplier", r.waterfall_multiplier)

@@ -99,6 +99,24 @@ scale. Use it for the final S-meter calibration after spectrum cal
 is set — gets the meter to read S9 = −73 dBm without re-shifting
 the spectrum y-axis you just calibrated.
 
+## Response mode — Peak vs Average
+
+The S-meter has two response modes, switchable via right-click on
+the meter face → **Response mode** submenu:
+
+| Mode | Computation | Best for |
+|---|---|---|
+| **Peak** *(default)* | Instantaneous maximum FFT bin in the RX passband | Quick read of the strongest signal — shows transients (CW dits, FT8 tones, lightning pops) clearly. |
+| **Average** | Mean of all passband bins in linear power (then back to dB), smoothed with a ~5-frame EWMA | Steadier reading more representative of the signal level the AGC sees. Better for setting AF gain or comparing band noise floors over time. |
+
+Why average is computed in **linear power** rather than averaging
+dB values directly: dB averaging would weight dim bins too heavily.
+A strong signal in noise would barely register above the
+band-mean. Linear-power averaging gives a meter reading that
+tracks actual energy in the passband.
+
+The mode persists across launches via QSettings.
+
 ## Moving / resizing the meter
 
 The S-Meter panel is a **dockable widget**. Drag the title bar to

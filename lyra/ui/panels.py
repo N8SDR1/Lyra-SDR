@@ -1795,12 +1795,14 @@ class SMeterPanel(GlassPanel):
         self._latest_smeter_dbm = float(dbfs) + (-19.0)
 
     def _show_smeter_cal_menu(self, pos):
-        """Right-click on the meter face → S-meter calibration menu.
+        """Right-click on the meter face → S-meter calibration +
+        response-mode menu.
 
-        Three useful workflows:
-          - Calibrate to a known reference (S9, S5, -73, -107 dBm)
+        Sections:
+          - Response mode (Peak / Average)
+          - Calibrate to a known reference (S9, S5, S3, S1, custom)
           - Reset cal to zero
-          - Open Settings → Visuals for the slider
+          - Open Settings → Visuals for sliders
 
         The "calibrate to" entries call radio.calibrate_smeter_to_dbm
         with the current reading, so the operator just clicks while
@@ -1812,10 +1814,34 @@ class SMeterPanel(GlassPanel):
         from PySide6.QtWidgets import QMenu, QInputDialog
         menu = QMenu(self)
         cur_dbm = self._latest_smeter_dbm
-        cur_label = f"current: {cur_dbm:+.1f} dBm"
+        cur_label = f"current: {cur_dbm:+.1f} dBm  ({self.radio.smeter_mode})"
 
         info = menu.addAction(cur_label)
         info.setEnabled(False)
+        menu.addSeparator()
+
+        # ── Response mode (Peak / Average) ──────────────────────
+        # Radio buttons inside a submenu so the active mode is
+        # visually obvious.
+        mode_menu = menu.addMenu("Response mode")
+        cur_mode = self.radio.smeter_mode
+        for key, label, tip in (
+            ("peak", "Peak (instant max in passband)",
+             "Shows the strongest single FFT bin inside the RX "
+             "passband. Responsive but jumpy on transients (CW dits, "
+             "FT8 tones, lightning crashes)."),
+            ("avg",  "Average (time-smoothed mean)",
+             "Average of all bins in the passband, smoothed with a "
+             "~5-frame EWMA. Steadier reading; better representation "
+             "of the actual signal level the AGC sees."),
+        ):
+            act = mode_menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(key == cur_mode)
+            act.setToolTip(tip)
+            act.triggered.connect(
+                lambda _checked=False, k=key: self.radio.set_smeter_mode(k))
+
         menu.addSeparator()
         # Quick presets — common references on the IARU S-meter
         # convention (S1 = -121 dBm, 6 dB / S-unit, S9 = -73, +20 = -53).

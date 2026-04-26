@@ -124,6 +124,7 @@ class Radio(QObject):
     # ── Streaming data signals ─────────────────────────────────────────
     spectrum_ready       = Signal(object, float, int)   # db, center_hz, rate
     smeter_level         = Signal(float)
+    smeter_mode_changed  = Signal(str)                  # "peak" | "avg"
     status_message       = Signal(str, int)             # text, timeout_ms
 
     # ── TCI spots (DX cluster markers on the panadapter) ───────────────
@@ -593,6 +594,21 @@ class Radio(QObject):
         # Visuals → "S-meter cal" or by right-click on the meter →
         # "Calibrate to current = …".
         self._smeter_cal_db = 0.0
+
+        # S-meter response mode — "peak" (default, instant max bin in
+        # the passband) or "avg" (time-smoothed mean of passband bins,
+        # in linear-power, then back to dB).
+        # Peak is responsive but jumpy on transients (CW dits, FT8
+        # tones, lightning crashes). Average is steadier and more
+        # representative of the actual signal level the AGC sees —
+        # useful for setting AF gain or comparing band noise levels.
+        # Operator switches via right-click on the meter face.
+        self._smeter_mode = "peak"
+        # Time-smoothing for average mode — exponential moving average
+        # of recent linear-power readings. Tau ~0.5 s feels natural
+        # (long enough to smooth out jitter, short enough to track
+        # band changes within a fade).
+        self._smeter_avg_lin = 0.0    # linear power running average
         self._sample_ring: deque = deque(maxlen=self._fft_size * 4)
         self._ring_lock = threading.Lock()
 
@@ -1887,6 +1903,28 @@ class Radio(QObject):
         self._smeter_cal_db = v
         self.smeter_cal_db_changed.emit(v)
 
+    # ── S-meter response mode (peak vs average) ─────────────────────
+    SMETER_MODES = ("peak", "avg")
+
+    @property
+    def smeter_mode(self) -> str:
+        return self._smeter_mode
+
+    def set_smeter_mode(self, mode: str):
+        """Switch the S-meter between 'peak' (instant max bin in
+        passband — jumpy, responsive) and 'avg' (time-smoothed mean
+        of passband bins in linear power — steady, AGC-friendly)."""
+        m = mode if mode in self.SMETER_MODES else "peak"
+        if m == self._smeter_mode:
+            return
+        # Reset the linear-power average when switching INTO avg mode
+        # so the meter doesn't briefly show a stale value from last
+        # time avg mode was active.
+        if m == "avg":
+            self._smeter_avg_lin = 0.0
+        self._smeter_mode = m
+        self.smeter_mode_changed.emit(m)
+
     def calibrate_smeter_to_dbm(self, target_dbm: float,
                                  current_meter_dbm: float):
         """One-click S-meter calibration: 'set the meter to read
@@ -2559,13 +2597,32 @@ class Radio(QObject):
         lo = max(0, center_bin - half_bw_bins)
         hi = min(self._fft_size, center_bin + half_bw_bins)
         if hi > lo:
-            # smeter_level is the raw FFT peak inside the passband
-            # plus the operator's S-meter cal trim. Spectrum cal is
-            # already baked into spec_db at FFT time; smeter cal is
-            # additive on top so the operator can shift the meter
-            # without touching the spectrum scale.
-            peak_db = float(np.max(spec_db[lo:hi])) + self._smeter_cal_db
-            self.smeter_level.emit(peak_db)
+            # Compute both metrics; emit the one matching current mode.
+            #
+            # Spectrum cal is already baked into spec_db at FFT time;
+            # smeter cal is added below so the operator can shift the
+            # meter without touching the spectrum scale.
+            band = spec_db[lo:hi]
+            if self._smeter_mode == "avg":
+                # Average in LINEAR power (convert each bin from dB,
+                # mean, back to dB). Pure dB averaging would weight
+                # the dim bins too heavily — a strong signal in noise
+                # would sit barely above the band-mean.
+                lin = 10.0 ** (band / 10.0)        # dB → linear power
+                avg_lin = float(np.mean(lin))
+                # EWMA smoothing — alpha = 0.20 gives ~5-frame time
+                # constant (~0.17 s at 30 fps, ~1 s at 5 fps; feels
+                # natural at any FPS the operator picks).
+                if self._smeter_avg_lin <= 0.0:
+                    self._smeter_avg_lin = avg_lin
+                else:
+                    self._smeter_avg_lin = (0.80 * self._smeter_avg_lin
+                                            + 0.20 * avg_lin)
+                level_db = (10.0 * float(np.log10(max(self._smeter_avg_lin, 1e-20)))
+                            + self._smeter_cal_db)
+            else:  # "peak" — instantaneous max bin in passband
+                level_db = float(np.max(band)) + self._smeter_cal_db
+            self.smeter_level.emit(level_db)
 
         # Noise-floor estimate — 20th percentile rejects the upper 80%
         # of bins (which likely contain signals), leaving the ambient
