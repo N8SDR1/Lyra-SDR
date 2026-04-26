@@ -26,19 +26,29 @@ in vec2 v_texcoord;     // x: 0..1 left→right, y: 0..1 TOP→bottom
 uniform sampler2D waterfallTex;
 uniform float uRowOffset;   // physical-row index of NEWEST data
 uniform float uRowCount;    // total rows in the texture
+uniform float uTexUMax;     // valid u range (= n_used / texture_width).
+                            // Texture is allocated MAX_BINS wide for
+                            // headroom but only the first n columns
+                            // ever get uploaded. Without this scale,
+                            // the right portion of the screen would
+                            // sample uninitialized texture territory
+                            // and render black.
 
 out vec4 fragColor;
 
 void main()
 {
+    // Scale widget-x (0=left edge, 1=right edge) to the actual data
+    // range in the texture. With uTexUMax = 0.5 (half the texture is
+    // populated), screen x=1 maps to texture u=0.5 — fills the whole
+    // screen with the data we have.
+    float u = v_texcoord.x * uTexUMax;
     // Map widget-y (0=top, 1=bottom) to physical texture row,
-    // accounting for the wrap. v_texcoord.y * uRowCount gives the
-    // logical "rows from newest" offset; adding uRowOffset and
-    // taking mod uRowCount gives the physical row.
+    // accounting for the wrap.
     float row = mod(uRowOffset + v_texcoord.y * uRowCount, uRowCount);
     // Sample at the centre of the texel to avoid bleed between rows
     // when GL_LINEAR filtering is on.
-    vec2 uv = vec2(v_texcoord.x, (row + 0.5) / uRowCount);
+    vec2 uv = vec2(u, (row + 0.5) / uRowCount);
     float v = texture(waterfallTex, uv).r;
     // Phase A.4: grayscale output. Phase B replaces this with a
     // palette LUT lookup (texture(uPaletteTex, vec2(v, 0.5)).rgb).

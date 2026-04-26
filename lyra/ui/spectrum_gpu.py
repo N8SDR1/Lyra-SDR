@@ -354,25 +354,26 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._vbo_trace.release()
 
     def resizeGL(self, w: int, h: int) -> None:
-        """Called by Qt when the widget is resized.
+        """Hook for resize-time setup. Phase A trace path uses NDC
+        throughout, so no per-resize state needs updating here.
+        Viewport is set in paintGL each frame (see _set_viewport)
+        because Qt 6 / PySide6 6.11 sometimes resets the viewport
+        between resizeGL and paintGL, making a viewport set here
+        unreliable."""
+        pass
 
-        High-DPI gotcha: on Windows display scaling > 100% (which is
-        the default on most modern laptops + many desktops), the
-        QOpenGLWidget framebuffer is sized in PHYSICAL pixels, not
-        the LOGICAL (w, h) values Qt passes here. Qt is supposed to
-        set glViewport for us, but in PySide6 6.11 it sometimes
-        leaves the viewport at the logical-pixel size — leaving the
-        bottom-right portion of the framebuffer (and therefore the
-        on-screen widget) un-rendered and showing background black.
-        We set the viewport ourselves using devicePixelRatio so the
-        quad and the trace fill the entire visible widget regardless
-        of OS scaling.
+    def _set_viewport(self) -> None:
+        """Set glViewport to match the current widget size in
+        framebuffer pixels. Called from paintGL on every frame so it
+        always matches the current widget size, even after Qt has
+        re-set the viewport to something else under the hood. The
+        per-frame cost is one int multiply + one GL call — negligible.
         """
         if self._gl is None:
             return
         dpr = self.devicePixelRatioF()
-        fb_w = max(1, int(round(w * dpr)))
-        fb_h = max(1, int(round(h * dpr)))
+        fb_w = max(1, int(round(self.width() * dpr)))
+        fb_h = max(1, int(round(self.height() * dpr)))
         self._gl.glViewport(0, 0, fb_w, fb_h)
 
     def paintGL(self) -> None:
@@ -398,6 +399,12 @@ class SpectrumGpuWidget(QOpenGLWidget):
         """
         if self._gl is None or self._prog_trace is None:
             return
+
+        # Set viewport to match current widget size every frame —
+        # Qt 6 / PySide6 6.11 sometimes resets viewport between
+        # resizeGL and paintGL, making a viewport set in resizeGL
+        # unreliable. Per-frame cost is negligible.
+        self._set_viewport()
 
         # ── Phase A test data ─────────────────────────────────────
         # Synthetic moving sine wave runs until set_spectrum is
@@ -513,6 +520,7 @@ class WaterfallGpuWidget(QOpenGLWidget):
         self._loc_row_offset: int = -1
         self._loc_row_count: int = -1
         self._loc_sampler: int = -1
+        self._loc_tex_u_max: int = -1
 
         # Circular buffer write state. _write_row points at the row
         # we MOST RECENTLY wrote (the visual top of the waterfall).
@@ -618,6 +626,7 @@ class WaterfallGpuWidget(QOpenGLWidget):
         self._loc_row_offset  = prog.uniformLocation("uRowOffset")
         self._loc_row_count   = prog.uniformLocation("uRowCount")
         self._loc_sampler     = prog.uniformLocation("waterfallTex")
+        self._loc_tex_u_max   = prog.uniformLocation("uTexUMax")
 
         # ── Fullscreen quad VBO ───────────────────────────────────
         # Interleaved: vec2 position + vec2 texcoord = 4 floats per
@@ -689,23 +698,28 @@ class WaterfallGpuWidget(QOpenGLWidget):
         self._row_pending = False
 
     def resizeGL(self, w: int, h: int) -> None:
-        # Same high-DPI viewport handling as SpectrumGpuWidget — see
-        # that class's resizeGL docstring for the full explanation.
-        # Short version: PySide6 6.11 sometimes leaves the viewport
-        # at logical-pixel size after a resize on display-scaling-
-        # enabled systems, leading to the bottom-right of the
-        # framebuffer (= visible widget area) staying un-rendered.
+        # Viewport is set in paintGL (see _set_viewport) — Qt 6 /
+        # PySide6 6.11 resets the viewport between resizeGL and
+        # paintGL, so a viewport set here would be discarded.
+        pass
+
+    def _set_viewport(self) -> None:
+        """Set glViewport to current widget framebuffer size — must
+        be called from paintGL each frame because Qt resets viewport
+        between resizeGL and paintGL."""
         if self._gl is None:
             return
         dpr = self.devicePixelRatioF()
-        fb_w = max(1, int(round(w * dpr)))
-        fb_h = max(1, int(round(h * dpr)))
+        fb_w = max(1, int(round(self.width() * dpr)))
+        fb_h = max(1, int(round(self.height() * dpr)))
         self._gl.glViewport(0, 0, fb_w, fb_h)
 
     def paintGL(self) -> None:
         if self._gl is None or self._prog is None or self._tex is None:
             return
         gl = self._gl
+        # Set viewport every frame — see _set_viewport docstring.
+        self._set_viewport()
 
         # ── Upload a pending row ──────────────────────────────────
         # We bind via QOpenGLTexture (which both binds AND activates
@@ -751,6 +765,18 @@ class WaterfallGpuWidget(QOpenGLWidget):
         if self._loc_row_count >= 0:
             self._prog.setUniformValue1f(
                 self._loc_row_count, float(self.ROW_COUNT))
+        # Constrain texture sampling to the populated portion of the
+        # texture. The texture is allocated MAX_BINS columns wide for
+        # headroom, but only the first _last_row_n columns get
+        # uploaded. Without this scale the right portion of the
+        # screen would sample uninitialized texture territory and
+        # render black — was the cause of the "rendering only fills
+        # part of the window" bug we hit during Phase A.4.
+        if self._loc_tex_u_max >= 0 and self._last_row_n > 0:
+            self._prog.setUniformValue1f(
+                self._loc_tex_u_max,
+                float(self._last_row_n) / float(MAX_BINS),
+            )
         self._vao.bind()
         gl.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
         self._vao.release()

@@ -7,6 +7,13 @@ build/lyra/
 build/installer/
 build/_pyi/
 
+# ── Diagnostic dumps from scripts/diag_*.py ─────────────────────────
+# One-off debugging artifacts; keep the diag scripts themselves but
+# not the PNGs / CSVs / etc they spit out.
+scripts/diag_*.png
+scripts/diag_*.csv
+scripts/diag_*.txt
+
 # ── Python ──────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
