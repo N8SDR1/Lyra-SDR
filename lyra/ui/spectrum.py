@@ -1,11 +1,22 @@
 """Spectrum + waterfall widgets. Custom-painted, no matplotlib."""
 from __future__ import annotations
 
+import time as _time
+
 import numpy as np
 from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, Signal
 from PySide6.QtGui import (
     QColor, QImage, QLinearGradient, QPainter, QPen, QPolygonF,
 )
+
+# Paint-stage perf instrumentation. Same module that times the FFT
+# loop in radio.py — sharing the registry means one toggle in
+# View → Show DSP Performance instruments BOTH the compute path AND
+# the render path. Shipping with paint timers because the Phase 1a
+# data showed render is 93% of tick time, so this is where the next
+# round of optimization will live.
+from lyra.dsp import perf as _perf_mod
+from lyra.dsp.perf import get_or_create as _perf_get
 
 # Graphics backend base class (QWidget or QOpenGLWidget) — selected at
 # import time by gfx.py from the user's Visuals preference. Uses the
@@ -662,6 +673,16 @@ class SpectrumWidget(_PaintedWidget):
         self.update()
 
     def paintEvent(self, _event):
+        # Paint-stage perf timing — Phase 1a.3 attack on the 93%-of-
+        # tick render bottleneck. Outer "p_spec" times the whole
+        # paint; inner "p_trace" and "p_spots" times the two stages
+        # most likely to dominate (per-pixel drawLine on a wide trace,
+        # and the spot collision packer + per-spot drawRoundedRect).
+        # When perf disabled, all branches short-circuit on the same
+        # module flag radio.py uses.
+        _perf = _perf_mod.enabled
+        _p_spec_t0 = _time.perf_counter() if _perf else 0.0
+
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), BG)
@@ -814,6 +835,9 @@ class SpectrumWidget(_PaintedWidget):
             p.drawText(self.rect(), Qt.AlignCenter,
                        "Waiting for stream…\n\n"
                        "Click ▶ Start on the toolbar")
+            if _perf:
+                _perf_get("p_spec").observe_ms(
+                    (_time.perf_counter() - _p_spec_t0) * 1000.0)
             return
 
         span_db = self._max_db - self._min_db
@@ -876,6 +900,14 @@ class SpectrumWidget(_PaintedWidget):
         grad.setColorAt(0.0, grad_top)
         grad.setColorAt(1.0, grad_bot)
 
+        # ── Paint timer: trace fill + line ───────────────────────
+        # Likely-dominant cost: building a w-vertex QPolygonF in a
+        # Python loop, then a w-1 loop of QPainter.drawLine calls.
+        # On a 1500-px-wide widget that's ~3000 Python→C++ calls per
+        # paint. Prime candidate for batching via drawPolyline (single
+        # call) or moving to QPainterPath, both of which we'll try
+        # once we see the numbers.
+        if _perf: _trace_t0 = _time.perf_counter()
         from PySide6.QtGui import QPolygonF
         from PySide6.QtCore import QPointF
         poly = QPolygonF()
@@ -891,6 +923,9 @@ class SpectrumWidget(_PaintedWidget):
         p.setPen(QPen(trace_color, 1.2))
         for i in range(w - 1):
             p.drawLine(i, int(ys[i]), i + 1, int(ys[i + 1]))
+        if _perf:
+            _perf_get("p_trace").observe_ms(
+                (_time.perf_counter() - _trace_t0) * 1000.0)
 
         # Peak markers — in-passband peak-hold trace (amber, brighter
         # than the fill gradient), clipped to pixel columns that fall
@@ -1082,6 +1117,11 @@ class SpectrumWidget(_PaintedWidget):
         #   D. Age-fade — linear from 100% alpha at ts=now to 30% alpha
         #      at ts=now-lifetime. Oldest spots visually recede so fresh
         #      ones pop. 30% floor so near-expiry spots remain legible.
+        # ── Paint timer: spots ───────────────────────────────────
+        # Sub-stage cost: collision packer (sort + greedy row assign)
+        # + per-spot drawRoundedRect + drawText + tick line. On a busy
+        # FT8 spectrum with 20+ visible spots this is non-trivial.
+        if _perf: _spots_t0 = _time.perf_counter()
         if self._spots and self._span_hz > 0:
             import time
             from PySide6.QtCore import QRectF
@@ -1201,6 +1241,11 @@ class SpectrumWidget(_PaintedWidget):
                                        max(80, border_alpha)), 1)
                 p.setPen(tick_pen)
                 p.drawLine(nx, int(by + box_h), nx, h - 18)
+        if _perf:
+            _perf_get("p_spots").observe_ms(
+                (_time.perf_counter() - _spots_t0) * 1000.0)
+            _perf_get("p_spec").observe_ms(
+                (_time.perf_counter() - _p_spec_t0) * 1000.0)
 
 
 class WaterfallWidget(_PaintedWidget):
@@ -1443,6 +1488,15 @@ class WaterfallWidget(_PaintedWidget):
         self.update()
 
     def paintEvent(self, _event):
+        # Paint-stage perf timing — same flag as SpectrumWidget. The
+        # waterfall is the second of the two synchronously-emitted
+        # signals from _tick_fft (spectrum_ready THEN waterfall_ready),
+        # so its paint cost rolls into the "emit" stage too. Need the
+        # split to know whether the bottleneck is the spectrum trace
+        # or the waterfall image blit.
+        _perf = _perf_mod.enabled
+        _p_water_t0 = _time.perf_counter() if _perf else 0.0
+
         p = QPainter(self)
         # Smooth pixmap transform — without this, drawImage scales the
         # waterfall bitmap with nearest-neighbor sampling (pixelated /
@@ -1462,6 +1516,9 @@ class WaterfallWidget(_PaintedWidget):
             p.drawText(self.rect(), Qt.AlignCenter,
                        "Waiting for stream…\n\n"
                        "Click ▶ Start on the toolbar")
+            if _perf:
+                _perf_get("p_water").observe_ms(
+                    (_time.perf_counter() - _p_water_t0) * 1000.0)
             return
         # Build a QImage view over the numpy buffer (no copy). The QImage
         # must reference bytes that outlive the paint call — self._data does.
@@ -1509,3 +1566,6 @@ class WaterfallWidget(_PaintedWidget):
                 p.drawLine(nx + half_px, 0, nx + half_px, h)
                 p.setPen(QPen(line, 1, Qt.SolidLine))
                 p.drawLine(nx, 0, nx, h)
+        if _perf:
+            _perf_get("p_water").observe_ms(
+                (_time.perf_counter() - _p_water_t0) * 1000.0)

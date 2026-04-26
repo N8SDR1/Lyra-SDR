@@ -207,3 +207,31 @@ def reset_all() -> None:
     before/after measurements."""
     for t in _REGISTRY.values():
         t.reset()
+
+
+# ── Process-wide enable flag ───────────────────────────────────────
+# Used by call sites in radio.py AND in ui/spectrum.py (paint timers)
+# so a single toggle in the View menu instruments BOTH the FFT loop
+# and the panadapter paint chain. A direct module attribute is cheaper
+# to read than a function call — important for hot paths like
+# paintEvent which can fire 30+ times per second per widget.
+
+enabled: bool = False
+
+
+def set_enabled(on: bool) -> None:
+    """Flip the process-wide instrumentation flag. Resets all rolling
+    timers on the off→on transition so newly-displayed averages aren't
+    contaminated by stale data from a previous enabled period."""
+    global enabled
+    if bool(on) == enabled:
+        return
+    if on:
+        reset_all()
+    enabled = bool(on)
+
+
+def is_enabled() -> bool:
+    """Function-call form of `enabled` for callers who don't want to
+    import the module attribute directly."""
+    return enabled

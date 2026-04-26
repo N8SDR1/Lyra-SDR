@@ -661,9 +661,15 @@ class Radio(QObject):
         # the perf_stats_changed emission to ~1 Hz regardless of FFT
         # rate so the UI doesn't get spammed.
         from PySide6.QtCore import QSettings as _QS
+        from lyra.dsp import perf as _perf_mod
         from lyra.dsp.perf import get_or_create as _perf_get
+        # Process-wide flag in lyra.dsp.perf is the canonical source —
+        # paint-stage timers in spectrum.py read the same flag, so one
+        # View menu toggle instruments BOTH the FFT loop here AND the
+        # panadapter paint chain there.
         self._perf_enabled = (str(_QS("N8SDR", "Lyra").value(
             "perf/enabled", "false")).lower() == "true")
+        _perf_mod.set_enabled(self._perf_enabled)
         # Stage timers — Phase 1a.2 fine-grained breakdown. The "fft"
         # and "tick" timers are kept first so the existing UI code
         # works unchanged; the per-stage timers add detail for the
@@ -2731,9 +2737,11 @@ class Radio(QObject):
         from PySide6.QtCore import QSettings as _QS
         _QS("N8SDR", "Lyra").setValue(
             "perf/enabled", "true" if self._perf_enabled else "false")
-        if self._perf_enabled:
-            from lyra.dsp.perf import reset_all as _reset
-            _reset()
+        # Flip the process-wide flag so paint timers in spectrum.py
+        # come on/off in lockstep with FFT timers here. set_enabled
+        # handles the reset_all() on off→on transition.
+        from lyra.dsp import perf as _perf_mod
+        _perf_mod.set_enabled(self._perf_enabled)
 
     # ── FFT tick → spectrum + S-meter signals ─────────────────────────
     def _tick_fft(self):
@@ -2749,7 +2757,10 @@ class Radio(QObject):
         # guessing where the bottleneck lives — the whole point of
         # Phase 1a is to MEASURE before optimizing.
         import time as _t
-        _perf = self._perf_enabled
+        # Read the canonical module flag (paint timers in spectrum.py
+        # check the same flag, so one toggle gates everything).
+        from lyra.dsp import perf as _perf_mod
+        _perf = _perf_mod.enabled
         _tick_t0 = _t.perf_counter() if _perf else 0.0
 
         # ── Stage 1: ring fetch ──────────────────────────────────

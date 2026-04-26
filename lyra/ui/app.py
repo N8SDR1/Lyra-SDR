@@ -1759,13 +1759,27 @@ class MainWindow(QMainWindow):
             tick  = _ms("tick")
             rate  = stats.get("tick", {}).get("rate_hz", 0.0)
 
+            # Phase 1a.3 paint stages. p_spec / p_water are the two
+            # widget paintEvents synchronously triggered by the
+            # spectrum_ready / waterfall_ready emits — they should
+            # together account for most of the "emit" stage time.
+            # p_trace and p_spots are the two most likely culprits
+            # within the spectrum paint.
+            p_spec  = _ms("p_spec")
+            p_water = _ms("p_water")
+            p_trace = _ms("p_trace")
+            p_spots = _ms("p_spots")
+
             # Inline format — keep stage names short so the line
             # doesn't push the version label off-screen on narrow
             # status bars.
             self._perf_label.setText(
                 f"ring {ring:4.2f} · fft {fft:4.2f} · db {db:4.2f} · "
                 f"smt {smt:4.2f} · nf {nf:4.2f} · scale {scale:4.2f} · "
-                f"emit {emit:4.2f} ms · tick {tick:5.2f} · {rate:4.1f} Hz"
+                f"emit {emit:4.2f} ms · tick {tick:5.2f} | "
+                f"spec {p_spec:4.2f} (trace {p_trace:4.2f} spots "
+                f"{p_spots:4.2f}) · water {p_water:4.2f} ms · "
+                f"{rate:4.1f} Hz"
             )
 
             # Tooltip: tabular form so a screenshot can be pasted into
@@ -1781,6 +1795,7 @@ class MainWindow(QMainWindow):
             tip_lines = [
                 "DSP performance breakdown (averages over last ~2 sec)",
                 "",
+                "  ── FFT loop (radio.py _tick_fft) ──",
                 _fmt("ring",  "ring"),
                 _fmt("fft",   "fft"),
                 _fmt("db",    "db"),
@@ -1788,6 +1803,12 @@ class MainWindow(QMainWindow):
                 _fmt("nf",    "nf"),
                 _fmt("scale", "scale"),
                 _fmt("emit",  "emit"),
+                "",
+                "  ── Paint stages (sync inside emit) ──",
+                _fmt("p_spec",  "spec"),
+                _fmt("p_trace", " trace"),
+                _fmt("p_spots", " spots"),
+                _fmt("p_water", "water"),
                 "  " + "─" * 50,
                 _fmt("tick",  "tick"),
                 "",
@@ -1836,11 +1857,12 @@ class MainWindow(QMainWindow):
             "─" * 60,
             f"  {'stage':6s}  {'avg':>7s}  {'min':>7s}  {'max':>7s}    ms",
         ]
-        order = ("ring", "fft", "db", "smt", "nf", "scale", "emit")
+        order = ("ring", "fft", "db", "smt", "nf", "scale", "emit",
+                 "p_spec", "p_trace", "p_spots", "p_water")
         for k in order:
             d = snap.get(k, {})
             lines.append(
-                f"  {k:6s}  {d.get('avg_ms', 0.0):7.2f}  "
+                f"  {k:7s}  {d.get('avg_ms', 0.0):7.2f}  "
                 f"{d.get('min_ms', 0.0):7.2f}  "
                 f"{d.get('max_ms', 0.0):7.2f}    ms")
         lines.append("  " + "─" * 35)
