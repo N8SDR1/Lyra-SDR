@@ -2231,23 +2231,16 @@ class SpectrumPanel(GlassPanel):
         self.widget.set_spectrum(spec_db, center_hz, rate)
 
     def _on_click(self, freq_hz):
-        # CW tuning correction: the CW passband filter sits at the
-        # CW-pitch offset from the carrier (see radio._compute_passband
-        # — CWU's passband centers at +pitch, CWL's at -pitch). If
-        # we set the carrier exactly to the click frequency, the CW
-        # signal would land at DC where the filter doesn't reach, and
-        # the operator would hear silence. Compensating here makes the
-        # click "land on the signal" as the operator expects:
-        #   CWU click → carrier = click_freq - pitch  (so signal sits
-        #               at +pitch baseband, inside the passband)
-        #   CWL click → carrier = click_freq + pitch
-        # Other modes set the carrier exactly to the click freq.
-        # Pitch is operator-adjustable via Settings → DSP → CW pitch.
-        mode = self.radio.mode
-        if mode == "CWU":
-            freq_hz = int(freq_hz) - self.radio.cw_pitch_hz
-        elif mode == "CWL":
-            freq_hz = int(freq_hz) + self.radio.cw_pitch_hz
+        # Click-to-tune: set carrier exactly to the click frequency
+        # for ALL modes. Earlier versions applied a CW pitch offset
+        # here (because the CW filter used to sit at ±pitch from
+        # carrier, so the signal had to land at the pitch to be
+        # inside the filter). The 2026-04-27 CW redesign moved the
+        # filter ON the carrier with the BFO inside CWDemod producing
+        # the audio pitch tone, so the click correction is no longer
+        # needed — the signal lands at the carrier (DC), inside the
+        # filter, the BFO mixes it up to the operator's chosen
+        # audible pitch tone.
         self.radio.set_freq_hz(int(freq_hz))
 
     def _on_spot_clicked(self, freq_hz):
@@ -2608,23 +2601,16 @@ class WaterfallPanel(GlassPanel):
         self.widget.push_row(spec_db)
 
     def _on_click(self, freq_hz):
-        # CW tuning correction: the CW passband filter sits at the
-        # CW-pitch offset from the carrier (see radio._compute_passband
-        # — CWU's passband centers at +pitch, CWL's at -pitch). If
-        # we set the carrier exactly to the click frequency, the CW
-        # signal would land at DC where the filter doesn't reach, and
-        # the operator would hear silence. Compensating here makes the
-        # click "land on the signal" as the operator expects:
-        #   CWU click → carrier = click_freq - pitch  (so signal sits
-        #               at +pitch baseband, inside the passband)
-        #   CWL click → carrier = click_freq + pitch
-        # Other modes set the carrier exactly to the click freq.
-        # Pitch is operator-adjustable via Settings → DSP → CW pitch.
-        mode = self.radio.mode
-        if mode == "CWU":
-            freq_hz = int(freq_hz) - self.radio.cw_pitch_hz
-        elif mode == "CWL":
-            freq_hz = int(freq_hz) + self.radio.cw_pitch_hz
+        # Click-to-tune: set carrier exactly to the click frequency
+        # for ALL modes. Earlier versions applied a CW pitch offset
+        # here (because the CW filter used to sit at ±pitch from
+        # carrier, so the signal had to land at the pitch to be
+        # inside the filter). The 2026-04-27 CW redesign moved the
+        # filter ON the carrier with the BFO inside CWDemod producing
+        # the audio pitch tone, so the click correction is no longer
+        # needed — the signal lands at the carrier (DC), inside the
+        # filter, the BFO mixes it up to the operator's chosen
+        # audible pitch tone.
         self.radio.set_freq_hz(int(freq_hz))
 
     def _on_right_click(self, freq_hz, shift, global_pos):

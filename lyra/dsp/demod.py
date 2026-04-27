@@ -57,21 +57,78 @@ class SSBDemod:
         return (np.real(out) * 2.0).astype(np.float32)
 
 
-class CWDemod(SSBDemod):
-    """CW — narrow SSB centered on a CW pitch tone.
+class CWDemod:
+    """CW — narrow filter at carrier (DC), then BFO mix to audio pitch.
 
-    CWU uses USB-side filter; CWL uses LSB-side.
-    Default 650 Hz pitch with 250 Hz total bandwidth.
+    Architecture (rewritten 2026-04-27 per operator request):
+
+      Old design ("filter at pitch"): the filter passband sat at
+      ±cw_pitch from carrier, so the operator had to tune so the CW
+      signal landed at the pitch (inside the filter). Click-to-tune
+      then needed a pitch correction. The filter visibly sat AWAY
+      from the marker on the panadapter — confusing.
+
+      New design ("filter at carrier"): a narrow LPF/BPF centered on
+      DC (symmetric around carrier in baseband) passes the CW signal
+      when the operator tunes exactly to it (signal at DC). A simple
+      BFO multiplication then mixes the result up to the audio pitch
+      so the operator hears a tone. This matches operator intuition:
+      filter sits ON the marker, pitch is purely an audio knob.
+
+      Side benefit: CWU vs CWL distinction collapses for narrow CW
+      filters (the signal IS at DC either way). We keep the
+      `sideband` parameter only to control BFO mix direction (USB =
+      positive pitch tone, LSB = also positive — convention is to
+      hear the same tone regardless, so both currently use +pitch
+      and the parameter is reserved for future use).
+
+    Default: 650 Hz pitch, 250 Hz total bandwidth. Pitch is
+    operator-adjustable via Settings → DSP → CW pitch.
     """
 
     def __init__(self, rate: int, pitch_hz: float = 650.0,
                  bw_hz: float = 250.0, taps: int = 513,
                  sideband: str = "U"):
-        half = bw_hz / 2.0
-        mode = "USB" if sideband == "U" else "LSB"
-        super().__init__(rate, mode,
-                         low_hz=pitch_hz - half, high_hz=pitch_hz + half,
-                         taps=taps)
+        if not _HAVE_SCIPY:
+            raise RuntimeError("scipy required")
+        self.rate = rate
+        self.pitch_hz = float(pitch_hz)
+        self.sideband = sideband
+        # Narrow lowpass filter, complex-valued LPF at bw/2. Applied
+        # to the complex IQ — passes ±bw/2 around DC, blocks the rest.
+        cutoff = max(50.0, bw_hz / 2.0)
+        self.lpf = firwin(taps, cutoff, fs=rate, window="hann").astype(np.float64)
+        self.state = np.zeros(taps - 1, dtype=np.complex64)
+        # BFO phase counter. Maintained as a sample index so phase
+        # stays continuous across process() calls of varying length —
+        # avoids the click/pop you'd get if every chunk started at
+        # phase zero.
+        self._bfo_index = 0
+
+    def set_pitch_hz(self, pitch_hz: float) -> None:
+        """Update the BFO pitch live. No filter rebuild needed —
+        the filter sits at DC, only the BFO mix frequency changes."""
+        self.pitch_hz = float(pitch_hz)
+
+    def process(self, iq: np.ndarray) -> np.ndarray:
+        if iq.size == 0:
+            return np.zeros(0, dtype=np.float32)
+        # 1. Narrow filter centered at DC
+        filt, self.state = lfilter(self.lpf, 1.0, iq, zi=self.state)
+        # 2. BFO: mix up to the pitch tone. Continuous phase via
+        #    monotonic sample index modulo (rate / pitch) cycle.
+        n = filt.size
+        idx = np.arange(self._bfo_index, self._bfo_index + n)
+        self._bfo_index += n
+        # Phase wrap to keep float precision over long sessions —
+        # at 48 kHz we'd hit float-precision issues after ~10 min.
+        if self._bfo_index > self.rate * 600:
+            self._bfo_index %= self.rate
+        phase = 2.0 * np.pi * self.pitch_hz * idx / self.rate
+        bfo = np.exp(1j * phase)
+        # 3. Output: real part of (filtered IQ × BFO). Real part of
+        #    the mix gives the cosine-quadrature audio tone.
+        return np.real(filt * bfo).astype(np.float32)
 
 
 class DSBDemod:

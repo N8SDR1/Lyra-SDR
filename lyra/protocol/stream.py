@@ -321,9 +321,13 @@ class HL2Stream:
         import numpy as np
         a = np.asarray(audio, dtype=np.float32)
         # Determine upsample factor from the current stream rate.
-        # _rate is set by the radio's set_rate path during construction
-        # and on every rate change. Defaults to 48000 if uninitialized.
-        rate = getattr(self, "_rate", 48000)
+        # NB: the stream's rate field is `sample_rate`, NOT `_rate` —
+        # an earlier version of this fix read the wrong attribute and
+        # silently got factor=1 (no upsample) at every IQ rate, so the
+        # AK4951 chopping at >48 k IQ persisted despite the resample
+        # call appearing in the code path. set_sample_rate() updates
+        # self.sample_rate; reading the right attribute fixes it.
+        rate = getattr(self, "sample_rate", 48000)
         factor = max(1, rate // 48000)
         if factor > 1:
             from scipy.signal import resample_poly

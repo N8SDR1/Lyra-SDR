@@ -850,23 +850,30 @@ class Radio(QObject):
         Conventions:
           USB / DIGU         : center .. center + BW
           LSB / DIGL         : center - BW .. center
-          CWU                : narrow window around center + CW pitch
-          CWL                : narrow window around center - CW pitch
+          CWU / CWL          : center - BW/2 .. center + BW/2
+                                (filter is ON the marker — operator
+                                tunes the signal to carrier; CWDemod's
+                                internal BFO mixes filtered baseband
+                                up to the audio pitch)
           AM / DSB / FM      : center - BW/2 .. center + BW/2
+
+        CW redesign 2026-04-27: the CW filter is now centered on DC
+        (carrier), not offset to ±cw_pitch as before. The pitch
+        becomes a pure audio knob (BFO frequency) instead of also
+        controlling filter position. This makes click-to-tune work
+        without a pitch correction in the panel handler, and the
+        visual passband sits over the signal the operator wants to
+        hear instead of beside it.
         """
         mode = self._mode
         bw = int(self._rx_bw_by_mode.get(mode, 2400))
-        cw_pitch = int(self._cw_pitch_hz)
         if mode in ("USB", "DIGU"):
             return (0, bw)
         if mode in ("LSB", "DIGL"):
             return (-bw, 0)
-        if mode == "CWU":
+        if mode in ("CWU", "CWL"):
             half = bw // 2
-            return (cw_pitch - half, cw_pitch + half)
-        if mode == "CWL":
-            half = bw // 2
-            return (-cw_pitch - half, -cw_pitch + half)
+            return (-half, half)
         if mode in ("AM", "DSB", "FM"):
             half = bw // 2
             return (-half, half)
@@ -2391,9 +2398,27 @@ class Radio(QObject):
             del self._audio_buf[:block]
             try:
                 if self._notch_enabled:
+                    n_applied = 0
                     for n in self._notches:
-                        if n.active:
+                        if n.active and n.filter is not None:
                             chunk = n.filter.process(chunk)
+                            n_applied += 1
+                    # One-shot diagnostic: print on the first chunk of
+                    # each "notches active" period so the operator can
+                    # confirm the DSP is firing. Suppressed if no
+                    # notches are actually active despite the master
+                    # NF flag being on (which would be the silent-
+                    # failure case the operator's been reporting).
+                    if not getattr(self, "_notch_diag_printed", False):
+                        print(f"[notch DSP] chunk {block} samples, "
+                              f"{n_applied} of {len(self._notches)} "
+                              f"notch(es) applied "
+                              f"(NF master={self._notch_enabled})")
+                        self._notch_diag_printed = True
+                else:
+                    # Reset diag so we'll print again next time NF
+                    # is re-enabled.
+                    self._notch_diag_printed = False
                 audio = demod.process(chunk)
                 # NR sits between demod and AGC — it cleans up the
                 # recovered audio before AGC evaluates gain, so hiss
