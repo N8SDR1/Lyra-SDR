@@ -46,11 +46,19 @@ _ASSET_PATH = (
 # Watermark intensity (0.0 .. 1.0). Set deliberately low so the
 # spectrum trace stays the primary visual element. Tunable from
 # experience — bump up if too faint, down if too dominant.
-WATERMARK_OPACITY = 0.35
+WATERMARK_OPACITY = 0.25
 
-# Vertical fraction of the panadapter the image occupies (preserved
-# aspect, so width follows). 0.92 leaves a small margin top/bottom.
+# Vertical fraction of the panadapter the image occupies. 0.92
+# leaves a small margin top/bottom.
 WATERMARK_HEIGHT_FRAC = 0.92
+
+# Horizontal stretch applied AFTER height scaling. 1.0 = preserve
+# the source image's natural aspect ratio (square 720x720). >1.0
+# stretches the image wider than tall, which suits a wide panadapter
+# better — the lyre silhouette doesn't read as "tall thin lyre" but
+# as a more spread-out constellation watermark. Set conservatively;
+# heavy stretching distorts the image noticeably.
+WATERMARK_WIDTH_STRETCH = 1.30
 
 # Vega pulse — overlaid on top of the watermark image at the position
 # of one of the brightest visible stars. Position is normalized within
@@ -126,9 +134,20 @@ def draw(painter: QPainter, w: int, h: int) -> None:
     global _cached_scaled, _cached_size
     if _cached_scaled is None or _cached_size != (w, h):
         target_h = max(1, int(h * WATERMARK_HEIGHT_FRAC))
-        # SmoothTransformation = bilinear; cheap on a 720px source
-        # and only runs on widget resize.
-        _cached_scaled = src.scaledToHeight(target_h, Qt.SmoothTransformation)
+        # Scale to the target height first (preserves aspect from the
+        # square source), then optionally stretch horizontally so the
+        # watermark fills more of a wide panadapter. SmoothTransformation
+        # = bilinear; cheap on a 720 px source and only runs on resize.
+        intermediate = src.scaledToHeight(target_h, Qt.SmoothTransformation)
+        if WATERMARK_WIDTH_STRETCH != 1.0:
+            target_w = max(1, int(intermediate.width() * WATERMARK_WIDTH_STRETCH))
+            _cached_scaled = intermediate.scaled(
+                target_w, target_h,
+                Qt.IgnoreAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        else:
+            _cached_scaled = intermediate
         _cached_size = (w, h)
 
     pix = _cached_scaled
