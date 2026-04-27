@@ -103,7 +103,10 @@ class CWDemod:
         cutoff = max(50.0, self.bw_hz / 2.0)
         proto = firwin(self.taps, cutoff, fs=self.rate,
                        window="hann").astype(np.float64)
-        sign = +1.0 if self.sideband.upper().startswith("U") else -1.0
+        # HL2 baseband mirror: USB RF signals land at NEGATIVE baseband
+        # on this gateware (same convention SSBDemod handles). CWU
+        # therefore wants the filter at -pitch baseband, CWL at +pitch.
+        sign = -1.0 if self.sideband.upper().startswith("U") else +1.0
         n = np.arange(self.taps)
         shift = np.exp(1j * 2.0 * np.pi * sign * self.pitch_hz * n / self.rate)
         self.lpf = (proto * shift).astype(np.complex64)
