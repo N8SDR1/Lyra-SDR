@@ -769,6 +769,38 @@ class DspSettingsTab(QWidget):
 
         v.addWidget(grp_agc)
 
+        # ── CW pitch ─────────────────────────────────────────────────
+        # Operator-adjustable tone for CW reception. Drives the
+        # CWDemod offset, the panadapter passband overlay position,
+        # and the click-to-tune CW correction so all three stay in
+        # sync. Persisted via QSettings (radio handles save).
+        grp_cw = QGroupBox("CW pitch")
+        gc = QGridLayout(grp_cw)
+        gc.addWidget(QLabel("Pitch (Hz):"), 0, 0)
+        from PySide6.QtWidgets import QSpinBox
+        self.cw_pitch_spin = QSpinBox()
+        self.cw_pitch_spin.setRange(200, 1500)
+        self.cw_pitch_spin.setSingleStep(10)
+        self.cw_pitch_spin.setSuffix(" Hz")
+        self.cw_pitch_spin.setValue(int(radio.cw_pitch_hz))
+        self.cw_pitch_spin.setFixedWidth(120)
+        self.cw_pitch_spin.setToolTip(
+            "CW tone frequency. Operator preference (typical 400-800 Hz; "
+            "many ops settle on 600 or 700 Hz). Drives the CWDemod tone "
+            "offset, the panadapter passband overlay position, and the "
+            "click-to-tune CW correction — all three stay in sync. Live "
+            "update on change.")
+        self.cw_pitch_spin.valueChanged.connect(
+            self.radio.set_cw_pitch_hz)
+        gc.addWidget(self.cw_pitch_spin, 0, 1)
+        gc.setColumnStretch(2, 1)
+        # Reflect external changes (e.g., loaded from a snapshot or
+        # set programmatically) back into the spinbox.
+        radio.cw_pitch_changed.connect(
+            lambda hz: self.cw_pitch_spin.setValue(int(hz))
+            if self.cw_pitch_spin.value() != int(hz) else None)
+        v.addWidget(grp_cw)
+
         # Placeholders for the DSP features still being built
         grp_nb = QGroupBox("Noise Blanker (impulse suppression)")
         gb = QVBoxLayout(grp_nb)

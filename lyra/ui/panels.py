@@ -2242,11 +2242,12 @@ class SpectrumPanel(GlassPanel):
         #               at +pitch baseband, inside the passband)
         #   CWL click → carrier = click_freq + pitch
         # Other modes set the carrier exactly to the click freq.
+        # Pitch is operator-adjustable via Settings → DSP → CW pitch.
         mode = self.radio.mode
         if mode == "CWU":
-            freq_hz = int(freq_hz) - 650   # CWDemod default pitch
+            freq_hz = int(freq_hz) - self.radio.cw_pitch_hz
         elif mode == "CWL":
-            freq_hz = int(freq_hz) + 650
+            freq_hz = int(freq_hz) + self.radio.cw_pitch_hz
         self.radio.set_freq_hz(int(freq_hz))
 
     def _on_spot_clicked(self, freq_hz):
@@ -2618,11 +2619,12 @@ class WaterfallPanel(GlassPanel):
         #               at +pitch baseband, inside the passband)
         #   CWL click → carrier = click_freq + pitch
         # Other modes set the carrier exactly to the click freq.
+        # Pitch is operator-adjustable via Settings → DSP → CW pitch.
         mode = self.radio.mode
         if mode == "CWU":
-            freq_hz = int(freq_hz) - 650   # CWDemod default pitch
+            freq_hz = int(freq_hz) - self.radio.cw_pitch_hz
         elif mode == "CWL":
-            freq_hz = int(freq_hz) + 650
+            freq_hz = int(freq_hz) + self.radio.cw_pitch_hz
         self.radio.set_freq_hz(int(freq_hz))
 
     def _on_right_click(self, freq_hz, shift, global_pos):

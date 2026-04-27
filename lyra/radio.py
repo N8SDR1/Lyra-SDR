@@ -148,6 +148,7 @@ class Radio(QObject):
     # relative to the tuned center frequency. Recomputed whenever mode or
     # RX BW changes so the widget can draw the translucent passband rect.
     passband_changed = Signal(int, int)    # (low_offset_hz, high_offset_hz)
+    cw_pitch_changed = Signal(int)         # Hz, operator-set CW tone
 
     # Panadapter zoom + update rates
     zoom_changed                  = Signal(float)      # 1.0 = full span
@@ -275,6 +276,20 @@ class Radio(QObject):
         self._rate = 48000
         self._mode = "USB"
         self._gain_db = 19
+        # CW pitch (Hz) — operator-adjustable via Settings → DSP.
+        # Drives both the CWDemod tone position AND the panadapter
+        # passband overlay AND the click-to-tune CW correction so
+        # all three stay in sync. Persisted to QSettings; defaults
+        # to 650 Hz (matches the legacy hardcoded value most ham
+        # SDR clients use). Typical operator range 400-800 Hz;
+        # individual preference often driven by hearing comfort.
+        from PySide6.QtCore import QSettings as _QS
+        try:
+            saved_pitch = int(_QS("N8SDR", "Lyra").value(
+                "dsp/cw_pitch_hz", 650))
+            self._cw_pitch_hz = max(200, min(1500, saved_pitch))
+        except (TypeError, ValueError):
+            self._cw_pitch_hz = 650
         # Volume chain — TWO stages since 2026-04-24:
         #   AF Gain (af_gain_db): makeup gain in dB, for cases where
         #     AGC is off (digital modes like FT8 run AGC off to avoid
@@ -841,7 +856,7 @@ class Radio(QObject):
         """
         mode = self._mode
         bw = int(self._rx_bw_by_mode.get(mode, 2400))
-        cw_pitch = 650  # matches CWDemod default
+        cw_pitch = int(self._cw_pitch_hz)
         if mode in ("USB", "DIGU"):
             return (0, bw)
         if mode in ("LSB", "DIGL"):
@@ -2523,6 +2538,31 @@ class Radio(QObject):
         self._agc_release = params["release"]
         self._agc_hang_blocks = params["hang_blocks"]
 
+    # ── CW pitch ─────────────────────────────────────────────────────
+    @property
+    def cw_pitch_hz(self) -> int:
+        return int(self._cw_pitch_hz)
+
+    def set_cw_pitch_hz(self, pitch: int) -> None:
+        """Set the CW pitch tone in Hz (clamped to 200..1500). Updates:
+          - The stored value (persisted to QSettings)
+          - The CWDemod instances (rebuilt at the new pitch)
+          - The passband overlay (re-emit with new offset)
+          - The cw_pitch_changed signal for any listeners
+        Operator-driven; typical preference range 400-800 Hz."""
+        new_pitch = int(max(200, min(1500, int(pitch))))
+        if new_pitch == self._cw_pitch_hz:
+            return
+        self._cw_pitch_hz = new_pitch
+        from PySide6.QtCore import QSettings as _QS
+        _QS("N8SDR", "Lyra").setValue("dsp/cw_pitch_hz", new_pitch)
+        # Rebuild demods so CWU/CWL pick up the new pitch.
+        self._rebuild_demods()
+        # Recompute + re-emit passband so the panadapter overlay
+        # shifts to the new CW position immediately.
+        self._emit_passband()
+        self.cw_pitch_changed.emit(new_pitch)
+
     # ── AGC threshold (target audio level) ───────────────────────────
     @property
     def agc_threshold(self) -> float:
@@ -2568,9 +2608,9 @@ class Radio(QObject):
                                  high_hz=300 + bw.get("LSB", 2400)),
                 "USB":  SSBDemod(48000, "USB", low_hz=300,
                                  high_hz=300 + bw.get("USB", 2400)),
-                "CWL":  CWDemod(48000, pitch_hz=650,
+                "CWL":  CWDemod(48000, pitch_hz=self._cw_pitch_hz,
                                 bw_hz=bw.get("CWL", 250), sideband="L"),
-                "CWU":  CWDemod(48000, pitch_hz=650,
+                "CWU":  CWDemod(48000, pitch_hz=self._cw_pitch_hz,
                                 bw_hz=bw.get("CWU", 250), sideband="U"),
                 "DSB":  DSBDemod(48000, bw_hz=bw.get("DSB", 5000)),
                 "AM":   AMDemod(48000, bw_hz=bw.get("AM", 6000) / 2),
