@@ -877,17 +877,19 @@ class Radio(QObject):
             return (0, bw)
         if mode in ("LSB", "DIGL"):
             return (-bw, 0)
-        # HL2 baseband mirror: USB-convention CW (CWU) lives at NEGATIVE
-        # baseband; LSB-convention (CWL) lives at POSITIVE baseband.
-        # The visible filter rectangle reflects that mirroring.
+        # CW: filter sits offset from the carrier by ±pitch. The
+        # panadapter is in sky-freq convention (display-side mirror
+        # applied), so CWU draws RIGHT of marker and CWL draws LEFT —
+        # matching SSB/USB sky-freq convention. The HL2 baseband mirror
+        # is handled inside CWDemod and is invisible at this layer.
         if mode == "CWU":
             half = bw // 2
             p = int(self._cw_pitch_hz)
-            return (-p - half, -p + half)
+            return (p - half, p + half)
         if mode == "CWL":
             half = bw // 2
             p = int(self._cw_pitch_hz)
-            return (p - half, p + half)
+            return (-p - half, -p + half)
         if mode in ("AM", "DSB", "FM"):
             half = bw // 2
             return (-half, half)
@@ -2589,18 +2591,18 @@ class Radio(QObject):
         where a clicked CW signal lands in the spectrum and where the
         audio is generated from.
 
-          CWU: -pitch  (filter / signal sit LEFT of the marker)
-          CWL: +pitch  (filter / signal sit RIGHT of the marker)
+          CWU: +pitch  (filter / signal sit RIGHT of the marker)
+          CWL: -pitch  (filter / signal sit LEFT of the marker)
           else: 0      (line is hidden in non-CW modes)
 
-        Sign convention follows the HL2 baseband mirror: USB-side CW
-        appears at negative baseband on this gateware, so CWU's filter
-        and the white reference line both sit to the LEFT of the marker.
+        The panadapter is in sky-freq convention (display-side mirror
+        flip applied in _tick_fft), so CWU appears RIGHT of marker
+        like USB. The HL2 baseband mirror is handled inside CWDemod.
         """
         if self._mode == "CWU":
-            return -int(self._cw_pitch_hz)
-        if self._mode == "CWL":
             return +int(self._cw_pitch_hz)
+        if self._mode == "CWL":
+            return -int(self._cw_pitch_hz)
         return 0
 
     def _emit_cw_zero(self) -> None:

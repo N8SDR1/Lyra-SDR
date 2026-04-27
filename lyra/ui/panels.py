@@ -2284,10 +2284,11 @@ class SpectrumPanel(GlassPanel):
         mode = self.radio.mode
         if mode in ("CWU", "CWL"):
             pitch = int(self.radio.cw_pitch_hz)
-            # HL2 baseband mirror: CWU signal lives at -pitch baseband,
-            # so VFO must move +pitch (above the clicked signal) for
-            # the signal to land inside the filter. CWL is mirrored.
-            target += +pitch if mode == "CWU" else -pitch
+            # Panadapter is sky-freq convention (display-mirror flip).
+            # CWU signal sits ABOVE the carrier visually, so to put a
+            # clicked signal at +pitch from the new VFO we subtract
+            # pitch from the click freq. CWL mirrored.
+            target += -pitch if mode == "CWU" else +pitch
         self.radio.set_freq_hz(target)
 
     def _on_spot_clicked(self, freq_hz):
@@ -2657,10 +2658,11 @@ class WaterfallPanel(GlassPanel):
         mode = self.radio.mode
         if mode in ("CWU", "CWL"):
             pitch = int(self.radio.cw_pitch_hz)
-            # HL2 baseband mirror: CWU signal lives at -pitch baseband,
-            # so VFO must move +pitch (above the clicked signal) for
-            # the signal to land inside the filter. CWL is mirrored.
-            target += +pitch if mode == "CWU" else -pitch
+            # Panadapter is sky-freq convention (display-mirror flip).
+            # CWU signal sits ABOVE the carrier visually, so to put a
+            # clicked signal at +pitch from the new VFO we subtract
+            # pitch from the click freq. CWL mirrored.
+            target += -pitch if mode == "CWU" else +pitch
         self.radio.set_freq_hz(target)
 
     def _on_right_click(self, freq_hz, shift, global_pos):
