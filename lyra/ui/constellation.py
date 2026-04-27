@@ -129,6 +129,13 @@ METEOR_FIREBALL_PROB     = 0.15    # chance of warm-gold meteor (vs cool blue)
 METEOR_HEAD_BLUE_COLOR   = QColor(225, 235, 255)
 METEOR_HEAD_GOLD_COLOR   = QColor(255, 215, 130)
 
+# Pseudo-gravity in px/s². Applied as a downward acceleration during
+# the meteor's flight, producing a visible parabolic arc instead of
+# a straight diagonal line. 0 = straight line. Higher = more bow.
+# Real-physics gravity (~9.8 m/s²) is invisible at this scale and
+# duration; we exaggerate so the curve actually reads on screen.
+METEOR_ARC_GRAVITY_PX_S2 = 600.0
+
 # Module-level meteor state. Each meteor is a dict with spawn coords,
 # velocity, color, duration, and spawn time. Position is recomputed
 # from age each frame so we don't accumulate per-frame integration drift.
@@ -162,8 +169,16 @@ def _spawn_meteor(w: int, h: int) -> dict:
     tx = (w - sx) + random.uniform(-0.15 * w, 0.15 * w)
     ty = float(h) + 20.0
     duration = random.uniform(METEOR_DURATION_MIN_S, METEOR_DURATION_MAX_S)
+
+    # Solve for initial velocity that produces a parabolic arc landing
+    # at (tx, ty) at age=duration under constant downward acceleration.
+    # Position model: x(t) = sx + vx·t          (no lateral gravity)
+    #                 y(t) = sy + vy·t + ½·g·t²
+    # so vy = (ty − sy − ½·g·dur²) ÷ dur — the gravity term is
+    # subtracted so the meteor still hits the target despite curving.
+    g = METEOR_ARC_GRAVITY_PX_S2
     vx = (tx - sx) / duration
-    vy = (ty - sy) / duration
+    vy = (ty - sy - 0.5 * g * duration * duration) / duration
 
     color = (METEOR_HEAD_GOLD_COLOR
              if random.random() < METEOR_FIREBALL_PROB
@@ -173,6 +188,7 @@ def _spawn_meteor(w: int, h: int) -> dict:
         "spawn_t": time.monotonic(),
         "sx": sx, "sy": sy,
         "vx": vx, "vy": vy,
+        "ay": g,                # constant downward accel for the arc
         "duration": duration,
         "color": color,
     }
@@ -196,7 +212,10 @@ def _draw_one_meteor(painter: QPainter, m: dict, now: float) -> bool:
         return True
 
     # Trail — drawn back-to-front (dimmest first) so the brightest
-    # near-head sample composites on top of the dimmer far-tail samples.
+    # near-head sample composites on top of the dimmer far-tail
+    # samples. Position uses the same parabolic kinematic as the
+    # head so the trail naturally curves along the meteor's arc.
+    ay = m.get("ay", 0.0)
     painter.setPen(Qt.NoPen)
     for i in range(METEOR_TRAIL_SAMPLES, 0, -1):
         t_back = (i / METEOR_TRAIL_SAMPLES) * METEOR_TRAIL_LENGTH_S
@@ -204,7 +223,7 @@ def _draw_one_meteor(painter: QPainter, m: dict, now: float) -> bool:
         if past_age < 0.0:
             continue
         tx = m["sx"] + m["vx"] * past_age
-        ty = m["sy"] + m["vy"] * past_age
+        ty = m["sy"] + m["vy"] * past_age + 0.5 * ay * past_age * past_age
         # frac is 1.0 at the head, 0.0 at the tail end.
         frac = 1.0 - (i / METEOR_TRAIL_SAMPLES)
         a = int(255 * life_a * frac * METEOR_TRAIL_MAX_ALPHA)
@@ -221,7 +240,7 @@ def _draw_one_meteor(painter: QPainter, m: dict, now: float) -> bool:
 
     # Bright head on top.
     hx = m["sx"] + m["vx"] * age
-    hy = m["sy"] + m["vy"] * age
+    hy = m["sy"] + m["vy"] * age + 0.5 * ay * age * age
     a = int(255 * life_a)
     col = QColor(m["color"])
     col.setAlpha(min(255, a))
