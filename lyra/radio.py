@@ -735,43 +735,16 @@ class Radio(QObject):
             self._ip = ip
             self.ip_changed.emit(ip)
 
-    @property
-    def cw_display_offset_hz(self) -> int:
-        """Thetis-style CW display offset (`cwSideToneShift`).
-
-        The DDS is tuned this many Hz away from the displayed VFO so a
-        CW signal under the marker lands at ±pitch in baseband (inside
-        the offset CW filter), producing the pitch tone. The panadapter
-        compensates by shifting the spectrum data so the signal appears
-        under the marker visually.
-
-          CWU: returns -pitch  → DDS = VFO - pitch
-          CWL: returns +pitch  → DDS = VFO + pitch
-          else: 0
-        """
-        if self._mode == "CWU":
-            return -int(self._cw_pitch_hz)
-        if self._mode == "CWL":
-            return +int(self._cw_pitch_hz)
-        return 0
-
-    def _retune_dds(self) -> None:
-        """Push the current DDS frequency = VFO + cw_display_offset_hz
-        to the stream. Called when VFO, mode, or pitch changes so the
-        DDS tracks the displayed VFO with the proper CW offset."""
-        if self._stream:
-            try:
-                dds = int(self._freq_hz) + int(self.cw_display_offset_hz)
-                self._stream._set_rx1_freq(dds)  # noqa: SLF001
-            except Exception as e:
-                self.status_message.emit(f"Freq set failed: {e}", 3000)
-
     def set_freq_hz(self, hz: int):
         hz = int(hz)
         if hz == self._freq_hz:
             return
         self._freq_hz = hz
-        self._retune_dds()
+        if self._stream:
+            try:
+                self._stream._set_rx1_freq(hz)  # noqa: SLF001
+            except Exception as e:
+                self.status_message.emit(f"Freq set failed: {e}", 3000)
         with self._ring_lock:
             self._sample_ring.clear()
         # Reset waterfall tick counter on freq change too, so the
@@ -860,10 +833,6 @@ class Radio(QObject):
         self._mode = alias
         self._audio_buf.clear()
         self._rebuild_demods()
-        # Mode change may flip cw_display_offset_hz between 0 and ±pitch
-        # (entering/leaving CW). Retune DDS so it tracks the new offset
-        # and the displayed VFO stays where the operator sees it.
-        self._retune_dds()
         # Flush NR state on mode change — otherwise the noise-floor
         # estimate from the previous mode (often with very different
         # bandwidth characteristics) leaks in as an audible transient.
@@ -881,12 +850,16 @@ class Radio(QObject):
         Conventions:
           USB / DIGU         : center .. center + BW
           LSB / DIGL         : center - BW .. center
-          CWU / CWL          : center - BW/2 .. center + BW/2
-                                (Filter is actually at ±pitch in baseband,
-                                but the panadapter compensates the pitch
-                                out via cw_display_offset_hz so the
-                                rectangle visually appears centered on
-                                the marker — Thetis convention.)
+          CWU                : center + pitch - BW/2 .. center + pitch + BW/2
+          CWL                : center - pitch - BW/2 .. center - pitch + BW/2
+                                (CW filter is centered on the pitch.
+                                The visible gap between the marker and
+                                the passband rectangle IS the zero-beat
+                                indicator — tune until the CW signal
+                                sits inside the offset rectangle.
+                                Click-to-tune handles the offset for
+                                you. Decoupled from BW so narrow
+                                contest filters stay usable.)
           AM / DSB / FM      : center - BW/2 .. center + BW/2
         """
         mode = self._mode
@@ -895,9 +868,14 @@ class Radio(QObject):
             return (0, bw)
         if mode in ("LSB", "DIGL"):
             return (-bw, 0)
-        if mode in ("CWU", "CWL"):
+        if mode == "CWU":
             half = bw // 2
-            return (-half, half)
+            p = int(self._cw_pitch_hz)
+            return (p - half, p + half)
+        if mode == "CWL":
+            half = bw // 2
+            p = int(self._cw_pitch_hz)
+            return (-p - half, -p + half)
         if mode in ("AM", "DSB", "FM"):
             half = bw // 2
             return (-half, half)
@@ -2607,10 +2585,6 @@ class Radio(QObject):
         _QS("N8SDR", "Lyra").setValue("dsp/cw_pitch_hz", new_pitch)
         # Rebuild demods so CWU/CWL pick up the new pitch.
         self._rebuild_demods()
-        # DDS = VFO + cw_display_offset_hz, and the offset depends on
-        # pitch. Retune so the signal stays under the marker after
-        # the operator slides the pitch knob in CWU/CWL.
-        self._retune_dds()
         # Recompute + re-emit passband so the panadapter overlay
         # shifts to the new CW position immediately.
         self._emit_passband()
@@ -2920,24 +2894,6 @@ class Radio(QObject):
         else:
             spec_out = spec_db
             eff_rate = int(self._rate)
-
-        # CW display offset (Thetis-style cwSideToneShift): shift the
-        # spectrum so a signal at the displayed VFO appears under the
-        # marker, even though the DDS is tuned pitch-Hz away to put
-        # the signal inside the offset CW filter.
-        #
-        # Derivation: DDS = VFO + cw_off. A signal at RF=VFO lands at
-        # baseband (VFO - DDS) = -cw_off Hz, which is FFT bin
-        # (N/2 - cw_off/hz_per_bin). To move that bin to N/2 (display
-        # center, where marker is drawn) we np.roll by
-        # +cw_off/hz_per_bin (k>0 moves bin i to bin i+k).
-        cw_off = int(self.cw_display_offset_hz)
-        if cw_off:
-            n_bins = spec_out.shape[0]
-            hz_per_bin = eff_rate / n_bins
-            shift_bins = int(round(cw_off / hz_per_bin))
-            if shift_bins:
-                spec_out = np.roll(spec_out, shift_bins)
 
         self.spectrum_ready.emit(spec_out, float(self._freq_hz), eff_rate)
 
