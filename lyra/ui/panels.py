@@ -2076,6 +2076,10 @@ class SpectrumPanel(GlassPanel):
         # → radio retunes to that freq.
         self.widget.clicked_freq.connect(
             lambda f: self.radio.set_freq_hz(int(f)))
+        # Right-click context menu (Phase B.6). Reuses the same
+        # handlers as the QPainter path — _on_right_click handles
+        # the shift+right quick-remove + plain-right menu logic.
+        self.widget.right_clicked_freq.connect(self._on_right_click)
         # Trace color — Radio holds the operator's pick; sync it now
         # and on changes.
         self._gpu_apply_trace_color()
@@ -2493,6 +2497,8 @@ class WaterfallPanel(GlassPanel):
         # Click-to-tune (Phase B.5).
         self.widget.clicked_freq.connect(
             lambda f: self.radio.set_freq_hz(int(f)))
+        # Right-click context menu (Phase B.6) — reuses _on_right_click.
+        self.widget.right_clicked_freq.connect(self._on_right_click)
         # Seed the palette from Radio's current selection, and track
         # changes so the operator's Settings → Visuals → Palette
         # combo flips the waterfall colors live (one 768-byte texture

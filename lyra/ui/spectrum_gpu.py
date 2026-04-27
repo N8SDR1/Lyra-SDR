@@ -72,7 +72,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QSurfaceFormat
 from PySide6.QtOpenGL import (
     QOpenGLBuffer, QOpenGLFunctions_4_3_Core, QOpenGLShader,
@@ -175,6 +175,11 @@ class SpectrumGpuWidget(QOpenGLWidget):
 
     # Click-to-tune signal — payload is absolute Hz at click x.
     clicked_freq = Signal(float)
+    # Right-click signal — payload is (abs_freq_hz, shift_held,
+    # global_position). globalPos lets the panel anchor a context
+    # menu at the click site; shift_held preserves the legacy
+    # shift+right = remove-nearest-notch quick gesture.
+    right_clicked_freq = Signal(float, bool, QPoint)
 
     # Synthetic-data point count — mimics Lyra's typical FFT size
     # (4096) so the test exercises the same draw cost as real usage.
@@ -324,12 +329,22 @@ class SpectrumGpuWidget(QOpenGLWidget):
         return self._center_hz + (x - w / 2.0) * hz_per_px
 
     def mousePressEvent(self, event) -> None:
-        """Left-click → emit clicked_freq with the absolute Hz at
-        the click x. Right-click is reserved for the context menu
-        we'll add in B.6."""
+        """Mouse button handler.
+
+        Left-click  → emit clicked_freq (absolute Hz at click x).
+        Right-click → emit right_clicked_freq with (freq, shift_held,
+                       globalPos) so the panel can pop the notch
+                       context menu OR run the shift+right quick-
+                       remove gesture.
+        """
+        x = int(event.position().x())
+        f = self._freq_at_pixel(x)
         if event.button() == Qt.LeftButton:
-            f = self._freq_at_pixel(int(event.position().x()))
             self.clicked_freq.emit(float(f))
+        elif event.button() == Qt.RightButton:
+            shift_held = bool(event.modifiers() & Qt.ShiftModifier)
+            self.right_clicked_freq.emit(
+                float(f), shift_held, event.globalPosition().toPoint())
         super().mousePressEvent(event)
 
     # ── QOpenGLWidget virtual method overrides ─────────────────────
@@ -640,6 +655,7 @@ class WaterfallGpuWidget(QOpenGLWidget):
     """
 
     clicked_freq = Signal(float)
+    right_clicked_freq = Signal(float, bool, QPoint)
 
     # Number of rows in the texture. 600 matches the typical Lyra
     # waterfall height. Allocated once at initializeGL — operator
@@ -759,9 +775,14 @@ class WaterfallGpuWidget(QOpenGLWidget):
         return self._center_hz + (x - w / 2.0) * hz_per_px
 
     def mousePressEvent(self, event) -> None:
+        x = int(event.position().x())
+        f = self._freq_at_pixel(x)
         if event.button() == Qt.LeftButton:
-            self.clicked_freq.emit(
-                float(self._freq_at_pixel(int(event.position().x()))))
+            self.clicked_freq.emit(float(f))
+        elif event.button() == Qt.RightButton:
+            shift_held = bool(event.modifiers() & Qt.ShiftModifier)
+            self.right_clicked_freq.emit(
+                float(f), shift_held, event.globalPosition().toPoint())
         super().mousePressEvent(event)
 
     def set_palette(self, palette_rgb: np.ndarray) -> None:
