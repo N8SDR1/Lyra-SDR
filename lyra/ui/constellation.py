@@ -136,6 +136,14 @@ METEOR_HEAD_GOLD_COLOR   = QColor(255, 215, 130)
 # duration; we exaggerate so the curve actually reads on screen.
 METEOR_ARC_GRAVITY_PX_S2 = 600.0
 
+# Random horizontal velocity component added at spawn, in px/s.
+# This is on TOP of the target-aimed velocity, so meteors no longer
+# fly in straight lines toward predictable target points — they
+# drift sideways unpredictably during flight, giving each meteor
+# its own visible arc/character rather than mirror-symmetric paths.
+# 0 = no drift (predictable trajectories). Tune up for more chaos.
+METEOR_LATERAL_DRIFT_PX_S = 400.0
+
 # Module-level meteor state. Each meteor is a dict with spawn coords,
 # velocity, color, duration, and spawn time. Position is recomputed
 # from age each frame so we don't accumulate per-frame integration drift.
@@ -179,6 +187,15 @@ def _spawn_meteor(w: int, h: int) -> dict:
     g = METEOR_ARC_GRAVITY_PX_S2
     vx = (tx - sx) / duration
     vy = (ty - sy - 0.5 * g * duration * duration) / duration
+
+    # Random horizontal velocity component on top of the target-aimed
+    # vx so each meteor drifts sideways unpredictably during flight
+    # — gives top-center spawns a visible arc and breaks up the
+    # mirror-symmetry of corner-to-corner paths.
+    if METEOR_LATERAL_DRIFT_PX_S > 0:
+        vx += random.uniform(
+            -METEOR_LATERAL_DRIFT_PX_S, METEOR_LATERAL_DRIFT_PX_S
+        )
 
     color = (METEOR_HEAD_GOLD_COLOR
              if random.random() < METEOR_FIREBALL_PROB
