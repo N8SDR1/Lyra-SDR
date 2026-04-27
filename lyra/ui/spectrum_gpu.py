@@ -776,7 +776,48 @@ class SpectrumGpuWidget(QOpenGLWidget):
         """
         self._draw_passband(painter)
         self._draw_noise_floor(painter)
+        self._draw_db_scale_labels(painter)
         self._draw_vfo_marker(painter)
+        self._draw_freq_scale_labels(painter)
+
+    # ── Axis labels ─────────────────────────────────────────────────
+    AXIS_COLOR = QColor(170, 204, 238)  # matches spectrum.py AXIS
+
+    def _draw_db_scale_labels(self, painter: QPainter) -> None:
+        """dB scale tick labels on the RIGHT edge — '+0', '-10',
+        '-20', etc. every other tenth of widget height. Operator can
+        read signal levels off the trace at a glance.
+        """
+        h = self.height()
+        w = self.width()
+        if h <= 0 or w <= 0:
+            return
+        span = self._max_db - self._min_db
+        if span <= 0:
+            return
+        painter.setPen(QPen(self.AXIS_COLOR, 1))
+        for i in range(0, 11, 2):
+            db = self._max_db - (i / 10) * span
+            y = int(h * i / 10)
+            painter.drawText(w - 45, y + 10, f"{db:+.0f}")
+
+    def _draw_freq_scale_labels(self, painter: QPainter) -> None:
+        """Frequency tick labels at the BOTTOM — kHz with one
+        decimal, every tenth of widget width. Lets the operator
+        verify what frequency they're clicking on (and what's in
+        view) without checking the tuning panel.
+        """
+        h = self.height()
+        w = self.width()
+        if h <= 0 or w <= 0 or self._span_hz <= 0:
+            return
+        painter.setPen(QPen(self.AXIS_COLOR, 1))
+        for i in range(1, 10):
+            x = int(w * i / 10)
+            offset_hz = (i / 10 - 0.5) * self._span_hz
+            freq_khz = (self._center_hz + offset_hz) / 1000.0
+            label = f"{freq_khz:,.1f}"
+            painter.drawText(x - 30, h - 4, label)
 
     def _draw_passband(self, painter: QPainter) -> None:
         """Translucent cyan rectangle covering the RX filter
