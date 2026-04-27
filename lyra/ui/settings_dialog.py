@@ -1174,9 +1174,11 @@ class VisualsSettingsTab(QWidget):
         self.lyra_const_check.setChecked(
             bool(self.radio.show_lyra_constellation))
         self.lyra_const_check.setToolTip(
-            "Subtle stylized Lyra constellation watermark drawn behind "
-            "the spectrum trace. Edge-faded so it stays out of the "
-            "trace area in the middle of the panadapter."
+            "Stylized Lyra / lyre constellation image rendered as a "
+            "faint watermark behind the spectrum trace. Additive blend "
+            "so only the bright stars and lyre lines show through; the "
+            "dark background of the source image disappears into the "
+            "black panadapter."
         )
         self.lyra_const_check.toggled.connect(
             self.radio.set_show_lyra_constellation)

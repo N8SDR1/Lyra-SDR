@@ -1,180 +1,107 @@
-"""Lyra constellation overlay for the panadapter.
+"""Lyra panadapter watermark.
 
-Renders a stylized version of the Lyra constellation as a faint
-watermark behind the spectrum trace. The shape is the classic Lyra
-asterism: Vega at the top, the small triangle of Vega + ε + ζ, and
-the parallelogram of β / γ / δ / ζ below. Real-sky-ish positions, but
-tweaked for visual balance in a wide panadapter rectangle.
+Renders a Lyra/lyre constellation image as a faint watermark behind
+the spectrum trace. Operator-toggleable in Settings → Visuals.
 
-Visual treatment (per operator preference, see commit-log):
-  - Stylized (B): brighter Vega, simplified parallelogram + triangle
-  - Edge-faded (C): radial alpha falloff from the widget center so
-    the constellation stays out of the trace's way in the middle
-  - Vega pulse (C): slow sinusoidal alpha modulation on Vega only
+Asset: lyra/assets/watermarks/lyra-watermark.jpg — a stylized lyre
+silhouette built from constellation stars + connecting lines on a
+dark starfield. Loaded once and cached at the current widget size.
 
-Drawn as the FIRST overlay so passband, marker, notches, and labels
-all sit on top.
+Visual treatment:
+  - Centered horizontally on the panadapter
+  - Vertically scaled to fit ~85% of widget height (preserves aspect)
+  - Painted with low overall opacity so the trace dominates
+  - Composed with CompositionMode_Plus (additive) so the dark
+    background pixels of the source image disappear into the black
+    panadapter background — only the bright stars / lines / lyre
+    edges actually show through. This avoids the otherwise-visible
+    "tinted rectangle" effect of a low-alpha dark-blue overlay.
+
+Drawn as the FIRST overlay (under the trace fill, passband, marker,
+etc.) so the spectrum line dominates visually.
 """
 
 from __future__ import annotations
 
-import math
-import time
+from pathlib import Path
+from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QPainter, QPixmap
 
 
-# Star positions in normalized constellation-cell coordinates
-# [(0..1, 0..1)]. Sky-up orientation: Vega top, parallelogram bottom.
-# The triangle (Vega + ε + ζ) is intentionally COMPACT and the
-# parallelogram (β / δ / γ) is intentionally WIDER than the triangle
-# — that's the proper Lyra silhouette and makes the shape readable
-# at a glance on the panadapter (vs. collapsing to a thin kite when
-# the two are similar widths).
-#
-# Tuple layout: (name, nx, ny, base_brightness)
-#   nx, ny  : 0..1 normalized position within the constellation cell
-#   base    : 0..1 brightness multiplier (Vega = 1.0, dimmer stars < 1)
-LYRA_STARS = [
-    ("Vega",  0.50, 0.05, 1.00),  # α Lyr — brightest, gets the pulse
-    ("eps",   0.42, 0.28, 0.55),  # ε Lyr (Double Double) — close to Vega
-    ("zet",   0.58, 0.28, 0.55),  # ζ Lyr — close to Vega
-    ("bet",   0.18, 0.62, 0.55),  # β Lyr (Sheliak) — wide-left of parallelogram
-    ("del",   0.82, 0.62, 0.50),  # δ Lyr — wide-right of parallelogram
-    ("gam",   0.50, 0.95, 0.55),  # γ Lyr (Sulafat) — bottom apex
-]
-LYRA_STARS_BY_NAME = {s[0]: s for s in LYRA_STARS}
+# Source image path, relative to this module's location.
+# lyra/ui/constellation.py → ../assets/watermarks/...
+_ASSET_PATH = (
+    Path(__file__).parent.parent / "assets" / "watermarks" / "lyra-watermark.jpg"
+)
 
-# Connecting lines drawn between stars (constellation lines).
-LYRA_LINES = [
-    ("Vega", "eps"),
-    ("Vega", "zet"),
-    ("eps",  "zet"),  # base of the small triangle below Vega
-    ("eps",  "bet"),  # parallelogram left side
-    ("zet",  "del"),  # parallelogram right side
-    ("bet",  "gam"),  # parallelogram bottom-left
-    ("del",  "gam"),  # parallelogram bottom-right
-]
+# Watermark intensity (0.0 .. 1.0). Set deliberately low so the
+# spectrum trace stays the primary visual element. Tunable from
+# experience — bump up if too faint, down if too dominant.
+WATERMARK_OPACITY = 0.35
+
+# Vertical fraction of the panadapter the image occupies (preserved
+# aspect, so width follows). 0.85 leaves a small margin top/bottom.
+WATERMARK_HEIGHT_FRAC = 0.92
+
+# Module-level cache. The source pixmap loads once on first draw;
+# the scaled cache rebuilds on widget-size change so we're not
+# re-scaling a 720x720 JPEG every frame.
+_source_pixmap: Optional[QPixmap] = None
+_source_load_attempted = False
+_cached_scaled: Optional[QPixmap] = None
+_cached_size: tuple[int, int] = (0, 0)
 
 
-# Visual tuning constants. The constellation should be visible
-# everywhere, just dimmer in the central trace area than near the
-# corners. First-pass numbers were too aggressive (BASE_ALPHA=110 +
-# inner-fade-to-zero meant most stars were invisible on a wide
-# panadapter); these are tuned to be readable on a black background.
-BASE_ALPHA          = 180   # max alpha (0..255) for the brightest pixel
-LINE_ALPHA_MULT     = 0.50  # lines dimmer than stars
-EDGE_FADE_CENTER    = 0.40  # alpha multiplier at the widget center
-EDGE_FADE_CORNER    = 1.00  # alpha multiplier at the corners
-STAR_RADIUS_PX      = 2.5   # base star dot radius
-VEGA_RADIUS_PX      = 4.5   # Vega is the showpiece
-VEGA_PULSE_PERIOD_S = 3.5   # full sine cycle in seconds
-VEGA_PULSE_MIN      = 0.55  # alpha at the dim end of the pulse
-VEGA_PULSE_MAX      = 1.00  # alpha at the bright end
-STAR_COLOR          = QColor(190, 215, 255)    # cool blue-white
-VEGA_COLOR          = QColor(230, 240, 255)    # slightly bluer/brighter
-LINE_COLOR          = QColor(160, 190, 225)
-
-
-def _edge_fade(nx: float, ny: float) -> float:
-    """Radial alpha multiplier ∈ [EDGE_FADE_CENTER, EDGE_FADE_CORNER].
-
-    nx, ny are normalized to [0,1] across the widget. Stars near the
-    widget center are dimmer (less likely to fight the trace); stars
-    near the corners are at full alpha. Falloff is smooth (smoothstep)
-    rather than a sharp cutoff. Never returns 0 — the operator wants
-    the constellation visible everywhere, just attenuated centrally."""
-    dx = nx - 0.5
-    dy = ny - 0.5
-    # Max possible radial distance in normalized space is sqrt(0.5) ~= 0.707.
-    r = math.hypot(dx, dy) / 0.707  # 0 at center, 1 at corners
-    # Smoothstep over [0, 1] for a soft sigmoid-ish curve.
-    t = max(0.0, min(1.0, r))
-    s = t * t * (3.0 - 2.0 * t)
-    return EDGE_FADE_CENTER + (EDGE_FADE_CORNER - EDGE_FADE_CENTER) * s
-
-
-def _vega_pulse_factor() -> float:
-    """0..1 multiplier for Vega's alpha, animated over time.
-
-    Sinusoid scaled to [VEGA_PULSE_MIN, VEGA_PULSE_MAX]. Driven by
-    time.monotonic() so it's continuous across paint events without
-    needing a separate QTimer — every panadapter repaint advances
-    the phase naturally."""
-    phase = (time.monotonic() % VEGA_PULSE_PERIOD_S) / VEGA_PULSE_PERIOD_S
-    s = 0.5 * (1.0 - math.cos(2.0 * math.pi * phase))   # 0..1
-    return VEGA_PULSE_MIN + s * (VEGA_PULSE_MAX - VEGA_PULSE_MIN)
+def _load_source() -> Optional[QPixmap]:
+    """Load the source image once. Returns None if the asset is
+    missing or fails to decode (e.g. installed without assets) so
+    the caller can no-op gracefully instead of crashing the paint
+    thread."""
+    global _source_pixmap, _source_load_attempted
+    if _source_load_attempted:
+        return _source_pixmap
+    _source_load_attempted = True
+    if not _ASSET_PATH.exists():
+        return None
+    pix = QPixmap(str(_ASSET_PATH))
+    if pix.isNull():
+        return None
+    _source_pixmap = pix
+    return _source_pixmap
 
 
 def draw(painter: QPainter, w: int, h: int) -> None:
-    """Render the Lyra constellation overlay into the given widget area.
+    """Render the Lyra watermark scaled to fit the panadapter area.
 
     Both spectrum_gpu.SpectrumGpuWidget and spectrum.SpectrumWidget
-    call this from their _draw_overlays method as the first overlay
-    so subsequent draws (passband, marker, notches) sit on top."""
+    call this from their _draw_overlays entry point as the first
+    overlay so the trace and other markers sit on top."""
     if w <= 0 or h <= 0:
         return
+    src = _load_source()
+    if src is None:
+        return
 
-    # Pre-compute pixel positions + edge-fade for each star.
-    #
-    # Width and height are scaled independently so the constellation
-    # can stretch horizontally on a wide panadapter without becoming
-    # a tall skinny kite. The vertical extent fills nearly the full
-    # widget height; the horizontal extent is roughly 60% of the
-    # widget width (capped to ~2x the height so the shape doesn't
-    # become unrecognizably squashed on extremely wide displays).
-    cell_h = int(h * 0.92)
-    cell_w = min(int(w * 0.60), int(cell_h * 2.0))
-    cx = w // 2
-    cy = int(h * 0.50)
-    star_px: dict[str, tuple[int, int, float, float]] = {}
-    for name, nx, ny, base in LYRA_STARS:
-        # Map (0..1, 0..1) within (cell_w, cell_h) centered on (cx, cy).
-        x = cx + int((nx - 0.5) * cell_w)
-        y = cy + int((ny - 0.5) * cell_h)
-        # Edge-fade is computed in widget-normalized coords so a star
-        # near the widget edge gets full alpha regardless of where it
-        # lives inside the constellation cell.
-        fade = _edge_fade(x / max(1, w), y / max(1, h))
-        star_px[name] = (x, y, base, fade)
+    global _cached_scaled, _cached_size
+    if _cached_scaled is None or _cached_size != (w, h):
+        target_h = max(1, int(h * WATERMARK_HEIGHT_FRAC))
+        # SmoothTransformation = bilinear; cheap on a 720px source
+        # and only runs on widget resize.
+        _cached_scaled = src.scaledToHeight(target_h, Qt.SmoothTransformation)
+        _cached_size = (w, h)
 
-    pulse = _vega_pulse_factor()
+    pix = _cached_scaled
+    x = (w - pix.width()) // 2
+    y = (h - pix.height()) // 2
 
-    painter.setRenderHint(QPainter.Antialiasing, True)
-
-    # Draw connecting lines first (they sit under the star dots).
-    line_alpha_max = int(BASE_ALPHA * LINE_ALPHA_MULT)
-    for a_name, b_name in LYRA_LINES:
-        ax, ay, _, fa = star_px[a_name]
-        bx, by, _, fb = star_px[b_name]
-        # Line alpha is the average fade of its two endpoints — that
-        # way a line whose endpoints straddle the trace area dims
-        # uniformly along its length.
-        alpha_f = 0.5 * (fa + fb)
-        alpha = int(line_alpha_max * alpha_f)
-        if alpha < 1:
-            continue
-        col = QColor(LINE_COLOR)
-        col.setAlpha(alpha)
-        painter.setPen(QPen(col, 1, Qt.SolidLine))
-        painter.drawLine(ax, ay, bx, by)
-
-    # Draw stars.
-    for name, (x, y, base, fade) in star_px.items():
-        alpha_f = base * fade
-        is_vega = (name == "Vega")
-        if is_vega:
-            alpha_f *= pulse
-        alpha = int(BASE_ALPHA * alpha_f)
-        if alpha < 1:
-            continue
-        col = QColor(VEGA_COLOR if is_vega else STAR_COLOR)
-        col.setAlpha(alpha)
-        radius = VEGA_RADIUS_PX if is_vega else STAR_RADIUS_PX
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(col)
-        painter.drawEllipse(
-            int(x - radius), int(y - radius),
-            int(radius * 2), int(radius * 2),
-        )
+    painter.save()
+    # Additive blending: dark source pixels (the image's navy
+    # background) contribute nothing on top of the black panadapter,
+    # so we only see the bright lyre/star content. Low opacity keeps
+    # the highlights from blowing out the trace.
+    painter.setCompositionMode(QPainter.CompositionMode_Plus)
+    painter.setOpacity(WATERMARK_OPACITY)
+    painter.drawPixmap(x, y, pix)
+    painter.restore()
