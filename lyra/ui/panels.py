@@ -2268,17 +2268,11 @@ class SpectrumPanel(GlassPanel):
         self.widget.set_spectrum(spec_db, center_hz, rate)
 
     def _on_click(self, freq_hz):
-        # Click-to-tune. CW filters sit OFFSET from the marker by
-        # ±cw_pitch (CWU passband above the marker, CWL below). For
-        # the clicked signal to land INSIDE the filter we tune the
-        # marker to (signal - pitch) for CWU, or (signal + pitch)
-        # for CWL. Other modes tune directly.
-        target = int(freq_hz)
-        mode = self.radio.mode
-        if mode in ("CWU", "CWL"):
-            pitch = int(self.radio.cw_pitch_hz)
-            target += -pitch if mode == "CWU" else +pitch
-        self.radio.set_freq_hz(target)
+        # Click-to-tune: marker = clicked frequency, period.
+        # In CW modes the Radio applies cw_display_offset_hz to the
+        # DDS internally so the clicked signal lands inside the
+        # offset filter at the correct pitch — no panel-side math.
+        self.radio.set_freq_hz(int(freq_hz))
 
     def _on_spot_clicked(self, freq_hz):
         # User clicked on a spot marker — tune + emit TCI spot_activated.
@@ -2638,17 +2632,11 @@ class WaterfallPanel(GlassPanel):
         self.widget.push_row(spec_db)
 
     def _on_click(self, freq_hz):
-        # Click-to-tune. CW filters sit OFFSET from the marker by
-        # ±cw_pitch (CWU passband above the marker, CWL below). For
-        # the clicked signal to land INSIDE the filter we tune the
-        # marker to (signal - pitch) for CWU, or (signal + pitch)
-        # for CWL. Other modes tune directly.
-        target = int(freq_hz)
-        mode = self.radio.mode
-        if mode in ("CWU", "CWL"):
-            pitch = int(self.radio.cw_pitch_hz)
-            target += -pitch if mode == "CWU" else +pitch
-        self.radio.set_freq_hz(target)
+        # Click-to-tune: marker = clicked frequency, period.
+        # In CW modes the Radio applies cw_display_offset_hz to the
+        # DDS internally so the clicked signal lands inside the
+        # offset filter at the correct pitch — no panel-side math.
+        self.radio.set_freq_hz(int(freq_hz))
 
     def _on_right_click(self, freq_hz, shift, global_pos):
         # Mirrors SpectrumPanel — both gestures gated on notch_enabled
