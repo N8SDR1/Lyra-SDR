@@ -2793,16 +2793,34 @@ class Radio(QObject):
             print(f"audio sink error: {e}")
 
     def _emit_tone(self, n: int):
-        rate = self._rate
-        t = (np.arange(n) + self._tone_phase) / rate
+        # n is the size of the incoming IQ block at self._rate. The
+        # audio sink runs at AUDIO_RATE (48 kHz) regardless of IQ
+        # rate — _do_demod's normal path goes through the channel
+        # which decimates IQ→48k. Tone needs to match: generate
+        # samples at 48 kHz and at the audio block size, NOT the
+        # IQ block size.
+        #
+        # The original code used self._rate as both the sample rate
+        # AND the block size, which produced 4× too many samples at
+        # 192 kHz IQ and 8× too many at 384 kHz. The over-sized
+        # write would queue up in the audio sink faster than it
+        # could drain, eventually backpressuring the GUI thread →
+        # hard "Not Responding" hang. Several operators hit this.
+        AUDIO_RATE = 48000
+        iq_rate = max(1, self._rate)
+        audio_n = max(1, int(n) * AUDIO_RATE // iq_rate)
+        t = (np.arange(audio_n) + self._tone_phase) / float(AUDIO_RATE)
         audio = (0.3 * np.sin(2 * np.pi * 1000.0 * t)).astype(np.float32)
-        self._tone_phase = (self._tone_phase + n) % rate
-        # Tone uses the same AF Gain + Volume chain as demod output
-        # so the operator's listening level stays consistent when
-        # switching to Mode → Tone for rig testing.
+        self._tone_phase = (self._tone_phase + audio_n) % AUDIO_RATE
+        # Tone uses AF Gain + Volume so operator's listening level
+        # stays consistent when switching to Mode → Tone for rig
+        # testing. Run through tanh as a safety limiter — without
+        # it, a high AF Gain (e.g. +35 dB = 56× linear) on the
+        # 0.3-amplitude sine would write peak ≈ 17 to the sink,
+        # which clips hard and on some sinks throws / blocks.
         af = self.af_gain_linear
         vol = 0.0 if self._muted else self._volume
-        audio = audio * af * vol
+        audio = np.tanh(audio * af * vol).astype(np.float32)
         try:
             self._audio_sink.write(audio)
         except Exception:
