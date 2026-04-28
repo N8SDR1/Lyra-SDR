@@ -1229,19 +1229,11 @@ class MainWindow(QMainWindow):
     # ── Lock / unlock panels ────────────────────────────────────────
     def _on_lock_panels_toggled(self, locked: bool):
         """View → Lock panels — toggle dock-bar drag/float/close
-        features on every panel. When locked, panels can't be moved
-        accidentally. State is persisted to QSettings so it survives
-        across launches."""
-        if locked:
-            # Strip the moveable / floatable / closable bits but keep
-            # whatever else Qt has set (e.g. vertical-title behavior).
-            features = QDockWidget.NoDockWidgetFeatures
-        else:
-            features = (QDockWidget.DockWidgetMovable
-                        | QDockWidget.DockWidgetFloatable
-                        | QDockWidget.DockWidgetClosable)
-        for dock in self.docks.values():
-            dock.setFeatures(features)
+        features on every panel AND the QSplitter handles between
+        panels. When locked, panels can't be moved or resized
+        accidentally. State is persisted to QSettings so it
+        survives across launches."""
+        self._apply_panel_lock(locked)
         self._settings.setValue("view/panels_locked", bool(locked))
         self._settings.sync()
         # Brief status-bar toast so the operator sees the toggle
@@ -1251,6 +1243,30 @@ class MainWindow(QMainWindow):
             if locked else
             "Panels unlocked — drag freely",
             2500)
+
+    def _apply_panel_lock(self, locked: bool) -> None:
+        """Push the lock state out to all dock features and splitter
+        handles. Split out from the toggle handler so we can re-apply
+        after a layout reset (which creates new QSplitters that don't
+        inherit the previous lock state)."""
+        from PySide6.QtWidgets import QSplitter
+        if locked:
+            features = QDockWidget.NoDockWidgetFeatures
+        else:
+            features = (QDockWidget.DockWidgetMovable
+                        | QDockWidget.DockWidgetFloatable
+                        | QDockWidget.DockWidgetClosable)
+        for dock in self.docks.values():
+            dock.setFeatures(features)
+        # QMainWindow internally builds QSplitters between docked
+        # widgets. Disabling each handle blocks drag-to-resize while
+        # keeping the visual separator visible (operator can still
+        # see the boundaries — just can't grab them).
+        for splitter in self.findChildren(QSplitter):
+            for i in range(1, splitter.count()):
+                handle = splitter.handle(i)
+                if handle is not None:
+                    handle.setEnabled(not locked)
 
     def _apply_panels_lock_from_settings(self):
         """Read the persisted lock state and apply on launch.
@@ -1580,6 +1596,12 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, self.docks["dsp"])
         for dock in self.docks.values():
             dock.setVisible(True)
+        # Re-apply the operator's panel-lock preference: layout reset
+        # rebuilds the QSplitter tree, and the new handles default to
+        # enabled. If the operator had panels locked before the reset,
+        # they expect them locked after too.
+        if self.lock_panels_action.isChecked():
+            self._apply_panel_lock(True)
         self.statusBar().showMessage(
             "Panel layout reset to factory defaults", 2500)
 
@@ -1639,6 +1661,10 @@ class MainWindow(QMainWindow):
                              self.docks["tuning"], Qt.Horizontal)
         for dock in self.docks.values():
             dock.setVisible(True)
+        # Re-apply the operator's panel-lock preference (new
+        # QSplitters from this rebuild default to enabled handles).
+        if self.lock_panels_action.isChecked():
+            self._apply_panel_lock(True)
         self.statusBar().showMessage(
             "Applied N8SDR layout — use View → 'Save current layout "
             "as my default' to lock it in",
