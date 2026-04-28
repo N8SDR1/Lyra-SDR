@@ -1122,14 +1122,27 @@ class SpectrumGpuWidget(QOpenGLWidget):
         MAX_SPOT_ROWS = 4
         ROW_GAP_PX = 3
         AGE_FADE_FLOOR = 0.30
-        # Dedicated font for spot callsigns. Use the widget's
-        # current font as the base (whatever the app theme selects)
-        # so we inherit a known-loadable family rather than
-        # nominating one that may or may not exist. Just bump the
-        # size + bold for legibility over the trace. 10 pt matches
-        # the bumped size used in the dB scale labels (9 pt on a
-        # QOpenGLWidget surface renders thin).
-        spot_font = QFont(painter.font())
+        # Dedicated font for spot callsigns. The display string is
+        # typically "<flag emoji> <callsign>" (e.g. "🇺🇸 N8SDR")
+        # because the TCI spot handler enriches the call with a
+        # DXCC flag from cty.dat. So the font needs both:
+        #   1. A text family that has ASCII glyphs for the callsign
+        #   2. An emoji family that has the regional-indicator
+        #      glyphs (U+1F1E6..U+1F1FF) for the flag
+        # Theme font (Exo 2) covers ASCII but not emoji, so we
+        # ALSO need an emoji family in the fallback chain.
+        # setFamilies takes an ordered list: Qt picks the family
+        # for each glyph by walking the list and using the first
+        # one that supports it. Putting the text family first means
+        # callsign chars render in Exo 2 (matches the rest of the
+        # UI); flag emoji falls through to Segoe UI Emoji.
+        spot_font = QFont()
+        spot_font.setFamilies([
+            "Exo 2",            # theme primary — covers Latin / ASCII
+            "Segoe UI",         # ASCII backup
+            "Arial",            # universal ASCII backup
+            "Segoe UI Emoji",   # flag emoji fallback (regional indicators)
+        ])
         spot_font.setPointSize(9)
         spot_font.setBold(True)
         painter.setFont(spot_font)
