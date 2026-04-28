@@ -994,6 +994,16 @@ class Radio(QObject):
     # rises, RMS rises with it and eventually crosses the quiet
     # threshold, halting climb naturally.
     LNA_AUTO_PULLUP_CEILING_DB = 24
+    # Two-tier ceiling: when there's a real signal in the demod
+    # passband (passband peak > NF + LNA_AUTO_PULLUP_PASSBAND_MARGIN_DB),
+    # climb stops at this lower value to keep the AD9866 PGA out of
+    # the +18..+28 dB compression zone where strong passband signals
+    # produce IMD/AGC pumping. Below this gain, signal-present is
+    # IRRELEVANT to pull-up — that's exactly the case where pull-up
+    # is most useful (bringing weak signals up from inaudible). The
+    # fix for the WWV-at-LNA-negative case where pull-up wouldn't
+    # climb because WWV's carrier was correctly visible.
+    LNA_AUTO_PULLUP_SIGNAL_CEILING_DB = 15
     # Defer pull-up after a manual gain change so the operator's
     # intent isn't immediately overridden.
     LNA_AUTO_PULLUP_DEFER_S = 5.0
@@ -1649,20 +1659,38 @@ class Radio(QObject):
         the quiet threshold and the streak stops accumulating —
         even before the hard ceiling is reached on a typical
         station."""
-        if self._gain_db >= self.LNA_AUTO_PULLUP_CEILING_DB:
+        # Two-tier ceiling: lower ceiling when a real signal is in
+        # the demod passband (PGA-compression risk). Higher ceiling
+        # otherwise (truly quiet band, only noise). Below either
+        # ceiling, signal-present does NOT block climb — that's the
+        # whole point of pull-up: bringing weak signals up.
+        pb_peak = self._lna_passband_peak_dbfs
+        nf_db = self._noise_floor_db
+        signal_in_passband = (
+            pb_peak is not None and nf_db is not None
+            and (pb_peak - nf_db)
+                > self.LNA_AUTO_PULLUP_PASSBAND_MARGIN_DB)
+        if signal_in_passband:
+            ceiling = self.LNA_AUTO_PULLUP_SIGNAL_CEILING_DB
+        else:
+            ceiling = self.LNA_AUTO_PULLUP_CEILING_DB
+        if self._gain_db >= ceiling:
+            self._lna_pullup_quiet_streak = 0
             return 0, ""
         # Defer to recent manual changes
         import time as _time
         since_user = _time.monotonic() - self._lna_last_user_change_ts
         if since_user < self.LNA_AUTO_PULLUP_DEFER_S:
             return 0, ""
-        # Peak gate (already in dBFS from caller)
+        # Peak gate (already in dBFS from caller). Full-IQ peak —
+        # protects against ADC-overload-imminent regardless of
+        # whether the loud signal is in passband or out of it.
         if peak_dbfs >= self.LNA_AUTO_QUIET_PEAK_DBFS:
             self._lna_pullup_quiet_streak = 0
             return 0, ""
         # RMS gate — worst case (max) over the window for the same
         # reason the back-off uses peak max: we want to NOT pull up
-        # if any recent tick saw real signal.
+        # if any recent tick saw real signal across the IQ band.
         if not self._lna_rms:
             return 0, ""
         rms_max_lin = max(self._lna_rms)
@@ -1671,20 +1699,6 @@ class Radio(QObject):
             return 0, ""
         rms_max_dbfs = 20.0 * float(np.log10(rms_max_lin))
         if rms_max_dbfs >= self.LNA_AUTO_QUIET_RMS_DBFS:
-            self._lna_pullup_quiet_streak = 0
-            return 0, ""
-        # Passband-signal gate — the critical fix for WWV-style
-        # strong narrowband carriers that don't move full-IQ peak
-        # or RMS but DO drive the AD9866 PGA into compression at
-        # high LNA. If the demod passband's strongest bin sits
-        # more than LNA_AUTO_PULLUP_PASSBAND_MARGIN_DB above the
-        # current noise floor, there's real signal in the filter
-        # the operator is listening to — refuse to climb.
-        pb_peak = self._lna_passband_peak_dbfs
-        nf_db = self._noise_floor_db
-        if (pb_peak is not None and nf_db is not None
-                and (pb_peak - nf_db)
-                    > self.LNA_AUTO_PULLUP_PASSBAND_MARGIN_DB):
             self._lna_pullup_quiet_streak = 0
             return 0, ""
         # All gates passed for this tick — accumulate streak

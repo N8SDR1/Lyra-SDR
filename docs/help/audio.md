@@ -123,21 +123,31 @@ bands without having to ride the slider yourself.
 |---|---|
 | RMS over recent window | < −50 dBFS |
 | Peak over recent window | < −25 dBFS |
-| Passband peak above noise floor | < +10 dB |
 | Sustained-quiet streak | 5 consecutive ticks (~7.5 s) |
 | Time since last manual gain change | > 5 s |
-| Current LNA gain | < +24 dB (auto soft ceiling) |
+| Current LNA gain | below the active ceiling (see below) |
 
-The **passband-peak gate** is the critical one for narrowband-strong
-signals like WWV. A WWV carrier at 10 MHz only occupies a few kHz
-out of the 192 kHz IQ stream, so it barely moves full-band peak or
-RMS — but it's what your ear is locked onto. If the strongest bin
-inside your demod filter is more than 10 dB above the noise floor,
-pull-up refuses to climb regardless of how quiet the rest of the
-band looks. The same comparison also drives an additional
-**back-off trigger** when LNA is already above +12 dB and a strong
-passband signal arrives mid-tune — the loop will drop 2 dB even if
-the full-band peak is still cool.
+**Two-tier soft ceiling.** Climb stops at one of two values
+depending on whether there's a real signal in your demod passband:
+
+| Situation | Soft ceiling |
+|---|---|
+| Passband peak more than +10 dB above noise floor | **+15 dB** |
+| Truly quiet passband (only noise) | **+24 dB** |
+
+Below either ceiling, an in-passband signal does **NOT** block
+climb — that's exactly the use case pull-up is built for (bringing
+weak but present signals up from inaudible). The lower +15 dB
+ceiling only kicks in once we're at a gain level where pushing
+further could drive the AD9866 PGA into compression with a strong
+in-filter signal. Above +15 with signal present, pull-up stops
+and the AGC takes over from there.
+
+If pull-up has driven LNA above +12 dB and a strong passband
+signal arrives mid-tune, an additional **back-off trigger** drops
+2 dB at a time until the PGA is happy — even if the full-IQ peak
+is still cool. This catches the "tune onto a strong AM carrier
+while pull-up has lifted you" case automatically.
 
 When all gates pass, Auto climbs by **+1 dB**. The next tick
 re-evaluates from the new gain. Down-steps stay aggressive (2–3
