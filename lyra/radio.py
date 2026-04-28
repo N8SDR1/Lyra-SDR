@@ -63,35 +63,6 @@ class Notch:
     filter: NotchFilter         # the actual DSP object
 
 
-class _Decimator:
-    """Stateful complex-signal decimator. Low-pass FIR + downsample with
-    persistent filter state so blocks joined back-to-back have no FIR
-    startup transient at the block boundary.
-    """
-
-    def __init__(self, rate_in: int, rate_out: int, taps: int = 257):
-        from scipy.signal import firwin
-        self.decim = rate_in // rate_out
-        # Anti-alias cutoff at 90% of output Nyquist
-        cutoff = (rate_out / 2.0) * 0.90
-        self.taps = firwin(taps, cutoff, fs=rate_in, window="hann").astype(np.float64)
-        self.state_i = np.zeros(taps - 1, dtype=np.float64)
-        self.state_q = np.zeros(taps - 1, dtype=np.float64)
-        self._phase = 0   # offset for decimation stride across block boundaries
-
-    def process(self, iq: np.ndarray) -> np.ndarray:
-        from scipy.signal import lfilter
-        i_out, self.state_i = lfilter(self.taps, 1.0, iq.real, zi=self.state_i)
-        q_out, self.state_q = lfilter(self.taps, 1.0, iq.imag, zi=self.state_q)
-        # Keep every `decim`-th sample, starting at the carried-over phase.
-        start = (-self._phase) % self.decim
-        i_dec = i_out[start::self.decim]
-        q_dec = q_out[start::self.decim]
-        consumed_to_end = len(i_out) - start
-        self._phase = (self._phase + consumed_to_end) % self.decim
-        return (i_dec + 1j * q_dec).astype(np.complex64)
-
-
 class Radio(QObject):
     # ── State change signals (UI subscribes) ───────────────────────────
     stream_state_changed = Signal(bool)
@@ -402,11 +373,17 @@ class Radio(QObject):
         # ── Runtime ───────────────────────────────────────────────────
         self._stream: Optional[HL2Stream] = None
         self._audio_sink = NullSink()
-        self._audio_buf: list = []
         self._audio_block = 2048
         self._tone_phase = 0.0
-        # Stateful decimator for RX rates > 48 k. Built lazily on first use.
-        self._decimator = None
+
+        # RX DSP channel — the WDSP integration seam. Owns its own
+        # decimator, audio buffer, demod instances, NR, and notch
+        # chain; Radio configures via setters and feeds IQ into
+        # process(). See lyra/dsp/channel.py for the full contract.
+        from lyra.dsp.channel import PythonRxChannel
+        self._rx_channel: PythonRxChannel = PythonRxChannel(
+            in_rate=self._rate, block_size=self._audio_block,
+        )
 
         # AGC: peak-track with hang time. Profile presets select
         # (release rate, hang blocks); Custom exposes the parameters
@@ -599,11 +576,10 @@ class Radio(QObject):
         self._peak_markers_color: str = ""      # peak marker color override
 
         # ── Noise Reduction ───────────────────────────────────────────
-        # Classical spectral-subtraction NR; neural NR (RNNoise /
-        # DeepFilterNet) is on the backlog. Processor is always alive;
-        # its .enabled flag gates the audio path.
-        from lyra.dsp.nr import SpectralSubtractionNR
-        self._nr = SpectralSubtractionNR(rate=48000)
+        # NR processor is owned by self._rx_channel (see lyra/dsp/channel.py).
+        # Radio just exposes the operator-facing on/off + profile via
+        # the channel's setters. Neural NR (RNNoise / DeepFilterNet)
+        # will hook in via the channel's NR pipeline when added.
         # Keep `_nr_profile` separate from the processor's internal
         # value so the UI can expose a "neural" placeholder even when
         # the processor itself only supports the classical profiles.
@@ -661,8 +637,14 @@ class Radio(QObject):
         self._ring_lock = threading.Lock()
 
         # ── Demods ─────────────────────────────────────────────────────
-        self._demods: dict = {}
-        self._rebuild_demods()
+        # Demod instances live inside self._rx_channel (one per mode,
+        # built from the channel's _rx_bw_by_mode + _cw_pitch_hz).
+        # Sync the channel's per-mode BW with Radio's current values
+        # so the UI's saved BW state takes effect immediately.
+        for _m, _bw in self._rx_bw_by_mode.items():
+            self._rx_channel.set_rx_bw(_m, int(_bw))
+        self._rx_channel.set_cw_pitch_hz(float(self._cw_pitch_hz))
+        self._rx_channel.set_mode(self._mode)
 
         # ── Thread bridge ─────────────────────────────────────────────
         # Batch samples in the RX thread before bridging to reduce Qt
@@ -795,7 +777,6 @@ class Radio(QObject):
         self._rate = rate
         with self._ring_lock:
             self._sample_ring.clear()
-        self._audio_buf.clear()
         # Reset the waterfall tick counter so the divider check
         # starts cleanly with the new rate. Without this, a counter
         # mid-cycle could leave the next waterfall row up to N FFT
@@ -806,8 +787,9 @@ class Radio(QObject):
                 self._stream.set_sample_rate(rate)
             except Exception as e:
                 self.status_message.emit(f"Rate change failed: {e}", 3000)
-        # Decimator is rate-dependent; notches use rate in coefficient calc.
-        self._decimator = None
+        # Channel rebuilds its decimator on the next IQ block at the
+        # new rate; notches use rate in coefficient calc so rebuild here.
+        self._rx_channel.set_in_rate(rate)
         self._rebuild_notches()
         self.rate_changed.emit(rate)
 
@@ -854,12 +836,10 @@ class Radio(QObject):
         if alias == self._mode:
             return
         self._mode = alias
-        self._audio_buf.clear()
-        self._rebuild_demods()
-        # Flush NR state on mode change — otherwise the noise-floor
-        # estimate from the previous mode (often with very different
-        # bandwidth characteristics) leaks in as an audible transient.
-        self._nr.reset()
+        # Channel handles its own audio-buffer flush + NR reset on
+        # mode switch so the previous mode's noise-floor estimate
+        # doesn't leak in as an audible transient.
+        self._rx_channel.set_mode(alias)
         if not self._suppress_band_save:
             self._save_current_band_memory()
         self.mode_changed.emit(alias)
@@ -1269,17 +1249,15 @@ class Radio(QObject):
 
     @property
     def nr_enabled(self) -> bool:
-        return self._nr.enabled
+        return self._rx_channel.nr_enabled
 
     def set_nr_enabled(self, on: bool):
         on = bool(on)
-        if on == self._nr.enabled:
+        if on == self._rx_channel.nr_enabled:
             return
-        self._nr.enabled = on
-        if on:
-            # Fresh state each time NR is turned back on so a stale
-            # overlap tail from a previous mode doesn't leak in.
-            self._nr.reset()
+        # Channel handles its own NR state (including the fresh-reset
+        # on enable so a stale overlap tail doesn't leak in).
+        self._rx_channel.set_nr_enabled(on)
         self.nr_enabled_changed.emit(on)
 
     @property
@@ -1293,12 +1271,12 @@ class Radio(QObject):
         self._nr_profile = name
         if name == "neural":
             # Reserved UI slot — no classical backend change. When a
-            # neural package gets wired in, this branch will swap the
-            # processor instance. For now fall back to medium so audio
-            # still flows rather than going silent.
-            self._nr.set_profile("medium")
+            # neural package gets wired in (probably via a different
+            # DspChannel subclass), this branch will swap the channel.
+            # For now fall back to medium so audio still flows.
+            self._rx_channel.set_nr_profile("medium")
         else:
-            self._nr.set_profile(name)
+            self._rx_channel.set_nr_profile(name)
         self.nr_profile_changed.emit(name)
 
     def set_muted(self, on: bool):
@@ -1490,8 +1468,10 @@ class Radio(QObject):
 
     def set_rx_bw(self, mode: str, bw: int):
         self._rx_bw_by_mode[mode] = int(bw)
+        # Always push to channel so the per-mode BW state stays in sync
+        # — the demod for `mode` rebuilds inside the channel.
+        self._rx_channel.set_rx_bw(mode, int(bw))
         if mode == self._mode:
-            self._rebuild_demods()
             self._emit_passband()
         self.rx_bw_changed.emit(mode, int(bw))
         if self._bw_locked and self._tx_bw_by_mode.get(mode) != int(bw):
@@ -1503,8 +1483,7 @@ class Radio(QObject):
         self.tx_bw_changed.emit(mode, int(bw))
         if self._bw_locked and self._rx_bw_by_mode.get(mode) != int(bw):
             self._rx_bw_by_mode[mode] = int(bw)
-            if mode == self._mode:
-                self._rebuild_demods()
+            self._rx_channel.set_rx_bw(mode, int(bw))
             self.rx_bw_changed.emit(mode, int(bw))
 
     def set_bw_lock(self, locked: bool):
@@ -2312,7 +2291,7 @@ class Radio(QObject):
             self._audio_sink.close()
         except Exception:
             pass
-        self._audio_buf.clear()
+        self._rx_channel.reset()
         # 30 ms — long enough for PortAudio/WASAPI to fully release
         # the device handle, short enough to be imperceptible to the
         # operator. Tested across AK4951↔PC swaps with no recurrence
@@ -2376,7 +2355,7 @@ class Radio(QObject):
             self._stream = None
         with self._ring_lock:
             self._sample_ring.clear()
-        self._audio_buf.clear()
+        self._rx_channel.reset()
         self._lna_peaks = []
         self._lna_rms = []
         self.stream_state_changed.emit(False)
@@ -2441,6 +2420,18 @@ class Radio(QObject):
         self._do_demod(samples)
 
     def _do_demod(self, iq):
+        """Route IQ through the RX channel, then apply AGC + volume,
+        then send to the audio sink.
+
+        Phase 2 refactor: the channel (lyra/dsp/channel.py) owns the
+        decimation, notch chain, demods, and NR. AGC + final volume
+        staging stay here since they're routing-side concerns. The
+        channel returns 48 kHz audio for any complete demod blocks
+        ready in its buffer; empty array if no full block yet.
+
+        WDSP integration path: when WdspChannel(DspChannel) lands,
+        this function doesn't change at all. Channel returns audio,
+        AGC + sink runs the same way."""
         mode = self._mode
         if mode == "Off":
             return
@@ -2448,52 +2439,24 @@ class Radio(QObject):
             self._emit_tone(len(iq))
             return
 
-        iq_48k = self._decimate_to_48k(iq)
-        if iq_48k.size == 0:
-            return
-        self._audio_buf.extend(iq_48k.tolist())
+        # Push current notch state to channel each call (cheap; the
+        # channel just stores the references). We do this here rather
+        # than in every notch-mutation site so the channel always sees
+        # fresh state without us tracking 8+ call sites.
+        self._rx_channel.set_notches(self._notches, self._notch_enabled)
 
-        block = self._audio_block
-        demod = self._demods.get(mode)
-        if demod is None:
+        try:
+            audio = self._rx_channel.process(iq)
+        except Exception as e:
+            print(f"channel error: {e}")
             return
-
-        while len(self._audio_buf) >= block:
-            chunk = np.asarray(self._audio_buf[:block], dtype=np.complex64)
-            del self._audio_buf[:block]
-            try:
-                if self._notch_enabled:
-                    n_applied = 0
-                    for n in self._notches:
-                        if n.active and n.filter is not None:
-                            chunk = n.filter.process(chunk)
-                            n_applied += 1
-                    # One-shot diagnostic: print on the first chunk of
-                    # each "notches active" period so the operator can
-                    # confirm the DSP is firing. Suppressed if no
-                    # notches are actually active despite the master
-                    # NF flag being on (which would be the silent-
-                    # failure case the operator's been reporting).
-                    if not getattr(self, "_notch_diag_printed", False):
-                        print(f"[notch DSP] chunk {block} samples, "
-                              f"{n_applied} of {len(self._notches)} "
-                              f"notch(es) applied "
-                              f"(NF master={self._notch_enabled})")
-                        self._notch_diag_printed = True
-                else:
-                    # Reset diag so we'll print again next time NF
-                    # is re-enabled.
-                    self._notch_diag_printed = False
-                audio = demod.process(chunk)
-                # NR sits between demod and AGC — it cleans up the
-                # recovered audio before AGC evaluates gain, so hiss
-                # doesn't dominate AGC's peak-tracker during quiet
-                # moments. No-op when nr.enabled is False.
-                audio = self._nr.process(audio)
-                audio = self._apply_agc_and_volume(audio)
-                self._audio_sink.write(audio)
-            except Exception as e:
-                print(f"demod error: {e}")
+        if audio.size == 0:
+            return
+        try:
+            audio = self._apply_agc_and_volume(audio)
+            self._audio_sink.write(audio)
+        except Exception as e:
+            print(f"audio sink error: {e}")
 
     def _emit_tone(self, n: int):
         rate = self._rate
@@ -2671,8 +2634,8 @@ class Radio(QObject):
         self._cw_pitch_hz = new_pitch
         from PySide6.QtCore import QSettings as _QS
         _QS("N8SDR", "Lyra").setValue("dsp/cw_pitch_hz", new_pitch)
-        # Rebuild demods so CWU/CWL pick up the new pitch.
-        self._rebuild_demods()
+        # Channel rebuilds CWU/CWL demods at the new pitch internally.
+        self._rx_channel.set_cw_pitch_hz(float(new_pitch))
         # Recompute + re-emit passband so the panadapter overlay
         # shifts to the new CW position immediately.
         self._emit_passband()
@@ -2706,40 +2669,10 @@ class Radio(QObject):
             3000)
         return target
 
-    def _decimate_to_48k(self, iq):
-        if self._rate == 48000:
-            return iq
-        decim = self._rate // 48000
-        if decim <= 1:
-            return iq
-        if self._decimator is None:
-            self._decimator = _Decimator(self._rate, 48000)
-        return self._decimator.process(iq)
-
-    def _rebuild_demods(self):
-        try:
-            bw = self._rx_bw_by_mode
-            self._demods = {
-                "LSB":  SSBDemod(48000, "LSB", low_hz=300,
-                                 high_hz=300 + bw.get("LSB", 2400)),
-                "USB":  SSBDemod(48000, "USB", low_hz=300,
-                                 high_hz=300 + bw.get("USB", 2400)),
-                "CWL":  CWDemod(48000, pitch_hz=self._cw_pitch_hz,
-                                bw_hz=bw.get("CWL", 250), sideband="L"),
-                "CWU":  CWDemod(48000, pitch_hz=self._cw_pitch_hz,
-                                bw_hz=bw.get("CWU", 250), sideband="U"),
-                "DSB":  DSBDemod(48000, bw_hz=bw.get("DSB", 5000)),
-                "AM":   AMDemod(48000, bw_hz=bw.get("AM", 6000) / 2),
-                "FM":   FMDemod(48000, deviation_hz=5000,
-                                audio_bw_hz=bw.get("FM", 10000) / 2),
-                "DIGL": SSBDemod(48000, "LSB", low_hz=200,
-                                 high_hz=200 + bw.get("DIGL", 3000)),
-                "DIGU": SSBDemod(48000, "USB", low_hz=200,
-                                 high_hz=200 + bw.get("DIGU", 3000)),
-            }
-        except RuntimeError as e:
-            print(f"demod init failed: {e}")
-            self._demods = {}
+    # Note: _decimate_to_48k and _rebuild_demods used to live here.
+    # Both are now owned by self._rx_channel (lyra/dsp/channel.py),
+    # which is the WDSP integration seam. Radio configures the channel
+    # via setters and feeds IQ into self._rx_channel.process(iq).
 
     def _make_notch_filter(self, abs_freq_hz: float,
                            width_hz: float,
@@ -2803,7 +2736,7 @@ class Radio(QObject):
                 self._audio_sink.close()
             except Exception:
                 pass
-            self._audio_buf.clear()
+            self._rx_channel.reset()
             import time as _time
             _time.sleep(0.030)
             self._audio_sink = self._make_sink()
