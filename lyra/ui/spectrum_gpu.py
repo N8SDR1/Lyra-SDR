@@ -1123,9 +1123,14 @@ class SpectrumGpuWidget(QOpenGLWidget):
         ROW_GAP_PX = 3
         AGE_FADE_FLOOR = 0.30
         # Dedicated font with emoji fallback so flag glyphs render.
+        # Bumped to 10 pt (vs 8 pt on the QPainter widget) because
+        # Qt fonts rendered through QPainter on top of QOpenGLWidget
+        # come out noticeably thinner than over a plain QWidget —
+        # 8 pt was unreadable in field test. Same 9-pt-bumped
+        # workaround used in _draw_db_scale_labels.
         spot_font = QFont()
         spot_font.setFamilies(["Segoe UI Emoji", "Segoe UI", "Arial"])
-        spot_font.setPointSize(8)
+        spot_font.setPointSize(10)
         spot_font.setBold(True)
         painter.setFont(spot_font)
         fm = QFontMetrics(spot_font)
@@ -1199,6 +1204,15 @@ class SpectrumGpuWidget(QOpenGLWidget):
             painter.setBrush(tint)
             painter.setPen(QPen(spot_color, 1))
             painter.drawRoundedRect(rect, 3, 3)
+            # Drop shadow — 1 px black offset below the text so the
+            # spot-color text stays legible regardless of how bright
+            # or dim the foreground color ends up after age-fade.
+            # Cheap (one extra drawText) and matches the over-trace
+            # text treatment in commercial SDR clients.
+            shadow_rect = QRectF(bx + 1, by + 1, tw, box_h)
+            painter.setPen(QPen(QColor(0, 0, 0, max(120, text_alpha)),
+                                1))
+            painter.drawText(shadow_rect, Qt.AlignCenter, text)
             painter.setPen(QPen(QColor(rc, gc, bc, text_alpha), 1))
             painter.drawText(rect, Qt.AlignCenter, text)
             # Vertical tick from box bottom down toward the trace
