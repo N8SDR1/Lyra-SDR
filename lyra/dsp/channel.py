@@ -245,11 +245,23 @@ class PythonRxChannel(DspChannel):
         self._nr.set_profile(profile)
 
     def reset(self) -> None:
-        """Drop in-flight buffers + transient state."""
+        """Drop in-flight buffers + transient state.
+
+        Also force a decimator rebuild — observed in field test that
+        big freq/mode jumps (e.g. AM 10 MHz WWV → DIGU 7.074 MHz FT8)
+        could leave audio stuck silent until the operator cycled the
+        sample rate, which is the only path that previously rebuilt
+        the decimator. Rebuilding here too closes that gap; the
+        per-call cost is negligible (one np.zeros(taps - 1)) and the
+        first IQ block after reset transparently rebuilds the
+        _Decimator instance via _decimate_to_48k."""
         self._audio_buf.clear()
         self._nr.reset()
-        # Decimator state can stay; it's only stale across rate
-        # changes, which set_in_rate handles separately.
+        # Force decimator rebuild on next block. Cheap (one filter-
+        # state allocation) and matches what set_in_rate does, which
+        # is the only path the operator had previously to recover
+        # from the stuck state.
+        self._decimator = None
 
     # ── Misc accessors for Radio (read-only views into channel state) ─
 

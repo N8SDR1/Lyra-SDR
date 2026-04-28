@@ -867,6 +867,19 @@ class Radio(QObject):
         # next waterfall row arrives promptly instead of inheriting
         # whatever counter state existed at the previous frequency.
         self._waterfall_tick_counter = 0
+        # Flush the audio chain. Field test on AM 10 MHz WWV → DIGU
+        # 7.074 MHz FT8: audio could get stuck silent across big
+        # freq jumps until the operator cycled the sample rate.
+        # channel.reset() drops in-flight audio buffer + forces
+        # decimator rebuild (matches what set_in_rate did, which
+        # was the only previous escape hatch). Also reset AGC peak
+        # so a stale loud-signal peak from the prior band doesn't
+        # clamp gain to silence on the new band while it slowly
+        # decays.
+        self._rx_channel.reset()
+        self._agc_peak = 1e-4
+        self._agc_hang_counter = 0
+        self._smeter_avg_lin = 0.0
         self._rebuild_notches()
         # If the band just changed and filter board is active, push the
         # new OC pattern so the N2ADR relays follow.
@@ -951,6 +964,14 @@ class Radio(QObject):
         # mode switch so the previous mode's noise-floor estimate
         # doesn't leak in as an audible transient.
         self._rx_channel.set_mode(alias)
+        # Also reset AGC + S-meter state. Different demods produce
+        # very different peak levels (AM envelope vs SSB sideband
+        # vs CW pitched tone), so a peak captured under the old
+        # mode would mis-clamp gain under the new one until it
+        # decayed. Same field-test motivation as set_freq_hz.
+        self._agc_peak = 1e-4
+        self._agc_hang_counter = 0
+        self._smeter_avg_lin = 0.0
         if not self._suppress_band_save:
             self._save_current_band_memory()
         self.mode_changed.emit(alias)
