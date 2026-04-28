@@ -1866,14 +1866,15 @@ class SMeterPanel(GlassPanel):
         mode_menu = menu.addMenu("Response mode")
         cur_mode = self.radio.smeter_mode
         for key, label, tip in (
-            ("peak", "Peak (instant max in passband)",
-             "Shows the strongest single FFT bin inside the RX "
-             "passband. Responsive but jumpy on transients (CW dits, "
-             "FT8 tones, lightning crashes)."),
-            ("avg",  "Average (time-smoothed mean)",
-             "Average of all bins in the passband, smoothed with a "
-             "~5-frame EWMA. Steadier reading; better representation "
-             "of the actual signal level the AGC sees."),
+            ("peak", "Peak (instant integrated power)",
+             "Total power summed across all FFT bins inside the RX "
+             "passband, no time smoothing. Responsive but jumpy on "
+             "transients (CW dits, FT8 tones, lightning crashes)."),
+            ("avg",  "Average (smoothed integrated power)",
+             "Total power summed across all FFT bins inside the RX "
+             "passband, EWMA-smoothed (~1 s at 5 fps). Steadier "
+             "reading; better representation of the actual signal "
+             "level the AGC sees."),
         ):
             act = mode_menu.addAction(label)
             act.setCheckable(True)
