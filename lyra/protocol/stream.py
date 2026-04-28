@@ -421,6 +421,28 @@ class HL2Stream:
         self._send_cc(0x00, rate_code, 0x00, 0x00, self._config_c4)
         self._keepalive_cc = (0x00, rate_code, 0x00, 0x00, self._config_c4)
 
+    def reassert_rate_keepalive(self):
+        """Re-send the sample-rate C&C without changing rate, and put
+        it back as the keepalive payload. Field test (N8SDR 2026-04-28):
+        big freq+mode jumps (AM 10 MHz WWV ↔ DIGU 7.074 MHz FT8) left
+        audio stuck silent until the operator cycled the sample rate.
+        Diagnosis: every _set_rx1_freq / set_lna_gain_db call REPLACES
+        _keepalive_cc with its own register, so the periodic keepalive
+        stops re-asserting the sample-rate config (C&C 0x00). The HL2
+        gateware seems to need that periodic re-assertion to keep IQ
+        flowing cleanly across LO retunes — without it, the EP6 stream
+        can stall in some hard-to-reproduce way that only a fresh C&C
+        0x00 unsticks. Calling this from Radio.set_freq_hz +
+        Radio.set_mode is the cheap "rate-cycle equivalent" that
+        avoids the visible 192→48→192 dance."""
+        if self._sock is None:
+            return
+        rate_code = SAMPLE_RATES.get(self.sample_rate)
+        if rate_code is None:
+            return
+        self._send_cc(0x00, rate_code, 0x00, 0x00, self._config_c4)
+        self._keepalive_cc = (0x00, rate_code, 0x00, 0x00, self._config_c4)
+
     def set_lna_gain_db(self, gain_db: int):
         """Set HL2 LNA gain in dB. Range -12..+48.
 
