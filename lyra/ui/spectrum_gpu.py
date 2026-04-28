@@ -312,6 +312,25 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # Grid lines (9×9 horiz/vert dotted divisions). Default ON;
         # operator toggle via Settings → Visuals.
         self._show_grid: bool = True
+        # DX/contest spots — list of dicts as published by Radio.
+        # Each spot dict: freq_hz, mode, call/display, ts (monotonic),
+        # color (0xAARRGGBB). Same payload shape as the CPU widget's
+        # _spots so the rendering code can be a 1:1 port.
+        self._spots: list[dict] = []
+        # Age-fade lifetime in seconds. 0 = no fade. Mirrors radio
+        # default of 600 s (10 min) — set authoritatively from
+        # radio.spot_lifetime_s when the panel wires the signal.
+        self._spot_lifetime_s: int = 600
+        # Optional mode filter — empty set = render all spots.
+        # Populated via set_spot_mode_filter(csv_or_set).
+        self._spot_mode_filter: set[str] = set()
+        # Vertical pixels at the top of the panadapter reserved by
+        # the band-plan strip (segment colors + landmark triangles).
+        # Spot row 0 sits BELOW this offset so callsign boxes don't
+        # paint over the band-plan visuals. 0 when band plan is
+        # off (or not yet ported to GPU). Will be set by the band
+        # plan port; for now it stays 0.
+        self._band_plan_reserved_px: int = 0
 
         # Notch markers (Phase B.13). Each entry is
         # (abs_freq_hz, width_hz, active, deep). Updated from
@@ -449,6 +468,42 @@ class SpectrumGpuWidget(QOpenGLWidget):
     def set_show_grid(self, visible: bool) -> None:
         """Toggle the 9×9 grid divisions on the panadapter."""
         self._show_grid = bool(visible)
+        self.update()
+
+    def set_spots(self, spots: list) -> None:
+        """Set the spot list. Each entry is a dict with keys:
+        freq_hz, mode, call/display, ts (monotonic), color (0xAARRGGBB).
+        Connected to radio.spots_changed in panels.py."""
+        self._spots = list(spots)
+        self.update()
+
+    def set_spot_lifetime_s(self, seconds: int) -> None:
+        """Drives the age-fade on spot boxes. Older spots fade toward
+        30% alpha as they approach the lifetime limit. 0 = no fade."""
+        self._spot_lifetime_s = max(0, int(seconds))
+        self.update()
+
+    def set_spot_mode_filter(self, csv_or_set) -> None:
+        """Accept a CSV string ('FT8,CW,SSB') or a pre-built set.
+        Empty = no filter, render all spots. SSB in CSV expands to
+        match USB/LSB/SSB so a single 'SSB' selector covers all
+        three sideband modes."""
+        if isinstance(csv_or_set, (set, frozenset)):
+            self._spot_mode_filter = {m.upper() for m in csv_or_set}
+        else:
+            csv = str(csv_or_set or "").strip()
+            if not csv:
+                self._spot_mode_filter = set()
+            else:
+                raw = [m.strip().upper()
+                       for m in csv.split(",") if m.strip()]
+                out: set[str] = set()
+                for m in raw:
+                    if m == "SSB":
+                        out.update(("SSB", "USB", "LSB"))
+                    else:
+                        out.add(m)
+                self._spot_mode_filter = out
         self.update()
 
     def set_notches(self, notches: list) -> None:
@@ -918,6 +973,7 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # the audible pitch position.
         self._draw_cw_zero_line(painter)
         self._draw_notches(painter)
+        self._draw_spots(painter)
         self._draw_freq_scale_labels(painter)
 
     # ── Axis labels ─────────────────────────────────────────────────
@@ -1031,6 +1087,125 @@ class SpectrumGpuWidget(QOpenGLWidget):
                 painter.setFont(label_font)
                 painter.drawText(nx + half_px + 4, 14,
                                  f"{int(round(width_hz))}{suffix} Hz")
+
+    def _draw_spots(self, painter: QPainter) -> None:
+        """DX/contest spot boxes with multi-row collision packing
+        and age-fade. Mirrors the CPU widget's spot rendering so
+        the same TCI/cluster spot stream looks identical regardless
+        of which backend is active.
+
+        Layout rules (1:1 with the CPU implementation):
+          - Up to 4 stacked rows. Newest spots (highest ts) get the
+            top row; older spots cascade down. Spots that can't find
+            a non-overlapping row this frame are skipped (still in
+            _spots for hit-testing once that lands).
+          - Linear age-fade: 100% alpha at ts=now down to 30% floor
+            at ts = now - lifetime. Lifetime 0 disables fade.
+          - Mode filter (set_spot_mode_filter) skips spots whose
+            mode is not in the active filter set. Empty = render all.
+          - Each box is a rounded rectangle with the spot color as
+            border + tint, callsign/display centered, and a vertical
+            tick from the box down to the trace area.
+          - Top of row 0 sits BELOW _band_plan_reserved_px so spot
+            boxes don't paint over the band-plan strip when that
+            overlay lands. Currently 0 (band plan not yet wired).
+        """
+        if not self._spots or self._span_hz <= 0:
+            return
+        w = self.width()
+        h = self.height()
+        if w <= 0 or h <= 0:
+            return
+        import time
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QFont, QFontMetrics
+        MAX_SPOT_ROWS = 4
+        ROW_GAP_PX = 3
+        AGE_FADE_FLOOR = 0.30
+        # Dedicated font with emoji fallback so flag glyphs render.
+        spot_font = QFont()
+        spot_font.setFamilies(["Segoe UI Emoji", "Segoe UI", "Arial"])
+        spot_font.setPointSize(8)
+        spot_font.setBold(True)
+        painter.setFont(spot_font)
+        fm = QFontMetrics(spot_font)
+        padding_h = 5
+        padding_v = 2
+        box_h = fm.height() + 2 * padding_v
+        # Filter to on-screen + mode-passing spots
+        mode_filter = self._spot_mode_filter
+        visible: list[tuple[float, dict]] = []
+        for s in self._spots:
+            if mode_filter:
+                m = str(s.get("mode", "")).upper()
+                if m not in mode_filter:
+                    continue
+            nf = (s["freq_hz"] - self._center_hz) / self._span_hz + 0.5
+            if 0.0 <= nf <= 1.0:
+                visible.append((nf, s))
+        # Newest-first so fresh spots claim the top row
+        visible.sort(key=lambda t: -t[1].get("ts", 0.0))
+        # Greedy multi-row collision packing
+        row_ranges: list[list[tuple[int, int]]] = [
+            [] for _ in range(MAX_SPOT_ROWS)]
+        placed: list[tuple[dict, int, float, float, float]] = []
+        # placed = (spot, nx, bx, by, tw)
+        for nf, s in visible:
+            nx = int(nf * w)
+            text = s.get("display") or s.get("call", "")
+            tw = fm.horizontalAdvance(text) + 2 * padding_h
+            bx = nx - tw // 2
+            bx = max(2, min(w - tw - 2, bx))
+            x_start = bx - ROW_GAP_PX
+            x_end = bx + tw + ROW_GAP_PX
+            chosen_row = -1
+            for r in range(MAX_SPOT_ROWS):
+                fits = True
+                for rs, re in row_ranges[r]:
+                    if not (x_end <= rs or x_start >= re):
+                        fits = False
+                        break
+                if fits:
+                    chosen_row = r
+                    break
+            if chosen_row < 0:
+                continue
+            row_ranges[chosen_row].append((x_start, x_end))
+            row_y0 = (self._band_plan_reserved_px + 3
+                      if self._band_plan_reserved_px > 0 else 2)
+            by = row_y0 + chosen_row * (box_h + 2)
+            placed.append((s, nx, bx, by, tw))
+        # Render with age-based alpha
+        now = time.monotonic()
+        lifetime = self._spot_lifetime_s
+        for s, nx, bx, by, tw in placed:
+            if lifetime > 0:
+                age = now - s.get("ts", now)
+                frac = max(0.0, min(1.0, age / lifetime))
+                alpha_mul = 1.0 - (1.0 - AGE_FADE_FLOOR) * frac
+            else:
+                alpha_mul = 1.0
+            argb = s.get("color", 0xFFFFD700)
+            rc = (argb >> 16) & 0xFF
+            gc = (argb >> 8) & 0xFF
+            bc = argb & 0xFF
+            border_alpha = int(round(255 * alpha_mul))
+            tint_alpha = int(round(45 * alpha_mul))
+            text_alpha = int(round(255 * alpha_mul))
+            spot_color = QColor(rc, gc, bc, border_alpha)
+            tint = QColor(rc, gc, bc, tint_alpha)
+            text = s.get("display") or s.get("call", "")
+            rect = QRectF(bx, by, tw, box_h)
+            painter.setBrush(tint)
+            painter.setPen(QPen(spot_color, 1))
+            painter.drawRoundedRect(rect, 3, 3)
+            painter.setPen(QPen(QColor(rc, gc, bc, text_alpha), 1))
+            painter.drawText(rect, Qt.AlignCenter, text)
+            # Vertical tick from box bottom down toward the trace
+            tick_pen = QPen(QColor(rc, gc, bc,
+                                   max(80, border_alpha)), 1)
+            painter.setPen(tick_pen)
+            painter.drawLine(nx, int(by + box_h), nx, h - 18)
 
     def _draw_freq_scale_labels(self, painter: QPainter) -> None:
         """Frequency tick labels at the BOTTOM — kHz with one

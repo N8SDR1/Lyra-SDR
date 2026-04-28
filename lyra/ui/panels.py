@@ -2173,6 +2173,14 @@ class SpectrumPanel(GlassPanel):
         # Notch markers (Phase B.13) — seed + track changes.
         self.widget.set_notches(self.radio.notch_details)
         self.radio.notches_changed.connect(self.widget.set_notches)
+        # DX/contest spots — seed lifetime + filter, then track signals.
+        self.widget.set_spot_lifetime_s(self.radio.spot_lifetime_s)
+        self.radio.spot_lifetime_changed.connect(
+            self.widget.set_spot_lifetime_s)
+        self.widget.set_spot_mode_filter(self.radio.spot_mode_filter_csv)
+        self.radio.spot_mode_filter_changed.connect(
+            self.widget.set_spot_mode_filter)
+        self.radio.spots_changed.connect(self.widget.set_spots)
         # Drag-edge-to-resize-RX-BW (Phase B.11). Operator pulls a
         # cyan edge → widget emits proposed BW (Hz, already
         # quantized + clamped) → push straight into Radio for the
