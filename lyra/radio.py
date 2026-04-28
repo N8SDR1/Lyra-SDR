@@ -2829,20 +2829,24 @@ class Radio(QObject):
             # meter without touching the spectrum scale.
             band = spec_db[lo:hi]
             if self._smeter_mode == "avg":
-                # Average in LINEAR power (convert each bin from dB,
-                # mean, back to dB). Pure dB averaging would weight
-                # the dim bins too heavily — a strong signal in noise
-                # would sit barely above the band-mean.
+                # INTEGRATED power across the passband bins (not per-bin
+                # average). Operators read the S-meter as 'how much
+                # signal energy is in the RX BW right now' — that's the
+                # SUM over bins, not the MEAN. The previous code used
+                # mean, which read about 10·log10(N_bins) too low (~18
+                # dB low at 192 k IQ + 3 kHz BW = 64 bins). Comparing
+                # to Thetis on a 7.060 noise-floor reference confirmed
+                # the discrepancy.
                 lin = 10.0 ** (band / 10.0)        # dB → linear power
-                avg_lin = float(np.mean(lin))
+                total_lin = float(np.sum(lin))
                 # EWMA smoothing — alpha = 0.20 gives ~5-frame time
                 # constant (~0.17 s at 30 fps, ~1 s at 5 fps; feels
                 # natural at any FPS the operator picks).
                 if self._smeter_avg_lin <= 0.0:
-                    self._smeter_avg_lin = avg_lin
+                    self._smeter_avg_lin = total_lin
                 else:
                     self._smeter_avg_lin = (0.80 * self._smeter_avg_lin
-                                            + 0.20 * avg_lin)
+                                            + 0.20 * total_lin)
                 level_db = (10.0 * float(np.log10(max(self._smeter_avg_lin, 1e-20)))
                             + self._smeter_cal_db)
             else:  # "peak" — instantaneous max bin in passband
