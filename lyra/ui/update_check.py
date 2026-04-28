@@ -234,3 +234,59 @@ class CheckForUpdatesDialog(QDialog):
             self._thread.quit()
             self._thread.wait(500)
         super().closeEvent(event)
+
+
+# ── Silent background check (auto-update notification) ────────────────
+class SilentUpdateChecker(QObject):
+    """Run the same GitHub release check as the dialog, but headless —
+    no UI, no modal. Emits one of:
+
+      update_available(tag, html_url)  — newer version found
+      no_update_available()            — caller is on the latest
+      check_failed(reason)             — couldn't reach GitHub
+
+    Used by MainWindow's startup hook to surface an "update available"
+    notification in the status bar + Help menu badge without forcing
+    the operator into a dialog. Operator can still open Help → Check
+    for Updates… any time for the full dialog.
+    """
+    update_available = Signal(str, str)
+    no_update_available = Signal()
+    check_failed = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._thread: Optional[QThread] = None
+        self._worker: Optional[_ReleaseFetchWorker] = None
+
+    def start(self) -> None:
+        """Kick off the background fetch. Safe to call multiple times;
+        a fetch already in flight is left alone."""
+        if self._thread is not None and self._thread.isRunning():
+            return
+        self._thread = QThread(self)
+        self._worker = _ReleaseFetchWorker()
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished_ok.connect(self._on_finished_ok)
+        self._worker.finished_error.connect(self._on_finished_error)
+        self._worker.finished_ok.connect(self._thread.quit)
+        self._worker.finished_error.connect(self._thread.quit)
+        self._thread.finished.connect(self._cleanup)
+        self._thread.start()
+
+    def _on_finished_ok(self, tag: str, url: str, body: str):
+        if is_newer(tag, lyra.__version__):
+            self.update_available.emit(tag, url or RELEASES_PAGE_URL)
+        else:
+            self.no_update_available.emit()
+
+    def _on_finished_error(self, msg: str):
+        self.check_failed.emit(msg)
+
+    def _cleanup(self):
+        if self._worker is not None:
+            self._worker.deleteLater()
+        self._worker = None
+        # Keep the QThread reference until next start() — it gets
+        # replaced on the next call.

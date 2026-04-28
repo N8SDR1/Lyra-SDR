@@ -162,6 +162,16 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QTimer as _QTimer
         _QTimer.singleShot(2000, self._maybe_show_opengl_nag)
 
+        # Auto-update check — fires a few seconds after the OpenGL nag
+        # so the two notifications don't compete for attention. Hits
+        # GitHub's public releases API in a worker thread; if a newer
+        # tag is found, surfaces a non-modal status-bar message + adds
+        # a badge to the Help menu's "Check for Updates" entry. The
+        # 24-hour cache and "skipped version" logic prevent re-nagging.
+        # Operator can opt out via Settings → General → "Check for
+        # updates on startup".
+        _QTimer.singleShot(5000, self._maybe_run_startup_update_check)
+
     # ── Layout ───────────────────────────────────────────────────────
     def _build_layout(self):
         # Central widget: spectrum + waterfall in a vertical splitter so
@@ -1434,6 +1444,125 @@ class MainWindow(QMainWindow):
         thread, compares versions, and shows the result."""
         from lyra.ui.update_check import CheckForUpdatesDialog
         CheckForUpdatesDialog(parent=self).exec()
+
+    # ── Auto-update check (silent, on startup) ────────────────────
+    def _maybe_run_startup_update_check(self):
+        """Decide whether to run the silent startup update check, and
+        if so, kick it off. Honors three opt-out paths:
+
+          1. Operator setting `update_check/check_on_startup` is false
+             (Settings → General → "Check for updates on startup").
+          2. A previous check this calendar day already ran (24-hour
+             cache via QSettings `update_check/last_check_iso`).
+          3. The dev tree (build_date == "dev") — devs see release
+             notifications via the manual Help menu, not on every
+             test launch.
+        """
+        # Opt-out paths
+        try:
+            import lyra
+            if lyra.__build_date__ == "dev":
+                return
+        except Exception:
+            pass
+        s = self._settings
+        # Default ON — explicit opt-out only.
+        if s.contains("update_check/check_on_startup"):
+            if s.value("update_check/check_on_startup") in (
+                    False, "false", "False", 0, "0"):
+                return
+        # 24-hour cache so we don't hit GitHub on every launch.
+        from datetime import datetime, timedelta
+        last_iso = str(s.value("update_check/last_check_iso") or "")
+        if last_iso:
+            try:
+                last = datetime.fromisoformat(last_iso)
+                if datetime.now() - last < timedelta(hours=24):
+                    return
+            except ValueError:
+                pass
+        # Stash a checker as an instance attr so the worker thread
+        # stays alive until it completes (Qt cleans it up via
+        # parent ownership when the window closes).
+        from lyra.ui.update_check import SilentUpdateChecker
+        self._startup_update_checker = SilentUpdateChecker(self)
+        self._startup_update_checker.update_available.connect(
+            self._on_startup_update_available)
+        self._startup_update_checker.no_update_available.connect(
+            self._on_startup_update_none)
+        self._startup_update_checker.check_failed.connect(
+            self._on_startup_update_failed)
+        self._startup_update_checker.start()
+
+    def _on_startup_update_available(self, tag: str, url: str):
+        """Background check found a newer release. Show a non-modal
+        notification: status-bar message (10 s) + Help menu badge.
+        Operator can dismiss-once-per-version via the "Skipped
+        versions" QSettings list — already-skipped tags don't
+        re-nag. The Help menu badge sticks until the operator
+        clicks Help → Check for Updates…"""
+        from datetime import datetime
+        s = self._settings
+        s.setValue("update_check/last_check_iso",
+                   datetime.now().isoformat())
+        s.setValue("update_check/latest_tag", tag)
+        s.setValue("update_check/latest_url", url)
+
+        # Skipped-version cache — if the operator has dismissed this
+        # exact tag before, don't re-show the toast (badge still
+        # appears so they can see it from the Help menu).
+        skipped_raw = s.value("update_check/skipped_versions") or ""
+        skipped = {t.strip() for t in str(skipped_raw).split(",") if t.strip()}
+
+        # Help menu badge — rename the action so operators can't miss it.
+        self._set_update_menu_badge(tag, has_update=True)
+
+        if tag in skipped:
+            return
+
+        # Status-bar toast for 12 seconds. The version label on the
+        # right side of the status bar already shows the running
+        # version, so this message gives the new one + a hint.
+        self.statusBar().showMessage(
+            f"🆕  Lyra {tag} is available — Help → Check for Updates",
+            12000)
+
+    def _on_startup_update_none(self):
+        from datetime import datetime
+        s = self._settings
+        s.setValue("update_check/last_check_iso",
+                   datetime.now().isoformat())
+        # Make sure any previous "Update available" badge clears
+        # (operator just upgraded to the latest).
+        self._set_update_menu_badge("", has_update=False)
+
+    def _on_startup_update_failed(self, msg: str):
+        # Silent — networks blip, firewalls block, GitHub rate-limits.
+        # We don't bug the operator on a failed background check.
+        # Don't update the cache timestamp either — try again next launch.
+        print(f"Lyra: silent update check failed: {msg}")
+
+    def _set_update_menu_badge(self, tag: str, has_update: bool):
+        """Update the Help → Check for Updates… menu entry to show a
+        '🆕 Update available' badge when a newer release is known.
+        Iterates Help menu actions to find the one we care about (no
+        instance reference because it's wired up in _build_menu)."""
+        target_text_idle = "Check for &Updates…"
+        target_text_badge = f"🆕 Update available — {tag}"
+        for action in self.menuBar().actions():
+            menu = action.menu()
+            if menu is None:
+                continue
+            # Heuristic: find the Help menu by checking its actions
+            # for the well-known "Check for Updates" entry.
+            for sub in menu.actions():
+                txt = sub.text()
+                if txt in (target_text_idle, target_text_badge) or \
+                        txt.startswith("🆕 Update available"):
+                    sub.setText(
+                        target_text_badge if has_update
+                        else target_text_idle)
+                    return
 
     def _open_discover_probe(self):
         """Help → Network Discovery Probe… — opens the diagnostic
