@@ -817,6 +817,40 @@ class DspSettingsTab(QWidget):
             if self.cw_pitch_spin.value() != int(hz) else None)
         v.addWidget(grp_cw)
 
+        # ── Auto-LNA (front-end gain automation) ─────────────────────
+        # The Auto button on the DSP+Audio panel toggles overload-
+        # protection back-off (always-on safety net). The pull-up
+        # toggle here promotes it to bidirectional — also raises gain
+        # when the band is sustained-quiet. Default OFF: the v1
+        # upward-chasing implementation drove LNA to +44 dB on 40 m
+        # and caused IMD, so this stays opt-in until field-tested.
+        grp_lna = QGroupBox("Auto-LNA")
+        gl = QVBoxLayout(grp_lna)
+        self.lna_pullup_chk = QCheckBox(
+            "Auto-LNA pull-up — also raise gain on sustained quiet "
+            "bands (opt-in, default off)")
+        self.lna_pullup_chk.setChecked(radio.lna_auto_pullup)
+        self.lna_pullup_chk.setToolTip(
+            "When OFF (default): the panel's Auto button is BACK-OFF\n"
+            "ONLY — it lowers LNA when the ADC gets close to clipping\n"
+            "and otherwise leaves your manual gain alone.\n\n"
+            "When ON: Auto becomes bidirectional. After the band has\n"
+            "been quiet (RMS < -50 dBFS, peak < -25 dBFS) for ~7.5\n"
+            "seconds, Auto climbs LNA by 1 dB to dig out weak\n"
+            "signals. Conservative ceiling at +24 dB to stay below\n"
+            "the IMD zone. Self-limits naturally when the noise floor\n"
+            "rises with gain. Defers 5 s after any manual slider\n"
+            "change so your input always wins.\n\n"
+            "Requires the Auto button to be enabled to take effect."
+        )
+        self.lna_pullup_chk.toggled.connect(
+            self.radio.set_lna_auto_pullup)
+        radio.lna_auto_pullup_changed.connect(
+            lambda on: self.lna_pullup_chk.setChecked(on)
+            if self.lna_pullup_chk.isChecked() != on else None)
+        gl.addWidget(self.lna_pullup_chk)
+        v.addWidget(grp_lna)
+
         # Placeholders for the DSP features still being built
         grp_nb = QGroupBox("Noise Blanker (impulse suppression)")
         gb = QVBoxLayout(grp_nb)

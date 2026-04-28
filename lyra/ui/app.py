@@ -1976,6 +1976,10 @@ class MainWindow(QMainWindow):
             r.set_muted(s.value("levels/muted") in (True, "true", "True", 1, "1"))
         if s.contains("levels/lna_auto"):
             r.set_lna_auto(s.value("levels/lna_auto") in (True, "true", "True", 1, "1"))
+        if s.contains("levels/lna_auto_pullup"):
+            r.set_lna_auto_pullup(
+                s.value("levels/lna_auto_pullup")
+                in (True, "true", "True", 1, "1"))
         # Noise Reduction
         if s.contains("nr/profile"):
             r.set_nr_profile(str(s.value("nr/profile")))
@@ -2119,6 +2123,7 @@ class MainWindow(QMainWindow):
         # Levels automation
         s.setValue("levels/muted",    r.muted)
         s.setValue("levels/lna_auto", r.lna_auto)
+        s.setValue("levels/lna_auto_pullup", r.lna_auto_pullup)
         # Noise Reduction
         s.setValue("nr/enabled",      r.nr_enabled)
         s.setValue("nr/profile",      r.nr_profile)

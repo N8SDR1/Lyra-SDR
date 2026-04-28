@@ -148,6 +148,7 @@ class Radio(QObject):
     # Mute + Auto-LNA (levels-side automation)
     muted_changed      = Signal(bool)        # True = muted
     lna_auto_changed   = Signal(bool)        # True = auto-adjusting
+    lna_auto_pullup_changed = Signal(bool)   # True = bidirectional auto
     # Emitted whenever Auto-LNA actually changes the gain (not on
     # every tick — only on real adjustments). Payload dict:
     #   delta_db    : signed dB step applied (negative for back-off)
@@ -327,6 +328,26 @@ class Radio(QObject):
         self._lna_rms: list[float] = []      # parallel to _lna_peaks
         self._lna_peaks_max = 120
         self._lna_current_peak_dbfs = -120.0
+        # Auto-LNA pull-up — opt-in bidirectional Auto-LNA. When True,
+        # the auto loop ALSO raises gain on sustained quiet bands, in
+        # addition to the always-on overload-protection back-off.
+        # Default OFF; v1 of upward-chasing Auto-LNA caused IMD on
+        # 40 m at +44 dB so this stays opt-in until field-tested. See
+        # _adjust_lna_auto for the conservative climb logic.
+        self._lna_auto_pullup = False
+        # Monotonic timestamp of the last MANUAL gain change. Auto
+        # pull-up defers to the user — no auto-raise within
+        # LNA_AUTO_PULLUP_DEFER_S seconds of a slider/scroll change.
+        self._lna_last_user_change_ts = 0.0
+        # Re-entrancy flag — auto-driven set_gain_db calls don't bump
+        # _lna_last_user_change_ts (otherwise the auto loop would
+        # forever defer to itself).
+        self._lna_in_auto_adjust = False
+        # Sustained-quiet streak counter for pull-up hysteresis.
+        # Pull-up only fires after LNA_AUTO_PULLUP_QUIET_TICKS
+        # consecutive ticks of "quiet" — keeps the loop from chasing
+        # gaps between band activity.
+        self._lna_pullup_quiet_streak = 0
         self._rx_bw_by_mode = dict(self.BW_DEFAULTS)
         self._tx_bw_by_mode = dict(self.BW_DEFAULTS)
         self._bw_locked = False
@@ -937,11 +958,44 @@ class Radio(QObject):
     LNA_MIN_DB = -12
     LNA_MAX_DB = 31
 
+    # ── Auto-LNA pull-up tunables ──
+    # All values empirically conservative. Pull-up is opt-in via
+    # set_lna_auto_pullup(); back-off branch (always on when
+    # lna_auto=True) uses its own thresholds in _adjust_lna_auto.
+    #
+    # Quiet detection — both must be true for the band to count as
+    # quiet (RMS catches sustained noise floor; peak guards against
+    # a strong signal that just brushed the passband). RMS-based
+    # detection deliberately avoids the v1 trap of chasing peaks.
+    LNA_AUTO_QUIET_RMS_DBFS = -50.0
+    LNA_AUTO_QUIET_PEAK_DBFS = -25.0
+    # Sustained-quiet streak in ticks (1.5 s each). 5 ticks ≈ 7.5 s
+    # — long enough to ride out gaps between QSOs without climbing.
+    LNA_AUTO_PULLUP_QUIET_TICKS = 5
+    # Ceiling for AUTO climb. User can still manually go higher.
+    # Set well below LNA_MAX_DB and below the +44 dB IMD zone the
+    # v1 auto-chase reached. Loop is also self-limiting: as gain
+    # rises, RMS rises with it and eventually crosses the quiet
+    # threshold, halting climb naturally.
+    LNA_AUTO_PULLUP_CEILING_DB = 24
+    # Defer pull-up after a manual gain change so the operator's
+    # intent isn't immediately overridden.
+    LNA_AUTO_PULLUP_DEFER_S = 5.0
+
     def set_gain_db(self, db: int):
         db = max(self.LNA_MIN_DB, min(self.LNA_MAX_DB, int(db)))
         if db == self._gain_db:
             return
         self._gain_db = db
+        # Stamp manual changes for pull-up's defer-to-user logic.
+        # Auto-driven calls are wrapped in _lna_in_auto_adjust so
+        # the auto loop doesn't keep deferring to itself.
+        if not self._lna_in_auto_adjust:
+            import time as _time
+            self._lna_last_user_change_ts = _time.monotonic()
+            # Manual change resets the quiet-streak counter — start
+            # fresh from whatever band conditions look like now.
+            self._lna_pullup_quiet_streak = 0
         if self._stream:
             try:
                 self._stream.set_lna_gain_db(db)
@@ -1339,10 +1393,25 @@ class Radio(QObject):
             # Reset history so we evaluate from current conditions
             self._lna_peaks = []
             self._lna_rms = []
+            self._lna_pullup_quiet_streak = 0
             self._lna_auto_timer.start()
         else:
             self._lna_auto_timer.stop()
         self.lna_auto_changed.emit(enabled)
+
+    # ── Auto-LNA pull-up (opt-in bidirectional mode) ──
+    @property
+    def lna_auto_pullup(self) -> bool:
+        return self._lna_auto_pullup
+
+    def set_lna_auto_pullup(self, enabled: bool):
+        enabled = bool(enabled)
+        if enabled == self._lna_auto_pullup:
+            return
+        self._lna_auto_pullup = enabled
+        # Reset streak whenever the toggle changes — start fresh.
+        self._lna_pullup_quiet_streak = 0
+        self.lna_auto_pullup_changed.emit(enabled)
 
     def _emit_peak_reading(self):
         """Periodic (4 Hz) ADC peak broadcast — drives the toolbar
@@ -1466,23 +1535,48 @@ class Radio(QObject):
         self._lna_current_peak_dbfs = peak_dbfs
         self.lna_peak_dbfs.emit(peak_dbfs)
 
-        # Overload-protection only. Two thresholds so we react
-        # aggressively to near-clipping but gently to "just hot."
+        # Overload-protection (back-off) branch — always active when
+        # lna_auto is True. Two thresholds so we react aggressively
+        # to near-clipping but gently to "just hot."
+        step = 0
+        reason = ""
         if peak_dbfs > -3.0:
             step = -3
+            reason = "back-off (urgent)"
         elif peak_dbfs > -10.0:
             step = -2
+            reason = "back-off"
         else:
-            return   # healthy — don't touch the user's gain setting
+            # ── Pull-up branch (opt-in, bidirectional Auto-LNA) ──
+            # Reaches here only when the band is healthy from the
+            # back-off perspective. If pull-up is enabled AND the
+            # band has been sustained-quiet, climb 1 dB.
+            if self._lna_auto_pullup:
+                step, reason = self._evaluate_pullup(peak_dbfs)
+            if step == 0:
+                return   # nothing to do — healthy, no climb warranted
 
         new_db = max(self.LNA_MIN_DB,
                      min(self.LNA_MAX_DB, self._gain_db + step))
+        # Apply the auto-specific ceiling only on the way UP. Going
+        # down past the ceiling is fine (back-off must always be
+        # allowed to lower gain however far it needs to).
+        if step > 0:
+            new_db = min(new_db, self.LNA_AUTO_PULLUP_CEILING_DB)
         if new_db == self._gain_db:
             return
         old_db = self._gain_db
-        self.set_gain_db(new_db)
+        # Mark this gain change as auto-driven so set_gain_db doesn't
+        # update _lna_last_user_change_ts (which would make the loop
+        # forever defer to itself).
+        self._lna_in_auto_adjust = True
+        try:
+            self.set_gain_db(new_db)
+        finally:
+            self._lna_in_auto_adjust = False
         self.status_message.emit(
-            f"Auto-LNA: peak {peak_dbfs:+.1f} dBFS → LNA {new_db:+d} dB",
+            f"Auto-LNA: {reason} peak {peak_dbfs:+.1f} dBFS → "
+            f"LNA {new_db:+d} dB",
             2000)
         # Structured event for the UI so it can flash the slider +
         # show a "last event" badge (signal-driven, not status-bar
@@ -1496,6 +1590,64 @@ class Radio(QObject):
         })
         self._lna_peaks = []
         self._lna_rms = []
+        # Reset quiet streak after any auto adjustment — let conditions
+        # re-prove themselves before we climb again.
+        self._lna_pullup_quiet_streak = 0
+
+    def _evaluate_pullup(self, peak_dbfs: float) -> tuple[int, str]:
+        """Decide whether the pull-up branch should raise gain by 1 dB.
+
+        Returns (step_db, reason). step_db == 0 means "do nothing."
+
+        Rules (ALL must hold for a +1 dB step):
+        - Pull-up is enabled (caller already checked this).
+        - Current gain is below LNA_AUTO_PULLUP_CEILING_DB.
+        - Last manual gain change was > LNA_AUTO_PULLUP_DEFER_S
+          ago (don't immediately override the operator).
+        - Peak dBFS over the recent window is below
+          LNA_AUTO_QUIET_PEAK_DBFS.
+        - Worst-case RMS over the recent window is below
+          LNA_AUTO_QUIET_RMS_DBFS (i.e. true band quiet, not just
+          gaps between transients).
+        - The above conditions have held for
+          LNA_AUTO_PULLUP_QUIET_TICKS consecutive ticks.
+
+        Hits a self-limit naturally: each +1 dB of LNA raises the
+        observed noise floor by ~1 dB, so RMS eventually crosses
+        the quiet threshold and the streak stops accumulating —
+        even before the hard ceiling is reached on a typical
+        station."""
+        if self._gain_db >= self.LNA_AUTO_PULLUP_CEILING_DB:
+            return 0, ""
+        # Defer to recent manual changes
+        import time as _time
+        since_user = _time.monotonic() - self._lna_last_user_change_ts
+        if since_user < self.LNA_AUTO_PULLUP_DEFER_S:
+            return 0, ""
+        # Peak gate (already in dBFS from caller)
+        if peak_dbfs >= self.LNA_AUTO_QUIET_PEAK_DBFS:
+            self._lna_pullup_quiet_streak = 0
+            return 0, ""
+        # RMS gate — worst case (max) over the window for the same
+        # reason the back-off uses peak max: we want to NOT pull up
+        # if any recent tick saw real signal.
+        if not self._lna_rms:
+            return 0, ""
+        rms_max_lin = max(self._lna_rms)
+        if rms_max_lin <= 1e-6:
+            # No data yet — don't act
+            return 0, ""
+        rms_max_dbfs = 20.0 * float(np.log10(rms_max_lin))
+        if rms_max_dbfs >= self.LNA_AUTO_QUIET_RMS_DBFS:
+            self._lna_pullup_quiet_streak = 0
+            return 0, ""
+        # All gates passed for this tick — accumulate streak
+        self._lna_pullup_quiet_streak += 1
+        if self._lna_pullup_quiet_streak < self.LNA_AUTO_PULLUP_QUIET_TICKS:
+            return 0, ""
+        # Streak satisfied — climb 1 dB. Streak reset happens after
+        # the gain change in the caller.
+        return +1, "pull-up (band quiet)"
 
     def set_rx_bw(self, mode: str, bw: int):
         self._rx_bw_by_mode[mode] = int(bw)
