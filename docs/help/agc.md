@@ -15,18 +15,23 @@ The **AGC** cluster on the DSP & AUDIO panel shows the active profile.
 | Profile | Decay (τ)       | Hang time  | Use                             |
 |---------|------------------|------------|----------------------------------|
 | **Off**  | —               | —          | Volume scales raw demod output  |
-| **Fast** | ~50 ms          | 0          | CW, weak signals                |
+| **Fast** | ~120 ms         | ~130 ms    | CW, weak signals                |
 | **Med**  | ~250 ms         | 0          | SSB / ragchew (default)         |
 | **Slow** | ~500 ms         | ~1 s       | DX nets, steady AM broadcast    |
 | **Auto** | same as Med     | same as Med | Threshold tracks noise floor    |
 | **Cust** | user-defined    | user-defined | Set release + hang in Settings |
 
-Values calibrated against Thetis 2.10.3.13 / WDSP wcpAGC defaults
-so behavior is recognizable to operators familiar with that client.
-Fast and Med have **zero hang** — the gain starts releasing on the
-very first audio block after the peak passes (the original Lyra
-profiles had release coefficients ~20× too slow which made audio
-stay clamped for many seconds — that's been corrected).
+Decay constants were calibrated against Thetis 2.10.3.13 / WDSP
+wcpAGC reference values so recovery speeds feel similar between
+the two clients. Fast keeps a short hang (~130 ms) because Lyra's
+peak-tracker AGC is simpler than Thetis's WDSP implementation
+(which has additional attack-envelope and hang-index smoothing) —
+without that hang, Fast would pump on AM voice envelopes. Med has
+zero hang for fluid SSB recovery, and Slow keeps a 1 s hang for
+steady-carrier listening (AM broadcast, DX nets). The original
+Lyra profiles had release coefficients ~20× too slow which made
+audio stay clamped for many seconds after a peak — that's been
+corrected.
 
 Label color on the panel tells you which mode is active at a glance:
 

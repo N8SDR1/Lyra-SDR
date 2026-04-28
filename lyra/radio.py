@@ -224,7 +224,16 @@ class Radio(QObject):
     # listening (AM broadcast, DX nets).
     AGC_PRESETS: dict[str, dict] = {
         "off":    {"release": 0.0,   "hang_blocks":  0},   # disabled
-        "fast":   {"release": 0.576, "hang_blocks":  0},   # τ≈ 50 ms
+        # Fast was originally tuned to Thetis values (0 hang, 50 ms
+        # decay), but Lyra's AGC is a simpler peak-tracker than
+        # Thetis/WDSP (no attack-envelope buffer, no hang-index
+        # threshold curve). Without those secondary smoothing
+        # stages, 0/50ms produced audible pumping on AM voice
+        # envelopes — "wavey in/out rapid audio." Adding a small
+        # hang (~130 ms) lets brief envelope dips ride through
+        # while still recovering quickly between CW dits or
+        # discrete signal events.
+        "fast":   {"release": 0.30,  "hang_blocks":  3},   # τ≈120 ms, hang 130 ms
         "med":    {"release": 0.158, "hang_blocks":  0},   # τ≈250 ms
         "slow":   {"release": 0.083, "hang_blocks": 23},   # τ≈500 ms, hang 1 s
         "auto":   {"release": 0.158, "hang_blocks":  0},   # med + track
@@ -2570,19 +2579,20 @@ class Radio(QObject):
     def set_audio_output(self, output: str):
         if output == self._audio_output:
             return
-        # AK4951 audio only works cleanly at 48 kHz (EP2 frames fire
-        # 1:1 with EP6 RX frames, so at higher IQ rates the audio
-        # queue under-drains and silence gets zero-padded — chopped
-        # distortion). Rather than veto the user's pick (confusing
-        # "why can't I select AK4951?" UX), drop the rate to 48 kHz
-        # ourselves and announce what we did. One click, works.
-        if output == "AK4951" and self._rate > 48000:
-            prev_rate = self._rate
-            self.status_message.emit(
-                f"AK4951 requires 48 k — dropping rate from "
-                f"{prev_rate//1000} k to 48 k and switching.", 4500)
-            self.set_rate(48000)
-            # Fall through to apply AK4951 now that rate is safe.
+        # NOTE: an earlier version of this method force-dropped the
+        # IQ rate to 48 kHz when switching INTO AK4951, on the
+        # (mistaken) premise that AK4951 audio required 48 k IQ.
+        # That was never true — AK4951 audio runs at 48 kHz
+        # internally regardless of the IQ stream rate (HPSDR EP2
+        # is its own 48 k audio slot, independent of EP6 IQ). The
+        # corresponding logic in set_rate that auto-switched
+        # AK4951 → PC at >48 k was already removed for the same
+        # reason after the operator field-tested AK4951 at 192 k
+        # IQ for an extended session. Removing it here too closes
+        # the symmetric bug: flipping AK→PC→AK at 192 k IQ used
+        # to drop the rate to 48 k on the way back into AK4951.
+        # Now both sinks accept any IQ rate and the operator's
+        # rate setting is sticky across output swaps.
         self._audio_output = output
         # Remember this choice as the user's preferred output for the
         # automatic fallback logic in set_rate (so if they later bump
