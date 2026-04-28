@@ -40,6 +40,7 @@ up changes.
 - **Notch Filters** — placing, adjusting, multi-notch
 - **Noise Reduction** — spectral-subtraction NR, profiles, neural roadmap
 - **APF (Audio Peaking Filter)** — narrow CW boost at the operator's pitch
+- **BIN (Binaural)** — pseudo-stereo headphone listening for CW + SSB
 - **Spectrum & Waterfall** — pan, zoom, drag, palettes
 - **S-Meter** — analog vs LED styles
 - **External Hardware** — N2ADR filter board, USB-BCD for linear amps

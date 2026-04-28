@@ -874,6 +874,49 @@ class DspSettingsTab(QWidget):
             if self.apf_gain_spin.value() != int(v_) else None)
         gc.addWidget(self.apf_gain_spin, 3, 1)
 
+        # ── BIN (Binaural pseudo-stereo) ─────────────────────────
+        # Hilbert phase-split puts the audio "in the middle of the
+        # head" for headphone listening. Helps both CW (spatial cue
+        # for weak signals) and SSB (voice widening). Two controls:
+        # enable + depth (0-100%).
+        from lyra.dsp.binaural import BinauralFilter as _BIN
+        gc.addWidget(QLabel("BIN:"), 4, 0)
+        self.bin_enable_chk = QCheckBox(
+            "Binaural pseudo-stereo (headphones)")
+        self.bin_enable_chk.setChecked(bool(radio.bin_enabled))
+        self.bin_enable_chk.setToolTip(
+            "When ON: a Hilbert phase-split routes a 90°-shifted copy\n"
+            "of the audio to one ear and the original to the other.\n"
+            "The brain hears this as a wider soundstage — helpful for\n"
+            "pulling weak CW out of noise (classic 'binaural CW' effect)\n"
+            "and for SSB voice on headphones.\n\n"
+            "Runs on all modes; no mode gate. Default OFF.")
+        self.bin_enable_chk.toggled.connect(self.radio.set_bin_enabled)
+        radio.bin_enabled_changed.connect(
+            lambda on: self.bin_enable_chk.setChecked(bool(on))
+            if self.bin_enable_chk.isChecked() != bool(on) else None)
+        gc.addWidget(self.bin_enable_chk, 4, 1, 1, 2)
+
+        gc.addWidget(QLabel("BIN Depth (%):"), 5, 0)
+        self.bin_depth_spin = QSpinBox()
+        self.bin_depth_spin.setRange(
+            int(_BIN.DEPTH_MIN * 100), int(_BIN.DEPTH_MAX * 100))
+        self.bin_depth_spin.setSingleStep(5)
+        self.bin_depth_spin.setSuffix(" %")
+        self.bin_depth_spin.setValue(int(round(radio.bin_depth * 100)))
+        self.bin_depth_spin.setFixedWidth(120)
+        self.bin_depth_spin.setToolTip(
+            "BIN depth — 0% = mono (no separation, equivalent to off),\n"
+            "100% = full Hilbert phase pair (maximum spatial cue).\n"
+            "Equal-loudness normalized so depth doesn't change perceived\n"
+            "volume. Default 70%.")
+        self.bin_depth_spin.valueChanged.connect(
+            lambda v_: self.radio.set_bin_depth(float(v_) / 100.0))
+        radio.bin_depth_changed.connect(
+            lambda v_: self.bin_depth_spin.setValue(int(round(v_ * 100)))
+            if self.bin_depth_spin.value() != int(round(v_ * 100)) else None)
+        gc.addWidget(self.bin_depth_spin, 5, 1)
+
         v.addWidget(grp_cw)
 
         # ── Auto-LNA (front-end gain automation) ─────────────────────

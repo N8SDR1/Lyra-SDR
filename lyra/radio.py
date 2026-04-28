@@ -182,6 +182,13 @@ class Radio(QObject):
     apf_bw_changed = Signal(int)         # -3 dB bandwidth in Hz
     apf_gain_changed = Signal(float)     # peak gain in dB
 
+    # BIN — Binaural pseudo-stereo. Hilbert phase-split puts the audio
+    # "in the middle of the head" with adjustable depth. Useful for CW
+    # spatial perception and for SSB voice widening on headphones.
+    # Operator-toggled, runs on all modes (no mode gate).
+    bin_enabled_changed = Signal(bool)
+    bin_depth_changed = Signal(float)    # 0.0..1.0
+
     # Panadapter noise-floor estimate — 20th percentile of the current
     # spectrum, rolling-averaged. Emitted at ~6 Hz (not every FFT tick)
     # so the widget's horizontal reference line doesn't twitch.
@@ -699,6 +706,21 @@ class Radio(QObject):
         self._rx_channel.set_apf_gain_db(self._apf_gain_db)
         self._rx_channel.set_apf_enabled(self._apf_enabled)
 
+        # BIN — Binaural pseudo-stereo. Lives in Radio (not the
+        # channel) because it produces stereo output and the audio
+        # sinks own the stereo plumbing. Default OFF; default depth
+        # is BinauralFilter.DEPTH_DEFAULT (~0.7, strong but not
+        # extreme). Runs LAST in the audio chain — after AGC, AF,
+        # Volume, and the tanh limiter — so the spatial split is
+        # the final transform before the sink applies L/R balance.
+        from lyra.dsp.binaural import BinauralFilter as _BIN
+        self._bin_enabled: bool = False
+        self._bin_depth: float = _BIN.DEPTH_DEFAULT
+        self._binaural = _BIN(
+            sample_rate=PythonRxChannel.AUDIO_RATE,
+            depth=self._bin_depth,
+        )
+
         # ── FFT ring buffer ───────────────────────────────────────────
         self._fft_size = 4096
         self._window = np.hanning(self._fft_size).astype(np.float32)
@@ -902,6 +924,9 @@ class Radio(QObject):
         self._agc_peak = 1e-4
         self._agc_hang_counter = 0
         self._smeter_avg_lin = 0.0
+        # BIN — clear Hilbert state + delay line so a freq/mode jump
+        # doesn't bleed the prior band's audio across the discontinuity.
+        self._binaural.reset()
         # NOTE: previous version called _stream.reassert_rate_keepalive()
         # here as a band-aid for stuck-audio after big freq jumps.
         # That's now redundant because the stream uses round-robin
@@ -1555,6 +1580,32 @@ class Radio(QObject):
         self._apf_gain_db = g
         self._rx_channel.set_apf_gain_db(g)
         self.apf_gain_changed.emit(g)
+
+    # ── BIN (Binaural pseudo-stereo) ───────────────────────────────
+    @property
+    def bin_enabled(self) -> bool:
+        return self._bin_enabled
+
+    @property
+    def bin_depth(self) -> float:
+        return self._bin_depth
+
+    def set_bin_enabled(self, on: bool) -> None:
+        on = bool(on)
+        if on == self._bin_enabled:
+            return
+        self._bin_enabled = on
+        self._binaural.set_enabled(on)
+        self.bin_enabled_changed.emit(on)
+
+    def set_bin_depth(self, depth: float) -> None:
+        from lyra.dsp.binaural import BinauralFilter as _BIN
+        d = max(_BIN.DEPTH_MIN, min(_BIN.DEPTH_MAX, float(depth)))
+        if d == self._bin_depth:
+            return
+        self._bin_depth = d
+        self._binaural.set_depth(d)
+        self.bin_depth_changed.emit(d)
 
     def set_muted(self, on: bool):
         on = bool(on)
@@ -2911,6 +2962,12 @@ class Radio(QObject):
             return
         try:
             audio = self._apply_agc_and_volume(audio)
+            # BIN — Binaural pseudo-stereo. Runs LAST in the audio
+            # chain so the spatial Hilbert-pair transform happens on
+            # the operator's already-leveled signal. Returns the input
+            # unchanged when disabled; returns a (N, 2) stereo array
+            # when active. Both audio sinks accept either shape.
+            audio = self._binaural.process(audio)
             self._audio_sink.write(audio)
         except Exception as e:
             print(f"audio sink error: {e}")

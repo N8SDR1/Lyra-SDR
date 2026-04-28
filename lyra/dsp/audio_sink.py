@@ -55,15 +55,23 @@ class AK4951Sink:
     def write(self, audio: np.ndarray) -> None:
         if audio.size == 0:
             return
-        mono = audio.astype(np.float32).reshape(-1)
-        # Apply per-channel gains and feed stereo so the EP2 packer
-        # writes independent L and R values into each audio slot.
-        # When the operator hasn't touched Balance both gains are
-        # √2/2 ≈ 0.707, so the AK4951 hears the same audio in both
-        # ears as the legacy mono-duplicated path did.
-        l = mono * self._left_gain
-        r = mono * self._right_gain
-        stereo = np.stack((l, r), axis=1)                # (N, 2)
+        # Two input shapes are accepted:
+        #   - mono (N,) — duplicated to L/R, then per-channel balance
+        #     applied. Default audio chain produces this shape.
+        #   - stereo (N, 2) — already L/R-distinct (e.g., BIN
+        #     pseudo-binaural is on). Balance gains apply column-wise.
+        if audio.ndim == 2 and audio.shape[1] == 2:
+            stereo = audio.astype(np.float32, copy=False)
+            stereo = stereo * np.array(
+                [self._left_gain, self._right_gain], dtype=np.float32)
+        else:
+            mono = audio.astype(np.float32).reshape(-1)
+            # When the operator hasn't touched Balance both gains are
+            # √2/2 ≈ 0.707, so the AK4951 hears the same audio in both
+            # ears as the legacy mono-duplicated path did.
+            l = mono * self._left_gain
+            r = mono * self._right_gain
+            stereo = np.stack((l, r), axis=1)            # (N, 2)
         self._stream.queue_tx_audio(stereo)
 
     def set_lr_gains(self, left: float, right: float) -> None:
@@ -156,15 +164,22 @@ class SoundDeviceSink:
     def write(self, audio: np.ndarray) -> None:
         if audio.size == 0:
             return
-        mono = audio.astype(np.float32).reshape(-1)
-        # Stereo build with per-channel balance gains applied.
-        # When the operator hasn't moved the Balance slider both
-        # gains are √2/2 (equal-power center) and the result is the
-        # same audio in both ears as before the balance feature
-        # existed.
-        l = mono * self._left_gain
-        r = mono * self._right_gain
-        a = np.stack((l, r), axis=1)
+        # Two input shapes are accepted (see AK4951Sink.write for
+        # rationale): mono (N,) or stereo (N, 2). BIN feeds the
+        # stereo path; everything else hits the mono path.
+        if audio.ndim == 2 and audio.shape[1] == 2:
+            a = audio.astype(np.float32, copy=False) * np.array(
+                [self._left_gain, self._right_gain], dtype=np.float32)
+        else:
+            mono = audio.astype(np.float32).reshape(-1)
+            # Stereo build with per-channel balance gains applied.
+            # When the operator hasn't moved the Balance slider both
+            # gains are √2/2 (equal-power center) and the result is
+            # the same audio in both ears as before the balance feature
+            # existed.
+            l = mono * self._left_gain
+            r = mono * self._right_gain
+            a = np.stack((l, r), axis=1)
         try:
             self._stream.write(a)
         except self._sd.PortAudioError:

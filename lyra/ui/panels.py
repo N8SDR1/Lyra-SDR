@@ -1237,6 +1237,20 @@ class DspPanel(GlassPanel):
         # Initial tooltip reflects current params + active mode.
         self._refresh_apf_tooltip()
 
+        # ── BIN (Binaural pseudo-stereo) ──────────────────────────
+        # Left-click  = toggle enable/disable
+        # Right-click = depth presets (25 / 50 / 70 / 100 %)
+        # No mode gate — runs on all modes (helpful for both CW
+        # spatial cue and SSB voice widening on headphones).
+        bin_btn = self.dsp_btns["BIN"]
+        bin_btn.setChecked(radio.bin_enabled)
+        bin_btn.toggled.connect(self.radio.set_bin_enabled)
+        bin_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        bin_btn.customContextMenuRequested.connect(self._show_bin_menu)
+        radio.bin_enabled_changed.connect(self._on_bin_enabled_changed)
+        radio.bin_depth_changed.connect(lambda _d: self._refresh_bin_tooltip())
+        self._refresh_bin_tooltip()
+
         dsp_row.addSpacing(12)
 
         # Live AGC readout — profile | threshold | current gain action.
@@ -1662,6 +1676,63 @@ class DspPanel(GlassPanel):
             "Left-click: toggle on/off.\n"
             "Right-click: quick BW / Gain presets, or open Settings."
             f"{mode_hint}")
+
+    # ── BIN button handlers ────────────────────────────────────────
+    def _show_bin_menu(self, pos):
+        """Right-click on BIN pops a depth-preset menu. Useful for
+        on-the-air tuning without opening Settings. Current depth
+        is checked so the operator always sees where they are."""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction
+        btn = self.dsp_btns["BIN"]
+        menu = QMenu(self)
+
+        toggle_act = QAction(
+            "Disable BIN" if self.radio.bin_enabled else "Enable BIN",
+            menu)
+        toggle_act.triggered.connect(
+            lambda: self.radio.set_bin_enabled(not self.radio.bin_enabled))
+        menu.addAction(toggle_act)
+        menu.addSeparator()
+
+        depth_menu = menu.addMenu(
+            f"Depth ({int(round(self.radio.bin_depth * 100))} %)")
+        cur_pct = int(round(self.radio.bin_depth * 100))
+        for pct in (25, 50, 70, 85, 100):
+            act = QAction(f"{pct} %", depth_menu)
+            act.setCheckable(True)
+            act.setChecked(pct == cur_pct)
+            act.triggered.connect(
+                lambda _=False, v=pct:
+                self.radio.set_bin_depth(float(v) / 100.0))
+            depth_menu.addAction(act)
+
+        menu.addSeparator()
+        more_act = QAction("More settings…", menu)
+        more_act.triggered.connect(self._open_dsp_settings_at_cw)
+        menu.addAction(more_act)
+        menu.exec(btn.mapToGlobal(pos))
+
+    def _on_bin_enabled_changed(self, on: bool):
+        btn = self.dsp_btns["BIN"]
+        if btn.isChecked() != on:
+            btn.blockSignals(True)
+            btn.setChecked(on)
+            btn.blockSignals(False)
+        self._refresh_bin_tooltip()
+
+    def _refresh_bin_tooltip(self):
+        """Tooltip live-updates with current depth so hover always
+        reflects the active setting."""
+        btn = self.dsp_btns.get("BIN")
+        if btn is None:
+            return
+        pct = int(round(self.radio.bin_depth * 100))
+        btn.setToolTip(
+            f"Binaural pseudo-stereo — Hilbert phase-split for headphones.\n"
+            f"Depth {pct} % (0 % = mono, 100 % = full spatial pair).\n"
+            "Left-click: toggle on/off.\n"
+            "Right-click: pick depth, or open Settings.")
 
     def _on_notches_changed(self, items):
         # items is list[(freq_hz, width_hz, active, deep)]. Compact

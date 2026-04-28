@@ -2014,6 +2014,15 @@ class MainWindow(QMainWindow):
         if s.contains("apf/enabled"):
             r.set_apf_enabled(
                 s.value("apf/enabled") in (True, "true", "True", 1, "1"))
+        # BIN (Binaural pseudo-stereo)
+        if s.contains("bin/depth"):
+            try:
+                r.set_bin_depth(float(s.value("bin/depth")))
+            except (TypeError, ValueError):
+                pass
+        if s.contains("bin/enabled"):
+            r.set_bin_enabled(
+                s.value("bin/enabled") in (True, "true", "True", 1, "1"))
         # Noise-floor marker on the spectrum (default on)
         if s.contains("visuals/noise_floor_marker"):
             r.set_noise_floor_enabled(
@@ -2160,6 +2169,9 @@ class MainWindow(QMainWindow):
         s.setValue("apf/enabled",     r.apf_enabled)
         s.setValue("apf/bw_hz",       int(r.apf_bw_hz))
         s.setValue("apf/gain_db",     float(r.apf_gain_db))
+        # BIN (Binaural pseudo-stereo)
+        s.setValue("bin/enabled",     r.bin_enabled)
+        s.setValue("bin/depth",       float(r.bin_depth))
         # Noise-floor marker
         s.setValue("visuals/noise_floor_marker", r.noise_floor_enabled)
         # Band plan

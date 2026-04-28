@@ -90,6 +90,7 @@ class HelpDialog(QDialog):
         "notches",
         "nr",
         "apf",
+        "bin",
         "spectrum",
         "smeter",
         "audio",
