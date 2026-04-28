@@ -213,26 +213,23 @@ class Radio(QObject):
     # so the threshold follows band conditions without user intervention.
     # AGC release coefficient is applied per audio block (~43 ms at
     # 48 kHz / 2048 samples). Time constant τ for peak decay is
-    # τ ≈ -43 ms / ln(1 - release). Values calibrated against
-    # Thetis 2.10.3.13 (WDSP wcpAGC) reference profiles:
-    #   Thetis FAST:  hang  0 ms, decay  50 ms
-    #   Thetis MED :  hang  0 ms, decay 250 ms
-    #   Thetis SLOW:  hang 1000 ms, decay 500 ms
+    # τ ≈ -43 ms / ln(1 - release). Profile target characteristics:
+    #   FAST:  hang ~130 ms, decay ~120 ms
+    #   MED :  hang    0 ms, decay ~250 ms
+    #   SLOW:  hang ~1000 ms, decay ~500 ms
     # The original Lyra values had release coefficients ~20-30×
     # too slow (Fast τ was 2.1 s, Slow τ was 43 s), which made
     # audio stay clamped for many seconds after a peak — exact
     # symptom: "audio doesn't come back up to audible after a
-    # strong signal." Hang on Fast/Med is now ZERO (matches
-    # Thetis); recovery starts on the very first block after
-    # the peak passes. Slow keeps a 1 s hang for steady-carrier
-    # listening (AM broadcast, DX nets).
+    # strong signal." Hang on Med is now ZERO; recovery starts on
+    # the very first block after the peak passes. Slow keeps a 1 s
+    # hang for steady-carrier listening (AM broadcast, DX nets).
     AGC_PRESETS: dict[str, dict] = {
         "off":    {"release": 0.0,   "hang_blocks":  0},   # disabled
-        # Fast was originally tuned to Thetis values (0 hang, 50 ms
-        # decay), but Lyra's AGC is a simpler peak-tracker than
-        # Thetis/WDSP (no attack-envelope buffer, no hang-index
-        # threshold curve). Without those secondary smoothing
-        # stages, 0/50ms produced audible pumping on AM voice
+        # Fast originally had 0 hang / 50 ms decay, but Lyra's AGC is
+        # a simple peak-tracker — no attack-envelope buffer, no hang-
+        # index threshold curve. Without those secondary smoothing
+        # stages, 0 / 50 ms produced audible pumping on AM voice
         # envelopes — "wavey in/out rapid audio." Adding a small
         # hang (~130 ms) lets brief envelope dips ride through
         # while still recovering quickly between CW dits or
@@ -712,8 +709,9 @@ class Radio(QObject):
         # "Calibrate to current = …".
         #
         # Default +28.0 dB: empirically derived on N8SDR's HL2+
-        # against Thetis 2.10.3.13 with WWV @ 10 MHz AM 8K and 40 m
-        # noise floor as references. Math chain:
+        # against an external reference receiver with WWV @ 10 MHz
+        # AM 8K and 40 m noise floor as known-strength signals.
+        # Math chain:
         #   - HL2 IQ stream is dBFS relative to ADC full-scale
         #   - Lyra integrates passband power (np.sum of linear bins)
         #   - LNA-invariant: meter formula subtracts current
@@ -3232,9 +3230,9 @@ class Radio(QObject):
             #
             # Earlier the modes diverged in shape (peak = single bin
             # max, avg = per-bin mean). Both produced readings ~18-30
-            # dB below Thetis on the same antenna/signal. Now they're
-            # both in the right ballpark; cal trim covers the residual
-            # absolute offset.
+            # dB below an external reference receiver on the same
+            # antenna/signal. Now they're both in the right ballpark;
+            # cal trim covers the residual absolute offset.
             lin = 10.0 ** (band / 10.0)            # dB → linear power
             total_lin = float(np.sum(lin))
             # Cache passband peak (max bin in dBFS) for Auto-LNA
@@ -3248,9 +3246,9 @@ class Radio(QObject):
             # signal level AT THE ANTENNA, not at the ADC. Without
             # this, moving the LNA slider changes the meter reading
             # one-for-one even though no signal at the antenna has
-            # changed. Matches the standard SDR-client convention
-            # (Thetis, SDR# etc.) — calibrate once, the meter holds
-            # across LNA changes. The +21 dB default cal in
+            # changed. Matches standard SDR-client convention —
+            # calibrate once, the meter holds across LNA changes.
+            # The +21 dB default cal in
             # _smeter_cal_db was originally tuned at LNA=+7, so
             # post-this-change the equivalent is +28 dB; new default
             # bumped accordingly.

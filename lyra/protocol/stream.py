@@ -217,13 +217,13 @@ class HL2Stream:
         # (c1,c2,c3,c4) bytes. Each USB block in an EP2 frame can carry
         # one C&C write, so to keep ALL configured registers fresh on
         # the HL2 gateware we cycle through this table across frames.
-        # Mirrors Thetis's networkproto1.c WriteMainLoop_HL2 round-robin
-        # (each frame increments out_control_idx and wraps back to 0
-        # after the last register, so every register is re-asserted
-        # every ~17 frames). Without this, only the most-recently-
-        # modified register stays "fresh" — the HL2 EP6 IQ stream
-        # could stall in a way only a manual sample-rate cycle
-        # unsticks (because that cycle re-issues C&C 0x00).
+        # Standard HPSDR P1 host pattern: each frame increments the
+        # round-robin index and wraps back to 0 after the last
+        # register, so every register is re-asserted within a
+        # bounded number of frames. Without this, only the most-
+        # recently-modified register stays "fresh" — the HL2 EP6 IQ
+        # stream could stall in a way only a manual sample-rate
+        # cycle unsticks (because that cycle re-issues C&C 0x00).
         self._cc_registers: dict[int, tuple[int, int, int, int]] = {
             0x00: (SAMPLE_RATES[sample_rate], 0x00, 0x00, self._config_c4),
         }
@@ -242,9 +242,7 @@ class HL2Stream:
         # fs regardless of EP6 IQ rate. To keep the codec from being
         # over-fed at higher IQ rates we throttle EP2 frame emission
         # to a fixed 380 Hz cadence (= 48 kHz audio / 126 samples per
-        # frame), decoupled from EP6 cadence. See _rx_loop. Same shape
-        # Thetis uses (where the network TX thread is paced by the LR
-        # audio semaphore at 48 k regardless of EP6 rate).
+        # frame), decoupled from EP6 cadence. See _rx_loop.
         from collections import deque
         # 1 s buffer at 48 kHz — caps unbounded growth if the demod
         # produces faster than the EP2 builder consumes.
@@ -523,10 +521,9 @@ class HL2Stream:
             # 48 kHz audio rate. At 48 k IQ that's 1:1 with EP6; at
             # 96/192/384 k we send EP2 every 2/4/8 EP6 frames so the
             # AK4951 codec (hard-locked at 48 kHz fs) doesn't get
-            # over-fed and crackle. Mirrors Thetis's design where the
-            # network TX thread is paced by the LR audio semaphore at
-            # 48 k regardless of EP6 rate. HL2 keepalive watchdog is
-            # plenty fast at 380 Hz so this doesn't trigger an
+            # over-fed and crackle. The TX thread is paced by audio
+            # rate independent of EP6 cadence. HL2 keepalive watchdog
+            # is plenty fast at 380 Hz so this doesn't trigger an
             # underrun-halt.
             n = max(1, self.sample_rate // 48000)
             self._ep6_count = getattr(self, "_ep6_count", 0) + 1
@@ -534,9 +531,9 @@ class HL2Stream:
                 continue
             # Round-robin C&C keepalive — pick the next register from
             # the registered set so EVERY one (sample rate, RX1 freq,
-            # LNA, etc.) gets re-asserted cyclically. Mirrors Thetis's
-            # WriteMainLoop_HL2 (out_control_idx wraps over all
-            # registers each frame). Single-register approach used to
+            # LNA, etc.) gets re-asserted cyclically. Standard HPSDR
+            # P1 host pattern: round-robin index wraps over all
+            # registers each frame. Single-register approach used to
             # cause stuck-silence after big freq jumps because once
             # _keepalive_cc held a freq command, sample-rate (C&C
             # 0x00) stopped going out and HL2 EP6 IQ stream could
