@@ -957,7 +957,7 @@ class DspPanel(GlassPanel):
 
         levels.addSpacing(20)
 
-        # AF Gain slider — makeup gain in dB (0..+50), LINEAR (1 tick
+        # AF Gain slider — makeup gain in dB (0..+80), LINEAR (1 tick
         # = 1 dB). Sits BETWEEN AGC and Volume in the signal path:
         #     demod → AGC → AF Gain → Volume → tanh → sink
         # Designed for AGC-off operation (digital modes, contesters,
@@ -966,23 +966,33 @@ class DspPanel(GlassPanel):
         # typical antenna/band level, then forget — Volume rides on
         # moment-to-moment listening comfort.
         #
+        # Range goes to +80 dB so AGC-off operation has roughly the
+        # same makeup-gain headroom that AGC-on gets via the AGC
+        # stage's internal +60 dB max gain. With the previous +50
+        # dB cap, AGC OFF on weak signals could be ~30 dB quieter
+        # than AGC ON even with everything maxed.
+        #
         # Linear dB mapping (not perceptual curve) because makeup
         # gain is naturally thought of in dB by operators: "this band
         # needs another 15 dB" is a concrete adjustment.
         levels.addWidget(QLabel("AF"))
         self.af_gain_slider = QSlider(Qt.Horizontal)
         self.af_gain_slider.setObjectName("af_gain_slider")
-        self.af_gain_slider.setRange(0, 50)
+        self.af_gain_slider.setRange(0, 80)
         self.af_gain_slider.setSingleStep(1)
         self.af_gain_slider.setPageStep(5)
         self.af_gain_slider.setValue(int(radio.af_gain_db))
         self.af_gain_slider.setFixedWidth(120)
         self.af_gain_slider.setToolTip(
-            "AF Gain — post-demod makeup gain, 0 to +50 dB.\n\n"
+            "AF Gain — post-demod makeup gain, 0 to +80 dB.\n\n"
             "Use this when AGC is off (digital modes) or the AGC "
             "target is too quiet for weak signals. Set once for "
             "your station's typical signal level, then ride Volume "
             "for moment-to-moment listening comfort.\n\n"
+            "The +80 dB ceiling matches the headroom AGC ON gets "
+            "via its internal automatic gain stage. Most operators "
+            "land in the +20..+50 dB zone; the upper range is for "
+            "running AGC off on weak signals.\n\n"
             "The tanh limiter after this stage prevents clipping "
             "at the sink, so you can't damage speakers with high "
             "AF Gain settings — the worst case is soft saturation.")

@@ -1106,12 +1106,19 @@ class Radio(QObject):
         return self._af_gain_db
 
     def set_af_gain_db(self, db: int):
-        """Integer dB, clamped 0..+50. Applied in _apply_agc_and_volume
+        """Integer dB, clamped 0..+80. Applied in _apply_agc_and_volume
         as a linear multiplier between AGC and Volume. Dedicated stage
         so operators running AGC off on digital modes have a natural
         "station loudness" knob independent of moment-to-moment
-        Volume trim."""
-        db = max(0, min(50, int(db)))
+        Volume trim.
+
+        Range goes to +80 dB (was +50) because AGC OFF has no other
+        source of makeup gain — and AGC ON internally provides up to
+        +60 dB of automatic amplification, so a +50 dB AF cap left
+        AGC OFF roughly 30 dB quieter on weak signals than AGC ON.
+        +80 dB closes that gap; operators who don't need the upper
+        range simply never visit it."""
+        db = max(0, min(80, int(db)))
         if db == self._af_gain_db:
             return
         self._af_gain_db = db
