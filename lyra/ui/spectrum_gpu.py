@@ -1130,7 +1130,7 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # the bumped size used in the dB scale labels (9 pt on a
         # QOpenGLWidget surface renders thin).
         spot_font = QFont(painter.font())
-        spot_font.setPointSize(10)
+        spot_font.setPointSize(9)
         spot_font.setBold(True)
         painter.setFont(spot_font)
         fm = QFontMetrics(spot_font)
