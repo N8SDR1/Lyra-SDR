@@ -457,7 +457,17 @@ class Radio(QObject):
         # placement; operator can adjust per-notch via wheel/drag.
         self._notches: list[Notch] = []
         self._notch_enabled = False
-        self._notch_default_width_hz = 80.0
+        # Notch defaults — tuned for a "kills the carrier" feel rather
+        # than the previous 80 Hz / single-biquad which left audible
+        # leak at the edges of the kill region.
+        # 40 Hz width: at typical heterodyne center frequencies (1-3 kHz)
+        # this gives Q ~ 25-75 — narrow enough to surgically remove a
+        # whistle without taking out adjacent voice content.
+        # Deep cascade: doubles dB attenuation at every offset (~30-40 dB
+        # → 60-80 dB at center). Operator can untoggle deep per-notch
+        # via right-click → "Deep" if they want a softer kill.
+        self._notch_default_width_hz = 40.0
+        self._notch_default_deep = True
 
         # TCI spots — keyed by callsign, capped size, oldest-first eviction.
         self._spots: dict[str, dict] = {}   # call -> {call, mode, freq_hz, color, ts}
@@ -1760,24 +1770,26 @@ class Radio(QObject):
     def add_notch(self, abs_freq_hz: float,
                   width_hz: float | None = None,
                   active: bool = True,
-                  deep: bool = False):
+                  deep: bool | None = None):
         """Place a new notch. Width defaults to the current
-        notch_default_width_hz. Auto-enables the notch bank if it's
-        currently off, on the assumption that an operator placing a
-        notch wants to hear the result.
+        notch_default_width_hz; deep defaults to the current
+        notch_default_deep (True out of the box, for genuine
+        "kill the carrier" attenuation). Auto-enables the notch
+        bank if it's currently off, on the assumption that an
+        operator placing a notch wants to hear the result.
 
-        `deep=True` cascades the IIR filter for ~2× attenuation —
-        normally toggled per-notch via the right-click menu after
-        placement, but accepted here for programmatic use (TCI,
-        QSettings restore, tests)."""
+        Pass `deep=True` or `deep=False` explicitly to override
+        the default — useful for TCI restore + tests that need
+        deterministic state."""
         w = width_hz if width_hz is not None else self._notch_default_width_hz
         w = max(self.NOTCH_WIDTH_MIN_HZ, min(self.NOTCH_WIDTH_MAX_HZ, float(w)))
-        nf = self._make_notch_filter(abs_freq_hz, w, deep=bool(deep))
+        d = self._notch_default_deep if deep is None else bool(deep)
+        nf = self._make_notch_filter(abs_freq_hz, w, deep=d)
         if nf is None:
             return
         self._notches.append(Notch(
             abs_freq_hz=float(abs_freq_hz), width_hz=w,
-            active=bool(active), deep=bool(deep), filter=nf,
+            active=bool(active), deep=d, filter=nf,
         ))
         if not self._notch_enabled:
             self.set_notch_enabled(True)
