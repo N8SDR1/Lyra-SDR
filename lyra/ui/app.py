@@ -1605,10 +1605,40 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             "Panel layout reset to factory defaults", 2500)
 
-    def _apply_n8sdr_layout(self):
-        """Apply the N8SDR operator's preferred 3-row + side-column layout.
+    # Baked snapshot of the N8SDR operator's preferred layout, captured
+    # by reading QSettings('N8SDR', 'Lyra')['user_default_dock_state']
+    # and ['user_default_center_split'] after the operator hand-tuned
+    # and saved it. restoreState reproduces it byte-for-byte regardless
+    # of how Qt's internal splitter nesting would otherwise resolve a
+    # splitDockWidget sequence — exact positions + exact proportions.
+    #
+    # Re-bake by re-running the extraction snippet documented in
+    # docs/dev/layouts.md (or just on-the-fly via the python -c
+    # snippet in commit b9182b3 of this file's history).
+    _N8SDR_DOCK_STATE_B64 = (
+        "AAAA/wAAAAD9AAAAAQAAAAIAAAoAAAABs/wBAAAAAvwAAAAAAAAHZwAABkQA////"
+        "/AIAAAAC/AAAADcAAAEsAAAA7gD////8AQAAAAL8AAAAAAAAAyQAAALaAP////wC"
+        "AAAAAvsAAAAIAGIAYQBuAGQBAAAANwAAAL0AAACKAP////sAAAAWAG0AbwBkAGUA"
+        "XwBmAGkAbAB0AGUAcgEAAAD4AAAAawAAAE4A////+wAAAAwAdAB1AG4AaQBuAGcB"
+        "AAADKAAABD8AAANmAP////sAAAASAGQAcwBwAF8AYQB1AGQAaQBvAQAAAWcAAACD"
+        "AAAAbwD////8AAAHawAAApUAAAKGAP////wCAAAAAvsAAAAMAG0AZQB0AGUAcgBz"
+        "AQAAADcAAAEpAAAA4gD////7AAAACAB2AGkAZQB3AQAAAWQAAACGAAAATAD///8A"
+        "AAoAAAADVgAAAAQAAAAEAAAACAAAAAj8AAAAAQAAAAIAAAABAAAAGABtAGEAaQBu"
+        "AF8AdABvAG8AbABiAGEAcgEAAAAA/////wAAAAAAAAAA"
+    )
+    _N8SDR_CENTER_SPLIT_B64 = (
+        "AAAA/wAAAAEAAAACAAAA5wAAAmcAAAAABgEAAAACAA=="
+    )
 
-        Target arrangement (matches the screenshot the operator sent):
+    def _apply_n8sdr_layout(self):
+        """Apply the N8SDR operator's hand-tuned layout, byte-for-byte.
+
+        Restores the exact dock arrangement and splitter proportions
+        from the snapshot embedded above. Bypasses splitDockWidget's
+        nesting quirks by going straight through restoreState().
+
+        Layout (for reference, in case the snapshot ever needs to be
+        re-derived):
 
             ┌────────┬─────────────────┬────────┐
             │  band  │     tuning      │ meters │
@@ -1618,51 +1648,43 @@ class MainWindow(QMainWindow):
             │       dsp + audio        │        │
             └──────────────────────────┴────────┘
             [ central panadapter / waterfall ]
-
-        Build sequence matters because Qt's splitDockWidget nests
-        splitters inside whatever container the target dock is in.
-        Wrong order gives mode/dsp under just the band column instead
-        of spanning band+tuning width.
-
-        Correct order:
-          1. Outer horizontal split: band | meters (establishes the
-             two top-level column blocks).
-          2. Right block vertical: meters / view (right column has
-             two rows; column boundary now fixed).
-          3. Left block vertical stack: band / mode / dsp (three rows
-             stacked. Each row's width = full left block width because
-             the splits happen at the outer block level.)
-          4. ONLY NOW split band horizontally to insert tuning beside
-             it — this splits just the top-left CELL, so band|tuning
-             share that row but mode/dsp below remain full left width.
         """
+        import base64
+        try:
+            dock_bytes = base64.b64decode(self._N8SDR_DOCK_STATE_B64)
+            ok = self.restoreState(dock_bytes)
+            if not ok:
+                # Restoration failed (Qt version mismatch, missing
+                # dock object names, etc.) — fall through to the
+                # programmatic build as a safety net.
+                raise RuntimeError("restoreState returned False")
+            split_bytes = base64.b64decode(self._N8SDR_CENTER_SPLIT_B64)
+            self.center_splitter.restoreState(split_bytes)
+        except Exception as e:
+            # Programmatic fallback — build the layout via splitter
+            # ops. Approximate proportions; operator drag-tunes from
+            # there.
+            print(f"[layout] N8SDR restoreState failed ({e}); "
+                  "falling back to programmatic build")
+            for dock in self.docks.values():
+                self.removeDockWidget(dock)
+                dock.setFloating(False)
+                dock.setVisible(True)
+            self.addDockWidget(Qt.TopDockWidgetArea, self.docks["band"])
+            self.splitDockWidget(self.docks["band"],
+                                 self.docks["meters"], Qt.Horizontal)
+            self.splitDockWidget(self.docks["meters"],
+                                 self.docks["view"], Qt.Vertical)
+            self.splitDockWidget(self.docks["band"],
+                                 self.docks["mode"], Qt.Vertical)
+            self.splitDockWidget(self.docks["mode"],
+                                 self.docks["dsp"], Qt.Vertical)
+            self.splitDockWidget(self.docks["band"],
+                                 self.docks["tuning"], Qt.Horizontal)
         for dock in self.docks.values():
-            self.removeDockWidget(dock)
-            dock.setFloating(False)
             dock.setVisible(True)
-        # Step 1: outer two-column split. band on left, meters on right.
-        self.addDockWidget(Qt.TopDockWidgetArea, self.docks["band"])
-        self.splitDockWidget(self.docks["band"],
-                             self.docks["meters"], Qt.Horizontal)
-        # Step 2: right column gets view stacked below meters.
-        self.splitDockWidget(self.docks["meters"],
-                             self.docks["view"], Qt.Vertical)
-        # Step 3: left column gets mode and dsp stacked below band.
-        # These splits happen at the LEFT BLOCK level so each row
-        # spans the full left-block width.
-        self.splitDockWidget(self.docks["band"],
-                             self.docks["mode"], Qt.Vertical)
-        self.splitDockWidget(self.docks["mode"],
-                             self.docks["dsp"], Qt.Vertical)
-        # Step 4: now split band horizontally to insert tuning. This
-        # splits ONLY the top-left cell — mode and dsp below stay
-        # full-width of the left block.
-        self.splitDockWidget(self.docks["band"],
-                             self.docks["tuning"], Qt.Horizontal)
-        for dock in self.docks.values():
-            dock.setVisible(True)
-        # Re-apply the operator's panel-lock preference (new
-        # QSplitters from this rebuild default to enabled handles).
+        # Re-apply the operator's panel-lock preference (the rebuilt
+        # QSplitter tree's new handles default to enabled).
         if self.lock_panels_action.isChecked():
             self._apply_panel_lock(True)
         self.statusBar().showMessage(
