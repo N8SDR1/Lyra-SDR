@@ -1,0 +1,353 @@
+"""DSP channel abstraction — the WDSP integration seam.
+
+This module defines the contract between Lyra's network/protocol
+layer and its DSP layer:
+
+  ┌─────────────┐   IQ at any rate   ┌──────────────────┐  Audio @ 48k
+  │ HL2Stream   │ ─────────────────▶ │   DspChannel     │ ─────────────▶
+  │ (network)   │                    │  (decim+demod)   │
+  └─────────────┘                    └──────────────────┘
+
+Today the only concrete implementation is `PythonRxChannel`, which
+wraps Lyra's existing scipy-based custom demods (SSB / CW / AM / DSB
+/ FM). When WDSP integration lands, a future `WdspChannel(DspChannel)`
+will call `wdsp.dll`'s `fexchange0()` instead — and no other code
+outside this module will need to change.
+
+Architectural intent (mirrors Thetis / WDSP RXA, 100% clean-room):
+  - Channel owns ALL its DSP state internally: decimator, demods,
+    audio buffer, NR, notch chain.
+  - Radio configures the channel via setters; the channel never
+    looks back at Radio's attributes.
+  - All sample-rate matching happens INSIDE the channel — outputs
+    are always 48 kHz audio regardless of input IQ rate, so the
+    EP2 frame builder always sees a clean 48 kHz audio stream.
+  - AGC and final volume staging live OUTSIDE the channel (in
+    Radio) — those are routing-side concerns. WDSP later puts
+    them in too; we'll move them when we wire WDSP.
+  - Notches are inside the channel (they operate on baseband IQ
+    before demod, so they have to be in this scope).
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Optional, Sequence
+
+import numpy as np
+
+from lyra.dsp.demod import (
+    SSBDemod, CWDemod, AMDemod, DSBDemod, FMDemod,
+)
+
+
+# ── Stateful complex-signal decimator ──────────────────────────────
+#
+# Used by PythonRxChannel when in_rate > audio_rate. Persistent
+# filter state across blocks so back-to-back chunks don't introduce
+# FIR startup transients at block boundaries.
+class _Decimator:
+    """Anti-aliased integer-rate complex decimator."""
+
+    def __init__(self, rate_in: int, rate_out: int, taps: int = 257):
+        from scipy.signal import firwin
+        self.decim = rate_in // rate_out
+        # Anti-alias cutoff at 90% of output Nyquist
+        cutoff = (rate_out / 2.0) * 0.90
+        self.taps = firwin(taps, cutoff, fs=rate_in, window="hann").astype(np.float64)
+        self.state_i = np.zeros(taps - 1, dtype=np.float64)
+        self.state_q = np.zeros(taps - 1, dtype=np.float64)
+        self._phase = 0   # decimation stride offset across block boundaries
+
+    def process(self, iq: np.ndarray) -> np.ndarray:
+        from scipy.signal import lfilter
+        i_out, self.state_i = lfilter(self.taps, 1.0, iq.real, zi=self.state_i)
+        q_out, self.state_q = lfilter(self.taps, 1.0, iq.imag, zi=self.state_q)
+        start = (-self._phase) % self.decim
+        i_dec = i_out[start::self.decim]
+        q_dec = q_out[start::self.decim]
+        consumed_to_end = len(i_out) - start
+        self._phase = (self._phase + consumed_to_end) % self.decim
+        return (i_dec + 1j * q_dec).astype(np.complex64)
+
+
+# ── Abstract channel ───────────────────────────────────────────────
+class DspChannel(ABC):
+    """Abstract RX DSP channel.
+
+    Contract:
+      - Inputs: complex64 IQ at `in_rate` Hz, arbitrary block size
+      - Outputs: float32 audio at `audio_rate` Hz (default 48 kHz)
+      - Stateful: maintains demod / filter / buffer state across
+        process() calls. Caller must call reset() on freq change
+        to avoid stale-buffer artifacts.
+
+    All concrete implementations must satisfy the same interface so
+    swapping (e.g. PythonRxChannel → WdspChannel) is transparent to
+    callers.
+    """
+
+    AUDIO_RATE = 48000
+
+    def __init__(self, in_rate: int):
+        self.in_rate: int = int(in_rate)
+        self.audio_rate: int = self.AUDIO_RATE
+
+    # ── Configuration setters (called by Radio when state changes) ─
+
+    @abstractmethod
+    def set_in_rate(self, rate: int) -> None:
+        """Switch the input IQ sample rate. Decimator rebuilds; audio
+        buffer flushes to avoid mixed-rate samples."""
+
+    @abstractmethod
+    def set_mode(self, mode: str) -> None:
+        """Select active demod (LSB/USB/CWL/CWU/AM/DSB/FM/DIGL/DIGU).
+        Modes 'Off' and 'Tone' are passed through; the channel
+        produces no audio for those (Radio handles tone generation)."""
+
+    @abstractmethod
+    def set_rx_bw(self, mode: str, bw_hz: int) -> None:
+        """Update the filter bandwidth for `mode`. Rebuilds that
+        mode's demod with the new bandwidth."""
+
+    @abstractmethod
+    def set_cw_pitch_hz(self, pitch_hz: float) -> None:
+        """Update CW pitch — affects CWL/CWU demods' tone."""
+
+    @abstractmethod
+    def set_notches(self, notches: Sequence, enabled: bool) -> None:
+        """Update the notch filter chain. `notches` is a sequence of
+        objects with a `.filter` attribute (a NotchFilter or None) and
+        a `.active` bool, matching Radio's Notch dataclass shape.
+        `enabled` is the master notch-engine on/off."""
+
+    @abstractmethod
+    def set_nr_enabled(self, enabled: bool) -> None:
+        """Master noise-reduction on/off."""
+
+    @abstractmethod
+    def set_nr_profile(self, profile: str) -> None:
+        """Switch NR profile (light / medium / aggressive)."""
+
+    @abstractmethod
+    def reset(self) -> None:
+        """Drop in-flight buffers + transient state. Called on
+        frequency change, mode change, stream restart."""
+
+    # ── DSP entry point ────────────────────────────────────────────
+
+    @abstractmethod
+    def process(self, iq: np.ndarray) -> np.ndarray:
+        """Run the full channel: IQ in (any rate) → audio out (48 kHz).
+
+        Returns an empty float32 array if the channel is in a no-audio
+        state (mode == 'Off' / 'Tone', or insufficient samples to
+        produce a complete demod block yet)."""
+
+
+# ── Concrete: Lyra's native Python channel ─────────────────────────
+class PythonRxChannel(DspChannel):
+    """Lyra's stock RX channel built on its scipy-based custom demods.
+
+    Owns the decimator, audio buffer, demod instances (one per mode),
+    NR processor, and notch chain. Radio configures via setters and
+    feeds IQ into process().
+
+    WDSP integration path: a future WdspChannel will call into the
+    DLL's fexchange0() and ignore most of this state. Both classes
+    satisfy the same DspChannel ABC, so Radio doesn't care which
+    one it has.
+    """
+
+    def __init__(self, in_rate: int, block_size: int = 1024):
+        super().__init__(in_rate)
+        self._block_size: int = int(block_size)
+        self._mode: str = "USB"
+
+        # Per-mode RX bandwidth — operator-set, persists across mode
+        # switches. Matches Radio.BW_DEFAULTS so the channel produces
+        # the same audio characteristics as the pre-refactor pipeline.
+        self._rx_bw_by_mode: dict[str, int] = {
+            "LSB":  2400, "USB":  2400,
+            "CWL":  250,  "CWU":  250,
+            "DSB":  5000,
+            "AM":   6000,
+            "FM":   10000,
+            "DIGL": 3000, "DIGU": 3000,
+        }
+        self._cw_pitch_hz: float = 650.0
+
+        # State that gets (re)built lazily.
+        self._decimator: Optional[_Decimator] = None
+        self._audio_buf: list = []
+        self._demods: dict = {}
+        self._rebuild_demods()
+
+        # NR processor — owned by the channel.
+        from lyra.dsp.nr import SpectralSubtractionNR
+        self._nr = SpectralSubtractionNR(rate=self.audio_rate)
+
+        # Notch chain — list of objects with .filter and .active
+        # attrs. Channel doesn't own these (Radio's notch-management
+        # state machine does); it just applies them inside process().
+        self._notches: Sequence = ()
+        self._notch_enabled: bool = False
+
+    # ── Setters ────────────────────────────────────────────────────
+
+    def set_in_rate(self, rate: int) -> None:
+        rate = int(rate)
+        if rate == self.in_rate:
+            return
+        self.in_rate = rate
+        # Force decimator rebuild on next IQ block. We don't build
+        # eagerly because rate may be set before the first sample
+        # arrives, and we want the first build to use the rate that's
+        # actually in effect when audio starts.
+        self._decimator = None
+        self._audio_buf.clear()
+
+    def set_mode(self, mode: str) -> None:
+        if mode == self._mode:
+            return
+        self._mode = mode
+        self._audio_buf.clear()
+        # Demods themselves don't change on mode switch (they're all
+        # built up-front in _rebuild_demods); we just route to a
+        # different one. NR state is mode-dependent in character (a
+        # CW noise floor is different from AM), so flush it.
+        self._nr.reset()
+
+    def set_rx_bw(self, mode: str, bw_hz: int) -> None:
+        self._rx_bw_by_mode[mode] = int(bw_hz)
+        # Rebuild only the affected demod — cheaper than rebuilding all.
+        self._rebuild_demods()
+
+    def set_cw_pitch_hz(self, pitch_hz: float) -> None:
+        new_pitch = float(pitch_hz)
+        if new_pitch == self._cw_pitch_hz:
+            return
+        self._cw_pitch_hz = new_pitch
+        # CW demods reference pitch; rebuild so they pick up the change.
+        self._rebuild_demods()
+
+    def set_notches(self, notches: Sequence, enabled: bool) -> None:
+        self._notches = notches
+        self._notch_enabled = bool(enabled)
+
+    def set_nr_enabled(self, enabled: bool) -> None:
+        self._nr.enabled = bool(enabled)
+        if not enabled:
+            self._nr.reset()
+
+    def set_nr_profile(self, profile: str) -> None:
+        self._nr.set_profile(profile)
+
+    def reset(self) -> None:
+        """Drop in-flight buffers + transient state."""
+        self._audio_buf.clear()
+        self._nr.reset()
+        # Decimator state can stay; it's only stale across rate
+        # changes, which set_in_rate handles separately.
+
+    # ── Misc accessors for Radio (read-only views into channel state) ─
+
+    @property
+    def nr_enabled(self) -> bool:
+        return bool(self._nr.enabled)
+
+    @property
+    def cw_pitch_hz(self) -> float:
+        return self._cw_pitch_hz
+
+    @property
+    def block_size(self) -> int:
+        return self._block_size
+
+    # ── Internals ──────────────────────────────────────────────────
+
+    def _rebuild_demods(self) -> None:
+        """Construct one demod instance per supported mode at the
+        channel's audio rate. Called on init, on rx_bw change, and
+        on cw_pitch change."""
+        try:
+            bw = self._rx_bw_by_mode
+            ar = self.audio_rate
+            self._demods = {
+                "LSB":  SSBDemod(ar, "LSB", low_hz=300,
+                                 high_hz=300 + bw.get("LSB", 2400)),
+                "USB":  SSBDemod(ar, "USB", low_hz=300,
+                                 high_hz=300 + bw.get("USB", 2400)),
+                "CWL":  CWDemod(ar, pitch_hz=self._cw_pitch_hz,
+                                bw_hz=bw.get("CWL", 250), sideband="L"),
+                "CWU":  CWDemod(ar, pitch_hz=self._cw_pitch_hz,
+                                bw_hz=bw.get("CWU", 250), sideband="U"),
+                "DSB":  DSBDemod(ar, bw_hz=bw.get("DSB", 5000)),
+                "AM":   AMDemod(ar, bw_hz=bw.get("AM", 6000) / 2),
+                "FM":   FMDemod(ar, deviation_hz=5000,
+                                audio_bw_hz=bw.get("FM", 10000) / 2),
+                "DIGL": SSBDemod(ar, "LSB", low_hz=200,
+                                 high_hz=200 + bw.get("DIGL", 3000)),
+                "DIGU": SSBDemod(ar, "USB", low_hz=200,
+                                 high_hz=200 + bw.get("DIGU", 3000)),
+            }
+        except RuntimeError as e:
+            print(f"[channel] demod init failed: {e}")
+            self._demods = {}
+
+    def _decimate_to_48k(self, iq: np.ndarray) -> np.ndarray:
+        if self.in_rate == self.audio_rate:
+            return iq
+        if self._decimator is None:
+            self._decimator = _Decimator(self.in_rate, self.audio_rate)
+        return self._decimator.process(iq)
+
+    # ── Main DSP entry point ───────────────────────────────────────
+
+    def process(self, iq: np.ndarray) -> np.ndarray:
+        """Run the full channel. Returns concatenated 48 kHz audio
+        for any complete demod blocks ready in the buffer; empty
+        array otherwise."""
+        mode = self._mode
+        if mode in ("Off", "Tone"):
+            # Channel produces no audio for these — Radio handles them.
+            return np.zeros(0, dtype=np.float32)
+
+        iq_48k = self._decimate_to_48k(iq)
+        if iq_48k.size == 0:
+            return np.zeros(0, dtype=np.float32)
+
+        self._audio_buf.extend(iq_48k.tolist())
+
+        block = self._block_size
+        demod = self._demods.get(mode)
+        if demod is None:
+            return np.zeros(0, dtype=np.float32)
+
+        # Drain complete blocks. Each block runs through
+        #   notches (baseband IQ) → demod (audio) → NR (audio).
+        # AGC + volume happen OUTSIDE the channel.
+        out_chunks: list[np.ndarray] = []
+        while len(self._audio_buf) >= block:
+            chunk = np.asarray(
+                self._audio_buf[:block], dtype=np.complex64,
+            )
+            del self._audio_buf[:block]
+            try:
+                if self._notch_enabled:
+                    for n in self._notches:
+                        if getattr(n, "active", False) and \
+                                getattr(n, "filter", None) is not None:
+                            chunk = n.filter.process(chunk)
+                audio = demod.process(chunk)
+                audio = self._nr.process(audio)
+                out_chunks.append(audio)
+            except Exception as e:
+                print(f"[channel] demod error: {e}")
+                # Don't propagate — keep the audio thread alive.
+                break
+
+        if not out_chunks:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(out_chunks)
