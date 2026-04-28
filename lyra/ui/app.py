@@ -2000,6 +2000,20 @@ class MainWindow(QMainWindow):
             r.set_nr_profile(str(s.value("nr/profile")))
         if s.contains("nr/enabled"):
             r.set_nr_enabled(s.value("nr/enabled") in (True, "true", "True", 1, "1"))
+        # APF (Audio Peaking Filter, CW only)
+        if s.contains("apf/bw_hz"):
+            try:
+                r.set_apf_bw_hz(int(s.value("apf/bw_hz")))
+            except (TypeError, ValueError):
+                pass
+        if s.contains("apf/gain_db"):
+            try:
+                r.set_apf_gain_db(float(s.value("apf/gain_db")))
+            except (TypeError, ValueError):
+                pass
+        if s.contains("apf/enabled"):
+            r.set_apf_enabled(
+                s.value("apf/enabled") in (True, "true", "True", 1, "1"))
         # Noise-floor marker on the spectrum (default on)
         if s.contains("visuals/noise_floor_marker"):
             r.set_noise_floor_enabled(
@@ -2142,6 +2156,10 @@ class MainWindow(QMainWindow):
         # Noise Reduction
         s.setValue("nr/enabled",      r.nr_enabled)
         s.setValue("nr/profile",      r.nr_profile)
+        # APF (Audio Peaking Filter, CW only)
+        s.setValue("apf/enabled",     r.apf_enabled)
+        s.setValue("apf/bw_hz",       int(r.apf_bw_hz))
+        s.setValue("apf/gain_db",     float(r.apf_gain_db))
         # Noise-floor marker
         s.setValue("visuals/noise_floor_marker", r.noise_floor_enabled)
         # Band plan

@@ -1219,6 +1219,24 @@ class DspPanel(GlassPanel):
         radio.nr_enabled_changed.connect(self._on_nr_enabled_changed)
         radio.nr_profile_changed.connect(self._on_nr_profile_changed)
 
+        # ── APF (Audio Peaking Filter) ────────────────────────────
+        # Left-click  = toggle enable/disable
+        # Right-click = quick BW/Gain sliders + open Settings shortcut
+        # Mode-gated to CW (button greys when not CWU/CWL but stays
+        # toggleable so the operator's setting is preserved across
+        # mode switches).
+        apf_btn = self.dsp_btns["APF"]
+        apf_btn.setChecked(radio.apf_enabled)
+        apf_btn.toggled.connect(self.radio.set_apf_enabled)
+        apf_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        apf_btn.customContextMenuRequested.connect(self._show_apf_menu)
+        radio.apf_enabled_changed.connect(self._on_apf_enabled_changed)
+        radio.apf_bw_changed.connect(lambda _bw: self._refresh_apf_tooltip())
+        radio.apf_gain_changed.connect(lambda _g: self._refresh_apf_tooltip())
+        radio.mode_changed.connect(lambda _m: self._refresh_apf_tooltip())
+        # Initial tooltip reflects current params + active mode.
+        self._refresh_apf_tooltip()
+
         dsp_row.addSpacing(12)
 
         # Live AGC readout — profile | threshold | current gain action.
@@ -1546,6 +1564,104 @@ class DspPanel(GlassPanel):
             f"Noise Reduction — active profile: {label}.\n"
             "Left-click: toggle on/off.\n"
             "Right-click: change profile.")
+
+    # ── APF button handlers ────────────────────────────────────────
+    def _show_apf_menu(self, pos):
+        """Right-click on the APF button pops a quick-access menu
+        for BW and Gain. The full slider UI lives in Settings → DSP
+        → CW; this is just for fast on-the-air tweaks without
+        opening the dialog. BW/gain entries are radio buttons
+        showing the current value at the top, then a few common
+        presets the operator can pick directly."""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction
+        from lyra.dsp.apf import AudioPeakFilter as _APF
+        btn = self.dsp_btns["APF"]
+        menu = QMenu(self)
+
+        # Toggle at the top.
+        toggle_act = QAction(
+            "Disable APF" if self.radio.apf_enabled else "Enable APF",
+            menu)
+        toggle_act.triggered.connect(
+            lambda: self.radio.set_apf_enabled(not self.radio.apf_enabled))
+        menu.addAction(toggle_act)
+        menu.addSeparator()
+
+        # Bandwidth presets — narrow / medium / wide. Current value
+        # gets the radio-button check.
+        bw_menu = menu.addMenu(f"Bandwidth ({self.radio.apf_bw_hz} Hz)")
+        cur_bw = int(self.radio.apf_bw_hz)
+        for bw in (40, 60, 80, 100, 150):
+            act = QAction(f"{bw} Hz", bw_menu)
+            act.setCheckable(True)
+            act.setChecked(bw == cur_bw)
+            act.triggered.connect(
+                lambda _=False, v=bw: self.radio.set_apf_bw_hz(v))
+            bw_menu.addAction(act)
+
+        # Gain presets — gentle / standard / strong.
+        gain_menu = menu.addMenu(
+            f"Gain (+{int(self.radio.apf_gain_db)} dB)")
+        cur_g = int(self.radio.apf_gain_db)
+        for g in (6, 9, 12, 15, 18):
+            act = QAction(f"+{g} dB", gain_menu)
+            act.setCheckable(True)
+            act.setChecked(g == cur_g)
+            act.triggered.connect(
+                lambda _=False, v=g: self.radio.set_apf_gain_db(float(v)))
+            gain_menu.addAction(act)
+
+        menu.addSeparator()
+        more_act = QAction("More settings…", menu)
+        more_act.triggered.connect(self._open_dsp_settings_at_cw)
+        menu.addAction(more_act)
+        menu.exec(btn.mapToGlobal(pos))
+
+    def _open_dsp_settings_at_cw(self):
+        """Pop Settings → DSP. The CW group sits inside the DSP tab
+        and includes APF, so the operator lands close to the full
+        APF controls (BW slider + gain slider). Same call path used
+        by the SDR-cal panel's right-click for Visuals."""
+        mw = self.window()
+        if hasattr(mw, "_open_settings"):
+            mw._open_settings(tab="DSP")
+        else:
+            try:
+                self.radio.status_message.emit(
+                    "APF: open File → DSP… for full BW / Gain controls",
+                    3000)
+            except Exception:
+                pass
+
+    def _on_apf_enabled_changed(self, on: bool):
+        btn = self.dsp_btns["APF"]
+        if btn.isChecked() != on:
+            btn.blockSignals(True)
+            btn.setChecked(on)
+            btn.blockSignals(False)
+        self._refresh_apf_tooltip()
+
+    def _refresh_apf_tooltip(self):
+        """Compose the APF button tooltip from current Radio state.
+        Shows BW + Gain numerics, plus a CW-mode hint if the radio is
+        currently on a non-CW mode (so the operator knows why
+        toggling the button doesn't audibly do anything right now)."""
+        btn = self.dsp_btns.get("APF")
+        if btn is None:
+            return
+        bw = int(self.radio.apf_bw_hz)
+        gain = int(self.radio.apf_gain_db)
+        is_cw = self.radio.mode in ("CWU", "CWL")
+        mode_hint = "" if is_cw else (
+            "\n\nCurrent mode is not CW — APF stays armed but only\n"
+            "audibly affects audio in CWU / CWL.")
+        btn.setToolTip(
+            f"Audio Peaking Filter — narrow CW boost.\n"
+            f"BW {bw} Hz, +{gain} dB at the CW pitch.\n"
+            "Left-click: toggle on/off.\n"
+            "Right-click: quick BW / Gain presets, or open Settings."
+            f"{mode_hint}")
 
     def _on_notches_changed(self, items):
         # items is list[(freq_hz, width_hz, active, deep)]. Compact

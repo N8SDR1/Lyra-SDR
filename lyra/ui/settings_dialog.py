@@ -811,6 +811,69 @@ class DspSettingsTab(QWidget):
         radio.cw_pitch_changed.connect(
             lambda hz: self.cw_pitch_spin.setValue(int(hz))
             if self.cw_pitch_spin.value() != int(hz) else None)
+
+        # ── APF (Audio Peaking Filter) ───────────────────────────
+        # Narrow peaking biquad centered on cw_pitch_hz. Only audible
+        # in CWU/CWL — channel mode-gates internally. Three controls:
+        # enable / -3 dB BW / peak gain. Center freq follows pitch
+        # automatically (no separate spinbox).
+        from lyra.dsp.apf import AudioPeakFilter as _APF
+        from PySide6.QtWidgets import QCheckBox
+        gc.addWidget(QLabel("APF:"), 1, 0)
+        self.apf_enable_chk = QCheckBox(
+            "Boost CW signal at pitch (Audio Peaking Filter)")
+        self.apf_enable_chk.setChecked(bool(radio.apf_enabled))
+        self.apf_enable_chk.setToolTip(
+            "When ON: a narrow peaking filter boosts audio at your CW\n"
+            "pitch, lifting weak signals out of the noise without the\n"
+            "ringing tail of a brick-wall narrow filter. Other audio\n"
+            "in the passband stays audible (you keep band context).\n\n"
+            "Only runs in CWU/CWL — preserved across mode switches\n"
+            "but silent in SSB/AM/FM/digital. Default OFF.")
+        self.apf_enable_chk.toggled.connect(self.radio.set_apf_enabled)
+        radio.apf_enabled_changed.connect(
+            lambda on: self.apf_enable_chk.setChecked(bool(on))
+            if self.apf_enable_chk.isChecked() != bool(on) else None)
+        gc.addWidget(self.apf_enable_chk, 1, 1, 1, 2)
+
+        gc.addWidget(QLabel("APF BW (Hz):"), 2, 0)
+        self.apf_bw_spin = QSpinBox()
+        self.apf_bw_spin.setRange(_APF.BW_MIN_HZ, _APF.BW_MAX_HZ)
+        self.apf_bw_spin.setSingleStep(10)
+        self.apf_bw_spin.setSuffix(" Hz")
+        self.apf_bw_spin.setValue(int(radio.apf_bw_hz))
+        self.apf_bw_spin.setFixedWidth(120)
+        self.apf_bw_spin.setToolTip(
+            f"APF -3 dB bandwidth ({_APF.BW_MIN_HZ}-{_APF.BW_MAX_HZ} Hz).\n"
+            "Lower = sharper peak, more boost concentration. Below ~30 Hz\n"
+            "the filter starts to ring on dits — keep ≥40 Hz for\n"
+            "comfortable CW. Default 80 Hz.")
+        self.apf_bw_spin.valueChanged.connect(self.radio.set_apf_bw_hz)
+        radio.apf_bw_changed.connect(
+            lambda v_: self.apf_bw_spin.setValue(int(v_))
+            if self.apf_bw_spin.value() != int(v_) else None)
+        gc.addWidget(self.apf_bw_spin, 2, 1)
+
+        gc.addWidget(QLabel("APF Gain (dB):"), 3, 0)
+        self.apf_gain_spin = QSpinBox()
+        self.apf_gain_spin.setRange(int(_APF.GAIN_MIN_DB),
+                                    int(_APF.GAIN_MAX_DB))
+        self.apf_gain_spin.setSingleStep(1)
+        self.apf_gain_spin.setSuffix(" dB")
+        self.apf_gain_spin.setValue(int(radio.apf_gain_db))
+        self.apf_gain_spin.setFixedWidth(120)
+        self.apf_gain_spin.setToolTip(
+            f"APF peak gain ({int(_APF.GAIN_MIN_DB)}-"
+            f"{int(_APF.GAIN_MAX_DB)} dB). Boost amount at the CW pitch.\n"
+            "Above ~14 dB, AGC pumping becomes noticeable on signals\n"
+            "that are already strong. Default +12 dB.")
+        self.apf_gain_spin.valueChanged.connect(
+            lambda v_: self.radio.set_apf_gain_db(float(v_)))
+        radio.apf_gain_changed.connect(
+            lambda v_: self.apf_gain_spin.setValue(int(v_))
+            if self.apf_gain_spin.value() != int(v_) else None)
+        gc.addWidget(self.apf_gain_spin, 3, 1)
+
         v.addWidget(grp_cw)
 
         # ── Auto-LNA (front-end gain automation) ─────────────────────

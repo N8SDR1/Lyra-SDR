@@ -131,6 +131,19 @@ class DspChannel(ABC):
         """Switch NR profile (light / medium / aggressive)."""
 
     @abstractmethod
+    def set_apf_enabled(self, enabled: bool) -> None:
+        """Master APF (Audio Peaking Filter) on/off. Only audible
+        in CW modes — channel mode-gates internally."""
+
+    @abstractmethod
+    def set_apf_bw_hz(self, bw_hz: int) -> None:
+        """APF -3 dB bandwidth in Hz. Lower = sharper peak."""
+
+    @abstractmethod
+    def set_apf_gain_db(self, gain_db: float) -> None:
+        """APF peak gain in dB. Boost amount at the CW pitch."""
+
+    @abstractmethod
     def reset(self) -> None:
         """Drop in-flight buffers + transient state. Called on
         frequency change, mode change, stream restart."""
@@ -188,6 +201,16 @@ class PythonRxChannel(DspChannel):
         from lyra.dsp.nr import SpectralSubtractionNR
         self._nr = SpectralSubtractionNR(rate=self.audio_rate)
 
+        # APF (Audio Peaking Filter) — owned by the channel. Mode-
+        # gated to CWU/CWL inside process(). Center freq tracks the
+        # CW pitch automatically, so the operator only needs to
+        # toggle it on/off and (optionally) tune BW/gain.
+        from lyra.dsp.apf import AudioPeakFilter
+        self._apf = AudioPeakFilter(
+            sample_rate=self.audio_rate,
+            center_hz=self._cw_pitch_hz,
+        )
+
         # Notch chain — list of objects with .filter and .active
         # attrs. Channel doesn't own these (Radio's notch-management
         # state machine does); it just applies them inside process().
@@ -231,6 +254,11 @@ class PythonRxChannel(DspChannel):
         self._cw_pitch_hz = new_pitch
         # CW demods reference pitch; rebuild so they pick up the change.
         self._rebuild_demods()
+        # APF center follows pitch automatically — that's the natural
+        # operator mental model ("I tuned to the pitch, now boost
+        # what I tuned to"). Coefficient swap is smooth on a
+        # populated zi (low-Q peaking filter), so no click.
+        self._apf.set_center_hz(new_pitch)
 
     def set_notches(self, notches: Sequence, enabled: bool) -> None:
         self._notches = notches
@@ -243,6 +271,15 @@ class PythonRxChannel(DspChannel):
 
     def set_nr_profile(self, profile: str) -> None:
         self._nr.set_profile(profile)
+
+    def set_apf_enabled(self, enabled: bool) -> None:
+        self._apf.set_enabled(bool(enabled))
+
+    def set_apf_bw_hz(self, bw_hz: int) -> None:
+        self._apf.set_bw_hz(int(bw_hz))
+
+    def set_apf_gain_db(self, gain_db: float) -> None:
+        self._apf.set_gain_db(float(gain_db))
 
     def reset(self) -> None:
         """Drop in-flight buffers + transient state.
@@ -257,6 +294,10 @@ class PythonRxChannel(DspChannel):
         _Decimator instance via _decimate_to_48k."""
         self._audio_buf.clear()
         self._nr.reset()
+        # APF state — safe to clear here because reset() is only
+        # called on freq/mode changes, where an audio discontinuity
+        # is already expected.
+        self._apf.reset()
         # Force decimator rebuild on next block. Cheap (one filter-
         # state allocation) and matches what set_in_rate does, which
         # is the only path the operator had previously to recover
@@ -338,8 +379,13 @@ class PythonRxChannel(DspChannel):
             return np.zeros(0, dtype=np.float32)
 
         # Drain complete blocks. Each block runs through
-        #   notches (baseband IQ) → demod (audio) → NR (audio).
-        # AGC + volume happen OUTSIDE the channel.
+        #   notches (baseband IQ) → demod (audio) → NR (audio)
+        #                        → APF (audio, CW-only).
+        # AGC + volume happen OUTSIDE the channel. APF is the last
+        # in-channel audio stage — it sits before AGC so AGC chases
+        # the boosted tone (which is the whole point: operator hears
+        # the CW signal at AGC target, not target-minus-boost).
+        is_cw = mode in ("CWU", "CWL")
         out_chunks: list[np.ndarray] = []
         while len(self._audio_buf) >= block:
             chunk = np.asarray(
@@ -354,6 +400,12 @@ class PythonRxChannel(DspChannel):
                             chunk = n.filter.process(chunk)
                 audio = demod.process(chunk)
                 audio = self._nr.process(audio)
+                # APF — only useful in CW. The operator's enable
+                # state is preserved across mode switches (button
+                # stays "on"), but the filter only runs when there's
+                # actually CW content to boost.
+                if is_cw and self._apf.enabled:
+                    audio = self._apf.process(audio)
                 out_chunks.append(audio)
             except Exception as e:
                 print(f"[channel] demod error: {e}")

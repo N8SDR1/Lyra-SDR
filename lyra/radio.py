@@ -173,6 +173,15 @@ class Radio(QObject):
     nr_enabled_changed = Signal(bool)
     nr_profile_changed = Signal(str)
 
+    # APF (Audio Peaking Filter) — CW-only narrow peaking biquad
+    # centered on cw_pitch_hz. Boosts the CW tone without the ringing
+    # tail of a brick-wall narrow filter. Channel mode-gates inside
+    # process() so the operator's setting is preserved across mode
+    # switches but only runs when there's CW content to boost.
+    apf_enabled_changed = Signal(bool)
+    apf_bw_changed = Signal(int)         # -3 dB bandwidth in Hz
+    apf_gain_changed = Signal(float)     # peak gain in dB
+
     # Panadapter noise-floor estimate — 20th percentile of the current
     # spectrum, rolling-averaged. Emitted at ~6 Hz (not every FFT tick)
     # so the widget's horizontal reference line doesn't twitch.
@@ -674,6 +683,21 @@ class Radio(QObject):
         # the processor itself only supports the classical profiles.
         from lyra.dsp.nr import SpectralSubtractionNR as _SSNR
         self._nr_profile = _SSNR.DEFAULT_PROFILE
+
+        # APF — Audio Peaking Filter (CW only). Defaults match the
+        # AudioPeakFilter class constants so a fresh install gets a
+        # sensible 80 Hz BW / +12 dB peak. Operator can tune both
+        # via Settings → DSP → CW. Default OFF — opt-in feature.
+        from lyra.dsp.apf import AudioPeakFilter as _APF
+        self._apf_enabled: bool = False
+        self._apf_bw_hz: int = _APF.BW_DEFAULT_HZ
+        self._apf_gain_db: float = _APF.GAIN_DEFAULT_DB
+        # Push initial values into the channel so its APF is in sync
+        # with Radio state from frame 0 (channel was just constructed
+        # earlier in __init__ with bare defaults).
+        self._rx_channel.set_apf_bw_hz(self._apf_bw_hz)
+        self._rx_channel.set_apf_gain_db(self._apf_gain_db)
+        self._rx_channel.set_apf_enabled(self._apf_enabled)
 
         # ── FFT ring buffer ───────────────────────────────────────────
         self._fft_size = 4096
@@ -1489,6 +1513,48 @@ class Radio(QObject):
         else:
             self._rx_channel.set_nr_profile(name)
         self.nr_profile_changed.emit(name)
+
+    # ── APF (Audio Peaking Filter) ─────────────────────────────────
+    @property
+    def apf_enabled(self) -> bool:
+        return self._apf_enabled
+
+    @property
+    def apf_bw_hz(self) -> int:
+        return self._apf_bw_hz
+
+    @property
+    def apf_gain_db(self) -> float:
+        return self._apf_gain_db
+
+    def set_apf_enabled(self, on: bool) -> None:
+        on = bool(on)
+        if on == self._apf_enabled:
+            return
+        self._apf_enabled = on
+        self._rx_channel.set_apf_enabled(on)
+        self.apf_enabled_changed.emit(on)
+
+    def set_apf_bw_hz(self, bw_hz: int) -> None:
+        # Clamp here too so external callers (TCI, CAT) can't push
+        # a degenerate value past the channel's biquad. AudioPeakFilter
+        # also clamps internally for defense-in-depth.
+        from lyra.dsp.apf import AudioPeakFilter as _APF
+        bw = max(_APF.BW_MIN_HZ, min(_APF.BW_MAX_HZ, int(bw_hz)))
+        if bw == self._apf_bw_hz:
+            return
+        self._apf_bw_hz = bw
+        self._rx_channel.set_apf_bw_hz(bw)
+        self.apf_bw_changed.emit(bw)
+
+    def set_apf_gain_db(self, gain_db: float) -> None:
+        from lyra.dsp.apf import AudioPeakFilter as _APF
+        g = max(_APF.GAIN_MIN_DB, min(_APF.GAIN_MAX_DB, float(gain_db)))
+        if g == self._apf_gain_db:
+            return
+        self._apf_gain_db = g
+        self._rx_channel.set_apf_gain_db(g)
+        self.apf_gain_changed.emit(g)
 
     def set_muted(self, on: bool):
         on = bool(on)
