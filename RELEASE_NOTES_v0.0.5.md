@@ -61,7 +61,19 @@ backend → GPU panadapter (beta)**.
 - GPU panadapter — switch backends, verify all overlays work
 - Big freq/mode jumps (WWV ↔ FT8 etc.) — should no longer stick
 
-## Known issues / next up
+## Known issues
+
+- **GPU panadapter (BETA) — rendering glitch in this build.** The
+  spectrum trace appears washed-out and smeared in GPU panadapter
+  mode. This is a regression introduced during the v0.0.5 BETA
+  feature-parity work and is being chased for a v0.0.5.1 patch.
+  **Workaround:** stay on the default **OpenGL — accelerated
+  QPainter** backend (Settings → Visuals → Graphics backend) — that
+  path is fully functional and indistinguishable in feature set.
+  Software (QPainter on CPU) is also fine if your GPU stack has
+  trouble.
+
+## Next up
 
 - ANF (auto-notch) and NB (noise blanker) buttons remain stubs;
   the next release will tackle those plus a captured-noise-profile
