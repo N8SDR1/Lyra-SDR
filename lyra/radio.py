@@ -189,6 +189,18 @@ class Radio(QObject):
     bin_enabled_changed = Signal(bool)
     bin_depth_changed = Signal(float)    # 0.0..1.0
 
+    # Phase 3.B+: DSP threading mode — operator-selectable BETA toggle.
+    # "single" runs DSP on the Qt main thread (v0.0.5 behavior).
+    # "worker" runs DSP on a dedicated lyra.dsp.worker.DspWorker thread
+    # (BETA, opt-in via Settings → DSP → Threading). Switching modes
+    # requires a Lyra restart — the worker thread is set up once at
+    # Radio construction time. Until Phase 3.B is fully wired
+    # (B.3+), selecting "worker" is currently a no-op preference.
+    dsp_threading_mode_changed = Signal(str)
+    DSP_THREADING_SINGLE = "single"
+    DSP_THREADING_WORKER = "worker"
+    DSP_THREADING_MODES = (DSP_THREADING_SINGLE, DSP_THREADING_WORKER)
+
     # Panadapter noise-floor estimate — 20th percentile of the current
     # spectrum, rolling-averaged. Emitted at ~6 Hz (not every FFT tick)
     # so the widget's horizontal reference line doesn't twitch.
@@ -720,6 +732,31 @@ class Radio(QObject):
             sample_rate=PythonRxChannel.AUDIO_RATE,
             depth=self._bin_depth,
         )
+
+        # ── DSP threading mode (Phase 3.B+) ───────────────────────────
+        # Operator preference for whether DSP runs on the Qt main
+        # thread ("single", current default) or a dedicated worker
+        # thread ("worker", BETA, opt-in via Settings → DSP →
+        # Threading). Changes are persisted via QSettings but only
+        # take effect on Lyra restart — the worker thread is set up
+        # once at Radio construction.
+        #
+        # Two values are tracked:
+        #   _dsp_threading_mode_at_startup  — what was loaded when
+        #     Radio was constructed; the mode currently RUNNING
+        #   _dsp_threading_mode             — operator's currently
+        #     selected preference; what gets persisted; what will
+        #     be RUNNING after the next restart
+        # When the two differ, the Settings dialog displays a
+        # "restart required" hint to the operator.
+        self._dsp_threading_mode_at_startup: str = self.DSP_THREADING_SINGLE
+        self._dsp_threading_mode: str = self.DSP_THREADING_SINGLE
+        # Phase 3.B B.1 has the DspWorker scaffolding but no live
+        # routing yet — selecting "worker" is currently a stored
+        # preference only. B.3+ wires the actual audio path.
+        print(f"[Radio] DSP threading mode: "
+              f"{self._dsp_threading_mode_at_startup} "
+              f"(Phase 3.B; worker mode dormant until B.3+)")
 
         # ── FFT ring buffer ───────────────────────────────────────────
         self._fft_size = 4096
@@ -1606,6 +1643,38 @@ class Radio(QObject):
         self._bin_depth = d
         self._binaural.set_depth(d)
         self.bin_depth_changed.emit(d)
+
+    # ── DSP threading mode (Phase 3.B+, restart-required) ──────────
+    @property
+    def dsp_threading_mode(self) -> str:
+        """Operator's currently selected DSP threading mode.
+
+        This is the persisted preference — what will be RUNNING
+        after the next Lyra restart. To check what's currently
+        running this session, use ``dsp_threading_mode_at_startup``."""
+        return self._dsp_threading_mode
+
+    @property
+    def dsp_threading_mode_at_startup(self) -> str:
+        """The DSP threading mode that was active when this Radio
+        instance was constructed — i.e., what's RUNNING right now.
+        Compare to ``dsp_threading_mode`` to detect when the operator
+        has changed the preference but not yet restarted."""
+        return self._dsp_threading_mode_at_startup
+
+    def set_dsp_threading_mode(self, mode: str) -> None:
+        """Set the DSP threading mode preference. Persisted via
+        QSettings; takes effect on next Lyra restart.
+
+        Accepts 'single' or 'worker'. Unknown values are clamped
+        to 'single' (safe default)."""
+        m = str(mode or "").strip().lower()
+        if m not in self.DSP_THREADING_MODES:
+            m = self.DSP_THREADING_SINGLE
+        if m == self._dsp_threading_mode:
+            return
+        self._dsp_threading_mode = m
+        self.dsp_threading_mode_changed.emit(m)
 
     def set_muted(self, on: bool):
         on = bool(on)

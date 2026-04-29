@@ -2152,6 +2152,16 @@ class MainWindow(QMainWindow):
         if s.contains("bin/enabled"):
             r.set_bin_enabled(
                 s.value("bin/enabled") in (True, "true", "True", 1, "1"))
+        # DSP threading mode (Phase 3.B+, restart-required to apply).
+        # Loaded BEFORE Radio's own startup-mode capture so that the
+        # restored preference becomes both the current selection AND
+        # the "what's running this session" snapshot. (Currently a
+        # no-op preference until B.3+ wires the worker audio path.)
+        if s.contains("dsp/threading_mode"):
+            mode = str(s.value("dsp/threading_mode") or "").strip().lower()
+            if mode in r.DSP_THREADING_MODES:
+                r._dsp_threading_mode = mode
+                r._dsp_threading_mode_at_startup = mode
         # Noise-floor marker on the spectrum (default on)
         if s.contains("visuals/noise_floor_marker"):
             r.set_noise_floor_enabled(
@@ -2301,6 +2311,8 @@ class MainWindow(QMainWindow):
         # BIN (Binaural pseudo-stereo)
         s.setValue("bin/enabled",     r.bin_enabled)
         s.setValue("bin/depth",       float(r.bin_depth))
+        # DSP threading mode (Phase 3.B+, restart-required to apply)
+        s.setValue("dsp/threading_mode", r.dsp_threading_mode)
         # Noise-floor marker
         s.setValue("visuals/noise_floor_marker", r.noise_floor_enabled)
         # Band plan

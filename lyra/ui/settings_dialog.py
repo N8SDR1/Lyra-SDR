@@ -974,6 +974,64 @@ class DspSettingsTab(QWidget):
         grp_eq.setEnabled(False)
         v.addWidget(grp_eq)
 
+        # ── DSP Threading (Phase 3.B+, BETA) ─────────────────────────
+        # Operator-selectable backend for where DSP runs:
+        #   "single" — Qt main thread (v0.0.5 behavior, default)
+        #   "worker" — dedicated DspWorker thread (BETA, opt-in)
+        # Switching requires Lyra restart.  The value here is the
+        # PREFERENCE (persisted, applied next restart); a hint shows
+        # when it differs from what's currently running this session.
+        grp_thr = QGroupBox("DSP Threading (advanced)")
+        gthr = QVBoxLayout(grp_thr)
+
+        thr_intro = QLabel(
+            "Where Lyra's DSP audio chain runs.  Default is single-"
+            "thread (Qt main thread) — same as v0.0.5.  Worker mode "
+            "moves DSP to a dedicated thread, freeing the main thread "
+            "for UI rendering.  Worker mode is BETA — opt in if you "
+            "want to help test it.\n\n"
+            "Changes take effect on the next Lyra restart.")
+        thr_intro.setWordWrap(True)
+        thr_intro.setStyleSheet("color: #8a9aac;")
+        gthr.addWidget(thr_intro)
+
+        from PySide6.QtWidgets import QComboBox
+        thr_row = QHBoxLayout()
+        thr_row.addWidget(QLabel("Threading:"))
+        self.threading_combo = QComboBox()
+        self.threading_combo.addItem("Single-thread (current)", "single")
+        self.threading_combo.addItem("Worker thread (BETA)", "worker")
+        # Select the current persisted preference
+        cur_mode = radio.dsp_threading_mode
+        idx = next((i for i in range(self.threading_combo.count())
+                    if self.threading_combo.itemData(i) == cur_mode), 0)
+        self.threading_combo.setCurrentIndex(idx)
+        self.threading_combo.setToolTip(
+            "DSP threading mode preference.  Persisted via QSettings; "
+            "takes effect on the next Lyra restart.\n\n"
+            "Single-thread: DSP runs on the Qt main thread (current "
+            "behavior).  Stable, well-tested.\n"
+            "Worker thread (BETA): DSP runs on a dedicated thread, "
+            "freeing the main thread for UI.  Field-test only — "
+            "report any audio glitches or unexpected behavior.")
+        self.threading_combo.currentIndexChanged.connect(
+            self._on_threading_combo)
+        thr_row.addWidget(self.threading_combo, 1)
+        gthr.addLayout(thr_row)
+
+        # Restart-required hint — only visible when the operator's
+        # selection differs from what's actually running this session.
+        self.threading_restart_hint = QLabel("")
+        self.threading_restart_hint.setWordWrap(True)
+        self.threading_restart_hint.setStyleSheet(
+            "color: #ffb84a; font-weight: 700; padding: 4px;")
+        gthr.addWidget(self.threading_restart_hint)
+        self._refresh_threading_restart_hint()
+        radio.dsp_threading_mode_changed.connect(
+            lambda _m: self._refresh_threading_restart_hint())
+
+        v.addWidget(grp_thr)
+
         v.addStretch(1)
 
         self._update_labels()
@@ -1036,6 +1094,32 @@ class DspSettingsTab(QWidget):
 
     def _on_action_db(self, action_db: float):
         self.action_label.setText(f"{action_db:+.1f} dB")
+
+    # ── DSP Threading (Phase 3.B+) ─────────────────────────────────
+    def _on_threading_combo(self, idx: int):
+        """Operator changed the threading-mode combo. Persist via
+        Radio.set_dsp_threading_mode (which fires the *_changed
+        signal — restart-hint label updates as a side effect)."""
+        if idx < 0:
+            return
+        mode = self.threading_combo.itemData(idx)
+        if mode:
+            self.radio.set_dsp_threading_mode(str(mode))
+
+    def _refresh_threading_restart_hint(self):
+        """Show / hide the 'restart required' hint based on whether
+        the operator's selected threading mode matches what's
+        actually running this session."""
+        running = self.radio.dsp_threading_mode_at_startup
+        selected = self.radio.dsp_threading_mode
+        if running == selected:
+            self.threading_restart_hint.setText("")
+            self.threading_restart_hint.setVisible(False)
+        else:
+            self.threading_restart_hint.setText(
+                f"⚠  Restart Lyra to apply: currently running "
+                f"'{running}', selected '{selected}'.")
+            self.threading_restart_hint.setVisible(True)
 
 
 class AudioSettingsTab(QWidget):
