@@ -2371,6 +2371,11 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._save_settings()
         self.pnl_tci.shutdown()
+        # Phase 3.B B.4: cleanly stop the DSP worker thread (if
+        # running) BEFORE Radio.stop() — drains in flight samples
+        # before the audio sink closes.  Idempotent / safe when
+        # worker mode isn't active.
+        self.radio.shutdown_dsp_worker()
         self.radio.stop()
         super().closeEvent(event)
 

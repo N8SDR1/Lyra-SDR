@@ -751,12 +751,16 @@ class Radio(QObject):
         # "restart required" hint to the operator.
         self._dsp_threading_mode_at_startup: str = self.DSP_THREADING_SINGLE
         self._dsp_threading_mode: str = self.DSP_THREADING_SINGLE
-        # Phase 3.B B.1 has the DspWorker scaffolding but no live
-        # routing yet — selecting "worker" is currently a stored
-        # preference only. B.3+ wires the actual audio path.
         print(f"[Radio] DSP threading mode: "
-              f"{self._dsp_threading_mode_at_startup} "
-              f"(Phase 3.B; worker mode dormant until B.3+)")
+              f"{self._dsp_threading_mode_at_startup}")
+        # Worker thread + DspWorker — constructed only when worker
+        # mode is the active mode at startup. Stored on Radio so
+        # they survive for the radio's lifetime; shut down via
+        # shutdown_dsp_worker() at app close.
+        self._dsp_worker = None      # type: Optional["DspWorker"]
+        self._dsp_worker_thread = None
+        if self._dsp_threading_mode_at_startup == self.DSP_THREADING_WORKER:
+            self._build_and_start_dsp_worker()
 
         # ── FFT ring buffer ───────────────────────────────────────────
         self._fft_size = 4096
@@ -2963,9 +2967,121 @@ class Radio(QObject):
             5000,
         )
 
+    # ── Phase 3.B B.4: DSP worker thread lifecycle ───────────────────
+    def _build_and_start_dsp_worker(self) -> None:
+        """Construct the DspWorker + its QThread and start the worker
+        running.  Called from __init__ when ``_dsp_threading_mode_at_startup``
+        is ``DSP_THREADING_WORKER``.
+
+        After this returns:
+        - ``self._dsp_worker`` is a live DspWorker on its own thread
+        - The worker's run_loop is draining its input queue
+        - The worker's process_block uses Radio's DSP machinery via
+          the back-reference set by attach_to_radio()
+        - The worker idles when no samples are enqueued (queue
+          empty); CPU cost while no stream is active is negligible
+
+        Pattern: QObject + moveToThread (modern Qt-recommended over
+        QThread.run override).  Worker is parented to Radio so it
+        gets cleaned up if Radio is destroyed without an explicit
+        shutdown_dsp_worker call.
+        """
+        from PySide6.QtCore import QThread
+        from lyra.dsp.worker import DspWorker
+        # Construct worker on main thread, then migrate ownership.
+        self._dsp_worker = DspWorker(parent=self)
+        self._dsp_worker.attach_to_radio(self)
+        # Seed the worker's config from Radio's current state so the
+        # worker has correct AGC / AF / Vol / Mute / BIN values from
+        # frame zero.
+        self._dsp_worker.set_agc_profile(self._agc_profile)
+        self._dsp_worker.set_agc_release(self._agc_release)
+        self._dsp_worker.set_agc_target(self._agc_target)
+        self._dsp_worker.set_agc_hang_blocks(self._agc_hang_blocks)
+        self._dsp_worker.set_af_gain_db(self._af_gain_db)
+        self._dsp_worker.set_volume(self._volume)
+        self._dsp_worker.set_muted(self._muted)
+        self._dsp_worker.set_bin_enabled(self._bin_enabled)
+        self._dsp_worker.set_bin_depth(self._bin_depth)
+        # Move to dedicated thread.  parent=None for the QThread is
+        # required by Qt — moveToThread fails if the source thread
+        # owns a parented object that's also being moved.  We track
+        # the thread on Radio to keep it alive.
+        self._dsp_worker_thread = QThread()
+        self._dsp_worker.moveToThread(self._dsp_worker_thread)
+        # Wire Radio setter signals to worker config slots.  These
+        # are cross-thread (Radio lives on main, worker on its own
+        # thread) so Qt automatically uses QueuedConnection — slot
+        # calls land on the worker's event loop between blocks, no
+        # locking needed (see threading.md §6).
+        from PySide6.QtCore import Qt as _Qt
+        _qc = _Qt.QueuedConnection
+        self.agc_profile_changed.connect(
+            self._dsp_worker.set_agc_profile, _qc)
+        self.bin_enabled_changed.connect(
+            self._dsp_worker.set_bin_enabled, _qc)
+        self.bin_depth_changed.connect(
+            self._dsp_worker.set_bin_depth, _qc)
+        # AF Gain, Volume, Muted aren't currently exposed as Qt
+        # signals on Radio (single-thread path reads them directly
+        # from `_af_gain_db` / `_volume` / `_muted` each block).
+        # Worker mode currently uses Radio's _apply_agc_and_volume
+        # which reads those same attributes, so live updates work
+        # for free.  When B.4+ migrates AGC to worker-owned state,
+        # we'll add the necessary _changed signals on Radio + slots
+        # on the worker.
+        # The worker's slot @run_loop runs once (until exit), driven
+        # by the thread's started signal.
+        self._dsp_worker_thread.started.connect(self._dsp_worker.run_loop)
+        self._dsp_worker_thread.start()
+        print(f"[Radio] DSP worker thread started "
+              f"(queue depth {self._dsp_worker.INPUT_QUEUE_DEPTH})")
+
+    def shutdown_dsp_worker(self, timeout_ms: int = 1500) -> None:
+        """Cleanly stop the DSP worker thread, if any.  Idempotent;
+        safe to call multiple times.  Called from MainWindow.closeEvent
+        before Radio.stop() so the worker drains in flight before
+        the audio sink closes.
+
+        Bounded wait — the worker's run_loop blocks on its input
+        queue with a short timeout, so stop_requested takes effect
+        within the queue's poll interval (~100 ms).  A 1.5-second
+        wait is generous and protects against hangs at app exit.
+        """
+        if self._dsp_worker is None:
+            return
+        try:
+            self._dsp_worker.request_stop()
+            if self._dsp_worker_thread is not None:
+                self._dsp_worker_thread.quit()
+                exited = self._dsp_worker_thread.wait(timeout_ms)
+                if not exited:
+                    print("[Radio] DSP worker thread did not exit "
+                          f"within {timeout_ms} ms — forcing terminate")
+                    self._dsp_worker_thread.terminate()
+                    self._dsp_worker_thread.wait(500)
+        except Exception as exc:
+            print(f"[Radio] shutdown_dsp_worker error: {exc}")
+        # Drop references so any second call is a no-op
+        self._dsp_worker = None
+        self._dsp_worker_thread = None
+
     # ── Internal: sample flow ─────────────────────────────────────────
     def _stream_cb(self, samples, _stats):
-        """RX-thread callback. Accumulate into a batch; bridge when full."""
+        """RX-thread callback. Accumulate into a batch; route the
+        batch through whichever DSP path the operator selected at
+        startup (single-thread Qt main, or worker thread).
+
+        Single-thread (default): emit via _SampleBridge whose
+        `samples_ready` signal hops to Radio._on_samples_main_thread
+        on the Qt main thread, where _do_demod runs the audio chain.
+
+        Worker thread (BETA, opt-in): push directly to the worker's
+        bounded queue. Worker's run_loop drains the queue and calls
+        process_block on its own thread.  Drop-oldest behavior on
+        queue overflow keeps memory bounded if the worker can't
+        keep up.
+        """
         with self._rx_batch_lock:
             self._rx_batch.extend(samples.tolist())
             if len(self._rx_batch) >= self._rx_batch_size:
@@ -2973,7 +3089,16 @@ class Radio(QObject):
                 self._rx_batch = []
             else:
                 return
-        self._bridge.samples_ready.emit(batch)
+        # Route the batch to the DSP path selected at startup. We
+        # check the at-startup mode (not the persisted preference) —
+        # this is the mode currently RUNNING this session.  If the
+        # operator changes the preference mid-session, it takes
+        # effect on the next restart, not now.
+        if (self._dsp_threading_mode_at_startup ==
+                self.DSP_THREADING_WORKER and self._dsp_worker is not None):
+            self._dsp_worker.enqueue_iq(batch)
+        else:
+            self._bridge.samples_ready.emit(batch)
 
     def _on_samples_main_thread(self, samples):
         with self._ring_lock:
