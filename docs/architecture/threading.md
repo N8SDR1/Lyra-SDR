@@ -808,7 +808,17 @@ automatically once an operator switches.
 
 ## Sign-off
 
-**Operator (N8SDR):** [pending review]
+**Operator (N8SDR):** Reviewed 2026-04-29 — approved direction.
+Settings-toggle (BETA) migration approach accepted; worker thread
+will be opt-in via Settings → DSP → Threading until enough field
+testing supports promotion to default.
 **Lead:** Claude
 
-When operator agrees with this design, we proceed to Phase 3.B.
+**Status:** Design doc is the source of truth for Phase 3.B
+implementation. Both this doc and the companion `wdsp_integration.md`
+are coherent post-relicense (Lyra is GPL v3+ effective v0.0.6;
+WDSP integration is unblocked but follows operator-priority order
+in the release roadmap).
+
+Next action: Phase 3.B sub-tasks per §13. B.1 starts when the
+operator gives the go-ahead.

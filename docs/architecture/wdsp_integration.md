@@ -102,7 +102,7 @@ Build the DspWorker thread architecture. This is the runway WDSP
 will run on. **Status:** 3.A design doc complete, awaiting review.
 
 ### Phase WD-1 — WDSP RX integration (opt-in)
-1. Add wdsp.dll bundling to the build pipeline (PyInstaller datas)
+1. Add `wdsp.dll` bundling to the build pipeline (PyInstaller datas)
 2. Build a Python ctypes binding for the subset of WDSP we need
 3. Implement `WdspChannel(DspChannel)` — calls `OpenChannel()`,
    `fexchange0()`, `SetRXAMode()`, etc.
@@ -110,13 +110,26 @@ will run on. **Status:** 3.A design doc complete, awaiting review.
 5. Restart-to-switch (loading WDSP at runtime is doable but
    error-prone; restart is cleaner)
 
-**Why opt-in:** WDSP is a C library — bugs are harder to chase, and
-Lyra's appeal as a clean Python codebase shouldn't be compromised
-unless the operator explicitly wants WDSP's features.
+**Why opt-in (Native stays default):** purely technical preferences,
+not licensing — both engines are now GPL-compatible:
+
+- **Smaller installer** — bundling `wdsp.dll` is fine (~3-5 MB) but
+  operators on dial-up / metered connections appreciate the
+  zero-DLL Native footprint
+- **Easier debugging** — Native is pure Python; operators can step
+  through a demod or NR stage with any debugger. WDSP is a C
+  library; debugging requires C tools.
+- **Faster bring-up** — Native works immediately; WDSP needs a one-
+  time DLL load + channel-handle setup. Operators just trying Lyra
+  for the first time get the simpler path.
+- **Cross-validation** — having both engines means operators can
+  A/B compare. That's a feature in itself.
 
 **What this gives operators:** WDSP's full RX-side feature set
 including NR2, optional NR3/NR4 if a fork is used, wideband AGC,
-diversity (when RX2 is wired). Native users keep what they have.
+diversity (when RX2 is wired). Native users keep what they have
+plus the noise toolkit we're building on the Native path
+(captured-noise-profile, NR2-native, ANF, NB).
 
 ### Phase TX-1 — Lyra TX scaffolding (Native first)
 Before PureSignal, we need a TX path at all. Lyra has zero TX
@@ -194,22 +207,38 @@ we're ready.
 
 ## 5. Building / packaging WDSP
 
-WDSP is open-source C. Three deployment options to evaluate at
-WD-1 kickoff:
+With license compatibility resolved (Section 6), the deployment
+question becomes purely operational. Three options ranked:
 
-1. **Bundle a pre-built wdsp.dll** with the Lyra installer.
-   Simplest; what Thetis does. Downside: must be rebuilt for each
-   architecture (we're x64 only, so just one build).
-2. **Build from source on first launch.** Compiler dependency on
-   the operator's machine. Painful.
-3. **Vendor a Python ctypes / pybind11 wrapper.** If a maintained
-   wrapper package exists for current WDSP, it's the cleanest;
-   we'd add it to `requirements.txt` and operators get it via pip.
-   **Investigation needed at WD-1 kickoff** — I'm not certain such
-   a package exists today; building our own ctypes binding is the
-   fallback.
+### Option 1 (RECOMMENDED) — Bundle a pre-built `wdsp.dll`
+- What Thetis does
+- Add `wdsp.dll` to `build/lyra.spec`'s `datas` list (same way we
+  bundle the GPU shaders)
+- Operators get one `Lyra-Setup-X.Y.Z.exe` download; everything
+  works
+- Build pipeline rebuilds `wdsp.dll` from a pinned upstream commit
+  whenever we want to upgrade
+- We're x64-only on Windows so just one build artifact
 
-**Decision deferred** to Phase WD-1 kickoff.
+### Option 2 (FALLBACK) — Build from source on first launch
+- Compiler dependency on operator's machine — painful
+- Only worth doing if Option 1 hits a roadblock
+
+### Option 3 (BACKUP) — Vendor a Python wrapper package
+- If a maintained `wdsp-py` (or similar) package exists, we could
+  add it to `requirements.txt` and operators get it via pip
+- **Investigation needed at WD-1 kickoff** — I'm not certain a
+  current Python wrapper exists. If one does, evaluate it; if
+  not, building our own ctypes binding is the path
+
+**Recommended decision: Option 1 (bundle), with our own ctypes
+binding for the small WDSP API surface we actually use.**
+
+Concrete WDSP API surface we'd bind initially (RX-side only):
+`OpenChannel`, `CloseChannel`, `fexchange0`, `SetRXAMode`,
+`SetRXAFiltLow/High`, `SetRXAAGCMode`, `SetRXAANRvals`,
+`SetRXAEMNRRun`, `SetEXTANBRun`, `SetEXTNOBRun`. ~15 functions, all
+documented in WDSP's headers.
 
 ## 6. License compatibility — RESOLVED ✓
 
@@ -275,17 +304,25 @@ on WDSP.
 
 ## 8. Migration / coexistence rules
 
-- **Lyra-native stays the default** indefinitely. Operators get a
-  working app out of the box without any DLL dependency.
+- **Lyra-native stays the default** for new installs. Operators
+  who want WDSP's specific feature set (NR2/NR3, PureSignal, CESSB)
+  flip a Settings toggle. This isn't a license-driven choice (both
+  engines are GPL-compatible now); it's about giving operators a
+  no-DLL-dependency starting experience and reserving WDSP for
+  operators who specifically want its features.
 - **WDSP is opt-in** — operator must explicitly switch engines.
 - **Per-band engine memory? No (v1).** Engine choice is a single
   global preference. Per-band would let operators run Native on
   60 m and WDSP on 20 m, but the UX cost (engine restart on every
   band change?) doesn't justify it. Re-evaluate if testers ask.
-- **Captured-noise-profile** lives in Native NR, not WDSP. WDSP
-  has its own NR variants; capturing a profile is a Lyra-native
-  feature. If operators want both, they can A/B between engines
-  per-session.
+- **Captured-noise-profile** is a Lyra-native NR feature, separate
+  from WDSP's NR variants. The two are different design ideas:
+  captured-profile lets the operator record their specific QRM and
+  target it; WDSP NR2/NR3 are statistical estimators that adapt
+  automatically. Operators who want captured-profile use Native;
+  operators who want WDSP's algorithmic NRs use WDSP. We could
+  later add captured-profile *to* WDSP if there's demand, but
+  Native-only for v1.
 - **Settings round-trip** — operator config (mode, BW, AGC profile,
   etc.) translates between engines. If you set USB + 2400 Hz BW on
   Native, then switch to WDSP, you get USB + 2400 Hz BW on WDSP.
@@ -364,15 +401,45 @@ next without disrupting the order. Worker-thread default
 promotion likely happens around v0.0.8 or v0.0.9 once it has 2-3
 release cycles of operator field testing.
 
+### Could WD-1 move earlier?
+
+With license compatibility resolved, **WD-1 (RX-side WDSP
+integration) is no longer technically blocked.** The current
+ordering (Native noise toolkit first, then TX scaffolding, then
+WDSP) reflects operator priority — captured-noise-profile was the
+headline ask, and native ANF / NB / NR2 round out the toolkit
+operators expect on the Native engine.
+
+If priorities shift (e.g., several testers ask for WDSP's NR2/NR3
+sooner, or a request for PureSignal becomes urgent), WD-1 can
+move earlier without rework — both engines coexist by design.
+Specifically, WD-1 could insert anywhere after v0.0.6 (threading)
+since the worker thread is the only WDSP prerequisite.
+
+**Practical guidance:** keep the Native-first ordering until
+operator field reports tell us to change. Don't reorder
+speculatively.
+
 ---
 
 ## Sign-off
 
-**Operator (N8SDR):** [pending review]
+**Operator (N8SDR):** Reviewed 2026-04-29 — approved direction.
+Lyra relicensed MIT → GPL v3+ (effective v0.0.6). WDSP integration
+unblocked technically; held back to follow operator-priority order
+(noise toolkit first, then TX, then WDSP).
 **Lead:** Claude
 
-When operator agrees with this layered plan, we proceed to Phase 3
-implementation knowing WDSP slots in cleanly later. No need to
-build WDSP scaffolding now — Phase 3 thread architecture is the
-foundation; WDSP work comes when we're ready to lift TX off the
-ground.
+**Status:** Both architecture docs (threading.md + this file) are
+now coherent post-relicense. Phase 3 implementation can proceed
+knowing:
+
+1. Threading uses a Settings-toggle approach (Single = default,
+   Worker = BETA) — see `threading.md` §13
+2. WDSP integration slots into the same DspWorker thread when WD-1
+   lands — no further architectural decisions needed before then
+3. License compatibility is resolved; bundling `wdsp.dll` with
+   Lyra is permitted
+
+No further design work is gating Phase 3.B. We start with B.1
+(DspWorker shell) when the operator gives the go-ahead.
