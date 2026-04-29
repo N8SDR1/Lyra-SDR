@@ -8,12 +8,67 @@ relocating panels in the main layout is a one-liner in app.py.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QMenu,
     QPushButton, QSizePolicy, QSlider, QSpinBox, QStackedWidget,
     QVBoxLayout, QWidget,
 )
+
+
+class SteppedSlider(QSlider):
+    """QSlider that paints visible tick marks ON TOP of the styled
+    groove + handle.
+
+    Why this exists: plain QSS-styled QSliders lose their native tick
+    marks. Once `QSlider::groove` or `QSlider::handle` is stylesheeted,
+    Qt switches the whole widget to fully-custom rendering and skips
+    tick painting entirely (a long-standing Qt quirk; see Qt forum
+    threads going back to Qt 5). Setting tickPosition + tickInterval
+    becomes a no-op for visible feedback.
+
+    Fix: subclass and overdraw ticks ourselves after the styled paint.
+    Used for the FPS + Waterfall step-list sliders so the operator can
+    actually see the discrete detent positions.
+    """
+
+    TICK_COLOR = QColor(140, 165, 195, 200)
+    TICK_WIDTH_PX = 1
+    TICK_HEIGHT_PX = 4
+    TICK_PAD_PX = 1   # gap between groove bottom and tick top
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if (self.tickPosition() == QSlider.NoTicks
+                or self.orientation() != Qt.Horizontal):
+            return
+        rng = self.maximum() - self.minimum()
+        if rng <= 0:
+            return
+        interval = max(1, self.tickInterval())
+        # The styled handle is 12 px wide (theme.py). Slider's drawable
+        # range starts handle_w/2 from each end so ticks line up with
+        # the handle's center at min and max.
+        HANDLE_W = 12
+        track_left = HANDLE_W / 2
+        track_right = self.width() - HANDLE_W / 2
+        track_w = max(1.0, track_right - track_left)
+        # Y center of the groove is roughly widget mid-height. Theme
+        # gives groove height=4. Ticks below that, with TICK_PAD gap.
+        groove_y_mid = self.height() / 2
+        tick_y_top = int(groove_y_mid + 2 + self.TICK_PAD_PX)
+        tick_y_bot = tick_y_top + self.TICK_HEIGHT_PX
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setPen(QPen(self.TICK_COLOR, self.TICK_WIDTH_PX))
+        i = self.minimum()
+        while i <= self.maximum():
+            frac = (i - self.minimum()) / rng
+            x = int(round(track_left + frac * track_w))
+            painter.drawLine(x, tick_y_top, x, tick_y_bot)
+            i += interval
+        painter.end()
 
 from lyra.radio import Radio
 from lyra.protocol.stream import SAMPLE_RATES
@@ -23,6 +78,79 @@ from lyra.ui.smeter import SMeter, AnalogMeter, LedBarMeter, LitArcMeter
 from lyra.control.tci import TciServer, TCI_DEFAULT_PORT
 from lyra.bands import AMATEUR_BANDS, BROADCAST_BANDS, GEN_SLOTS, band_for_freq
 from lyra.ui.led_freq import FrequencyDisplay
+
+
+# ── Slider step lists ────────────────────────────────────────────────
+# Both the front-panel ViewPanel and the Settings → Display tab share
+# these so the two sliders can never disagree about what each detent
+# means. Hand-curated to give fine grain at the low end (where each
+# step changes the visual feel substantially) and coarser jumps at the
+# high end (where 50 vs 55 fps is indistinguishable).
+#
+# Reference: Thetis SDR ships with 40 Hz default, 60 Hz with averaging
+# enabled is the "optimized" recommendation per Apache Labs guidance.
+# Lyra's default is 40 fps to match.
+SPECTRUM_FPS_STEPS: tuple[int, ...] = (
+    5, 10, 15, 20, 25, 30, 40, 50, 60, 75, 90, 120,
+)
+SPECTRUM_FPS_DEFAULT = 40   # index 6 in SPECTRUM_FPS_STEPS
+
+# Waterfall step list — (divider, multiplier) tuples ordered FAST → SLOW.
+# Index 8 is the "neutral" 1-row-per-FFT setting. Operator-facing slider
+# is INVERTED (right = faster) so movement direction matches expectation.
+#
+# Bumped 2026-04-29: max multiplier extended from 10× → 30× per operator
+# request. At low spec rates (5-20 fps), the previous 10× cap meant
+# rows-per-second was too slow for digital-mode hunting (FT8 etc).
+# Multiplier-mode rows are linearly interpolated from the previous FFT
+# (no CPU cost beyond the single new FFT we already computed).
+WATERFALL_SPEED_STEPS: tuple[tuple[int, int], ...] = (
+    # Fast end (multiplier > 1, divider = 1)
+    (1, 30), (1, 20), (1, 15), (1, 10), (1, 6), (1, 4), (1, 3), (1, 2),
+    # Neutral (index 8) — one row per FFT
+    (1, 1),
+    # Slow end (divider > 1, multiplier = 1)
+    (2, 1), (3, 1), (5, 1), (8, 1), (12, 1), (20, 1),
+)
+WATERFALL_NEUTRAL_INDEX = 8
+
+
+def fps_to_slider_position(fps: int) -> int:
+    """Find the closest step index for an arbitrary FPS value. Used
+    when restoring slider position from Radio state (which may hold
+    a value not in the step list — e.g. a legacy QSettings value)."""
+    fps = int(fps)
+    return min(range(len(SPECTRUM_FPS_STEPS)),
+               key=lambda i: abs(SPECTRUM_FPS_STEPS[i] - fps))
+
+
+def fps_from_slider_position(pos: int) -> int:
+    """Slider position → FPS. Clamps to valid range."""
+    pos = max(0, min(len(SPECTRUM_FPS_STEPS) - 1, int(pos)))
+    return SPECTRUM_FPS_STEPS[pos]
+
+
+def wf_to_slider_position(divider: int, multiplier: int) -> int:
+    """Find the closest step index for an arbitrary (divider, multiplier)
+    pair. Compares the effective scroll factor (multiplier / divider)
+    against each step's factor."""
+    divider = max(1, int(divider))
+    multiplier = max(1, int(multiplier))
+    target = multiplier / divider
+    best_idx = WATERFALL_NEUTRAL_INDEX
+    best_diff = float("inf")
+    for i, (d, m) in enumerate(WATERFALL_SPEED_STEPS):
+        diff = abs((m / d) - target)
+        if diff < best_diff:
+            best_diff = diff
+            best_idx = i
+    return best_idx
+
+
+def wf_from_slider_position(pos: int) -> tuple[int, int]:
+    """Slider position → (divider, multiplier). Clamps to valid range."""
+    pos = max(0, min(len(WATERFALL_SPEED_STEPS) - 1, int(pos)))
+    return WATERFALL_SPEED_STEPS[pos]
 
 
 # ── Connection ──────────────────────────────────────────────────────────
@@ -346,6 +474,34 @@ class ModeFilterPanel(GlassPanel):
                 combo.setCurrentIndex(i)
                 return
 
+    @staticmethod
+    def _ensure_bw_value(combo: QComboBox, value: int):
+        """Select `value` in a BW combo. If it matches a preset, just
+        select that preset. If not — for example after the operator
+        dragged the spectrum-filter edge to a non-preset value like
+        5.2 kHz — insert a '(custom)' entry at the top of the dropdown
+        and select it, so the combo accurately reflects the actual
+        bandwidth instead of silently lying about it.
+
+        Any prior '(custom)' entry is removed first so repeated drags
+        don't accumulate stale entries. When the operator subsequently
+        picks a real preset, the next call here strips the custom
+        entry and selects the preset normally."""
+        # Strip prior custom entries to avoid accumulation.
+        for i in range(combo.count() - 1, -1, -1):
+            if "(custom)" in combo.itemText(i):
+                combo.removeItem(i)
+        # Try to match a preset.
+        for i in range(combo.count()):
+            if combo.itemData(i) == value:
+                combo.setCurrentIndex(i)
+                return
+        # Not a preset — show as a custom entry at the top.
+        label = (f"{value/1000:.1f} k (custom)" if value >= 1000
+                 else f"{value} Hz (custom)")
+        combo.insertItem(0, label, value)
+        combo.setCurrentIndex(0)
+
     def _refresh_bw_combos(self):
         mode = self.radio.mode
         presets = Radio.BW_PRESETS.get(mode, [2400])
@@ -357,7 +513,10 @@ class ModeFilterPanel(GlassPanel):
             for hz in presets:
                 label = f"{hz/1000:.1f} k" if hz >= 1000 else f"{hz} Hz"
                 combo.addItem(label, hz)
-            self._select_combo_data(combo, val)
+            # Use _ensure_bw_value so a non-preset BW (e.g. dragged
+            # from the spectrum filter edge) shows up as "(custom)"
+            # rather than the combo silently mismatching the radio.
+            self._ensure_bw_value(combo, val)
             combo.blockSignals(False)
 
     def _on_rx_bw_changed(self, _idx):
@@ -398,13 +557,13 @@ class ModeFilterPanel(GlassPanel):
     def _on_radio_rx_bw_changed(self, mode: str, bw: int):
         if mode == self.radio.mode:
             self.rx_bw_combo.blockSignals(True)
-            self._select_combo_data(self.rx_bw_combo, bw)
+            self._ensure_bw_value(self.rx_bw_combo, bw)
             self.rx_bw_combo.blockSignals(False)
 
     def _on_radio_tx_bw_changed(self, mode: str, bw: int):
         if mode == self.radio.mode:
             self.tx_bw_combo.blockSignals(True)
-            self._select_combo_data(self.tx_bw_combo, bw)
+            self._ensure_bw_value(self.tx_bw_combo, bw)
             self.tx_bw_combo.blockSignals(False)
 
 
@@ -512,11 +671,23 @@ class ViewPanel(GlassPanel):
         # redundant numeric readouts.
         h.addSpacing(10)
         h.addWidget(QLabel("Spec"))
-        self.fps_slider = QSlider(Qt.Horizontal)
+        self.fps_slider = SteppedSlider(Qt.Horizontal)
         self.fps_slider.setObjectName("fps_slider")
-        self.fps_slider.setRange(5, 120)   # bumped from 60 → 120 for faster WF max
-        self.fps_slider.setValue(radio.spectrum_fps)
+        # Step-list slider — each detent is a useful FPS value the
+        # operator might actually pick (5, 10, 15, 20, 25, 30, 40, 50,
+        # 60, 75, 90, 120). Linear-from-5-to-120 used to feel "wild
+        # at top, hard to land low" because human perception of fps
+        # is logarithmic-ish. See SPECTRUM_FPS_STEPS at module top.
+        self.fps_slider.setRange(0, len(SPECTRUM_FPS_STEPS) - 1)
+        self.fps_slider.setValue(fps_to_slider_position(radio.spectrum_fps))
         self.fps_slider.setFixedWidth(130)
+        # Visible ticks + 1-per-step page/single moves so the operator
+        # both SEES and FEELS the discrete detents. Without these, the
+        # slider snaps to integer positions but visually looks smooth.
+        self.fps_slider.setTickPosition(QSlider.TicksBelow)
+        self.fps_slider.setTickInterval(1)
+        self.fps_slider.setSingleStep(1)
+        self.fps_slider.setPageStep(1)
         self._refresh_fps_tooltip(radio.spectrum_fps)
         # FPS slider commit policy:
         #   - while mouse is held (drag): just refresh tooltip, NO radio update
@@ -538,28 +709,26 @@ class ViewPanel(GlassPanel):
         self.fps_slider.valueChanged.connect(self._on_fps_slider_drag)
         h.addWidget(self.fps_slider)
 
-        # Waterfall rate — unified slider covering multiplier (fast)
-        # and divider (slow) in one control:
-        #
-        #   slider val   →  (divider, multiplier)  → rows/sec at 30 fps
-        #   -----------  --------------------------  -------------------
-        #   0            →  div=1, mult=3            90   (3x max)
-        #   1            →  div=1, mult=2            60   (2x)
-        #   2            →  div=1, mult=1            30   (normal)
-        #   3            →  div=2                    15
-        #   …
-        #   22           →  div=21                    1.4 (slow crawl)
-        #
-        # Inverted appearance so RIGHT end = fast (user expectation).
+        # Waterfall rate — step-list slider covering multiplier (fast)
+        # and divider (slow) in one control. See WATERFALL_SPEED_STEPS
+        # at module top for the full list. Inverted so RIGHT = faster.
+        # Index 8 = neutral (1 row per FFT). Fast end goes up to 30×
+        # multiplier (linearly interpolated rows from the previous FFT
+        # — no extra CPU cost, just visual scroll speed).
         h.addSpacing(10)
         h.addWidget(QLabel("WF"))
-        self.wf_slider = QSlider(Qt.Horizontal)
+        self.wf_slider = SteppedSlider(Qt.Horizontal)
         self.wf_slider.setObjectName("wf_slider")
-        self.wf_slider.setRange(0, 29)   # 0=10× fast, 9=normal, 29=21× slow
+        self.wf_slider.setRange(0, len(WATERFALL_SPEED_STEPS) - 1)
         self.wf_slider.setInvertedAppearance(True)   # right = faster
-        self.wf_slider.setValue(self._wf_state_to_slider(
+        self.wf_slider.setValue(wf_to_slider_position(
             radio.waterfall_divider, radio.waterfall_multiplier))
         self.wf_slider.setFixedWidth(140)
+        # Visible ticks per detent — see fps_slider above for rationale.
+        self.wf_slider.setTickPosition(QSlider.TicksBelow)
+        self.wf_slider.setTickInterval(1)
+        self.wf_slider.setSingleStep(1)
+        self.wf_slider.setPageStep(1)
         self._refresh_wf_tooltip()
         # Debounce — works fine for the WF slider (operator confirmed)
         self._wf_debounce = _QTimer(self)
@@ -588,30 +757,17 @@ class ViewPanel(GlassPanel):
                     self.zoom_combo.blockSignals(False)
                 return
 
-    # Unified WF slider encoding. Bumped 2026-04-24 to cover 1..10×
-    # multipliers at the fast end (was 1..8×; earlier 1..3×).
-    #
-    #   slider  0..8  → multiplier 10..2 (fast mode, row duplication)
-    #   slider  9     → normal (divider 1, multiplier 1)
-    #   slider 10..29 → divider 2..21 (slow crawl, one row per N ticks)
+    # Backward-compat shims. The waterfall slider encoding now lives
+    # at module scope (WATERFALL_SPEED_STEPS + wf_*_slider_position
+    # helpers) so the Settings dialog's slider can share it. These
+    # static methods stay so any existing call sites keep working.
     @staticmethod
     def _wf_slider_to_state(v: int) -> tuple[int, int]:
-        """slider value → (divider, multiplier)."""
-        if v <= 8:
-            return (1, 10 - v)       # 0→10×, 1→9×, …, 8→2×
-        if v == 9:
-            return (1, 1)            # normal
-        return (v - 8, 1)            # 10→div=2, 29→div=21
+        return wf_from_slider_position(v)
 
     @staticmethod
     def _wf_state_to_slider(divider: int, multiplier: int) -> int:
-        """Inverse of _wf_slider_to_state — for restoring slider
-        position from radio state."""
-        if multiplier >= 2:
-            return max(0, min(8, 10 - multiplier))
-        if divider <= 1:
-            return 9
-        return min(29, divider + 8)
+        return wf_to_slider_position(divider, multiplier)
 
     def _rows_per_sec(self) -> float:
         fps = self.radio.spectrum_fps
@@ -620,9 +776,15 @@ class ViewPanel(GlassPanel):
         return fps * mult / div
 
     def _refresh_fps_tooltip(self, fps: int):
-        self.fps_slider.setToolTip(
-            f"Spectrum refresh rate — {fps} fps. Lower = less CPU / GPU "
-            "load, laggier trace. Higher = smoother but more work.")
+        # Smoothing tip when fps is high — Apache Labs guidance is that
+        # 60 Hz looks best with averaging on, otherwise frame-to-frame
+        # jitter is more visible at higher rates.
+        tip = (f"Spectrum refresh rate — {fps} fps. Lower = less CPU / "
+               "GPU load. Higher = smoother but more work.")
+        if fps >= 50:
+            tip += ("\n\nTip: at high FPS, enable Settings → Display → "
+                    "'Smooth spectrum trace' for cleanest look.")
+        self.fps_slider.setToolTip(tip)
 
     def _refresh_wf_tooltip(self):
         rps = self._rows_per_sec()
@@ -630,13 +792,14 @@ class ViewPanel(GlassPanel):
         div = self.radio.waterfall_divider
         extra = ""
         if mult > 1:
-            extra = f"  (fast mode: {mult}x row duplication)"
+            extra = f"  (fast mode: {mult}× row interpolation)"
         elif div > 1:
             extra = f"  (1 row per {div} FFT ticks)"
         self.wf_slider.setToolTip(
             f"Waterfall scroll rate — {rps:.1f} rows/sec{extra}. "
-            "Right = faster scroll (up to 3x spectrum FPS), left = "
-            "slow crawl with more time-history visible.")
+            "Right = faster scroll (up to 30× at the fast end, "
+            "useful for digital-mode hunting at low spec rates), "
+            "left = slow crawl with more time-history visible.")
 
     # ── user-driven ──────────────────────────────────────────────
     def _on_zoom_pick(self, _idx: int):
@@ -698,13 +861,15 @@ class ViewPanel(GlassPanel):
         self._fps_debounce.stop()
         self._commit_fps_value()
 
-    def _on_fps_slider_drag(self, fps: int):
+    def _on_fps_slider_drag(self, slider_pos: int):
         """valueChanged fires constantly during drag AND for click-
-        jumps / keyboard / programmatic setValue. While the mouse is
-        actively held, only the tooltip updates — radio is left alone
-        so the FFT timer's setInterval isn't hammered. Non-drag
-        changes (no preceding sliderPressed) fall through to the
-        75 ms debounce path."""
+        jumps / keyboard / programmatic setValue. The slider position
+        is an index into SPECTRUM_FPS_STEPS — convert to fps for the
+        tooltip. While the mouse is actively held, only the tooltip
+        updates — radio is left alone so the FFT timer's setInterval
+        isn't hammered. Non-drag changes (no preceding sliderPressed)
+        fall through to the 75 ms debounce path."""
+        fps = fps_from_slider_position(slider_pos)
         self._refresh_fps_tooltip(fps)
         self._refresh_wf_tooltip()
         if self._fps_dragging:
@@ -712,7 +877,8 @@ class ViewPanel(GlassPanel):
         self._fps_debounce.start()
 
     def _commit_fps_value(self):
-        self.radio.set_spectrum_fps(self.fps_slider.value())
+        fps = fps_from_slider_position(self.fps_slider.value())
+        self.radio.set_spectrum_fps(fps)
 
     def _on_wf_slider_drag(self, _v: int):
         """Drag → refresh tooltip + bump debounce timer. Radio commits
@@ -751,9 +917,12 @@ class ViewPanel(GlassPanel):
         self.zoom_label.setText(f"{zoom:.1f}x")
 
     def _on_radio_fps_changed(self, fps: int):
-        if self.fps_slider.value() != fps:
+        # Radio holds an arbitrary FPS int; slider operates on step
+        # indices. Snap to nearest step for the slider position.
+        target_pos = fps_to_slider_position(fps)
+        if self.fps_slider.value() != target_pos:
             self.fps_slider.blockSignals(True)
-            self.fps_slider.setValue(fps)
+            self.fps_slider.setValue(target_pos)
             self.fps_slider.blockSignals(False)
         self._refresh_fps_tooltip(fps)
         self._refresh_wf_tooltip()

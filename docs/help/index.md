@@ -52,7 +52,7 @@ up changes.
 *(At the end of the topic list)*
 
 - **Support Lyra** — donate, file bugs, contribute
-- **License** — MIT (full text + third-party attributions)
+- **License** — GPL v3+ (full text + third-party attributions)
 
 ## About
 

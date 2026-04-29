@@ -482,10 +482,11 @@ class MainWindow(QMainWindow):
             lambda: self.show_help("support"))
         help_menu.addAction(support_act)
 
-        license_act = QAction("&License (MIT)…", self)
+        license_act = QAction("&License (GPL v3+)…", self)
         license_act.setToolTip(
-            "Open the User Guide → License topic. MIT — "
-            "permissive, ham-radio-friendly, no warranty.")
+            "Open the User Guide → License topic. GPL v3 or later — "
+            "free software, ham-radio-friendly, no warranty. Allows "
+            "WDSP and other GPL components to be used legally.")
         license_act.triggered.connect(
             lambda: self.show_help("license"))
         help_menu.addAction(license_act)
@@ -1199,7 +1200,7 @@ class MainWindow(QMainWindow):
             "<p>Author: <b>Rick Langford (N8SDR)</b><br>"
             "Repository: <a href='https://github.com/N8SDR1/Lyra-SDR'>"
             "github.com/N8SDR1/Lyra-SDR</a><br>"
-            "License: MIT</p>"
+            "License: GPL v3 or later</p>"
             "<p style='color:#8a9aac; font-size:10px'>"
             "TCI server protocol © EESDR Expert Electronics, "
             "implemented from the public TCI v1.9 / v2.0 spec."

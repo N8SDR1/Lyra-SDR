@@ -99,6 +99,19 @@ class SpectrumWidget(_PaintedWidget):
         self._font_consolas_8 = _QFont("Consolas")
         self._font_consolas_8.setPointSize(8)
         self._font_spot: _QFont | None = None   # built lazily, see paintEvent
+
+        # ── Paint instrumentation (opt-in via LYRA_PAINT_DEBUG=1) ────
+        # When enabled, we accumulate per-paint timings and print a
+        # one-line summary every 5 seconds: frame count, average, p95,
+        # peak, and the slowest single paint that period. Used to
+        # diagnose the long-running visual-drag bug. Default off so
+        # production sessions don't spam the console.
+        import os as _os
+        self._paint_debug = (_os.environ.get("LYRA_PAINT_DEBUG", "")
+                             .strip() in ("1", "true", "True"))
+        self._paint_t0_window = 0.0
+        self._paint_durations: list[float] = []
+        self._paint_setspec_count = 0   # set_spectrum() calls this window
         # Notches: list of (abs_freq_hz, width_hz, active, deep) tuples.
         # Visualization:
         #   active=True            → saturated red filled rectangle
@@ -198,19 +211,6 @@ class SpectrumWidget(_PaintedWidget):
         # when hovering an edge. Notch cursor logic already kicks in
         # on press, so this only affects the passband edges.
         self.setMouseTracking(True)
-
-        # ── Paint instrumentation (opt-in via LYRA_PAINT_DEBUG=1) ────
-        # When enabled, we accumulate per-paint timings and print a
-        # one-line summary every 5 seconds: frame count, average, p95,
-        # peak, and the slowest single paint that period. Used to
-        # diagnose the long-running visual-drag bug. Default off so
-        # production sessions don't spam the console.
-        import os as _os
-        self._paint_debug = (_os.environ.get("LYRA_PAINT_DEBUG", "")
-                             .strip() in ("1", "true", "True"))
-        self._paint_t0_window = 0.0
-        self._paint_durations: list[float] = []
-        self._paint_setspec_count = 0   # set_spectrum() calls this window
 
     def set_spots(self, spots: list[dict]):
         self._spots = list(spots)

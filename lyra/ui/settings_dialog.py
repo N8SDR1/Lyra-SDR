@@ -19,6 +19,14 @@ from PySide6.QtWidgets import (
     QButtonGroup, QColorDialog, QComboBox, QFrame, QRadioButton, QSlider,
 )
 
+# Shared with the front-panel ViewPanel slider — both UIs map slider
+# detents to the same FPS values + (divider, multiplier) tuples.
+from lyra.ui.panels import (
+    SPECTRUM_FPS_STEPS, WATERFALL_SPEED_STEPS, SteppedSlider,
+    fps_to_slider_position, fps_from_slider_position,
+    wf_to_slider_position, wf_from_slider_position,
+)
+
 
 class _ColorPickLabel(QLabel):
     """Clickable label that represents a color-pick target.
@@ -1781,11 +1789,7 @@ class VisualsSettingsTab(QWidget):
         # Off by default (raw FFT). Strength 1..10 maps to alpha
         # ~0.91..0.09; higher = smoother / slower response. Useful
         # for reading weak signals through a noisy floor without
-        # touching the audio DSP. Placed at rows 12/13 to avoid
-        # collision with auto_scale_chk (row 10) and wf_auto_scale_chk
-        # (row 11) — earlier draft put it at 10/11 and the QGridLayout
-        # silently overlaid the widgets, producing visually-stacked
-        # text and unreliable toggle state.
+        # touching the audio DSP.
         self.smooth_chk = QCheckBox("Smooth spectrum trace")
         self.smooth_chk.setChecked(radio.spectrum_smoothing_enabled)
         self.smooth_chk.setToolTip(
@@ -1795,13 +1799,23 @@ class VisualsSettingsTab(QWidget):
             "audio or DSP.")
         self.smooth_chk.toggled.connect(
             self.radio.set_spectrum_smoothing_enabled)
+        # Rows 10/11 already host auto_scale_chk and wf_auto_scale_chk.
+        # Place smoothing at rows 12/13 so the QGridLayout doesn't
+        # stack two widgets at the same coordinates (which produced
+        # visually-overlapping labels and made toggle state unreliable).
         gd.addWidget(self.smooth_chk, 12, 0, 1, 3, Qt.AlignLeft)
 
         gd.addWidget(QLabel("Strength"), 13, 0)
-        self.smooth_slider = QSlider(Qt.Horizontal)
+        self.smooth_slider = SteppedSlider(Qt.Horizontal)
         self.smooth_slider.setRange(1, 10)
         self.smooth_slider.setValue(int(radio.spectrum_smoothing_strength))
         self.smooth_slider.setFixedWidth(240)
+        # Visible tick marks per detent — same UX pattern as the FPS /
+        # WF sliders above.
+        self.smooth_slider.setTickPosition(QSlider.TicksBelow)
+        self.smooth_slider.setTickInterval(1)
+        self.smooth_slider.setSingleStep(1)
+        self.smooth_slider.setPageStep(1)
         self.smooth_slider.setToolTip(
             "Smoothing strength. 1 = barely averaged (fast). "
             "10 = heavily averaged (slow but very clean).")
@@ -1952,16 +1966,27 @@ class VisualsSettingsTab(QWidget):
         gr.addWidget(self.zoom_combo, 0, 1, Qt.AlignLeft)
         radio.zoom_changed.connect(self._on_zoom_changed)
 
-        # Spectrum FPS — how often the spectrum repaints (5..60 Hz).
+        # Spectrum FPS — step-list slider. See SPECTRUM_FPS_STEPS in
+        # panels.py for the full ladder. Hand-curated so each detent
+        # is a useful value (5, 10, 15, 20, 25, 30, 40, 50, 60, 75,
+        # 90, 120 fps) rather than every-integer-in-a-range.
         gr.addWidget(QLabel("Spectrum rate"), 1, 0)
-        self.fps_slider = QSlider(Qt.Horizontal)
-        self.fps_slider.setRange(5, 120)   # bumped from 60 for faster WF
-        self.fps_slider.setValue(radio.spectrum_fps)
+        self.fps_slider = SteppedSlider(Qt.Horizontal)
+        self.fps_slider.setRange(0, len(SPECTRUM_FPS_STEPS) - 1)
+        self.fps_slider.setValue(fps_to_slider_position(radio.spectrum_fps))
         self.fps_slider.setFixedWidth(240)
+        # Visible tick marks at each detent + 1-per-click stepping so the
+        # operator both sees and feels the discrete steps.
+        self.fps_slider.setTickPosition(QSlider.TicksBelow)
+        self.fps_slider.setTickInterval(1)
+        self.fps_slider.setSingleStep(1)
+        self.fps_slider.setPageStep(1)
         self.fps_slider.setToolTip(
             "How fast the spectrum repaints. Lower = less CPU / GPU "
             "load, laggier trace. Higher = smoother but more work. "
-            "30 fps is a good balance.")
+            "40 fps is the default (matches Thetis convention). At 60 "
+            "fps and above, enable 'Smooth spectrum trace' below for "
+            "the cleanest look.")
         gr.addWidget(self.fps_slider, 1, 1)
         self.fps_label = QLabel(f"{radio.spectrum_fps} fps")
         self.fps_label.setFixedWidth(80)
@@ -1976,8 +2001,10 @@ class VisualsSettingsTab(QWidget):
         self._fps_debounce = _QTimer(self)
         self._fps_debounce.setSingleShot(True)
         self._fps_debounce.setInterval(75)
+        # Slider value is a step index; convert to FPS via the helper.
         self._fps_debounce.timeout.connect(
-            lambda: self.radio.set_spectrum_fps(self.fps_slider.value()))
+            lambda: self.radio.set_spectrum_fps(
+                fps_from_slider_position(self.fps_slider.value())))
         self.fps_slider.sliderPressed.connect(
             lambda: (setattr(self, '_fps_dragging', True),
                      self._fps_debounce.stop()))
@@ -2000,17 +2027,24 @@ class VisualsSettingsTab(QWidget):
         #   9     → normal (divider 1, multiplier 1)
         #   10..29 → divider 2..21 (slow crawl)
         gr.addWidget(QLabel("Waterfall rate"), 2, 0)
-        self.wf_slider = QSlider(Qt.Horizontal)
-        self.wf_slider.setRange(0, 29)
+        self.wf_slider = SteppedSlider(Qt.Horizontal)
+        self.wf_slider.setRange(0, len(WATERFALL_SPEED_STEPS) - 1)
         self.wf_slider.setInvertedAppearance(True)  # right = faster
-        self.wf_slider.setValue(self._wf_state_to_slider(
+        self.wf_slider.setValue(wf_to_slider_position(
             radio.waterfall_divider, radio.waterfall_multiplier))
         self.wf_slider.setFixedWidth(240)
+        # Visible tick marks per detent + 1-per-click stepping.
+        self.wf_slider.setTickPosition(QSlider.TicksBelow)
+        self.wf_slider.setTickInterval(1)
+        self.wf_slider.setSingleStep(1)
+        self.wf_slider.setPageStep(1)
         self.wf_slider.setToolTip(
-            "How fast the waterfall scrolls. Right end = up to 10× "
-            "visual speed (row duplication), middle = one row per "
-            "FFT, left end = slow crawl (1 row per 21 FFTs, long "
-            "time-history on screen at once).")
+            "How fast the waterfall scrolls. Right end = up to 30× "
+            "visual speed (rows linearly interpolated between FFTs — "
+            "useful for digital-mode hunting at low spec rates). "
+            "Middle = one row per FFT (1:1 with spectrum FPS). Left "
+            "end = slow crawl (1 row per 20 FFTs; long time-history "
+            "on screen at once for QSO chasing or multi-band scanning).")
         gr.addWidget(self.wf_slider, 2, 1)
         self.wf_label = QLabel(self._wf_label_text())
         self.wf_label.setFixedWidth(110)
@@ -2314,15 +2348,19 @@ class VisualsSettingsTab(QWidget):
                 return
 
     def _on_fps_slider_release(self):
-        """Mouse released — commit immediately (no debounce wait)."""
+        """Mouse released — commit immediately (no debounce wait).
+        Slider value is a step index; convert to FPS for the radio."""
         self._fps_dragging = False
         self._fps_debounce.stop()
-        self.radio.set_spectrum_fps(self.fps_slider.value())
+        fps = fps_from_slider_position(self.fps_slider.value())
+        self.radio.set_spectrum_fps(fps)
 
-    def _on_fps_slider_drag(self, fps: int):
+    def _on_fps_slider_drag(self, slider_pos: int):
         """valueChanged — refresh labels locally; commit only when
         operator releases the mouse (or via debounce on click-jump /
-        keyboard, which don't fire press/release)."""
+        keyboard, which don't fire press/release). Slider value is a
+        step index; convert to FPS for display."""
+        fps = fps_from_slider_position(slider_pos)
         self.fps_label.setText(f"{fps} fps")
         self.wf_label.setText(self._wf_label_text())
         if getattr(self, "_fps_dragging", False):
@@ -2338,31 +2376,26 @@ class VisualsSettingsTab(QWidget):
 
     def _sync_fps_slider(self, fps: int):
         """Radio FPS changed elsewhere (front-panel slider, QSettings
-        load, etc.) — mirror here without firing our own valueChanged."""
-        if self.fps_slider.value() != fps:
+        load, etc.) — mirror here without firing our own valueChanged.
+        Snap arbitrary FPS values to the nearest step position."""
+        target_pos = fps_to_slider_position(fps)
+        if self.fps_slider.value() != target_pos:
             self.fps_slider.blockSignals(True)
-            self.fps_slider.setValue(fps)
+            self.fps_slider.setValue(target_pos)
             self.fps_slider.blockSignals(False)
         self.fps_label.setText(f"{fps} fps")
         self.wf_label.setText(self._wf_label_text())
 
-    # Slider encoding helpers — must match ViewPanel._wf_slider_to_state.
+    # Slider encoding — delegates to the shared step-list helpers in
+    # panels.py so the front-panel and Settings sliders can never
+    # disagree about what each detent means.
     @staticmethod
     def _wf_slider_to_state(v: int) -> tuple[int, int]:
-        """slider value → (divider, multiplier). See ViewPanel comment."""
-        if v <= 8:
-            return (1, 10 - v)       # 0→10×, 1→9×, …, 8→2×
-        if v == 9:
-            return (1, 1)
-        return (v - 8, 1)            # 10→div=2, 29→div=21
+        return wf_from_slider_position(v)
 
     @staticmethod
     def _wf_state_to_slider(divider: int, multiplier: int) -> int:
-        if multiplier >= 2:
-            return max(0, min(8, 10 - multiplier))
-        if divider <= 1:
-            return 9
-        return min(29, divider + 8)
+        return wf_to_slider_position(divider, multiplier)
 
     def _wf_label_text(self) -> str:
         """rows/sec = fps × multiplier / divider. Accounts for the

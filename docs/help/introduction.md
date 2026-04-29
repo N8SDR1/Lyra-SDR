@@ -7,7 +7,8 @@ Lyra is a Qt-based SDR transceiver application for Steve Haynal's
 (eventually cross-platform) PC client that talks HPSDR Protocol 1
 directly to the radio, decodes the IQ stream in real time, and
 provides a modern panadapter / control surface in the spirit of
-Thetis and ExpertSDR3 — but built from scratch, licensed MIT,
+Thetis and ExpertSDR3 — but built from scratch, licensed GPL v3+
+(see Getting Started → License for the relicense history),
 tailored specifically to the HL2 family.
 
 ## The name
@@ -53,10 +54,10 @@ Lyra aims to be:
   stays disabled unless an FTDI device is actually detected — no
   way to key into the wrong filter. Gateware quirks (duplex bit,
   EP2 keepalive, spectrum mirroring) are handled transparently.
-- **Small and reviewable.** MIT licensed, small enough that a
-  single operator can read and understand the whole pipeline,
-  from the first UDP packet off the wire to the last sample
-  leaving sounddevice.
+- **Small and reviewable.** GPL v3+ licensed (MIT through v0.0.5),
+  small enough that a single operator can read and understand the
+  whole pipeline, from the first UDP packet off the wire to the
+  last sample leaving sounddevice.
 
 ## What Lyra is **not**
 

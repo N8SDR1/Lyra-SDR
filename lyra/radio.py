@@ -648,7 +648,7 @@ class Radio(QObject):
         # divider lets the operator slow the scrolling heatmap without
         # affecting spectrum refresh rate (e.g. 3x divider = waterfall
         # scrolls at 10 rows/sec while spectrum stays at 30 fps).
-        self._fft_interval_ms = 33   # ~30 Hz
+        self._fft_interval_ms = 25   # 40 Hz default — matches Thetis
         self._waterfall_divider = 1
         self._waterfall_tick_counter = 0
 
@@ -898,7 +898,10 @@ class Radio(QObject):
         # ── Periodic FFT tick ─────────────────────────────────────────
         self._fft_timer = QTimer(self)
         self._fft_timer.timeout.connect(self._tick_fft)
-        self._fft_timer.start(33)
+        # Match the default _fft_interval_ms above. Operator can change
+        # via the Spec rate slider; that calls set_spectrum_fps which
+        # updates this timer's interval live.
+        self._fft_timer.start(self._fft_interval_ms)
 
     # ── Read-only properties ──────────────────────────────────────────
     @property
@@ -2860,11 +2863,16 @@ class Radio(QObject):
         return self._waterfall_multiplier
 
     def set_waterfall_multiplier(self, m: int):
-        """Push the same spectrum row multiple times per FFT tick for
-        a fast-scroll effect. Range 1..10 (1=normal, 10=10× visual
-        speed). Bumped from 8 to 10 after follow-up feedback that
-        max was still not fast enough."""
-        m = max(1, min(10, int(m)))
+        """Multi-row push per FFT tick for a fast-scroll effect.
+        Earlier versions duplicated the same row N times (visible
+        vertical blockiness); current implementation linearly
+        interpolates between the previous and current FFT so the M
+        rows form a smooth gradient. Range 1..30 (1 = normal, 30 =
+        30× visual speed). Cap raised 2026-04-29: at low spec rates
+        (5-20 fps) the previous 10× cap meant rows-per-second was
+        too slow for digital-mode hunting, where operators want
+        rapid scroll to see FT8 cycles distinctly."""
+        m = max(1, min(30, int(m)))
         self._waterfall_multiplier = m
         self.waterfall_multiplier_changed.emit(m)
 

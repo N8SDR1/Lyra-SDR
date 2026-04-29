@@ -415,6 +415,19 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._font_spot.setPointSize(9)
         self._font_spot.setBold(True)
 
+        # ── Paint instrumentation (opt-in via LYRA_PAINT_DEBUG=1) ────
+        # Mirrors the CPU widget's instrumentation. Enabling this env
+        # var prints a one-line summary every 5 seconds with frame
+        # count, set_spectrum call count, mean / p95 / max paint
+        # times, and a verdict tag. Used to diagnose the visual-drag
+        # bug. Default off; near-zero cost when disabled.
+        import os as _os
+        self._paint_debug = (_os.environ.get("LYRA_PAINT_DEBUG", "")
+                             .strip() in ("1", "true", "True"))
+        self._paint_t0_window: float = 0.0
+        self._paint_durations: list[float] = []
+        self._paint_setspec_count: int = 0
+
         # Notch markers (Phase B.13). Each entry is
         # (abs_freq_hz, width_hz, active, deep). Updated from
         # radio.notches_changed via the panel.
@@ -440,19 +453,6 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._synth_timer.timeout.connect(self.update)
         if self._synthetic_active:
             self._synth_timer.start()
-
-        # ── Paint instrumentation (opt-in via LYRA_PAINT_DEBUG=1) ────
-        # Mirrors the CPU widget's instrumentation. Enabling this env
-        # var prints a one-line summary every 5 seconds with frame
-        # count, set_spectrum call count, mean / p95 / max paint
-        # times, and a verdict tag. Used to diagnose the visual-drag
-        # bug. Default off; near-zero cost when disabled.
-        import os as _os
-        self._paint_debug = (_os.environ.get("LYRA_PAINT_DEBUG", "")
-                             .strip() in ("1", "true", "True"))
-        self._paint_t0_window: float = 0.0
-        self._paint_durations: list[float] = []
-        self._paint_setspec_count: int = 0
 
     # ── Public data API ────────────────────────────────────────────
 
