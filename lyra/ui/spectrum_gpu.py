@@ -383,6 +383,38 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # Pre-allocated scratch for in-place EWMA — see spectrum.py.
         self._smoothing_scratch: Optional[np.ndarray] = None
 
+        # ── Cached QFonts (paint-loop optimization) ──────────────────
+        # See spectrum.py.__init__ for rationale. Same fonts as the
+        # CPU widget plus a 9pt-bold (status overlays) and a spot
+        # font with explicit family fallbacks to render emoji flags.
+        from PySide6.QtGui import QFont as _QFont
+        self._font_7pt_bold = _QFont()
+        self._font_7pt_bold.setPointSize(7)
+        self._font_7pt_bold.setBold(True)
+        self._font_8pt = _QFont()
+        self._font_8pt.setPointSize(8)
+        self._font_8pt_bold = _QFont()
+        self._font_8pt_bold.setPointSize(8)
+        self._font_8pt_bold.setBold(True)
+        self._font_9pt_bold = _QFont()
+        self._font_9pt_bold.setPointSize(9)
+        self._font_9pt_bold.setBold(True)
+        self._font_consolas_8 = _QFont("Consolas")
+        self._font_consolas_8.setPointSize(8)
+        # Spot font with explicit family fallback chain — same chain
+        # the per-frame allocator was using; just built once. Qt picks
+        # per-glyph: callsign chars render in Exo 2 (theme primary),
+        # flag emoji falls through to Segoe UI Emoji.
+        self._font_spot = _QFont()
+        self._font_spot.setFamilies([
+            "Exo 2",            # theme primary — covers Latin / ASCII
+            "Segoe UI",         # ASCII backup
+            "Arial",            # universal ASCII backup
+            "Segoe UI Emoji",   # flag emoji fallback (regional indicators)
+        ])
+        self._font_spot.setPointSize(9)
+        self._font_spot.setBold(True)
+
         # Notch markers (Phase B.13). Each entry is
         # (abs_freq_hz, width_hz, active, deep). Updated from
         # radio.notches_changed via the panel.
@@ -1299,7 +1331,7 @@ class SpectrumGpuWidget(QOpenGLWidget):
         if w <= 0 or h <= 0 or self._span_hz <= 0:
             return
         from lyra import band_plan as _bp
-        from PySide6.QtGui import QFont, QPolygonF
+        from PySide6.QtGui import QPolygonF
         from PySide6.QtCore import QPointF
 
         hz_per_px = self._span_hz / w
@@ -1312,9 +1344,8 @@ class SpectrumGpuWidget(QOpenGLWidget):
             segs = _bp.visible_segments(
                 self._band_plan_region,
                 self._center_hz, self._span_hz)
-            seg_lbl_font = QFont()
-            seg_lbl_font.setPointSize(7)
-            seg_lbl_font.setBold(True)
+            # Cached font — see __init__.
+            seg_lbl_font = self._font_7pt_bold
             for seg, seg_lo, seg_hi in segs:
                 x0 = int(center_x + (seg_lo - self._center_hz) / hz_per_px)
                 x1 = int(center_x + (seg_hi - self._center_hz) / hz_per_px)
@@ -1342,10 +1373,8 @@ class SpectrumGpuWidget(QOpenGLWidget):
                 self._center_hz, self._span_hz)
             tri_y = (self.BAND_STRIP_H
                      if self._show_band_segments else 0)
-            lm_font = QFont()
-            lm_font.setPointSize(7)
-            lm_font.setBold(True)
-            painter.setFont(lm_font)
+            # Cached font — see __init__.
+            painter.setFont(self._font_7pt_bold)
             for lm in marks:
                 mx = int(center_x +
                          (lm["freq"] - self._center_hz) / hz_per_px)
@@ -1377,9 +1406,8 @@ class SpectrumGpuWidget(QOpenGLWidget):
         if self._show_band_edge_warn:
             lo_vis = self._center_hz - self._span_hz / 2
             hi_vis = self._center_hz + self._span_hz / 2
-            edge_lbl_font = QFont()
-            edge_lbl_font.setPointSize(8)
-            edge_lbl_font.setBold(True)
+            # Cached font — see __init__.
+            edge_lbl_font = self._font_8pt_bold
             for b in _bp.get_region(self._band_plan_region)["bands"]:
                 for edge_hz in (b["low"], b["high"]):
                     if not (lo_vis <= edge_hz <= hi_vis):
@@ -1478,14 +1506,11 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # min in the passband, separated by ≥ 16 px so labels
         # don't crowd each other.
         if self._peak_markers_show_db and pb_x_hi > pb_x_lo + 10:
-            from PySide6.QtGui import QFont
             pb_slice = peak_line[pb_x_lo:pb_x_hi]
             min_in_pb = float(np.min(pb_slice))
             threshold = min_in_pb + 6.0
-            lbl_font = QFont()
-            lbl_font.setPointSize(7)
-            lbl_font.setBold(True)
-            painter.setFont(lbl_font)
+            # Cached font — see __init__.
+            painter.setFont(self._font_7pt_bold)
             painter.setPen(QPen(amber, 1))
             candidates = []
             for i in range(1, len(pb_slice) - 1):
@@ -1524,11 +1549,8 @@ class SpectrumGpuWidget(QOpenGLWidget):
         span = self._max_db - self._min_db
         if span <= 0:
             return
-        from PySide6.QtGui import QFont
-        f = QFont()
-        f.setPointSize(9)
-        f.setBold(True)
-        painter.setFont(f)
+        # Cached font — see __init__.
+        painter.setFont(self._font_9pt_bold)
         painter.setPen(QPen(self.AXIS_COLOR, 1))
         for i in range(0, 11, 2):
             db = self._max_db - (i / 10) * span
@@ -1552,9 +1574,8 @@ class SpectrumGpuWidget(QOpenGLWidget):
         if w <= 0 or h <= 0:
             return
         hz_per_px = self._span_hz / max(1, w)
-        from PySide6.QtGui import QFont
-        label_font = QFont()
-        label_font.setPointSize(8)
+        # Cached font — see __init__.
+        label_font = self._font_8pt
         for freq, width_hz, active, deep in self._notches:
             nf = (freq - self._center_hz) / self._span_hz + 0.5
             if not (0.0 <= nf <= 1.0):
@@ -1624,7 +1645,7 @@ class SpectrumGpuWidget(QOpenGLWidget):
             return
         import time
         from PySide6.QtCore import QRectF
-        from PySide6.QtGui import QFont, QFontMetrics
+        from PySide6.QtGui import QFontMetrics
         MAX_SPOT_ROWS = 4
         ROW_GAP_PX = 3
         AGE_FADE_FLOOR = 0.30
@@ -1642,15 +1663,8 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # one that supports it. Putting the text family first means
         # callsign chars render in Exo 2 (matches the rest of the
         # UI); flag emoji falls through to Segoe UI Emoji.
-        spot_font = QFont()
-        spot_font.setFamilies([
-            "Exo 2",            # theme primary — covers Latin / ASCII
-            "Segoe UI",         # ASCII backup
-            "Arial",            # universal ASCII backup
-            "Segoe UI Emoji",   # flag emoji fallback (regional indicators)
-        ])
-        spot_font.setPointSize(9)
-        spot_font.setBold(True)
+        # Cached font — see __init__.
+        spot_font = self._font_spot
         painter.setFont(spot_font)
         fm = QFontMetrics(spot_font)
         padding_h = 5
@@ -1758,11 +1772,8 @@ class SpectrumGpuWidget(QOpenGLWidget):
         w = self.width()
         if h <= 0 or w <= 0 or self._span_hz <= 0:
             return
-        from PySide6.QtGui import QFont
-        f = QFont()
-        f.setPointSize(9)
-        f.setBold(True)
-        painter.setFont(f)
+        # Cached font — see __init__.
+        painter.setFont(self._font_9pt_bold)
         painter.setPen(QPen(self.AXIS_COLOR, 1))
         for i in range(1, 10):
             x = int(w * i / 10)
@@ -1820,10 +1831,8 @@ class SpectrumGpuWidget(QOpenGLWidget):
         painter.drawLine(0, nf_y, w, nf_y)
         # Label, right-justified near the right edge so it doesn't
         # collide with the trace in the busy middle of the spectrum.
-        from PySide6.QtGui import QFont
-        f = QFont("Consolas")
-        f.setPointSize(8)
-        painter.setFont(f)
+        # Cached font — see __init__.
+        painter.setFont(self._font_consolas_8)
         painter.setPen(QPen(color, 1))
         painter.drawText(w - 90, nf_y - 3,
                          f"NF {self._noise_floor_db:+.0f} dBFS")

@@ -77,6 +77,28 @@ class SpectrumWidget(_PaintedWidget):
         # up and showed up as a noticeable CPU bump when smoothing
         # was enabled. With this, EWMA is fully in-place after frame 1.
         self._smoothing_scratch: np.ndarray | None = None
+
+        # ── Cached QFonts (paint-loop optimization) ──────────────────
+        # Building a QFont() inside paintEvent is expensive on Windows:
+        # each construction can allocate a GDI HFONT handle, force the
+        # font engine to re-resolve metrics, and churn the QPainter
+        # text cache. With overlays redrawing at 30-60 fps and several
+        # font allocations per frame (segment labels, edge warnings,
+        # peak labels, noise-floor label, spot boxes), per-frame
+        # construction is one of the bigger contributors to UI lag
+        # under long sessions. Cache them once here, reuse forever.
+        # _font_spot is built lazily on first paint because it derives
+        # from QPainter's current font (which we don't have at __init__).
+        from PySide6.QtGui import QFont as _QFont
+        self._font_7pt_bold = _QFont()
+        self._font_7pt_bold.setPointSize(7)
+        self._font_7pt_bold.setBold(True)
+        self._font_8pt_bold = _QFont()
+        self._font_8pt_bold.setPointSize(8)
+        self._font_8pt_bold.setBold(True)
+        self._font_consolas_8 = _QFont("Consolas")
+        self._font_consolas_8.setPointSize(8)
+        self._font_spot: _QFont | None = None   # built lazily, see paintEvent
         # Notches: list of (abs_freq_hz, width_hz, active, deep) tuples.
         # Visualization:
         #   active=True            → saturated red filled rectangle
@@ -848,11 +870,8 @@ class SpectrumWidget(_PaintedWidget):
                     # Label if there's room (≥ 24 px wide)
                     if x1 - x0 >= 24:
                         p.setPen(QPen(QColor(240, 240, 240, 220), 1))
-                        from PySide6.QtGui import QFont as _QFont
-                        lbl_font = _QFont()
-                        lbl_font.setPointSize(7)
-                        lbl_font.setBold(True)
-                        p.setFont(lbl_font)
+                        # Cached font — see __init__.
+                        p.setFont(self._font_7pt_bold)
                         p.drawText(x0 + 3, BAND_STRIP_H - 2, seg["label"])
             if self._show_band_landmarks:
                 top_reserve += LANDMARK_STRIP_H
@@ -862,12 +881,10 @@ class SpectrumWidget(_PaintedWidget):
                 hz_per_px = self._span_hz / w
                 center_x = w / 2
                 tri_y = BAND_STRIP_H if self._show_band_segments else 0
-                from PySide6.QtGui import QPolygonF, QFont as _QFont2
+                from PySide6.QtGui import QPolygonF
                 from PySide6.QtCore import QPointF
-                lbl_font = _QFont2()
-                lbl_font.setPointSize(7)
-                lbl_font.setBold(True)
-                p.setFont(lbl_font)
+                # Cached font — see __init__.
+                p.setFont(self._font_7pt_bold)
                 for lm in marks:
                     mx = int(center_x + (lm["freq"] - self._center_hz) / hz_per_px)
                     if not (0 <= mx <= w):
@@ -904,11 +921,8 @@ class SpectrumWidget(_PaintedWidget):
                                       Qt.DashLine))
                         p.drawLine(ex, 0, ex, h)
                         p.setPen(QPen(QColor(255, 120, 120, 220), 1))
-                        from PySide6.QtGui import QFont as _QFont3
-                        ef = _QFont3()
-                        ef.setPointSize(8)
-                        ef.setBold(True)
-                        p.setFont(ef)
+                        # Cached font — see __init__.
+                        p.setFont(self._font_8pt_bold)
                         p.drawText(ex + 3,
                                    h - 22,
                                    f"{b['name']} EDGE")
@@ -984,10 +998,8 @@ class SpectrumWidget(_PaintedWidget):
             p.setPen(QPen(nf_color, 1, Qt.DashLine))
             p.drawLine(0, nf_y, w, nf_y)
             # Label in a tiny monospace so it doesn't fight the grid
-            from PySide6.QtGui import QFont
-            label_font = QFont("Consolas")
-            label_font.setPointSize(8)
-            p.setFont(label_font)
+            # Cached font — see __init__.
+            p.setFont(self._font_consolas_8)
             p.setPen(QPen(nf_color, 1))
             # Position just above the line, right-justified near the edge
             p.drawText(w - 90, nf_y - 3,
@@ -1096,11 +1108,8 @@ class SpectrumWidget(_PaintedWidget):
                     # the passband (avoid labeling baseline).
                     min_in_pb = float(np.min(pb_slice))
                     threshold = min_in_pb + 6.0
-                    from PySide6.QtGui import QFont as _QFont
-                    lbl_font = _QFont()
-                    lbl_font.setPointSize(7)
-                    lbl_font.setBold(True)
-                    p.setFont(lbl_font)
+                    # Cached font — see __init__.
+                    p.setFont(self._font_7pt_bold)
                     p.setPen(QPen(amber, 1))
                     # Greedy: find the top 3 peaks separated by ≥ 16 px
                     candidates = []
@@ -1230,14 +1239,16 @@ class SpectrumWidget(_PaintedWidget):
             ROW_GAP_PX    = 3      # horizontal padding between same-row boxes
             AGE_FADE_FLOOR = 0.30  # min alpha multiplier for very old spots
 
-            # Inherit the widget's current font (loaded by the theme)
-            # so we don't risk nominating a family Qt can't actually
-            # load. Just bump the size + bold for over-trace legibility.
-            spot_font = QFont(p.font())
-            spot_font.setPointSize(8)
-            spot_font.setBold(True)
-            p.setFont(spot_font)
-            fm = QFontMetrics(spot_font)
+            # Spot font — built ONCE on first paint by inheriting the
+            # widget's current theme font (so we don't nominate a
+            # family Qt can't actually load), then cached. Subsequent
+            # paints just reuse self._font_spot.
+            if self._font_spot is None:
+                self._font_spot = QFont(p.font())
+                self._font_spot.setPointSize(8)
+                self._font_spot.setBold(True)
+            p.setFont(self._font_spot)
+            fm = QFontMetrics(self._font_spot)
             padding_h = 5
             padding_v = 2
             box_h = fm.height() + 2 * padding_v
