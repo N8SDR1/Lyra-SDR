@@ -414,12 +414,24 @@ class HL2Stream:
             self.set_lna_gain_db(lna_gain_db)
 
     def _set_rx1_freq(self, hz: int):
+        # NOTE: this method is called on EVERY frequency change —
+        # click-to-tune, wheel-zoom, drag-pan, band button, mode
+        # change (CW pitch correction), spectrum drag-tune. A
+        # `print(...)` here used to log each call; that was useful
+        # during early HPSDR P1 bring-up but became a real-time
+        # bottleneck once operators were actively working the
+        # panadapter (Windows cmd.exe console is notoriously slow
+        # under heavy stdout, and Python's main thread blocked on
+        # those writes — visible as gradual visual drag on the
+        # spectrum / waterfall over a session, with audio unaffected
+        # because audio runs on a separate thread/sink).  Removed
+        # 2026-04-29.  If we ever need the logging back, gate it
+        # behind a LYRA_DEBUG_FREQ env var or send to logging.debug.
         c0 = 0x04  # RX1 NCO freq
         c1 = (hz >> 24) & 0xFF
         c2 = (hz >> 16) & 0xFF
         c3 = (hz >> 8) & 0xFF
         c4 = hz & 0xFF
-        print(f"[stream] set RX1 freq {hz} Hz  C&C={c0:02X} {c1:02X} {c2:02X} {c3:02X} {c4:02X}")
         self._send_cc(c0, c1, c2, c3, c4)
         with self._cc_lock:
             self._cc_registers[c0] = (c1, c2, c3, c4)
