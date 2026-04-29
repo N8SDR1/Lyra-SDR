@@ -644,6 +644,36 @@ class Radio(QObject):
         self._fft_interval_ms = 33   # ~30 Hz
         self._waterfall_divider = 1
         self._waterfall_tick_counter = 0
+
+        # ── Radio-side instrumentation (LYRA_PAINT_DEBUG=1) ──────────
+        # When enabled, counts how often _tick_fft fires vs how often
+        # spectrum_ready is actually emitted, and how much main-thread
+        # time _on_samples_main_thread + _do_demod consume per 5 sec
+        # window. The point is to disambiguate three scenarios when
+        # the panadapter feels slow:
+        #   (a) FFT timer is firing on schedule but ring is drained
+        #       between ticks  → emit count low, tick count = expected
+        #   (b) FFT timer is starved (main thread busy with DSP)
+        #       → tick count low (e.g. 5/s instead of 30/s)
+        #   (c) DSP is fine but something else is on the main thread
+        #       → tick + emit both fine, lag must be elsewhere
+        import os as _os
+        self._radio_debug = (_os.environ.get("LYRA_PAINT_DEBUG", "")
+                             .strip() in ("1", "true", "True"))
+        self._dbg_t0_window: float = 0.0
+        self._dbg_fft_ticks: int = 0
+        self._dbg_fft_emits: int = 0
+        self._dbg_samples_calls: int = 0
+        self._dbg_samples_total_ms: float = 0.0
+        self._dbg_samples_max_ms: float = 0.0
+        # Per-stage timing inside _do_demod so we can pinpoint WHICH
+        # DSP stage is causing the 65ms spike. Track max + total per
+        # 5-second window.
+        self._dbg_stage_max = {
+            "channel": 0.0, "agc": 0.0, "bin": 0.0, "sink": 0.0}
+        self._dbg_stage_total = {
+            "channel": 0.0, "agc": 0.0, "bin": 0.0, "sink": 0.0}
+        self._dbg_largest_iq_n: int = 0   # biggest single batch this window
         # Multiplier lets the waterfall scroll FASTER than the FFT tick
         # rate by emitting the same spectrum row multiple times per
         # tick. With M=3 + divider=1 + 30 fps, the waterfall scrolls
@@ -3101,6 +3131,9 @@ class Radio(QObject):
             self._bridge.samples_ready.emit(batch)
 
     def _on_samples_main_thread(self, samples):
+        if self._radio_debug:
+            import time as _rdtime
+            _rd_t0 = _rdtime.perf_counter()
         with self._ring_lock:
             self._sample_ring.extend(samples)
         # Track IQ peak AND RMS magnitude for Auto-LNA + toolbar readout.
@@ -3120,6 +3153,12 @@ class Radio(QObject):
             if len(self._lna_rms) > self._lna_peaks_max:
                 self._lna_rms.pop(0)
         self._do_demod(samples)
+        if self._radio_debug:
+            _rd_dt_ms = (_rdtime.perf_counter() - _rd_t0) * 1000.0
+            self._dbg_samples_calls += 1
+            self._dbg_samples_total_ms += _rd_dt_ms
+            if _rd_dt_ms > self._dbg_samples_max_ms:
+                self._dbg_samples_max_ms = _rd_dt_ms
 
     def _do_demod(self, iq):
         """Route IQ through the RX channel, then apply AGC + volume,
@@ -3147,22 +3186,62 @@ class Radio(QObject):
         # fresh state without us tracking 8+ call sites.
         self._rx_channel.set_notches(self._notches, self._notch_enabled)
 
+        # Per-stage timing — only when LYRA_PAINT_DEBUG=1. The branch
+        # is cheap (single attribute lookup) when off.
+        _dbg = self._radio_debug
+        if _dbg:
+            import time as _ddtime
+            try:
+                _n = int(iq.shape[0])
+                if _n > self._dbg_largest_iq_n:
+                    self._dbg_largest_iq_n = _n
+            except Exception:
+                pass
+
         try:
+            if _dbg:
+                _t = _ddtime.perf_counter()
             audio = self._rx_channel.process(iq)
+            if _dbg:
+                _dt = (_ddtime.perf_counter() - _t) * 1000.0
+                self._dbg_stage_total["channel"] += _dt
+                if _dt > self._dbg_stage_max["channel"]:
+                    self._dbg_stage_max["channel"] = _dt
         except Exception as e:
             print(f"channel error: {e}")
             return
         if audio.size == 0:
             return
         try:
+            if _dbg:
+                _t = _ddtime.perf_counter()
             audio = self._apply_agc_and_volume(audio)
+            if _dbg:
+                _dt = (_ddtime.perf_counter() - _t) * 1000.0
+                self._dbg_stage_total["agc"] += _dt
+                if _dt > self._dbg_stage_max["agc"]:
+                    self._dbg_stage_max["agc"] = _dt
             # BIN — Binaural pseudo-stereo. Runs LAST in the audio
             # chain so the spatial Hilbert-pair transform happens on
             # the operator's already-leveled signal. Returns the input
             # unchanged when disabled; returns a (N, 2) stereo array
             # when active. Both audio sinks accept either shape.
+            if _dbg:
+                _t = _ddtime.perf_counter()
             audio = self._binaural.process(audio)
+            if _dbg:
+                _dt = (_ddtime.perf_counter() - _t) * 1000.0
+                self._dbg_stage_total["bin"] += _dt
+                if _dt > self._dbg_stage_max["bin"]:
+                    self._dbg_stage_max["bin"] = _dt
+            if _dbg:
+                _t = _ddtime.perf_counter()
             self._audio_sink.write(audio)
+            if _dbg:
+                _dt = (_ddtime.perf_counter() - _t) * 1000.0
+                self._dbg_stage_total["sink"] += _dt
+                if _dt > self._dbg_stage_max["sink"]:
+                    self._dbg_stage_max["sink"] = _dt
         except Exception as e:
             print(f"audio sink error: {e}")
 
@@ -3483,6 +3562,68 @@ class Radio(QObject):
             self._audio_sink = self._make_sink()
             self._push_balance_to_sink()
 
+    def _radio_debug_maybe_print(self):
+        """Once per ~5 seconds, print a one-line Radio-side diagnostic
+        summary: FFT timer ticks, spectrum emits, IQ-batch counts, and
+        cumulative DSP main-thread time. Called from _tick_fft so it
+        piggybacks on an already-running timer (no extra clock work
+        when LYRA_PAINT_DEBUG is off — the caller checks the flag)."""
+        import time as _rdtime
+        now = _rdtime.perf_counter()
+        if self._dbg_t0_window == 0.0:
+            self._dbg_t0_window = now
+            return
+        if (now - self._dbg_t0_window) < 5.0:
+            return
+        elapsed = now - self._dbg_t0_window
+        ticks = self._dbg_fft_ticks
+        emits = self._dbg_fft_emits
+        s_calls = self._dbg_samples_calls
+        s_total = self._dbg_samples_total_ms
+        s_max   = self._dbg_samples_max_ms
+        s_pct   = (s_total / (elapsed * 1000.0)) * 100.0
+        # DSP-load classifier — if _on_samples_main_thread is using more
+        # than 50% of wall-clock time on the main thread, the timer +
+        # paint + UI events are all going to be starved.
+        verdict = "ok"
+        if s_pct > 80.0:
+            verdict = "SATURATED"
+        elif s_pct > 50.0:
+            verdict = "HEAVY"
+        elif s_pct > 25.0:
+            verdict = "warm"
+        # Per-stage diagnostic — pinpoints which DSP stage is the
+        # spike. "max" is the worst single call this window; "tot" is
+        # cumulative ms spent in that stage. The stage with the
+        # biggest max is the one to optimize.
+        sm = self._dbg_stage_max
+        st = self._dbg_stage_total
+        stage_str = (
+            f"channel(max={sm['channel']:.1f}ms tot={st['channel']:.0f}ms) "
+            f"agc(max={sm['agc']:.1f}ms tot={st['agc']:.0f}ms) "
+            f"bin(max={sm['bin']:.1f}ms tot={st['bin']:.0f}ms) "
+            f"sink(max={sm['sink']:.1f}ms tot={st['sink']:.0f}ms)")
+        print(f"[Lyra radio] {verdict}: "
+              f"fft_ticks={ticks} ({ticks/elapsed:.1f}/s), "
+              f"emits={emits} ({emits/elapsed:.1f}/s), "
+              f"iq_batches={s_calls}, "
+              f"largest_iq_n={self._dbg_largest_iq_n}, "
+              f"dsp_main_thread={s_total:.0f}ms ({s_pct:.0f}% of wall), "
+              f"dsp_max_per_batch={s_max:.1f}ms")
+        if s_calls > 0:
+            print(f"[Lyra radio] stages: {stage_str}")
+        # Reset window
+        self._dbg_t0_window = now
+        self._dbg_fft_ticks = 0
+        self._dbg_fft_emits = 0
+        self._dbg_samples_calls = 0
+        self._dbg_samples_total_ms = 0.0
+        self._dbg_samples_max_ms = 0.0
+        self._dbg_largest_iq_n = 0
+        for _k in self._dbg_stage_max:
+            self._dbg_stage_max[_k] = 0.0
+            self._dbg_stage_total[_k] = 0.0
+
     def _make_sink(self):
         if self._audio_output == "AK4951":
             return AK4951Sink(self._stream)
@@ -3495,6 +3636,13 @@ class Radio(QObject):
 
     # ── FFT tick → spectrum + S-meter signals ─────────────────────────
     def _tick_fft(self):
+        # Radio-side instrumentation: count this tick whether or not
+        # we have enough samples to emit. If the timer is firing 30x/s
+        # but the ring is short → ring-drain issue; if the timer is
+        # only firing 5x/s → main-thread starvation.
+        if self._radio_debug:
+            self._dbg_fft_ticks += 1
+            self._radio_debug_maybe_print()
         with self._ring_lock:
             if len(self._sample_ring) < self._fft_size:
                 return
@@ -3696,6 +3844,8 @@ class Radio(QObject):
             eff_rate = int(self._rate)
 
         self.spectrum_ready.emit(spec_out, float(self._freq_hz), eff_rate)
+        if self._radio_debug:
+            self._dbg_fft_emits += 1
 
         # Waterfall fires on its own cadence (1 row per N FFT ticks)
         # and can burst M rows per push for fast-scroll mode.

@@ -401,6 +401,19 @@ class SpectrumGpuWidget(QOpenGLWidget):
         if self._synthetic_active:
             self._synth_timer.start()
 
+        # ── Paint instrumentation (opt-in via LYRA_PAINT_DEBUG=1) ────
+        # Mirrors the CPU widget's instrumentation. Enabling this env
+        # var prints a one-line summary every 5 seconds with frame
+        # count, set_spectrum call count, mean / p95 / max paint
+        # times, and a verdict tag. Used to diagnose the visual-drag
+        # bug. Default off; near-zero cost when disabled.
+        import os as _os
+        self._paint_debug = (_os.environ.get("LYRA_PAINT_DEBUG", "")
+                             .strip() in ("1", "true", "True"))
+        self._paint_t0_window: float = 0.0
+        self._paint_durations: list[float] = []
+        self._paint_setspec_count: int = 0
+
     # ── Public data API ────────────────────────────────────────────
 
     def set_spectrum(self, spec_db: np.ndarray,
@@ -420,6 +433,11 @@ class SpectrumGpuWidget(QOpenGLWidget):
         n = int(min(spec_db.shape[0], MAX_BINS))
         if n < 2:
             return
+        # Paint-debug counter: how often spectrum data is arriving.
+        # Compare against frame count in the 5-second summary to
+        # detect rate anomalies.
+        if self._paint_debug:
+            self._paint_setspec_count += 1
         # Cache the range so the Y-axis drag handler knows the
         # current (min, max) to compute proposed deltas from.
         self._min_db = float(min_db)
@@ -1073,6 +1091,15 @@ class SpectrumGpuWidget(QOpenGLWidget):
     # from the existing QPainter widget where it doesn't.
 
     def paintEvent(self, event) -> None:
+        # Optional paint timing — see __init__. Includes BOTH the GL
+        # framebuffer + the QPainter overlay pass, since either can
+        # be the bottleneck on different machines.
+        if self._paint_debug:
+            import time as _ptime
+            _paint_t0 = _ptime.perf_counter()
+        else:
+            _paint_t0 = None
+
         # Standard QOpenGLWidget machinery — runs initializeGL on
         # first call, resizeGL on resize, paintGL every frame. After
         # super returns, the GL framebuffer has been swapped to
@@ -1085,6 +1112,47 @@ class SpectrumGpuWidget(QOpenGLWidget):
             self._draw_overlays(painter)
         finally:
             painter.end()
+
+        if _paint_t0 is not None:
+            self._record_paint_time(_paint_t0)
+
+    def _record_paint_time(self, t0: float) -> None:
+        """5-second rolling summary of GPU widget paint timings. See
+        SpectrumWidget._record_paint_time in spectrum.py for the same
+        pattern + verdict-tag rationale."""
+        import time as _ptime
+        now = _ptime.perf_counter()
+        dt_ms = (now - t0) * 1000.0
+        self._paint_durations.append(dt_ms)
+        if self._paint_t0_window == 0.0:
+            self._paint_t0_window = now
+            return
+        if (now - self._paint_t0_window) < 5.0:
+            return
+        ds = self._paint_durations
+        n = len(ds)
+        if n == 0:
+            self._paint_t0_window = now
+            return
+        ds_sorted = sorted(ds)
+        mean_ms = sum(ds) / n
+        p95_ms  = ds_sorted[int(0.95 * (n - 1))]
+        max_ms  = ds_sorted[-1]
+        elapsed = now - self._paint_t0_window
+        fps = n / elapsed if elapsed > 0 else 0.0
+        setspec = self._paint_setspec_count
+        verdict = "ok"
+        if max_ms > 100.0 or mean_ms > 20.0:
+            verdict = "SLOW"
+        elif max_ms > 50.0 or mean_ms > 10.0:
+            verdict = "warm"
+        print(f"[Lyra paint] SpectrumGPU {verdict}: "
+              f"{n} frames in {elapsed:.1f}s ({fps:.1f} fps), "
+              f"set_spectrum={setspec}, "
+              f"mean={mean_ms:.1f}ms p95={p95_ms:.1f}ms max={max_ms:.1f}ms")
+        self._paint_durations = []
+        self._paint_setspec_count = 0
+        self._paint_t0_window = now
 
     def _draw_overlays(self, painter: QPainter) -> None:
         """Draw all QPainter overlays in the right order.
@@ -1907,6 +1975,17 @@ class WaterfallGpuWidget(QOpenGLWidget):
         if self._synthetic_active:
             self._synth_timer.start()
 
+        # ── Paint instrumentation (LYRA_PAINT_DEBUG=1) ──────────────
+        # Same pattern as SpectrumGpuWidget. Tagged "WaterfallGPU" in
+        # the printed line so we can compare the two widgets side by
+        # side during a drag event.
+        import os as _os
+        self._paint_debug = (_os.environ.get("LYRA_PAINT_DEBUG", "")
+                             .strip() in ("1", "true", "True"))
+        self._paint_t0_window: float = 0.0
+        self._paint_durations: list[float] = []
+        self._paint_pushrow_count: int = 0   # push_row() calls this window
+
     # ── Public data API ────────────────────────────────────────────
 
     def set_tuning(self, center_hz: float, span_hz: float) -> None:
@@ -1981,6 +2060,9 @@ class WaterfallGpuWidget(QOpenGLWidget):
         min_db/max_db: dynamic-range window. Values <= min_db map to
             0 (darkest), values >= max_db map to 255 (brightest).
         """
+        # Paint-debug counter (rows pushed per 5-second window).
+        if self._paint_debug:
+            self._paint_pushrow_count += 1
         # Real data takes over — disable synthetic generator before
         # we forward to the internal pusher (so the synthetic timer
         # doesn't fight with caller-driven pushes).
@@ -2324,6 +2406,13 @@ class WaterfallGpuWidget(QOpenGLWidget):
     # GL-then-QPainter hybrid approach.
 
     def paintEvent(self, event) -> None:
+        # Optional paint timing — see __init__.
+        if self._paint_debug:
+            import time as _ptime
+            _paint_t0 = _ptime.perf_counter()
+        else:
+            _paint_t0 = None
+
         super().paintEvent(event)
         painter = QPainter(self)
         try:
@@ -2331,6 +2420,48 @@ class WaterfallGpuWidget(QOpenGLWidget):
             self._draw_overlays(painter)
         finally:
             painter.end()
+
+        if _paint_t0 is not None:
+            self._record_paint_time(_paint_t0)
+
+    def _record_paint_time(self, t0: float) -> None:
+        """5-second rolling summary of waterfall widget paint timings.
+        Mirrors SpectrumGpuWidget._record_paint_time. Counts push_row()
+        calls separately as "rows=N" — that's how often new spectrum
+        data was pushed in by the radio."""
+        import time as _ptime
+        now = _ptime.perf_counter()
+        dt_ms = (now - t0) * 1000.0
+        self._paint_durations.append(dt_ms)
+        if self._paint_t0_window == 0.0:
+            self._paint_t0_window = now
+            return
+        if (now - self._paint_t0_window) < 5.0:
+            return
+        ds = self._paint_durations
+        n = len(ds)
+        if n == 0:
+            self._paint_t0_window = now
+            return
+        ds_sorted = sorted(ds)
+        mean_ms = sum(ds) / n
+        p95_ms  = ds_sorted[int(0.95 * (n - 1))]
+        max_ms  = ds_sorted[-1]
+        elapsed = now - self._paint_t0_window
+        fps = n / elapsed if elapsed > 0 else 0.0
+        rows = self._paint_pushrow_count
+        verdict = "ok"
+        if max_ms > 100.0 or mean_ms > 20.0:
+            verdict = "SLOW"
+        elif max_ms > 50.0 or mean_ms > 10.0:
+            verdict = "warm"
+        print(f"[Lyra paint] WaterfallGPU {verdict}: "
+              f"{n} frames in {elapsed:.1f}s ({fps:.1f} fps), "
+              f"rows={rows}, "
+              f"mean={mean_ms:.1f}ms p95={p95_ms:.1f}ms max={max_ms:.1f}ms")
+        self._paint_durations = []
+        self._paint_pushrow_count = 0
+        self._paint_t0_window = now
 
     def _draw_overlays(self, painter: QPainter) -> None:
         self._draw_notches(painter)

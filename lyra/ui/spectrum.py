@@ -163,6 +163,19 @@ class SpectrumWidget(_PaintedWidget):
         # on press, so this only affects the passband edges.
         self.setMouseTracking(True)
 
+        # ── Paint instrumentation (opt-in via LYRA_PAINT_DEBUG=1) ────
+        # When enabled, we accumulate per-paint timings and print a
+        # one-line summary every 5 seconds: frame count, average, p95,
+        # peak, and the slowest single paint that period. Used to
+        # diagnose the long-running visual-drag bug. Default off so
+        # production sessions don't spam the console.
+        import os as _os
+        self._paint_debug = (_os.environ.get("LYRA_PAINT_DEBUG", "")
+                             .strip() in ("1", "true", "True"))
+        self._paint_t0_window = 0.0
+        self._paint_durations: list[float] = []
+        self._paint_setspec_count = 0   # set_spectrum() calls this window
+
     def set_spots(self, spots: list[dict]):
         self._spots = list(spots)
         self.update()
@@ -667,6 +680,11 @@ class SpectrumWidget(_PaintedWidget):
         event.accept()
 
     def set_spectrum(self, spec_db: np.ndarray, center_hz: float, span_hz: float):
+        # Paint-debug instrumentation: count how often spectrum data
+        # arrives, so the 5-second summary can flag rate anomalies
+        # (e.g. signal-multiplication causing N× emit per FFT).
+        if self._paint_debug:
+            self._paint_setspec_count += 1
         self._spec_db = spec_db
         self._center_hz = center_hz
         self._span_hz = span_hz
@@ -695,6 +713,15 @@ class SpectrumWidget(_PaintedWidget):
         self.update()
 
     def paintEvent(self, _event):
+        # Optional paint timing — enabled by LYRA_PAINT_DEBUG=1 env var.
+        # See __init__ for the rationale. When off, the only added cost
+        # is one attribute lookup + branch.
+        if self._paint_debug:
+            import time as _ptime
+            _paint_t0 = _ptime.perf_counter()
+        else:
+            _paint_t0 = None
+
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), BG)
@@ -862,6 +889,8 @@ class SpectrumWidget(_PaintedWidget):
             p.drawText(self.rect(), Qt.AlignCenter,
                        "Waiting for stream…\n\n"
                        "Click ▶ Start on the toolbar")
+            if _paint_t0 is not None:
+                self._record_paint_time(_paint_t0)
             return
 
         span_db = self._max_db - self._min_db
@@ -1273,6 +1302,51 @@ class SpectrumWidget(_PaintedWidget):
                 # visually noisy on busy bands. Matches the GPU
                 # backend's rendering and standard SDR-client
                 # convention.
+
+        # End of paintEvent — record duration for diagnostics if the
+        # operator launched with LYRA_PAINT_DEBUG=1. Cheap when off.
+        if _paint_t0 is not None:
+            self._record_paint_time(_paint_t0)
+
+    def _record_paint_time(self, t0: float) -> None:
+        """Append one paint duration to the rolling window and, every
+        5 seconds, print a single summary line: frame count, set_spectrum
+        call count, mean / p95 / max paint times in ms, plus a basic
+        load classification. Used to diagnose the visual-drag bug."""
+        import time as _ptime
+        now = _ptime.perf_counter()
+        dt_ms = (now - t0) * 1000.0
+        self._paint_durations.append(dt_ms)
+        if self._paint_t0_window == 0.0:
+            self._paint_t0_window = now
+            return
+        if (now - self._paint_t0_window) < 5.0:
+            return
+        # Window full — emit summary and reset.
+        ds = self._paint_durations
+        n = len(ds)
+        if n == 0:
+            self._paint_t0_window = now
+            return
+        ds_sorted = sorted(ds)
+        mean_ms = sum(ds) / n
+        p95_ms  = ds_sorted[int(0.95 * (n - 1))]
+        max_ms  = ds_sorted[-1]
+        elapsed = now - self._paint_t0_window
+        fps = n / elapsed if elapsed > 0 else 0.0
+        setspec = self._paint_setspec_count
+        verdict = "ok"
+        if max_ms > 100.0 or mean_ms > 20.0:
+            verdict = "SLOW"
+        elif max_ms > 50.0 or mean_ms > 10.0:
+            verdict = "warm"
+        print(f"[Lyra paint] Spectrum {verdict}: "
+              f"{n} frames in {elapsed:.1f}s ({fps:.1f} fps), "
+              f"set_spectrum={setspec}, "
+              f"mean={mean_ms:.1f}ms p95={p95_ms:.1f}ms max={max_ms:.1f}ms")
+        self._paint_durations = []
+        self._paint_setspec_count = 0
+        self._paint_t0_window = now
 
 
 class WaterfallWidget(_PaintedWidget):

@@ -779,7 +779,36 @@ class MainWindow(QMainWindow):
         self._gpu_timer = QTimer(self)
         self._gpu_timer.setInterval(1000)
         self._gpu_timer.timeout.connect(self._tick_gpu)
-        self._gpu_timer.start()
+        # ── EMERGENCY OFF-SWITCH (LYRA_NO_GPU_READOUT=1) ─────────────
+        # The PDH wildcard query `\GPU Engine(*)\Utilization Percentage`
+        # enumerates every GPU engine instance in the system. Windows
+        # leaves "ghost" instances in the counter set after processes
+        # exit, so the list can grow into the hundreds over a long
+        # session. CollectQueryData + GetFormattedCounterArray run on
+        # the Qt main thread and can block it for tens-to-hundreds of
+        # ms when the instance count is high — visible to the operator
+        # as spectrum/waterfall lag, sluggish dropdowns, and "molasses"
+        # UI even though CPU/GPU usage is near zero.
+        #
+        # Set the env var LYRA_NO_GPU_READOUT=1 to launch without the
+        # GPU readout timer at all. The label shows "GPU off" and the
+        # timer never starts. Confirms whether PDH polling is the lag
+        # source on a given operator's machine. The proper fix (move
+        # PDH to a worker thread, periodic query reset) lands later.
+        import os as _os
+        if _os.environ.get("LYRA_NO_GPU_READOUT", "").strip() in ("1", "true", "True"):
+            self.gpu_label.setText("GPU off")
+            self.gpu_label.setToolTip(
+                "GPU readout disabled by LYRA_NO_GPU_READOUT=1. "
+                "Restart without the env var to re-enable.")
+            print("[Lyra] GPU readout disabled (LYRA_NO_GPU_READOUT=1) "
+                  "— PDH timer not started.")
+        else:
+            self._gpu_timer.start()
+            # Slow-tick instrumentation: print a one-liner whenever a
+            # tick takes longer than 25 ms so we have evidence whether
+            # PDH polling is the source of any reported UI lag.
+            self._gpu_slow_threshold_ms = 25.0
         # Right-click to hide — useful for A/B-testing whether the
         # GPU readout's PDH polling is contributing to spectrum
         # paint stutter on this hardware. PDH calls are usually fast
@@ -981,6 +1010,12 @@ class MainWindow(QMainWindow):
         if self._gpu_mode is None:
             self.gpu_label.setText("GPU  n/a ")
             return
+        # Slow-tick instrumentation: time the actual PDH/NVML work so
+        # we can correlate lag reports with main-thread blocking. Print
+        # a one-liner only when the tick exceeds the slow threshold so
+        # the console doesn't get spammed in the healthy case.
+        import time as _ttime
+        _t0 = _ttime.perf_counter()
         try:
             if self._gpu_mode == "nvml":
                 rates = self._gpu_nvml.nvmlDeviceGetUtilizationRates(
@@ -1002,6 +1037,16 @@ class MainWindow(QMainWindow):
         except Exception:
             self.gpu_label.setText("GPU  n/a ")
             return
+        # Slow-tick instrumentation: log if the poll took long enough
+        # that the main thread would have noticeably stuttered.
+        _dt_ms = (_ttime.perf_counter() - _t0) * 1000.0
+        thr = getattr(self, "_gpu_slow_threshold_ms", 25.0)
+        if _dt_ms >= thr:
+            n_inst = len(values) if self._gpu_mode == "pdh" else 0
+            print(f"[Lyra] GPU readout SLOW tick: {_dt_ms:.1f} ms "
+                  f"(mode={self._gpu_mode}, instances={n_inst}). "
+                  f"If lag persists, set LYRA_NO_GPU_READOUT=1 and "
+                  f"restart Lyra to confirm.")
         self.gpu_label.setText(f"GPU {pct:4.1f}%")
         # Color thresholds matched to CPU label so a glance at both
         # gives a consistent "load = green/yellow/orange/red" reading.
