@@ -93,10 +93,28 @@ class AK4951Sink:
 
 
 class SoundDeviceSink:
-    """Route audio to the PC default playback device.
+    """Route audio to the PC default playback device — non-blocking.
 
     Key design choices (documented because they matter for Windows
     audio interfaces, USB multichannel cards, and S/PDIF outputs):
+
+    - **Callback-based, never blocks the caller.** Earlier versions
+      used PortAudio's blocking `write()` API. When the OS audio
+      buffer filled (which happens randomly on Windows: USB scheduling
+      hiccups, exclusive-mode grabs by other apps, driver state),
+      `write()` would block the calling thread for tens of ms — up to
+      ~65 ms in the field. With our DSP path producing a write call
+      every ~10 ms of audio, even one stall meant the DSP thread fell
+      behind real-time. Stalls compounded into the visible "drag" bug
+      where the spectrum, waterfall, and slider input all became
+      sluggish for many seconds at a time.
+      The fix: route audio through a thread-safe ring buffer, fed by
+      the DSP thread (write()) and drained by PortAudio's audio
+      callback thread. write() never blocks. If the ring overflows
+      (DSP outpaces device), we drop the oldest audio rather than
+      stall the caller. If the ring underflows (callback fires faster
+      than DSP fills), we emit silence rather than stutter the device.
+      Both events are counted and rate-limited to console for tuning.
 
     - **Prefers WASAPI over MME.** PortAudio's system default on
       Windows is MME (20+ years old, flaky with S/PDIF and USB audio
@@ -115,8 +133,15 @@ class SoundDeviceSink:
       anyway).
     """
 
+    # Ring buffer capacity in seconds of audio. 200 ms gives the DSP
+    # thread plenty of cushion to absorb a 100 ms OS audio stall
+    # without dropping, while keeping operator-perceived latency
+    # acceptable (worst case = 200 ms of post-event tail). Sized at
+    # init time from rate so this works the same at any future rate.
+    _RING_SECONDS = 0.200
+
     def __init__(self, rate: int = 48000, device: Optional[int] = None,
-                 blocksize: int = 1024):
+                 blocksize: int = 0):
         try:
             import sounddevice as sd
         except ImportError as e:
@@ -124,6 +149,7 @@ class SoundDeviceSink:
                 "sounddevice is not installed. `pip install sounddevice` "
                 "or switch the audio output to AK4951."
             ) from e
+        import threading
         self._sd = sd
         self._rate = rate
 
@@ -131,16 +157,47 @@ class SoundDeviceSink:
             device = self._pick_wasapi_default(sd)
 
         self._channels = 2
-        self._stream = sd.OutputStream(
-            samplerate=rate, channels=self._channels, dtype="float32",
-            blocksize=blocksize, device=device,
-        )
-        self._stream.start()
         # Stereo balance gains. Default = equal-power center
         # (cos/sin at π/4 = √2/2 each). Updated by Radio whenever the
         # operator moves the Balance slider.
         self._left_gain = 0.7071067811865476
         self._right_gain = 0.7071067811865476
+
+        # ── Ring buffer (frames × channels, float32) ────────────────
+        capacity_frames = max(1024, int(rate * self._RING_SECONDS))
+        self._ring_capacity_frames = capacity_frames
+        self._ring = np.zeros(
+            (capacity_frames, self._channels), dtype=np.float32)
+        self._ring_read_idx = 0     # next frame to read by callback
+        self._ring_write_idx = 0    # next frame to write by DSP
+        self._ring_count = 0        # frames currently in ring
+        # Lock guards the three indices above. Hold time is O(N) frames
+        # being copied which is a few hundred ints/floats — sub-ms even
+        # in the worst case, so the audio thread waiting on it doesn't
+        # stutter audibly.
+        self._ring_lock = threading.Lock()
+
+        # Diagnostic counters — incremented inside the lock so they
+        # stay coherent with read/write activity. Printed periodically
+        # by _maybe_print_stats so the operator (and we) can see if
+        # the ring is sized correctly for their machine.
+        self._overruns: int = 0     # write() had to drop oldest frames
+        self._underruns: int = 0    # callback ran out of data, padded silence
+        self._frames_written: int = 0
+        self._frames_read: int = 0
+        import time as _t
+        self._stats_last_print = _t.monotonic()
+
+        # Open in CALLBACK mode — passing `callback=` switches PortAudio
+        # to non-blocking; write() will never be called on the stream
+        # itself. blocksize=0 lets PortAudio pick its optimal size for
+        # this device (typically 256-512 frames at 48k).
+        self._stream = sd.OutputStream(
+            samplerate=rate, channels=self._channels, dtype="float32",
+            blocksize=blocksize, device=device,
+            callback=self._audio_callback,
+        )
+        self._stream.start()
 
     @staticmethod
     def _pick_wasapi_default(sd):
@@ -161,7 +218,43 @@ class SoundDeviceSink:
                 return None
         return None
 
+    def _audio_callback(self, outdata, frames, time_info, status):
+        """PortAudio audio-thread callback — fill `outdata` with the
+        next `frames` frames from the ring buffer.
+
+        Runs on a high-priority audio thread (NOT the DSP/main thread).
+        Must be fast and must NOT raise. If the ring is short, fill the
+        tail with silence rather than blocking — a brief glitch is
+        always better than stuttering or hanging the device.
+        """
+        with self._ring_lock:
+            avail = self._ring_count
+            take = min(avail, frames)
+            if take > 0:
+                # Copy `take` frames out of the ring, handling wrap-around.
+                end = self._ring_read_idx + take
+                if end <= self._ring_capacity_frames:
+                    outdata[:take] = self._ring[
+                        self._ring_read_idx:end]
+                else:
+                    n1 = self._ring_capacity_frames - self._ring_read_idx
+                    outdata[:n1] = self._ring[self._ring_read_idx:]
+                    outdata[n1:take] = self._ring[:take - n1]
+                self._ring_read_idx = (
+                    self._ring_read_idx + take) % self._ring_capacity_frames
+                self._ring_count -= take
+                self._frames_read += take
+            if take < frames:
+                # Underrun — pad the rest with silence. This produces a
+                # brief glitch rather than a device stutter.
+                outdata[take:] = 0.0
+                self._underruns += 1
+
     def write(self, audio: np.ndarray) -> None:
+        """Non-blocking write. Prepares stereo float32, applies balance
+        gains, then enqueues into the ring buffer. If the ring is full
+        the oldest frames are dropped (operator hears a brief glitch
+        rather than seeing the entire UI freeze)."""
         if audio.size == 0:
             return
         # Two input shapes are accepted (see AK4951Sink.write for
@@ -180,15 +273,65 @@ class SoundDeviceSink:
             l = mono * self._left_gain
             r = mono * self._right_gain
             a = np.stack((l, r), axis=1)
-        try:
-            self._stream.write(a)
-        except self._sd.PortAudioError:
-            # Intentionally swallowed: a transient PortAudio error
-            # (e.g., device exclusive-mode grabbed by another app)
-            # should not crash the audio thread. If the user ever
-            # reports "no audio" with a clean stream, re-enable the
-            # diagnostic prints in the git history for this file.
-            pass
+        # Ensure C-contiguous (N, 2) float32 — np.stack already is, the
+        # explicit cast handles the rare path where a came pre-shaped
+        # but in F-order or with a non-float32 dtype slipped through.
+        if not (a.dtype == np.float32 and a.flags["C_CONTIGUOUS"]):
+            a = np.ascontiguousarray(a, dtype=np.float32)
+        n = a.shape[0]
+
+        with self._ring_lock:
+            free = self._ring_capacity_frames - self._ring_count
+            if n > free:
+                # Overrun — drop the oldest (n - free) frames by
+                # advancing the read pointer. Operator hears a brief
+                # discontinuity; we don't block the DSP thread.
+                drop = n - free
+                self._ring_read_idx = (
+                    self._ring_read_idx + drop) % self._ring_capacity_frames
+                self._ring_count -= drop
+                self._overruns += 1
+            # Copy `a` into the ring at write_idx, handling wrap-around.
+            end = self._ring_write_idx + n
+            if end <= self._ring_capacity_frames:
+                self._ring[self._ring_write_idx:end] = a
+            else:
+                n1 = self._ring_capacity_frames - self._ring_write_idx
+                self._ring[self._ring_write_idx:] = a[:n1]
+                self._ring[:n - n1] = a[n1:]
+            self._ring_write_idx = (
+                self._ring_write_idx + n) % self._ring_capacity_frames
+            self._ring_count += n
+            self._frames_written += n
+        self._maybe_print_stats()
+
+    def _maybe_print_stats(self) -> None:
+        """Print a one-line ring-buffer status every 10 seconds IF
+        any overruns or underruns occurred since the last print. Stays
+        silent in healthy operation so we don't spam the console."""
+        import time as _t
+        now = _t.monotonic()
+        if (now - self._stats_last_print) < 10.0:
+            return
+        if self._overruns == 0 and self._underruns == 0:
+            self._stats_last_print = now
+            return
+        # Snapshot under lock for a coherent read of all counters.
+        with self._ring_lock:
+            ov = self._overruns
+            un = self._underruns
+            wr = self._frames_written
+            rd = self._frames_read
+            self._overruns = 0
+            self._underruns = 0
+        elapsed = now - self._stats_last_print
+        self._stats_last_print = now
+        print(f"[Lyra audio] SoundDeviceSink ring: "
+              f"overruns={ov} underruns={un} "
+              f"in {elapsed:.1f}s "
+              f"(written={wr}, read={rd}). "
+              f"overruns mean DSP outpaced device (rare glitches expected); "
+              f"underruns mean device pulled faster than DSP fed.")
 
     def set_lr_gains(self, left: float, right: float) -> None:
         """Update the L/R channel gains. Called by Radio whenever
