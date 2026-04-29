@@ -194,28 +194,51 @@ we're ready.
 
 ## 5. Building / packaging WDSP
 
-WDSP is open-source C (Apache 2.0). Three deployment options:
+WDSP is open-source C. Three deployment options to evaluate at
+WD-1 kickoff:
 
 1. **Bundle a pre-built wdsp.dll** with the Lyra installer.
    Simplest; what Thetis does. Downside: must be rebuilt for each
    architecture (we're x64 only, so just one build).
 2. **Build from source on first launch.** Compiler dependency on
    the operator's machine. Painful.
-3. **Vendor a Python ctypes wrapper** that wraps `wdsp.dll` via a
-   pip-installable package (someone may already maintain one). If
-   `wdsp-py` exists and works, that's the cleanest.
+3. **Vendor a Python ctypes / pybind11 wrapper.** If a maintained
+   wrapper package exists for current WDSP, it's the cleanest;
+   we'd add it to `requirements.txt` and operators get it via pip.
+   **Investigation needed at WD-1 kickoff** — I'm not certain such
+   a package exists today; building our own ctypes binding is the
+   fallback.
 
-**Decision deferred** to Phase WD-1 kickoff. Investigation work then.
+**Decision deferred** to Phase WD-1 kickoff.
 
-## 6. License compatibility
+## 6. License compatibility — MUST VERIFY before WD-1
 
-- **Lyra:** MIT
-- **WDSP:** Apache 2.0 (Warren Pratt's terms)
-- Both are permissive; bundling Lyra + WDSP in a single installer
-  is fine. Apache 2.0 requires we include a LICENSE file
-  attribution; that lives at `NOTICE.md` already.
+⚠️ **OPEN QUESTION.** I do not have current verified information
+on WDSP's license terms. Before any WD-1 work begins, we must:
 
-No license issue.
+1. Read the WDSP source repository's LICENSE file directly
+2. Confirm the license terms (MIT? BSD? Apache? GPL? LGPL?)
+3. Verify compatibility with Lyra's MIT license
+
+**If WDSP turns out to be GPL** (which is common for ham-radio C
+libraries), bundling it with Lyra in a single installer may
+trigger GPL copyleft obligations on Lyra itself, which we don't
+want. Acceptable mitigations would be:
+
+- **Keep WDSP as an external dependency** that operators install
+  separately (no bundling — Lyra dynamically links/loads the DLL
+  if present, falls back to native if not). This keeps Lyra MIT.
+- **Distribute WDSP from a separate "Lyra-WDSP-bridge" repo**
+  with its own license that's compatible with WDSP's. Lyra-MIT
+  imports the bridge as a dependency.
+
+**If WDSP is permissive** (MIT/BSD/Apache/etc.): bundling is fine,
+attribution goes in `NOTICE.md`.
+
+This is a **gating decision** for Phase WD-1 — we don't write any
+ctypes binding code until the license question is settled. Until
+then this doc assumes "permissive license, bundling allowed";
+revise if reality differs.
 
 ## 7. Settings UX preview
 
@@ -298,21 +321,34 @@ engines work under load.
 | Will Lyra integrate WDSP? | Yes, Phase WD-1+ |
 | When? | After Phase 3 threading + after captured-noise-profile ships |
 | Will it replace Lyra-native? | No. Both coexist long-term. Operator picks. |
-| Required for PureSignal? | Yes. PureSignal goes via WDSP's PSR engine. |
+| Required for PureSignal? | Practically yes. PureSignal via WDSP's PSR engine is the realistic path. A native (Python) PureSignal is theoretically possible (Volterra-series adaptive predistortion) but is a years-long DSP-engineering project not warranted unless WDSP integration becomes blocked. |
 | Required for TX in general? | No. Native TX (Phase TX-1) lands first; WDSP TX (Phase WD-2) is the polished alternative. |
 | Required for captured-noise-profile? | No. That's a Native-NR feature. |
 | Required for ANF / NB / NR2? | No. Native-only versions land first; WDSP equivalents come along when WD-1 ships. |
 
 ## 12. Order of work — high level
 
+Splitting smaller-than-originally-proposed so each release is
+testable. Versions are markers, not commitments — we re-scope
+per-release based on actual time taken.
+
 ```
 v0.0.5  (✓ shipped) — Listening Tools (APF, BIN, GPU panadapter parity)
    │
-v0.0.6 — Phase 3 threading + Captured-noise-profile + NR2-native
+v0.0.6 — Phase 3 threading (BETA toggle) — DSP worker thread
+         shipped opt-in via Settings; default stays single-thread
    │
-v0.0.7 — ANF + NB + minor polish
+v0.0.7 — Captured-noise-profile NR (the headline ask) — runs on
+         either backend
    │
-v0.1.0 — Native TX (TX-1) — first transmit-capable Lyra
+v0.0.8 — NR2-native (minimum-statistics noise estimator)
+   │
+v0.0.9 — ANF (auto-notch, LMS adaptive)
+   │
+v0.0.10 — NB (impulse blanker, IQ-domain)
+         At this point the noise toolkit is complete on Native.
+   │
+v0.1.0 — Native TX scaffolding (TX-1) — first transmit-capable Lyra
    │
 v0.2.0 — WDSP integration (WD-1) — opt-in second DSP engine for RX
    │
@@ -321,7 +357,10 @@ v0.3.0 — WDSP TX (WD-2) + PureSignal calibration UX (PS-1)
 v0.4.0 — RX2 + diversity (depends on threading + WDSP being settled)
 ```
 
-Subject to revision. Versions are markers, not commitments.
+If at any point a release runs out of time, items slip to the
+next without disrupting the order. Worker-thread default
+promotion likely happens around v0.0.8 or v0.0.9 once it has 2-3
+release cycles of operator field testing.
 
 ---
 

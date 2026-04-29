@@ -161,14 +161,21 @@ Plus three short-lived/auxiliary threads (no impact on DSP):
 └──────────────────────────────────────────────────────────────┘
 ```
 
-## 4. Thread responsibilities
+## 4. Thread responsibilities (worker mode active)
+
+When operator opts into the worker-thread backend (Settings →
+DSP → Threading: Worker (BETA)):
 
 | Thread | Owns | Reads (cross-thread) | Writes (cross-thread) |
 |---|---|---|---|
-| **HPSDR rx** | UDP socket, frame parser, C&C registers, TX audio queue | none | IQ samples → worker queue |
-| **DSP worker** | rx_channel, audio_sink, AGC state, BIN state, sample_ring, FFT context, LNA peaks history | config snapshot from main (mode, freq, AGC profile, APF/BIN params, NR profile) | spectrum data, S-meter, LNA readings → main |
-| **Qt main** | All UI state, panels, settings, operator preferences, band memory, snapshots | meter readings, spectrum data | config changes → worker, freq/mode → stream |
-| **PortAudio cb** | OutputStream's internal buffer | audio frames the worker wrote | (none — feeds OS audio) |
+| **HPSDR rx** | UDP socket, frame parser, C&C registers, TX audio queue | none | IQ samples → worker queue (worker mode) or _bridge signal (single mode) |
+| **DSP worker** | rx_channel, audio_sink (when in worker mode), AGC state, BIN state, sample_ring, FFT context, LNA peak history | own copy of WorkerConfig (AGC + AF/Vol/BIN + Muted) — updated via slots | spectrum data, S-meter, LNA peak updates → main |
+| **Qt main** | All UI state, panels, settings, operator preferences, band memory, snapshots, single-thread DSP path | meter readings, spectrum data | config changes → worker (queued slots), freq/mode → stream |
+| **PortAudio cb** | OutputStream's internal buffer | audio frames the writer thread wrote | (none — feeds OS audio) |
+
+When operator stays on the single-thread default: the DSP worker
+runs but stays idle; all DSP happens on the Qt main thread as
+today. No behavior change vs v0.0.5.
 
 ## 5. State ownership table
 
@@ -227,58 +234,110 @@ machinery with `QueuedConnection`. The only existing locks
 (`_rx_batch_lock`, `_ring_lock`) get evaluated for removal in
 Phase 3.B.
 
-## 6. The atomic-config-snapshot pattern
+## 6. Config replication via Qt slots (no atomic snapshots needed)
 
 To avoid mid-block parameter tearing (e.g., demod mid-block while
-mode flips from USB to LSB), the worker reads a **consistent
-snapshot** of its local config at the start of each `process_block`.
-The worker maintains its own `_config: WorkerConfig` dataclass that
-mirrors the Radio's operator-facing parameters. Main thread updates
-fire Qt signals; worker's slots update `_config` between blocks.
+mode flips from USB to LSB), we rely on Qt's event loop ordering
+rather than locks or per-block snapshots:
+
+- The worker holds a small `_config: WorkerConfig` dataclass for
+  the few parameters it owns directly (AGC, AF/Vol, BIN).
+- Operator-driven setters on Radio (main thread) emit
+  `*_changed` signals.
+- The worker has slots wired to those signals via
+  `QueuedConnection`, so each slot runs on the **worker** thread
+  between `process_block` calls — never during one.
+- Each `process_block` reads `self._config` directly. No snapshot,
+  no lock — the slot calls and the block calls interleave at the
+  Qt event loop's natural boundaries.
+
+This works because Python's GIL plus Qt's queued slot dispatch
+guarantee that a slot won't preempt the middle of `process_block`.
+The worker's event loop drains pending slots before pulling the
+next IQ block off the input queue.
+
+### What the worker actually owns directly
+
+Most operator-facing config flows **through** the channel via its
+existing `set_*` methods. The channel encapsulates mode, sample
+rate, RX BW, CW pitch, notches, NR, and APF state. The worker
+just needs to call `_rx_channel.set_mode(new_mode)` etc. when the
+operator changes them — no separate WorkerConfig field for those.
+
+Only the items NOT inside the channel need worker-side mirrors:
 
 ```python
 @dataclass
 class WorkerConfig:
-    mode: str
-    freq_hz: int
-    rate: int
-    af_gain_db: int
-    volume: float
-    muted: bool
-    agc_profile: str
+    # AGC envelope tracker config (mutable state lives here too)
+    agc_profile: str           # off / fast / med / slow / custom
     agc_release: float
     agc_target: float
     agc_hang_blocks: int
-    apf_enabled: bool
-    apf_bw_hz: int
-    apf_gain_db: float
+    # Audio chain post-AGC
+    af_gain_db: int            # 0..+80 dB
+    volume: float              # 0.0..1.0
+    muted: bool
+    # BIN — Hilbert phase split (CW + headphone widening)
     bin_enabled: bool
-    bin_depth: float
-    notches: tuple[Notch, ...]
-    notch_enabled: bool
-    nr_enabled: bool
-    nr_profile: str
-    cw_pitch_hz: int
-    rx_bw_by_mode: dict[str, int]
+    bin_depth: float           # 0.0..1.0
 ```
 
-Updates from main → worker:
+Mutable per-block state owned by worker but **not** in WorkerConfig:
+- `_agc_peak`, `_agc_hang_counter` (AGC envelope tracker)
+- `_smeter_avg_lin` (S-meter linear running average)
+- `_lna_peaks`, `_lna_rms` (rolling history for Auto-LNA)
+- `_noise_baseline`, `_noise_history` (Auto-AGC noise floor)
+- `_binaural` (the `BinauralFilter` instance with FIR zi + delay buf)
+- `_rx_channel` (the channel itself, with all its internal state)
+
+### Example update flow
+
 ```python
 # In Radio.set_apf_enabled (main thread):
-self._apf_enabled = bool(on)
-self.apf_enabled_changed.emit(on)
-# Worker's slot connected via QueuedConnection:
+def set_apf_enabled(self, on):
+    self._apf_enabled = bool(on)
+    # APF lives in the channel — emit signal that channel's slot
+    # (running on worker thread) picks up
+    self.apf_enabled_changed.emit(bool(on))
+
+# Worker subscribes to the signal once at construction:
+self._radio.apf_enabled_changed.connect(
+    self._on_apf_enabled, Qt.QueuedConnection)
+
+# Worker's slot — runs on worker thread between process_block calls:
 def _on_apf_enabled(self, on):
-    self._config.apf_enabled = bool(on)
-    self._rx_channel.set_apf_enabled(on)  # also flows down into channel
+    # No WorkerConfig field for APF; flows straight into channel
+    self._rx_channel.set_apf_enabled(on)
 ```
 
-Two important properties of QueuedConnection:
+For AGC change (the worker DOES hold AGC config in `_config`):
+
+```python
+# Main thread:
+def set_agc_profile(self, name):
+    # update Radio's local copy (for UI display)
+    self._agc_profile = name
+    # tell worker about the new profile
+    self.agc_profile_changed.emit(name)
+
+# Worker slot:
+def _on_agc_profile(self, name):
+    self._config.agc_profile = name
+    # also recompute the derived release/target/hang from preset table
+    preset = AGC_PRESETS[name]
+    self._config.agc_release = preset["release"]
+    self._config.agc_hang_blocks = preset["hang_blocks"]
+    # ...
+```
+
+### Two important properties of QueuedConnection
+
 1. The slot runs on the **receiver's** thread (worker), not the
    emitter's (main). No raw threading needed.
 2. Events queue in order — if main emits `set_freq` then `set_mode`,
-   worker processes them in that order, with `process_block` calls
-   interleaved at block boundaries.
+   the worker processes them in that order, never interleaved with
+   the body of a `process_block` call.
 
 ## 7. Reset / flush sequencing
 
@@ -361,129 +420,389 @@ FFT currently runs on the main thread via `_fft_timer` reading
   panadapter responds immediately rather than waiting for the next
   timer fire.
 
-## 10. AK4951 sink consideration
+## 10. AK4951 sink — gating thread-safety audit
 
 `AK4951Sink.write()` queues stereo samples into the HL2Stream's TX
 audio queue (`stream.queue_tx_audio()`). The HL2Stream's TX thread
-then drains this queue into EP2 frames sent to the radio. So:
+then drains this queue into EP2 frames sent to the radio.
 
-- DSP worker calls `audio_sink.write(audio)` (worker thread)
+In Phase 3:
+- DSP worker calls `audio_sink.write(audio)` from the **worker
+  thread** (instead of the current main thread)
 - `audio_sink` = `AK4951Sink`, internally calls
-  `stream.queue_tx_audio(stereo)` (still worker thread)
-- `stream.queue_tx_audio` is currently uses `deque` operations
-  which are thread-safe in CPython for append/popleft, but we need
-  to verify any non-trivial state there is locked.
+  `stream.queue_tx_audio(stereo)`
+- HL2Stream's TX thread is the consumer — same as today
 
-**Action item for Phase 3.B:** audit `HL2Stream.queue_tx_audio`
-and `clear_tx_audio` for thread safety.
+**This crosses an additional thread boundary that didn't exist
+before.** Today: main → tx thread (1 boundary). Phase 3: worker →
+tx thread (still 1 boundary, but a different producer thread).
+The audit must confirm:
+
+1. `stream.queue_tx_audio()` uses thread-safe operations end to
+   end (deque.append is GIL-protected, but length checks +
+   conditional drops need explicit locks).
+2. `stream.clear_tx_audio()` (called on sink swap and shutdown)
+   doesn't race with concurrent writes from the worker.
+3. The `inject_audio_tx` flag (set/cleared on sink lifecycle) is
+   ordered correctly w.r.t. queued samples.
+
+**Status: BLOCKING for Phase 3.B activation.** Sub-task B.7
+explicitly audits this. If unsafe operations are found, they must
+be wrapped in locks BEFORE the worker thread starts driving the
+sink. Audio corruption from this kind of race is the worst-case
+failure mode — operator hears garbled / digitized audio with no
+obvious cause.
 
 ## 11. SoundDeviceSink consideration
 
 `SoundDeviceSink.write()` calls `OutputStream.write(stereo)`
-(blocking, but PortAudio handles its own thread synchronization).
-PortAudio's OutputStream is documented as thread-safe for write
-operations from a single thread — which matches our pattern (DSP
-worker is the single producer).
+(blocking write — PortAudio buffers internally and the OS audio
+callback drains).
 
-**No change needed for SoundDeviceSink.** ✓
+The thread-safety constraint is **single-producer**, not "any
+thread can call write." PortAudio supports a single producer
+thread driving the stream; concurrent writes from multiple threads
+are undefined behavior.
+
+What this means for Phase 3:
+
+- **Today:** stream is created on the main thread (in
+  `Radio.__init__` when `set_audio_output("PC Soundcard")` runs)
+  and `write()` is called from the main thread. ✓ Single producer.
+- **Phase 3:** stream is created on the main thread but `write()`
+  must come exclusively from the **worker** thread.
+- **Hand-off** — the OutputStream object is fine to use from a
+  thread that didn't create it, as long as creation finishes
+  before the first write. Lifecycle:
+  ```
+  main creates OutputStream → main hands reference to worker →
+  worker calls write() exclusively → close() can come from either
+  ```
+
+**Sink lifecycle in Phase 3:**
+
+1. Operator changes audio output (Settings → Audio → Output device)
+   on the main thread
+2. Main thread creates the new sink, hands it to the worker via
+   a Qt signal carrying the sink object as payload
+3. Worker's slot replaces its current sink reference
+4. Worker keeps writing audio without interruption (or with one
+   block of silence — acceptable; sink swap is operator-driven)
+
+**Sub-task B.4 covers this** — the sink-swap signal must serialize
+so the worker doesn't try to write to a half-constructed sink.
 
 ## 12. Risk register
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Audio dropouts under heavy DSP load | Medium | Medium (operator hears clicks) | Bounded drop-oldest queue + measurable in stress test |
-| Mode-switch race (worker processes new-mode sample with old filter state) | Medium | Low (one block of weird audio at switch) | Atomic config snapshot at block start; reset called on mode change |
+| Audio dropouts under heavy DSP load | Medium | Medium (operator hears clicks) | Bounded drop-oldest queue + stress test in 3.C |
+| Mode-switch race — between main sending reset signal and worker processing it, rx thread enqueues 1-2 more IQ batches that then run with old config | Medium | Low (one block of weird audio at switch — already happens in single-thread code due to channel's internal buffer) | Worker's reset handler clears the input queue before resetting state; matches single-thread behavior so no UX regression |
 | Notch list mid-update (worker sees half-applied notch list) | Low | Low | `notches_changed` signal carries an immutable tuple snapshot |
 | Auto-LNA logic stale (reads old LNA peaks because signal hasn't fired yet) | Low | Low | Auto-LNA is already heuristic; ~100 ms staleness in peak history is fine |
 | Reset/flush deadlock (main waits for worker, worker waits for main) | Low | High | All cross-thread is fire-and-forget signal/slot; no synchronous waits |
 | QTimer logic on main expects sample ring to be there | High at first | Low (visual stall) | Phase 3.B explicitly removes `_fft_timer` and moves FFT into worker |
 | Existing locks (`_rx_batch_lock`, `_ring_lock`) become redundant or wrong | High at first | Low | Audit and remove in 3.B |
+| HL2Stream TX queue not fully thread-safe under new producer | Medium | High (audio corruption) | Sub-task B.7 audits; gating before activation |
+| OutputStream created on main thread but written from worker | Low | Medium | Standard PortAudio pattern; verified in B.4 with single-producer lifecycle |
+| Sink swap mid-stream causes worker to write to half-constructed sink | Low | Medium | Sink swap goes via signal — worker swaps reference between blocks |
+| Backend toggle (single ↔ worker) confuses operator | Low | Low | Default = single-thread (current behavior). Operator opts into BETA explicitly. |
 
-## 13. Migration checklist (Phase 3.B sub-tasks)
+## 13. Migration strategy: Settings-toggle backend (BETA → default)
 
-In order. Each is a separate commit. Stop and test between any
-two if anything looks wrong.
+**Approach revised after design review.** Instead of a rip-and-
+replace migration that flips the audio path wholesale, threading
+follows the same pattern that worked for the GPU panadapter
+backend:
 
-- [ ] B.1 — Create `lyra/dsp/worker.py` with `DspWorker(QThread)`
-  shell + `WorkerConfig` dataclass. No DSP yet, just lifecycle.
-- [ ] B.2 — Move `_rx_channel`, `_audio_sink`, `_binaural` ownership
-  into worker. Stub `process_block` that just routes IQ through the
-  same chain currently in `_on_samples_main_thread`.
-- [ ] B.3 — Add input queue + `enqueue_iq` method called from
-  `_stream_cb` (rx thread). Worker drains the queue in its run
-  loop. Main thread no longer touches `_on_samples_main_thread`.
-- [ ] B.4 — Migrate AGC + AF/Vol + tanh into worker. Add `agc_*`
-  config update slots. Keep a fallback path until B.5 is verified.
-- [ ] B.5 — Migrate LNA peak/RMS tracking into worker. Add
-  `lna_peak_update` cross-thread signal. Main-thread Auto-LNA logic
-  consumes from a local copy.
-- [ ] B.6 — Move `_sample_ring` ownership into worker. Move FFT into
-  worker. Remove main-thread `_fft_timer`.
-- [ ] B.7 — Audit + remove redundant locks (`_rx_batch_lock`,
-  `_ring_lock`). Verify HL2Stream TX queue thread safety.
-- [ ] B.8 — Reset / flush request mechanism — worker-side handler
-  for the existing reset operations.
-- [ ] B.9 — Remove the dead `_on_samples_main_thread` and any
-  scaffolding from B.1-B.7.
-- [ ] B.10 — End-to-end smoke test: all modes, all sample rates,
-  all sink combinations, mode/freq/rate changes under load,
-  Settings panel changes during stream.
+```
+Settings → DSP → Threading: [● Single-thread (default)
+                              ○ Worker thread (BETA)]
+```
 
-Each sub-task lands as its own commit on `feature/threaded-dsp` (new
-branch off `main`). Branch merges to main only after Phase 3.C
-(stress test) signs off.
+Both code paths live in the tree. Operator picks one. If the worker
+backend has a problem we missed in design, **flip a switch** to
+fall back. We keep both paths until the worker backend has many
+release cycles of field testing.
+
+Why this is worth the extra effort:
+
+- **Zero-risk rollout.** Single-thread DSP is what every existing
+  v0.0.5 install runs. New install or upgrade defaults to that
+  same behavior. Tester opts into BETA explicitly via Settings.
+- **Field-testable in parallel.** Multiple operators can run on
+  different backends and we get comparison data.
+- **Easy rollback.** No revert commit needed if a tester hits a
+  worker-thread bug — they flip the toggle, file an issue, and
+  keep running their station.
+- **Eventual deprecation path.** When we have 6+ months of clean
+  worker-backend testing, we flip the default. Single-thread stays
+  as a fallback, just like QPainter still does for the panadapter.
+
+The cost: maintaining two routing paths in `Radio._on_samples_*`
+for a release or two. Acceptable.
+
+### Migration checklist (Phase 3.B sub-tasks)
+
+In order. Each is a separate commit on a `feature/threaded-dsp`
+branch off `main`. Stop and test between any two if anything looks
+wrong.
+
+- [ ] **B.1 — DspWorker shell + WorkerConfig.**
+  Create `lyra/dsp/worker.py` with the `DspWorker` class
+  (QObject subclass, `moveToThread` pattern), `WorkerConfig`
+  dataclass, lifecycle methods (`start`, `stop`). No DSP behavior
+  yet. Worker exists but isn't connected to anything.
+
+- [ ] **B.2 — Settings toggle + persistence.**
+  Add Settings → DSP → "Threading: [Single | Worker (BETA)]"
+  combo. Wire to a new `Radio.dsp_threading_mode` property +
+  QSettings key (`dsp/threading_mode`, default `"single"`).
+  At startup, Lyra logs which mode is active. **Switching modes
+  requires Lyra restart** (cleanest, avoids mid-flight migration
+  edge cases).
+
+- [ ] **B.3 — Worker process_block (audio path).**
+  Implement worker's `process_block(iq)` mirroring
+  `_on_samples_main_thread` body: notches/demod/NR/APF (via
+  `_rx_channel.process`), AGC, AF/Vol/Mute/tanh, BIN, sink write.
+  Move `_binaural` ownership into the worker. The single-thread
+  path still works exactly as before; worker only runs when
+  Settings selects it.
+
+- [ ] **B.4 — Worker input queue + activation.**
+  Worker exposes `enqueue_iq(samples)`. When worker mode is
+  active, `Radio._stream_cb` (rx thread) routes batches to
+  `worker.enqueue_iq` instead of `_bridge.samples_ready.emit`.
+  Worker's run loop drains the queue and calls `process_block`.
+  Drop-oldest behavior on queue overflow. Single-thread path
+  remains unchanged for default users.
+
+- [ ] **B.5 — Sink lifecycle for cross-thread use.**
+  When worker mode is active, audio sink (AK4951 or
+  SoundDeviceSink) is owned by the worker. Sink swaps on
+  Settings change route through a signal so the worker swaps
+  references between blocks (no half-constructed sink writes).
+
+- [ ] **B.6 — LNA peak/RMS tracking moves to worker.**
+  When worker mode is active, the per-block IQ peak/RMS
+  computation runs on the worker. Worker emits `lna_peak_update`
+  signal; main-thread Auto-LNA logic consumes from a local
+  buffer it maintains from those updates.
+
+- [ ] **B.7 — HL2Stream TX queue thread-safety audit (gating).**
+  Audit `queue_tx_audio`, `clear_tx_audio`, `inject_audio_tx`
+  for thread safety. Add locks where needed. **Must complete
+  before B.4 enables operator-facing worker mode** — audio
+  corruption from a missed lock is the worst-case bug.
+
+- [ ] **B.8 — FFT migration to worker.**
+  When worker mode is active, the sample ring is worker-internal
+  and FFT runs inside `process_block` on a tick counter. Worker
+  emits `spectrum_ready` (existing signal). Main-thread
+  `_fft_timer` is disabled when worker mode is active. Verify
+  panadapter cadence is identical between modes.
+
+- [ ] **B.9 — Reset / flush via signal.**
+  When worker mode is active, `Radio.reset()` emits a
+  `reset_requested` signal to the worker. Worker's slot clears
+  its input queue, resets `_rx_channel`, AGC peak, sample ring,
+  binaural. Main-thread state (operator config, UI) reset
+  in-place as today.
+
+- [ ] **B.10 — End-to-end smoke test (per Section 14).**
+  All modes, all sample rates, both sinks, both backends, mode/
+  freq/rate changes under load. Operator-facing field test
+  follows.
+
+After B.10 passes: worker-thread backend is BETA-stable. The
+**default** stays single-thread until at least one full release
+cycle of operator field testing has passed without significant
+issues. Promotion to default happens in a future release with a
+one-line change to the `dsp/threading_mode` default key.
+
+### Long-term: when do we remove single-thread?
+
+Not soon. The single-thread path:
+- Is the rollback for any worker-thread issue
+- Is the simpler code path for new contributors to read
+- Has zero deps on Qt threading correctness in the field
+
+We remove it when:
+- Worker thread has 6+ months of clean operator field reports
+- We can no longer cleanly maintain both paths (some new feature
+  forces a fork)
+- We need the worker thread for a feature single-thread can't
+  support (unlikely; even RX2 + TX could in principle run on the
+  main thread, just slowly)
+
+Until then: **both paths supported, worker is BETA, single is
+default.**
+
+## 13b. Thread lifecycle (start, stop, shutdown)
+
+When worker mode is active, here's exactly what happens at each
+operator action:
+
+### Lyra startup
+1. `MainWindow.__init__` constructs `Radio` (main thread)
+2. `Radio.__init__` constructs the worker:
+   - Creates `DspWorker` QObject
+   - Creates `QThread`, calls `worker.moveToThread(thread)`
+   - Connects worker config slots to Radio's `*_changed` signals
+   - `thread.start()` — worker now has its own event loop running
+3. Worker is **idle** — it's running but no IQ samples are being
+   produced (radio not started yet)
+
+### Operator clicks Start (begin streaming)
+1. Main thread tells `HL2Stream` to start
+2. Stream's `_rx_loop` begins receiving UDP packets in its own
+   thread (unchanged)
+3. Stream's callback (`_stream_cb`) routes IQ batches:
+   - **Single-thread mode:** to `_bridge.samples_ready.emit` (today's path)
+   - **Worker mode:** to `worker.enqueue_iq` (new path)
+4. Worker's run loop pulls batches off the queue and processes them
+
+### Operator clicks Stop
+1. Main thread tells `HL2Stream` to stop
+2. Stream's rx thread exits cleanly
+3. Worker's input queue drains naturally (no more IQ arriving)
+4. Worker stays **alive but idle** — ready to resume on next Start
+
+### Operator changes mode/freq/rate (during stream)
+1. Main thread updates Radio's local copies, emits
+   `*_changed` signals
+2. Worker's slots (running on worker thread) update the channel
+   via existing `_rx_channel.set_*` calls
+3. For freq/mode/rate: Radio also emits `reset_requested` →
+   worker clears queue + resets channel state
+4. Operator hears momentary discontinuity (same as today)
+
+### Operator changes audio sink (Settings → Audio → Output)
+1. Main thread constructs the new sink object
+2. Main thread emits `audio_sink_changed(sink)` signal
+3. Worker's slot replaces its sink reference between blocks
+4. Old sink's `close()` is called — drains internal buffer
+
+### Operator changes Settings → DSP → Threading mode
+1. Setting persists to QSettings
+2. **Restart required** (cleanest — avoids mid-flight migration)
+3. Restart picks up the new mode
+
+### Lyra shutdown (operator closes the window)
+1. `MainWindow.closeEvent` triggers Radio shutdown
+2. Radio tells stream to stop
+3. Radio tells worker to stop:
+   - Sets a `_shutdown_requested` flag
+   - Worker's run loop sees flag, drains pending blocks, exits
+   - `thread.quit()` then `thread.wait(1000)` — bounded wait
+4. Audio sink `close()` runs on worker before exit
+5. Qt main loop exits; process terminates
+
+**No deadlocks possible** because:
+- Main never waits synchronously on the worker (only `thread.wait`
+  with a timeout, and only at shutdown)
+- Worker never waits synchronously on the main (signals are
+  fire-and-forget)
+- Qt's queued signal/slot machinery handles cleanup of pending
+  events when threads exit
 
 ## 14. Phase 3.C — verification
 
-Stress-test combinations to verify no regressions:
+Stress-test the **worker** backend against the **single-thread**
+backend on the same machine, same operator session. Both must
+behave identically (audio + UI + meter readings).
 
-- 384k IQ rate + Aggressive NR + APF + BIN at depth 1.0 + every
-  notch active — heaviest combo we ship today
-- WWV ↔ FT8 alternation every 5 seconds for 5 minutes — verifies
-  reset path under load
-- Settings panel walk-through during stream: change AGC profile,
-  toggle BIN, switch rate, switch mode, etc. — verify no audio
-  dropouts during config flux
-- Both sinks: AK4951 and PC Soundcard, swap between them under load
-- Both backends: QPainter and GPU panadapter — verify FFT cadence
-  is correct on both
+Test matrix:
 
-Pass criteria:
-- No audio dropouts in any combination above
-- No frame drops on rx thread (operator-visible: ADC peak indicator
-  should update smoothly)
-- CPU utilization across cores improves vs single-thread baseline
-- No deadlocks, no hangs, no QThread cleanup warnings on close
-- Memory footprint stable over 30-minute idle stream
+| Test | Single-thread | Worker | Notes |
+|---|---|---|---|
+| 96k IQ + USB + AGC Med | Baseline | Match | Most common operator config |
+| 192k IQ + Aggressive NR + APF + BIN d=1.0 | Baseline | Match | Heavy DSP load |
+| 384k IQ + every notch active + Aggressive NR | Baseline | Match | Heaviest combo we ship |
+| WWV ↔ FT8 alternation every 5s for 5min | Baseline | Match | Reset path under load |
+| Mode/freq/rate changes during stream | Baseline | Match | Config flux without dropouts |
+| AK4951 ↔ PC Soundcard swap during stream | Baseline | Match | Sink swap correctness |
+| QPainter ↔ GPU panadapter | Baseline | Match | FFT cadence on both |
+| Lyra start → Start → Stop → close | Baseline | Match | Lifecycle correctness |
+
+Pass criteria for the **worker** backend:
+
+- ✓ No audio dropouts across the matrix above
+- ✓ No frame drops on rx thread (ADC peak indicator updates
+  smoothly)
+- ✓ CPU utilization across cores improves vs single-thread (Task
+  Manager: main thread % drops, worker thread % rises; total stays
+  similar or improves)
+- ✓ No deadlocks, no hangs, no QThread cleanup warnings on close
+- ✓ Memory footprint stable over 30-minute idle stream
+- ✓ S-meter, peak markers, panadapter, all overlays render
+  identically to single-thread mode
+- ✓ Operator field test confirms "feels right" — no subtle
+  perceptual differences in audio, no laggy controls, no
+  unexpected resets
+
+If any fail: bug fix on the worker path before the BETA toggle
+ships in a release. Single-thread path is unaffected.
 
 ## 15. Rollback plan
 
-Phase 3.B is a single architectural change with multiple commits.
-If it produces field-test issues:
+The Settings-toggle approach makes rollback trivial:
 
-- Each B.x commit is independently revertable. We can roll back to
-  whichever sub-task last passed.
+**Field-test rollback (operator):**
+- Operator on BETA hits a problem
+- They flip Settings → DSP → Threading back to "Single-thread"
+- Restart Lyra
+- Single-thread path runs exactly as before — zero regression
+- They file an issue, we fix on the worker path
+
+**Release rollback (us):**
+- Phase 3.B's individual commits are still independently revertable
+  if a sub-task introduces a regression even in single-thread mode
 - Worst case: revert the entire `feature/threaded-dsp` branch,
-  cherry-pick any small bugfixes that were unrelated, keep going
-  on `main` with single-thread DSP.
-- Captured-noise-profile and the rest of the noise toolkit work
-  doesn't strictly require Phase 3 — it would just be slower
-  without it. So Phase 3 rollback delays performance, not features.
+  cherry-pick any unrelated fixes, ship single-thread-only
+- The published v0.0.5 installer is unaffected; we just don't ship
+  the BETA toggle in the next release
 
-## 16. Open questions
+**Long-term rollback:**
+- If after months of testing the worker backend has a fundamental
+  flaw, we keep the single-thread path and quietly remove the
+  Settings toggle. No operator who didn't opt into BETA notices.
 
-- **Should we use `QThread.run()` override, or worker QObject +
-  `moveToThread`?** Latter is the modern Qt-recommended pattern,
-  cleaner for signal/slot. Going with QObject + moveToThread.
-- **Single worker or multiple (e.g., one per RX channel)?** Single
-  for v0.0.6. Multi-worker is a Phase 4 concern when RX2 + TX both
-  ship.
+Phase 3.D features (captured-noise-profile, NR2, etc.) are designed
+to work on **either** backend so they don't depend on the threading
+work succeeding. Building them on top of the single-thread path
+during Phase 3 BETA is fine — they get the threading benefit
+automatically once an operator switches.
+
+## 16. Decided design choices + open questions
+
+### Decided (this revision)
+
+- **QThread.run() override vs QObject + moveToThread?**
+  Going with **QObject + moveToThread**. Modern Qt-recommended
+  pattern, cleaner for signal/slot.
+- **Single worker or multiple?**
+  **Single for v0.0.6.** Multi-worker is a future concern when
+  RX2 + TX both ship and benefit from parallelism.
+- **Migration approach — rip-and-replace or Settings toggle?**
+  **Settings toggle (BETA)** — both code paths coexist; operator
+  picks. See Section 13.
+
+### Still open — operator input welcome
+
 - **Block size for worker — same as today (2048)?** Probably yes,
-  but stress test will reveal whether smaller (lower latency) or
-  larger (better cache) is better.
-- **Watchdog?** Should we add a "worker hasn't processed a block in
-  N ms" detector that warns the operator? Phase 3.D consideration,
-  not required for B.
+  but stress test in 3.C will reveal whether smaller (lower
+  latency) or larger (better cache) is better.
+- **Watchdog?** Should we add a "worker hasn't processed a block
+  in N ms" detector that warns the operator? Phase 3.D
+  consideration, not required for B.
+- **When do we promote worker → default?** After how many release
+  cycles of clean field testing? Suggest minimum 2 releases (so
+  v0.0.8 or v0.0.9 if we ship Phase 3 in v0.0.6).
+- **Should we expose a "DSP thread CPU usage" metric on the
+  toolbar?** Nice-to-have for diagnosing performance issues; not
+  blocking.
 
 ---
 
