@@ -2256,6 +2256,17 @@ class MainWindow(QMainWindow):
             r.set_peak_markers_show_db(
                 s.value("visuals/peak_show_db")
                 in (True, "true", "True", 1, "1"))
+        # Spectrum smoothing (display-only EWMA on the trace)
+        if s.contains("visuals/spectrum_smoothing"):
+            r.set_spectrum_smoothing_enabled(
+                s.value("visuals/spectrum_smoothing")
+                in (True, "true", "True", 1, "1"))
+        if s.contains("visuals/spectrum_smoothing_strength"):
+            try:
+                r.set_spectrum_smoothing_strength(
+                    int(s.value("visuals/spectrum_smoothing_strength")))
+            except (TypeError, ValueError):
+                pass
         geom = s.value("geometry")
         if geom is not None:
             self.restoreGeometry(geom)
@@ -2377,6 +2388,11 @@ class MainWindow(QMainWindow):
         # Peak marker style + readout toggle
         s.setValue("visuals/peak_style",       r.peak_markers_style)
         s.setValue("visuals/peak_show_db",     r.peak_markers_show_db)
+        # Spectrum smoothing (display-only EWMA)
+        s.setValue("visuals/spectrum_smoothing",
+                   r.spectrum_smoothing_enabled)
+        s.setValue("visuals/spectrum_smoothing_strength",
+                   r.spectrum_smoothing_strength)
         # graphics_backend is already written by VisualsSettingsTab
         # directly when the operator picks a backend — no code here.
         import json

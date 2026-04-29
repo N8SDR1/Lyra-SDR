@@ -375,6 +375,14 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._peak_hold_db: Optional[np.ndarray] = None
         self._peak_last_ts: Optional[float] = None
 
+        # Display-only EWMA smoothing — see spectrum.py for the same
+        # pattern. Off by default; toggled from Settings → Display.
+        self._smoothing_enabled: bool = False
+        self._smoothing_strength: int = 4    # 1..10
+        self._smoothed_db: Optional[np.ndarray] = None
+        # Pre-allocated scratch for in-place EWMA — see spectrum.py.
+        self._smoothing_scratch: Optional[np.ndarray] = None
+
         # Notch markers (Phase B.13). Each entry is
         # (abs_freq_hz, width_hz, active, deep). Updated from
         # radio.notches_changed via the panel.
@@ -442,6 +450,30 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # current (min, max) to compute proposed deltas from.
         self._min_db = float(min_db)
         self._max_db = float(max_db)
+        # Optional EWMA smoothing (display only, off by default). We
+        # operate on the same `n`-prefix the trace + peak-hold use so
+        # everything stays in sync. Strength 1..10 → alpha ≈ 1 -
+        # strength/11; higher strength = slower / smoother response.
+        if self._smoothing_enabled:
+            spec_pref = spec_db[:n].astype(np.float32, copy=False)
+            alpha = 1.0 - (self._smoothing_strength / 11.0)
+            if (self._smoothed_db is None
+                    or self._smoothed_db.shape != spec_pref.shape):
+                self._smoothed_db = spec_pref.copy()
+                self._smoothing_scratch = np.empty_like(self._smoothed_db)
+            else:
+                # In-place EWMA via lerp:  s += α·(x − s). Reuses the
+                # pre-allocated scratch so each frame is allocation-free.
+                # See spectrum.py for the rationale (~1 MB/s GC pressure
+                # under the old `alpha * x` allocation pattern at 60 fps).
+                np.subtract(spec_pref, self._smoothed_db,
+                            out=self._smoothing_scratch)
+                self._smoothing_scratch *= alpha
+                self._smoothed_db += self._smoothing_scratch
+            # Substitute the smoothed buffer for downstream consumers
+            # (peak-hold + GL trace upload) — both already use spec_db[:n].
+            spec_db = self._smoothed_db
+            n = self._smoothed_db.shape[0]
         # Peak-hold buffer maintenance — same algo as the CPU
         # widget: linear dB/sec decay, then clamp-up to the live
         # spectrum so peaks can never sit below current signal.
@@ -577,6 +609,21 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._user_segment_colors = {
             str(k).upper(): str(v)
             for k, v in dict(overrides or {}).items() if v}
+        self.update()
+
+    # ── Spectrum smoothing API (display-only EWMA) ─────────────────
+    def set_spectrum_smoothing_enabled(self, on: bool) -> None:
+        """Display-only EWMA smoothing of the spectrum trace. Off by
+        default. Disabling clears the EWMA buffer so a later re-enable
+        starts clean rather than picking up a stale memory."""
+        self._smoothing_enabled = bool(on)
+        if not self._smoothing_enabled:
+            self._smoothed_db = None
+        self.update()
+
+    def set_spectrum_smoothing_strength(self, strength: int) -> None:
+        """Smoothing strength 1..10 (higher = smoother / slower response)."""
+        self._smoothing_strength = max(1, min(10, int(strength)))
         self.update()
 
     # ── Peak-markers API (mirrors the CPU widget) ──────────────────

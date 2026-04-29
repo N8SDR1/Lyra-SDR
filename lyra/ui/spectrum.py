@@ -63,6 +63,20 @@ class SpectrumWidget(_PaintedWidget):
         self._max_db = -20.0
         self._center_hz = 0.0
         self._span_hz = 48000.0
+        # Display-only EWMA smoothing (off by default). When enabled,
+        # set_spectrum() blends each frame into _smoothed_db and the
+        # widget renders the smoothed buffer instead of the raw FFT.
+        # Pure visual filter — does not touch DSP or audio.
+        self._smoothing_enabled: bool = False
+        self._smoothing_strength: int = 4    # 1..10 (higher = smoother)
+        self._smoothed_db: np.ndarray | None = None
+        # Pre-allocated scratch buffer for the EWMA in-place computation.
+        # Without this, each frame allocated a fresh ndarray for the
+        # `alpha * spec_db` term — at 60 fps with 4096 bins that was
+        # ~1 MB/sec of allocation churn, which Python's GC had to mop
+        # up and showed up as a noticeable CPU bump when smoothing
+        # was enabled. With this, EWMA is fully in-place after frame 1.
+        self._smoothing_scratch: np.ndarray | None = None
         # Notches: list of (abs_freq_hz, width_hz, active, deep) tuples.
         # Visualization:
         #   active=True            → saturated red filled rectangle
@@ -260,6 +274,21 @@ class SpectrumWidget(_PaintedWidget):
 
     def set_peak_markers_show_db(self, on: bool):
         self._peak_markers_show_db = bool(on)
+        self.update()
+
+    def set_spectrum_smoothing_enabled(self, on: bool):
+        """Display-only EWMA smoothing of the spectrum trace. Off by
+        default. Disabling clears the EWMA buffer so a later re-enable
+        starts clean rather than picking up a stale memory."""
+        self._smoothing_enabled = bool(on)
+        if not self._smoothing_enabled:
+            self._smoothed_db = None
+        self.update()
+
+    def set_spectrum_smoothing_strength(self, strength: int):
+        """Smoothing strength 1..10 (higher = smoother / slower response)."""
+        self._smoothing_strength = max(1, min(10, int(strength)))
+        # No buffer reset — let the new alpha take effect on next frame.
         self.update()
 
     def set_band_plan_region(self, region_id: str):
@@ -685,6 +714,30 @@ class SpectrumWidget(_PaintedWidget):
         # (e.g. signal-multiplication causing N× emit per FFT).
         if self._paint_debug:
             self._paint_setspec_count += 1
+        # Optional EWMA smoothing — display-only, off by default. We
+        # do this BEFORE storing _spec_db so peak-hold and the trace
+        # both work off the smoothed signal (consistent operator view).
+        # Strength 1..10 maps to alpha ≈ 1 - strength/11, so higher
+        # strength = smaller alpha = slower / smoother response.
+        if (self._smoothing_enabled
+                and spec_db is not None and spec_db.size > 0):
+            alpha = 1.0 - (self._smoothing_strength / 11.0)
+            if (self._smoothed_db is None
+                    or self._smoothed_db.shape != spec_db.shape):
+                # Initialize from the first frame so we don't show a
+                # long fade-in from -inf. Also (re)allocate the scratch
+                # buffer to match.
+                self._smoothed_db = spec_db.astype(np.float32).copy()
+                self._smoothing_scratch = np.empty_like(self._smoothed_db)
+            else:
+                # In-place EWMA via the lerp form  s += α·(x − s).
+                # Three numpy ops, all with `out=` so no per-frame
+                # allocation. Equivalent math to s = α·x + (1−α)·s.
+                np.subtract(spec_db, self._smoothed_db,
+                            out=self._smoothing_scratch)
+                self._smoothing_scratch *= alpha
+                self._smoothed_db += self._smoothing_scratch
+            spec_db = self._smoothed_db   # downstream (peak-hold + draw) sees smoothed
         self._spec_db = spec_db
         self._center_hz = center_hz
         self._span_hz = span_hz

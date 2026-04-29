@@ -1777,6 +1777,43 @@ class VisualsSettingsTab(QWidget):
             self.radio.set_peak_markers_show_db)
         gd.addWidget(self.peak_show_db_chk, 9, 0, 1, 3, Qt.AlignLeft)
 
+        # Spectrum smoothing — display-only EWMA filter on the trace.
+        # Off by default (raw FFT). Strength 1..10 maps to alpha
+        # ~0.91..0.09; higher = smoother / slower response. Useful
+        # for reading weak signals through a noisy floor without
+        # touching the audio DSP. Placed at rows 12/13 to avoid
+        # collision with auto_scale_chk (row 10) and wf_auto_scale_chk
+        # (row 11) — earlier draft put it at 10/11 and the QGridLayout
+        # silently overlaid the widgets, producing visually-stacked
+        # text and unreliable toggle state.
+        self.smooth_chk = QCheckBox("Smooth spectrum trace")
+        self.smooth_chk.setChecked(radio.spectrum_smoothing_enabled)
+        self.smooth_chk.setToolTip(
+            "Display-only EWMA averaging applied to the spectrum "
+            "trace before drawing. Calms a jittery noise floor and "
+            "makes weak signals easier to spot. Does NOT affect "
+            "audio or DSP.")
+        self.smooth_chk.toggled.connect(
+            self.radio.set_spectrum_smoothing_enabled)
+        gd.addWidget(self.smooth_chk, 12, 0, 1, 3, Qt.AlignLeft)
+
+        gd.addWidget(QLabel("Strength"), 13, 0)
+        self.smooth_slider = QSlider(Qt.Horizontal)
+        self.smooth_slider.setRange(1, 10)
+        self.smooth_slider.setValue(int(radio.spectrum_smoothing_strength))
+        self.smooth_slider.setFixedWidth(240)
+        self.smooth_slider.setToolTip(
+            "Smoothing strength. 1 = barely averaged (fast). "
+            "10 = heavily averaged (slow but very clean).")
+        self.smooth_slider.valueChanged.connect(
+            self._on_smooth_strength_changed)
+        gd.addWidget(self.smooth_slider, 13, 1)
+        self.smooth_lbl = QLabel(f"{int(radio.spectrum_smoothing_strength)}")
+        self.smooth_lbl.setFixedWidth(80)
+        self.smooth_lbl.setStyleSheet(
+            "color: #cdd9e5; font-family: Consolas, monospace;")
+        gd.addWidget(self.smooth_lbl, 13, 2, Qt.AlignLeft)
+
         # → right column (Signal range is one of the taller groups)
         col_right.addWidget(grp_db)
 
@@ -2251,6 +2288,10 @@ class VisualsSettingsTab(QWidget):
     def _on_peak_decay_changed(self, dbps: int):
         self.peak_decay_lbl.setText(f"{dbps} dB/s")
         self.radio.set_peak_markers_decay_dbps(float(dbps))
+
+    def _on_smooth_strength_changed(self, strength: int):
+        self.smooth_lbl.setText(f"{int(strength)}")
+        self.radio.set_spectrum_smoothing_strength(int(strength))
 
     def _reset_db_ranges(self):
         # Match Radio's pre-settings defaults.

@@ -2412,6 +2412,16 @@ class SpectrumPanel(GlassPanel):
         self.radio.peak_markers_color_changed.connect(
             self.widget.set_peak_markers_color)
 
+        # Spectrum smoothing — display-only EWMA. Seed + subscribe.
+        self.widget.set_spectrum_smoothing_enabled(
+            self.radio.spectrum_smoothing_enabled)
+        self.widget.set_spectrum_smoothing_strength(
+            self.radio.spectrum_smoothing_strength)
+        self.radio.spectrum_smoothing_enabled_changed.connect(
+            self.widget.set_spectrum_smoothing_enabled)
+        self.radio.spectrum_smoothing_strength_changed.connect(
+            self.widget.set_spectrum_smoothing_strength)
+
         # Trace color — Radio holds the operator's pick; sync it now
         # and on changes.
         self._gpu_apply_trace_color()
@@ -2512,6 +2522,15 @@ class SpectrumPanel(GlassPanel):
             self.widget.set_peak_markers_enabled)
         radio.peak_markers_decay_changed.connect(
             self.widget.set_peak_markers_decay_dbps)
+        # Spectrum smoothing — display-only EWMA. Seed + subscribe.
+        self.widget.set_spectrum_smoothing_enabled(
+            radio.spectrum_smoothing_enabled)
+        self.widget.set_spectrum_smoothing_strength(
+            radio.spectrum_smoothing_strength)
+        radio.spectrum_smoothing_enabled_changed.connect(
+            self.widget.set_spectrum_smoothing_enabled)
+        radio.spectrum_smoothing_strength_changed.connect(
+            self.widget.set_spectrum_smoothing_strength)
         # Landmark click-to-tune: tune freq + switch mode in one shot.
         self.widget.landmark_clicked.connect(self._on_landmark_clicked)
         # User color picks — seed widget from Radio, subscribe to updates.

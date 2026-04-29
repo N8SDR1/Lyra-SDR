@@ -222,6 +222,13 @@ class Radio(QObject):
     peak_markers_style_changed   = Signal(str)     # "line"/"dots"/"triangles"
     peak_markers_show_db_changed = Signal(bool)    # show numeric dB at peaks
 
+    # Spectrum trace smoothing — display-only EWMA filter applied before
+    # the trace is drawn. Off by default (true raw FFT). Strength 1..10
+    # maps to an alpha in roughly [0.91 .. 0.09]; lower alpha = more
+    # smoothing / slower response. Pure visual feature; no DSP impact.
+    spectrum_smoothing_enabled_changed  = Signal(bool)
+    spectrum_smoothing_strength_changed = Signal(int)   # 1..10
+
     # User-picked colors — spectrum trace + per-segment band-plan
     # fills. Stored as #RRGGBB hex strings for simple QSettings
     # round-trip. Empty string = use the built-in default color.
@@ -713,6 +720,12 @@ class Radio(QObject):
         self._peak_markers_decay_dbps = 10.0
         self._peak_markers_style = "dots"        # "line" / "dots" / "triangles"
         self._peak_markers_show_db = False       # show numeric dB at top peaks
+
+        # Spectrum smoothing (display-only EWMA). Default OFF so the
+        # raw FFT is still the baseline operator view; opt-in via
+        # Settings → Display.
+        self._spectrum_smoothing_enabled = False
+        self._spectrum_smoothing_strength = 4    # 1..10 (higher = smoother)
 
         # User-picked colors. Empty string means "use the hardcoded
         # default" so the UI can reset by clearing. Segment overrides
@@ -1430,6 +1443,29 @@ class Radio(QObject):
     @property
     def peak_markers_decay_dbps(self) -> float:
         return self._peak_markers_decay_dbps
+
+    # ── Spectrum smoothing API (display-only EWMA) ───────────────────
+    @property
+    def spectrum_smoothing_enabled(self) -> bool:
+        return self._spectrum_smoothing_enabled
+
+    def set_spectrum_smoothing_enabled(self, on: bool):
+        on = bool(on)
+        if on == self._spectrum_smoothing_enabled:
+            return
+        self._spectrum_smoothing_enabled = on
+        self.spectrum_smoothing_enabled_changed.emit(on)
+
+    @property
+    def spectrum_smoothing_strength(self) -> int:
+        return self._spectrum_smoothing_strength
+
+    def set_spectrum_smoothing_strength(self, strength: int):
+        s = max(1, min(10, int(strength)))
+        if s == self._spectrum_smoothing_strength:
+            return
+        self._spectrum_smoothing_strength = s
+        self.spectrum_smoothing_strength_changed.emit(s)
 
     # ── User color pickers API ───────────────────────────────────────
     @property
