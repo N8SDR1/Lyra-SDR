@@ -176,6 +176,17 @@ class DspWorker(QObject):
         # need atomic compound updates.
         self._stop_requested: bool = False
         self._reset_requested: bool = False
+        # Phase 3.B B.3 — back-reference to Radio for the audio chain.
+        # The worker calls radio._rx_channel.process(), radio._apply_
+        # agc_and_volume(), radio._binaural.process(), and radio.
+        # _audio_sink.write() from worker thread when worker mode is
+        # active.  Future sub-tasks (B.5+) progressively migrate the
+        # ownership of these objects from Radio to the worker — until
+        # then, the back-reference pattern works because at any one
+        # time only ONE path drives DSP (single-thread main OR worker,
+        # never both).  Wired by Radio after construction via
+        # ``attach_to_radio()``.
+        self._radio = None
 
     # ── Public API: producer-side (rx thread, main thread) ─────
 
@@ -221,6 +232,21 @@ class DspWorker(QObject):
         """Request the worker to exit ``run_loop`` cleanly.  Called
         from the main thread on radio stop or Lyra shutdown."""
         self._stop_requested = True
+
+    def attach_to_radio(self, radio) -> None:
+        """Phase 3.B B.3 — link the worker to the Radio that owns the
+        DSP objects (rx_channel, audio_sink, binaural, agc state).
+
+        Called once by Radio just after worker construction.  Worker
+        then references Radio's DSP machinery from its own thread
+        when worker mode is active.
+
+        This is a transitional pattern. Subsequent sub-tasks (B.5+)
+        will migrate sink + LNA + FFT ownership directly into the
+        worker; B.3 just shifts WHERE the existing Radio methods get
+        called (worker thread instead of main).
+        """
+        self._radio = radio
 
     @property
     def config(self) -> WorkerConfig:
@@ -317,27 +343,114 @@ class DspWorker(QObject):
     def process_block(self, samples: np.ndarray) -> None:
         """Run DSP on one block of complex64 IQ samples.
 
-        SHELL — does nothing in B.1.  Subsequent sub-tasks fill
-        this in with the audio chain that currently lives in
-        ``Radio._do_demod`` and ``Radio._on_samples_main_thread``.
+        Phase 3.B B.3 — mirrors ``Radio._do_demod`` body, running on
+        the worker thread instead of the main thread.  Calls Radio's
+        existing DSP machinery (channel, AGC, BIN, sink) via the
+        back-reference set by ``attach_to_radio()``.
 
-        Final shape (per ``threading.md`` §3) will be:
+        Future sub-tasks migrate ownership of these objects directly
+        into the worker; B.3 only shifts WHERE the calls happen, not
+        WHERE the state lives.
 
-        1.  LNA peak / RMS tracking → emit ``lna_peak_update``
-            (B.6)
-        2.  ``rx_channel.process(iq)`` runs the existing chain:
-            decim → notches → demod → NR → APF → audio (B.3)
-        3.  AGC + AF gain + Volume + tanh limiter (B.4)
-        4.  ``binaural.process(audio)`` for BIN, when enabled (B.5)
-        5.  ``audio_sink.write(audio)`` to AK4951 or
-            SoundDeviceSink (B.5)
-        6.  Sample-ring update + periodic FFT emit
-            ``spectrum_ready`` (B.8)
-        7.  S-meter linear power running average — emit
-            ``smeter_reading`` at meter cadence (B.4 / B.5)
+        What this commit (B.3) covers:
+
+        - Mode dispatch (Off / Tone / regular)
+        - Notch state push to channel (matches single-thread cadence)
+        - ``rx_channel.process(iq)`` — full RX channel pipeline
+          (decim → notches → demod → NR → APF → audio)
+        - AGC + AF Gain + Volume + tanh limiter (via
+          ``radio._apply_agc_and_volume``)
+        - BIN — Hilbert phase split (via ``radio._binaural.process``)
+        - Audio sink write (via ``radio._audio_sink.write``)
+
+        What's NOT in B.3 (covered later):
+
+        - LNA peak / RMS tracking + ``lna_peak_update`` emit (B.6)
+        - Sample-ring update + FFT + ``spectrum_ready`` emit (B.8)
+        - S-meter linear-power averaging + ``smeter_reading`` (B.4/5)
+        - Reset/flush via ``request_reset()`` (B.9)
+
+        Errors at any stage are logged but never crash the worker
+        thread — operator hears a single block of silence at worst,
+        and the next block proceeds normally.
         """
-        # Stub — no behavior yet. Each B.x sub-task adds one stage.
-        pass
+        radio = self._radio
+        if radio is None:
+            # Not yet attached — nothing to do.  This shouldn't
+            # happen in production (Radio attaches after construction)
+            # but the guard makes worker-in-isolation tests safer.
+            return
+        # Mode dispatch — matches Radio._do_demod's first 5 lines.
+        # Reads radio._mode directly; Python attribute access is
+        # GIL-protected so we get a coherent value (no torn write).
+        # Worker may see a slightly stale mode if main thread is
+        # mid-set_mode() — at most one block of wrong-mode audio,
+        # and Radio.set_mode() also fires reset_requested via signal
+        # (B.9) which clears the queue.
+        try:
+            mode = radio._mode
+        except AttributeError:
+            return
+        if mode == "Off":
+            return
+        if mode == "Tone":
+            # Tone generation lives on Radio (uses radio._tone_phase
+            # state).  Worker calls it from worker thread; Radio's
+            # _emit_tone is the only writer of _tone_phase, so no
+            # race.  Will eventually move into the worker if/when
+            # tone testing benefits from threading isolation.
+            try:
+                radio._emit_tone(len(samples))
+            except Exception as exc:
+                print(f"[DspWorker] tone error: {exc}")
+            return
+
+        # Push current notch state to the channel each block —
+        # matches the cadence Radio._do_demod uses.  Cheap (just
+        # stores references); ensures channel sees fresh state
+        # without us tracking 8+ call sites.
+        try:
+            radio._rx_channel.set_notches(
+                radio._notches, radio._notch_enabled)
+        except Exception as exc:
+            print(f"[DspWorker] notch update error: {exc}")
+            # Continue — old notch state is fine for one block.
+
+        # Stage 1 — channel runs decim → notch → demod → NR → APF
+        try:
+            audio = radio._rx_channel.process(samples)
+        except Exception as exc:
+            print(f"[DspWorker] channel.process error: {exc}")
+            return
+        if audio.size == 0:
+            # No complete demod block ready yet (channel buffers
+            # partial blocks across calls).  Next call may produce.
+            return
+
+        # Stage 2 — AGC + AF Gain + Volume + tanh limiter
+        try:
+            audio = radio._apply_agc_and_volume(audio)
+        except Exception as exc:
+            print(f"[DspWorker] agc/volume error: {exc}")
+            return
+
+        # Stage 3 — BIN (Hilbert phase split for headphone listening).
+        # No-op pass-through when bin_enabled == False, returns
+        # (N, 2) stereo when active.  Both audio sinks accept either
+        # mono or stereo input.
+        try:
+            audio = radio._binaural.process(audio)
+        except Exception as exc:
+            print(f"[DspWorker] binaural error: {exc}")
+            # Continue with whatever audio we had — better than
+            # silence.
+
+        # Stage 4 — write to audio sink (AK4951 or PC Soundcard)
+        try:
+            radio._audio_sink.write(audio)
+        except Exception as exc:
+            print(f"[DspWorker] sink write error: {exc}")
+            # Continue; next block may succeed.
 
     def _reset(self) -> None:
         """Flush in-flight DSP state.  Triggered by
