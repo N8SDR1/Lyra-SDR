@@ -2503,11 +2503,250 @@ class VisualsSettingsTab(QWidget):
         self.wf_label.setText(self._wf_label_text())
 
 
+class NoiseSettingsTab(QWidget):
+    """Phase 3.D — Noise toolkit settings.
+
+    Holds the operator-tunable knobs for noise-toolkit features.
+    Day-1 contents: Captured Noise Profile (capture duration,
+    smart-guard toggle, storage location, age-warning thresholds,
+    profile manager + folder shortcuts).  As Phase 3.D #2 (NB),
+    #3 (ANF), #4 (NR2) ship, their settings join this tab.
+    """
+
+    def __init__(self, radio):
+        super().__init__()
+        self.radio = radio
+
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import (
+            QFileDialog, QPushButton, QRadioButton, QButtonGroup,
+            QSpinBox, QLineEdit, QGroupBox)
+        self._QSettings = QSettings   # used by setter helpers below
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(16, 16, 16, 16)
+        v.setSpacing(14)
+
+        # ── Captured Noise Profile ──────────────────────────────
+        grp_cap = QGroupBox("Captured Noise Profile")
+        gv = QVBoxLayout(grp_cap)
+        gv.setSpacing(8)
+
+        intro = QLabel(
+            "Audacity-style noise capture. Tune to a noise-only "
+            "frequency or wait for a transmission gap, then click "
+            "the 📷 Cap button on the DSP+Audio panel.  Lyra records "
+            "the band noise spectrum and uses it as a locked NR "
+            "reference — much more accurate than the live VAD-"
+            "tracked estimate.\n\n"
+            "Profiles save to disk and persist across Lyra restarts.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #8a9aac;")
+        gv.addWidget(intro)
+
+        # Capture duration slider — 1.0..5.0 sec, locked range.
+        s = QSettings("N8SDR", "Lyra")
+        cur_dur = float(s.value("noise/capture_duration_sec", 2.0,
+                                type=float))
+        cur_dur = max(1.0, min(5.0, cur_dur))   # clamp on load
+        dur_row = QHBoxLayout()
+        dur_row.addWidget(QLabel("Capture duration:"))
+        self.dur_slider = QSlider(Qt.Horizontal)
+        self.dur_slider.setRange(10, 50)   # tenths of a second
+        self.dur_slider.setValue(int(round(cur_dur * 10)))
+        self.dur_slider.setTickPosition(QSlider.TicksBelow)
+        self.dur_slider.setTickInterval(10)
+        self.dur_slider.setSingleStep(1)
+        self.dur_slider.setPageStep(5)
+        self.dur_label = QLabel(f"{cur_dur:.1f} s")
+        self.dur_label.setMinimumWidth(60)
+        self.dur_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700;")
+        self.dur_slider.valueChanged.connect(self._on_duration_changed)
+        dur_row.addWidget(self.dur_slider, 1)
+        dur_row.addWidget(self.dur_label)
+        gv.addLayout(dur_row)
+
+        # Smart-guard toggle — operator can disable if it's flagging
+        # captures they know are fine.
+        cur_guard = bool(s.value(
+            "noise/smart_guard_enabled", True, type=bool))
+        self.guard_chk = QCheckBox(
+            "Detect signal during capture (smart-guard, recommended)")
+        self.guard_chk.setChecked(cur_guard)
+        self.guard_chk.setToolTip(
+            "When enabled, Lyra checks the captured noise for "
+            "frame-to-frame power variance and warns if a signal "
+            "appears to have been present during capture.\n\n"
+            "Disable if you know your captures are good and the "
+            "warning is firing on stable noise sources you've "
+            "verified by ear.")
+        self.guard_chk.toggled.connect(self._on_guard_toggled)
+        gv.addWidget(self.guard_chk)
+
+        # Storage location selector.
+        loc_box = QGroupBox("Storage location")
+        loc_v = QVBoxLayout(loc_box)
+        loc_v.setSpacing(6)
+        # Resolve the current default + custom paths.
+        from lyra.dsp import noise_profile_store as nps
+        default_path = str(nps.default_profile_folder())
+        cur_custom = str(s.value("noise/profile_folder", "",
+                                  type=str) or "")
+        self._loc_default_radio = QRadioButton(
+            f"Default — {default_path}")
+        self._loc_custom_radio = QRadioButton("Custom folder:")
+        if cur_custom:
+            self._loc_custom_radio.setChecked(True)
+        else:
+            self._loc_default_radio.setChecked(True)
+        loc_v.addWidget(self._loc_default_radio)
+        loc_v.addWidget(self._loc_custom_radio)
+        custom_row = QHBoxLayout()
+        custom_row.setContentsMargins(20, 0, 0, 0)
+        self._loc_custom_field = QLineEdit(cur_custom)
+        self._loc_custom_field.setPlaceholderText(
+            "Click Browse… to choose a folder")
+        self._loc_custom_browse = QPushButton("Browse…")
+        custom_row.addWidget(self._loc_custom_field, 1)
+        custom_row.addWidget(self._loc_custom_browse)
+        loc_v.addLayout(custom_row)
+        # Wire — custom field is enabled only when Custom radio is on.
+        self._loc_custom_field.setEnabled(self._loc_custom_radio.isChecked())
+        self._loc_custom_browse.setEnabled(self._loc_custom_radio.isChecked())
+        self._loc_default_radio.toggled.connect(self._on_location_radio_toggled)
+        self._loc_custom_radio.toggled.connect(self._on_location_radio_toggled)
+        self._loc_custom_browse.clicked.connect(self._on_browse_custom_folder)
+        self._loc_custom_field.editingFinished.connect(
+            self._on_custom_path_edited)
+        gv.addWidget(loc_box)
+
+        # Age warning thresholds.
+        age_row = QHBoxLayout()
+        age_row.addWidget(QLabel("Profile age warning:"))
+        self.age_amber = QSpinBox()
+        self.age_amber.setRange(1, 168)   # 1 hour to 1 week
+        self.age_amber.setSuffix(" hours")
+        self.age_amber.setValue(int(s.value(
+            "noise/age_amber_hours", 24, type=int)))
+        self.age_amber.valueChanged.connect(self._on_age_amber_changed)
+        age_row.addWidget(QLabel("Amber after"))
+        age_row.addWidget(self.age_amber)
+        age_row.addSpacing(16)
+        self.age_red = QSpinBox()
+        self.age_red.setRange(1, 90)
+        self.age_red.setSuffix(" days")
+        self.age_red.setValue(int(s.value(
+            "noise/age_red_days", 7, type=int)))
+        self.age_red.valueChanged.connect(self._on_age_red_changed)
+        age_row.addWidget(QLabel("Red after"))
+        age_row.addWidget(self.age_red)
+        age_row.addStretch(1)
+        gv.addLayout(age_row)
+
+        # Action buttons.
+        action_row = QHBoxLayout()
+        self.btn_open_manager = QPushButton("Open profile manager…")
+        self.btn_open_manager.clicked.connect(
+            self._on_open_profile_manager)
+        action_row.addWidget(self.btn_open_manager)
+        self.btn_open_folder = QPushButton("Open profiles folder…")
+        self.btn_open_folder.setToolTip(
+            "Open the active profile folder in your OS file explorer.")
+        self.btn_open_folder.clicked.connect(self._on_open_profile_folder)
+        action_row.addWidget(self.btn_open_folder)
+        action_row.addStretch(1)
+        gv.addLayout(action_row)
+
+        v.addWidget(grp_cap)
+        v.addStretch(1)
+
+    # ── Slot implementations ─────────────────────────────────────
+
+    def _on_duration_changed(self, val_tenths: int) -> None:
+        seconds = val_tenths / 10.0
+        self.dur_label.setText(f"{seconds:.1f} s")
+        s = self._QSettings("N8SDR", "Lyra")
+        s.setValue("noise/capture_duration_sec", float(seconds))
+
+    def _on_guard_toggled(self, on: bool) -> None:
+        s = self._QSettings("N8SDR", "Lyra")
+        s.setValue("noise/smart_guard_enabled", bool(on))
+        # Push to NR — the smart_guard_enabled flag is a per-instance
+        # attribute on the SpectralSubtractionNR.
+        try:
+            self.radio._rx_channel._nr._smart_guard_enabled = bool(on)
+        except AttributeError:
+            pass
+
+    def _on_location_radio_toggled(self, _checked: bool) -> None:
+        custom = self._loc_custom_radio.isChecked()
+        self._loc_custom_field.setEnabled(custom)
+        self._loc_custom_browse.setEnabled(custom)
+        if custom:
+            path = self._loc_custom_field.text().strip()
+            if path:
+                self.radio.set_noise_profile_folder(path)
+        else:
+            # Default — clear the custom path setting.
+            self.radio.set_noise_profile_folder("")
+
+    def _on_browse_custom_folder(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        start = self._loc_custom_field.text().strip() or str(
+            self.radio.noise_profile_folder)
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Choose noise-profile storage folder", start)
+        if not chosen:
+            return
+        self._loc_custom_field.setText(chosen)
+        if self._loc_custom_radio.isChecked():
+            self.radio.set_noise_profile_folder(chosen)
+
+    def _on_custom_path_edited(self) -> None:
+        path = self._loc_custom_field.text().strip()
+        if self._loc_custom_radio.isChecked() and path:
+            self.radio.set_noise_profile_folder(path)
+
+    def _on_age_amber_changed(self, val: int) -> None:
+        s = self._QSettings("N8SDR", "Lyra")
+        s.setValue("noise/age_amber_hours", int(val))
+
+    def _on_age_red_changed(self, val: int) -> None:
+        s = self._QSettings("N8SDR", "Lyra")
+        s.setValue("noise/age_red_days", int(val))
+
+    def _on_open_profile_manager(self) -> None:
+        try:
+            from lyra.ui.noise_profile_manager import NoiseProfileManager
+        except ImportError:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "Profile manager",
+                "Profile manager dialog is not yet wired in this "
+                "build.  Coming in Day 3 piece 3.")
+            return
+        dlg = NoiseProfileManager(self.radio, parent=self)
+        dlg.exec()
+
+    def _on_open_profile_folder(self) -> None:
+        """Open the current profile folder in the OS file explorer."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from lyra.dsp import noise_profile_store as nps
+        folder = self.radio.noise_profile_folder
+        # Create the folder on demand so the explorer doesn't open
+        # an "this folder doesn't exist" error.
+        nps.ensure_folder(folder)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+
 class SettingsDialog(QDialog):
     """App-wide tabbed settings — accessed from the main toolbar (⚙).
 
     Tab order (matches reference SDR clients layout):
-      Radio → Network/TCI → Hardware → Audio → DSP → Visuals → Keyer → Bands
+      Radio → Network/TCI → Hardware → Audio → DSP → Noise → Visuals → Keyer → Bands
     """
 
     def __init__(self, radio, tci_server: TciServer, parent=None):
@@ -2534,6 +2773,14 @@ class SettingsDialog(QDialog):
 
         self.tab_dsp = DspSettingsTab(radio)
         self.tabs.addTab(self.tab_dsp, "DSP")
+
+        # Phase 3.D — Noise toolkit lives on its own tab so it has
+        # room to grow as NB / ANF / NR2 ship over the next releases.
+        # On day one, only the Captured Noise Profile section is
+        # populated; greyed-out reserves for unfinished features are
+        # intentionally NOT shown to avoid confusing testers.
+        self.tab_noise = NoiseSettingsTab(radio)
+        self.tabs.addTab(self.tab_noise, "Noise")
 
         self.tab_audio = AudioSettingsTab(radio)
         self.tabs.addTab(self.tab_audio, "Audio")

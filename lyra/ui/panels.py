@@ -1388,6 +1388,43 @@ class DspPanel(GlassPanel):
         radio.nr_enabled_changed.connect(self._on_nr_enabled_changed)
         radio.nr_profile_changed.connect(self._on_nr_profile_changed)
 
+        # ── Capture Noise Profile button (Phase 3.D #1) ──────────
+        # Compact action button paired with NR — left-click starts
+        # a 2-second capture with the operator's saved duration
+        # preference; right-click pops the full menu (capture /
+        # manage / settings / clear / open profiles folder).  The
+        # button text and color flip during capture to give live
+        # progress feedback.
+        self.nr_cap_btn = QPushButton("📷 Cap")
+        self.nr_cap_btn.setObjectName("dsp_btn")
+        self.nr_cap_btn.setToolTip(
+            "Capture noise profile\n"
+            "Left-click: start a capture (default 2.0 s)\n"
+            "Right-click: capture options + manager + settings\n\n"
+            "Tune to a noise-only frequency or wait for a\n"
+            "transmission gap before clicking; the captured\n"
+            "profile becomes a locked NR reference more\n"
+            "accurate than the live VAD-tracked estimate.")
+        self.nr_cap_btn.clicked.connect(self._on_nr_capture_clicked)
+        self.nr_cap_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.nr_cap_btn.customContextMenuRequested.connect(
+            self._show_nr_capture_menu)
+        # Slight visual distinction: action-button (not a toggle),
+        # so we leave it un-checkable.
+        self.nr_cap_btn.setCheckable(False)
+        dsp_row.addWidget(self.nr_cap_btn)
+        # Live capture-progress poll — drives the button label
+        # while a capture is in progress.  Stopped when state goes
+        # back to idle/ready.
+        self._nr_cap_poll = QTimer(self)
+        self._nr_cap_poll.setInterval(100)  # 10 Hz UI refresh
+        self._nr_cap_poll.timeout.connect(self._refresh_nr_capture_button)
+        # Capture-done signal: prompts for save name + warns on
+        # smart-guard "suspect" verdict.
+        radio.noise_capture_done.connect(self._on_noise_capture_done)
+        radio.noise_active_profile_changed.connect(
+            self._on_noise_active_profile_changed)
+
         # ── APF (Audio Peaking Filter) ────────────────────────────
         # Left-click  = toggle enable/disable
         # Right-click = quick BW/Gain sliders + open Settings shortcut
@@ -1701,28 +1738,61 @@ class DspPanel(GlassPanel):
         "light":      "Light",
         "medium":     "Medium",
         "aggressive": "Aggressive",
+        # "captured" is inserted dynamically in _show_nr_menu so its
+        # enabled state can reflect whether a profile is loaded.
         "neural":     "Neural (RNNoise / DeepFilterNet)",
     }
 
     def _show_nr_menu(self, pos):
         """Right-click on the NR button pops a profile picker.
         Mirrors the AGC right-click idiom — radio buttons with the
-        current profile checked. The Neural entry is greyed out if no
-        neural-NR package is importable on this system."""
+        current profile checked.  The Neural entry is greyed out if
+        no neural-NR package is importable on this system; the
+        Captured entry is greyed when no operator-recorded profile
+        is loaded."""
         btn = self.dsp_btns["NR"]
         menu = QMenu(self)
         current = self.radio.nr_profile
         neural_ok = Radio.neural_nr_available()
-        for key, label in self._NR_PROFILE_LABELS.items():
+        has_captured = self.radio.has_captured_profile()
+        captured_name = self.radio.active_captured_profile_name
+
+        # Live NR profiles (same order as before — Light / Medium /
+        # Aggressive).
+        for key in ("light", "medium", "aggressive"):
+            label = self._NR_PROFILE_LABELS[key]
             act = QAction(label, menu)
             act.setCheckable(True)
             act.setChecked(key == current)
-            if key == "neural" and not neural_ok:
-                act.setEnabled(False)
-                act.setText(f"{label}  (install RNNoise or DeepFilterNet)")
             act.triggered.connect(
                 lambda _=False, k=key: self.radio.set_nr_profile(k))
             menu.addAction(act)
+
+        # Captured-profile entry — operator's recorded noise model
+        # (Phase 3.D #1).  Disabled when no profile is loaded.
+        cap_label = (f"Captured: {captured_name}"
+                     if has_captured else "Captured  (no profile loaded)")
+        cap_act = QAction(cap_label, menu)
+        cap_act.setCheckable(True)
+        cap_act.setChecked(current == "captured")
+        cap_act.setEnabled(has_captured)
+        cap_act.triggered.connect(
+            lambda _=False: self.radio.set_nr_profile("captured"))
+        menu.addAction(cap_act)
+
+        # Neural placeholder — same handling as before.
+        neural_label = self._NR_PROFILE_LABELS["neural"]
+        neu_act = QAction(neural_label, menu)
+        neu_act.setCheckable(True)
+        neu_act.setChecked(current == "neural")
+        if not neural_ok:
+            neu_act.setEnabled(False)
+            neu_act.setText(
+                f"{neural_label}  (install RNNoise or DeepFilterNet)")
+        neu_act.triggered.connect(
+            lambda _=False: self.radio.set_nr_profile("neural"))
+        menu.addAction(neu_act)
+
         menu.addSeparator()
         toggle_act = QAction(
             "Disable NR" if self.radio.nr_enabled else "Enable NR", menu)
@@ -1730,6 +1800,226 @@ class DspPanel(GlassPanel):
             lambda: self.radio.set_nr_enabled(not self.radio.nr_enabled))
         menu.addAction(toggle_act)
         menu.exec(btn.mapToGlobal(pos))
+
+    # ── Capture-button helpers (Phase 3.D #1) ────────────────────────
+
+    def _on_nr_capture_clicked(self) -> None:
+        """Left-click on the Capture button.
+
+        - If no capture is in progress: start a 2-second capture
+          (or whatever duration is saved in QSettings).
+        - If a capture IS in progress: cancel it.
+
+        Both paths are no-cost if Radio isn't ready; the actual
+        capture only progresses when audio is flowing through
+        the channel.
+        """
+        from PySide6.QtCore import QSettings
+        state, _ = self.radio.nr_capture_progress()
+        if state == "capturing":
+            self.radio.cancel_noise_capture()
+            self._nr_cap_poll.stop()
+            self._refresh_nr_capture_button()
+            return
+        # Pull the saved duration preference (set in Settings -> Noise
+        # tab); default 2.0 sec per locked operator decision.
+        s = QSettings("N8SDR", "Lyra")
+        duration = float(s.value("noise/capture_duration_sec", 2.0,
+                                 type=float))
+        # Need NR enabled OR at least the audio chain to feed the
+        # accumulator.  NR's process() handles capture-while-disabled
+        # via the lightweight FFT-only path, so we don't auto-enable
+        # NR here — operator decides.
+        self.radio.begin_noise_capture(duration)
+        self._nr_cap_poll.start()
+        self._refresh_nr_capture_button()
+
+    def _refresh_nr_capture_button(self) -> None:
+        """Update the Capture button label to reflect current state.
+
+        Called from the 100 ms QTimer while a capture is in progress
+        plus once on each state transition.  When the capture
+        finishes, the timer stops and the button returns to its
+        idle label.
+        """
+        state, frac = self.radio.nr_capture_progress()
+        btn = self.nr_cap_btn
+        if state == "capturing":
+            pct = int(round(frac * 100))
+            btn.setText(f"⏹ {pct}%")
+            btn.setToolTip(
+                f"Capturing noise profile — {pct}% complete.\n"
+                "Click to cancel.")
+        else:
+            self._nr_cap_poll.stop()
+            btn.setText("📷 Cap")
+            btn.setToolTip(
+                "Capture noise profile\n"
+                "Left-click: start a capture (default 2.0 s)\n"
+                "Right-click: capture options + manager + settings")
+
+    def _show_nr_capture_menu(self, pos):
+        """Right-click on the Capture button — full menu of
+        capture-related actions."""
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QInputDialog
+        btn = self.nr_cap_btn
+        menu = QMenu(self)
+
+        # Capture-now entries with a few common durations.
+        s = QSettings("N8SDR", "Lyra")
+        default_dur = float(s.value("noise/capture_duration_sec", 2.0,
+                                    type=float))
+        cap_now = QAction(f"Capture now ({default_dur:.1f} s)", menu)
+        cap_now.triggered.connect(self._on_nr_capture_clicked)
+        menu.addAction(cap_now)
+        for dur in (1.0, 2.0, 3.0, 5.0):
+            if abs(dur - default_dur) < 0.01:
+                continue   # already shown as the "default" entry
+            act = QAction(f"Capture for {dur:.1f} s", menu)
+            act.triggered.connect(
+                lambda _=False, d=dur: self.radio.begin_noise_capture(d))
+            act.triggered.connect(self._nr_cap_poll.start)
+            act.triggered.connect(self._refresh_nr_capture_button)
+            menu.addAction(act)
+
+        menu.addSeparator()
+
+        # Manage / Settings shortcuts.
+        manage_act = QAction("Manage profiles…", menu)
+        manage_act.triggered.connect(self._open_noise_profile_manager)
+        menu.addAction(manage_act)
+        settings_act = QAction("Open Noise settings…", menu)
+        settings_act.triggered.connect(self._open_noise_settings)
+        menu.addAction(settings_act)
+
+        # Clear (only if a profile is loaded).
+        if self.radio.has_captured_profile():
+            menu.addSeparator()
+            clear_act = QAction(
+                f"Clear loaded profile "
+                f"({self.radio.active_captured_profile_name})", menu)
+            clear_act.triggered.connect(self._on_clear_captured_profile)
+            menu.addAction(clear_act)
+
+        menu.exec(btn.mapToGlobal(pos))
+
+    def _on_noise_capture_done(self, verdict: str) -> None:
+        """Slot for ``Radio.noise_capture_done`` — fires when a
+        capture finalizes inside NR.
+
+        Stops the progress poll (the timer would have stopped on
+        next tick anyway), refreshes the button, then opens a
+        Save-As dialog so the operator can name and persist the
+        profile.  If smart-guard verdict is "suspect", the dialog
+        starts with a warning banner.
+        """
+        self._nr_cap_poll.stop()
+        self._refresh_nr_capture_button()
+        self._prompt_save_captured_profile(verdict)
+
+    def _on_noise_active_profile_changed(self, name: str) -> None:
+        """Slot for ``Radio.noise_active_profile_changed`` — fires
+        when a profile is loaded or cleared.  We refresh the
+        Capture button tooltip + the NR button tooltip so hover
+        text reflects the new state."""
+        self._refresh_nr_capture_button()
+        # Also refresh the NR button tooltip via the existing path.
+        self._on_nr_profile_changed(self.radio.nr_profile)
+
+    def _prompt_save_captured_profile(self, verdict: str) -> None:
+        """Open a save-as dialog after a capture finalizes."""
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        # Default name = "<band> <YYYY-MM-DD HH:MM>" — operator can
+        # accept or edit.
+        from datetime import datetime
+        try:
+            from lyra.bands import band_for_freq_hz
+            band = band_for_freq_hz(int(self.radio._freq_hz)) or ""
+        except Exception:
+            band = ""
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        default_name = f"{band} {ts}".strip()
+
+        prompt = "Capture complete.  Save as:"
+        if verdict == "suspect":
+            prompt = (
+                "⚠  Capture finished but the smart-guard flagged it as "
+                "SUSPECT — high frame-to-frame power variance suggests "
+                "a signal was riding through the capture window.\n\n"
+                "The profile may suppress real signals when used.  "
+                "Consider re-capturing on a quieter spot.\n\n"
+                "Save anyway as:")
+        name, ok = QInputDialog.getText(
+            self, "Save captured noise profile",
+            prompt, text=default_name)
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            return
+        try:
+            self.radio.save_current_capture_as(name, overwrite=False)
+            self.radio.status_message.emit(
+                f"Saved noise profile: {name}", 4000)
+            # Auto-switch NR profile to "captured" on a successful
+            # save — the operator just captured and saved a profile,
+            # almost certainly wants to use it.
+            if self.radio.nr_profile != "captured":
+                self.radio.set_nr_profile("captured")
+        except FileExistsError:
+            # Re-prompt with overwrite confirmation.
+            ans = QMessageBox.question(
+                self, "Overwrite existing profile?",
+                f"A profile named {name!r} already exists.  "
+                f"Overwrite it?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No)
+            if ans == QMessageBox.StandardButton.Yes:
+                try:
+                    self.radio.save_current_capture_as(
+                        name, overwrite=True)
+                    self.radio.status_message.emit(
+                        f"Saved noise profile: {name}", 4000)
+                    if self.radio.nr_profile != "captured":
+                        self.radio.set_nr_profile("captured")
+                except Exception as exc:
+                    QMessageBox.warning(
+                        self, "Save failed", str(exc))
+        except Exception as exc:
+            QMessageBox.warning(self, "Save failed", str(exc))
+
+    def _on_clear_captured_profile(self) -> None:
+        """Drop the loaded profile + switch NR off "captured" mode."""
+        self.radio.clear_captured_profile()
+        if self.radio.nr_profile == "captured":
+            # No longer makes sense to be on "captured" with no
+            # profile loaded.  Fall back to medium.
+            self.radio.set_nr_profile("medium")
+
+    def _open_noise_profile_manager(self) -> None:
+        """Open the Manage Profiles dialog (created in Day 3 piece 3)."""
+        try:
+            from lyra.ui.noise_profile_manager import NoiseProfileManager
+        except ImportError:
+            # Manager dialog not yet wired — fall back to the
+            # noise-settings shortcut so the operator at least
+            # reaches a profile-related place.
+            self._open_noise_settings()
+            return
+        dlg = NoiseProfileManager(self.radio, parent=self.window())
+        dlg.exec()
+
+    def _open_noise_settings(self) -> None:
+        """Open Settings on the Noise tab."""
+        mw = self.window()
+        if hasattr(mw, "_open_settings"):
+            try:
+                mw._open_settings(tab="Noise")
+            except Exception:
+                # Tab may not exist yet during a partial migration —
+                # fall back to DSP, which still has NR placeholders.
+                mw._open_settings(tab="DSP")
 
     def _on_nr_enabled_changed(self, on: bool):
         btn = self.dsp_btns["NR"]
