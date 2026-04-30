@@ -38,7 +38,9 @@ up changes.
 - **AGC** — profiles (Off / Fast / Med / Slow / Auto / Custom),
   threshold, auto-tracking
 - **Notch Filters** — placing, adjusting, multi-notch
-- **Noise Reduction** — spectral-subtraction NR, profiles, neural roadmap
+- **Noise Reduction** — spectral-subtraction NR, profiles
+  (Light / Medium / Aggressive), captured-noise-profile workflow
+  (Audacity-style), neural roadmap
 - **APF (Audio Peaking Filter)** — narrow CW boost at the operator's pitch
 - **BIN (Binaural)** — pseudo-stereo headphone listening for CW + SSB
 - **Spectrum & Waterfall** — pan, zoom, drag, palettes

@@ -2003,8 +2003,22 @@ class DspPanel(GlassPanel):
             band = band_for_freq_hz(int(self.radio._freq_hz)) or ""
         except Exception:
             band = ""
+        mode = ""
+        try:
+            mode = str(getattr(self.radio, "mode", "") or "")
+        except Exception:
+            pass
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         default_name = f"{band} {ts}".strip()
+
+        # Dialog title carries the band/mode metadata so the
+        # operator sees what's about to be stamped into the JSON
+        # without having to look at the radio panel.
+        title_bits = ["Save captured noise profile"]
+        if band or mode:
+            ctx_bits = [b for b in (band, mode) if b]
+            title_bits.append(f"— {' '.join(ctx_bits)}")
+        title = "  ".join(title_bits)
 
         prompt = "Capture complete.  Save as:"
         if verdict == "suspect":
@@ -2016,7 +2030,7 @@ class DspPanel(GlassPanel):
                 "Consider re-capturing on a quieter spot.\n\n"
                 "Save anyway as:")
         name, ok = QInputDialog.getText(
-            self, "Save captured noise profile",
+            self, title,
             prompt, text=default_name)
         if not ok:
             return

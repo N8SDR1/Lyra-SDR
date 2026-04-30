@@ -105,6 +105,52 @@ and/or threaded demod.
   turn on Notch first — right-click is gated on NF state so the
   gesture stays free for other spectrum features when NF is off.
 
+## Captured noise profile is muting real signals
+
+If a captured profile makes your signal-of-interest quieter than
+NR-off, the captured noise model probably contains some signal
+energy. Most likely cause: a signal was actually present during
+the capture window.
+
+**Fix:** re-capture on a noise-only frequency.
+
+1. Tune to a quiet patch on the band (5–10 kHz from any active
+   station, or wait for a transmission gap).
+2. Right-click the **📷 Cap** button → **Manage profiles…** →
+   select the bad profile → **Re-capture**.
+3. Lyra runs the smart-guard variance check — if it flags the
+   new capture as "suspect" too, the band may not have a quiet-
+   enough patch right now. Try a different time of day.
+
+You can also disable the captured profile temporarily by clicking
+the **source badge** below the DSP buttons row to flip back to
+**Live (VAD)**.  The captured profile stays loaded; you can flip
+back to it later by clicking the badge again.
+
+## Source badge stuck on Live, can't switch to Captured
+
+The badge below the DSP buttons row only enables when a captured
+profile is **loaded** in NR.
+
+- If the badge text says **"no captured profile"** — capture one
+  via the **📷 Cap** button, or load an existing one from the
+  Manage Profiles dialog.
+- If you previously deleted the active profile, the source toggle
+  auto-flipped back to Live and the badge greyed out as a safety
+  measure.
+- If you have profiles on disk but none loaded (e.g. after a Lyra
+  reinstall), use **Manage profiles…** → select one → **Use Selected**.
+
+## Profile manager shows greyed/strikethrough profiles
+
+Profiles saved with a different FFT size than the current NR
+config show greyed with strikethrough. **Cannot be loaded.**
+
+This shouldn't happen with normal use — Lyra's NR FFT size is
+hardcoded at 256 across versions. If you see it, you've imported
+a profile from a custom build with a different FFT setting, or
+the profile JSON was hand-edited.
+
 ## TCI client can't connect
 
 - Settings → Network/TCI — verify the server is enabled.
