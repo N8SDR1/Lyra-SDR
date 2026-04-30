@@ -243,6 +243,25 @@ class HL2Stream:
         # over-fed at higher IQ rates we throttle EP2 frame emission
         # to a fixed 380 Hz cadence (= 48 kHz audio / 126 samples per
         # frame), decoupled from EP6 cadence. See _rx_loop.
+        #
+        # Phase 3.B B.7 — thread-safety audit (DSP worker mode).
+        # In single-thread mode the producer of this queue (demod
+        # writes via AK4951Sink.write → queue_tx_audio) is the Qt
+        # main thread.  In worker mode it's the DspWorker thread.
+        # The consumer (_pack_audio_bytes called from the EP2
+        # frame builder) is HL2Stream's TX thread in BOTH modes.
+        # All three call sites (queue_tx_audio, clear_tx_audio,
+        # _pack_audio_bytes) acquire ``_tx_audio_lock`` before
+        # touching ``_tx_audio``, so the producer-thread switch
+        # introduced by worker mode is safe — no additional locks
+        # needed.  The only non-locked field consumed cross-thread
+        # is ``inject_audio_tx`` (a plain bool used by the EP2
+        # frame builder to decide whether to call _pack_audio_bytes
+        # at all), which is GIL-safe for atomic load/store and
+        # tolerates a one-frame staleness on toggle (worst case:
+        # one EP2 frame of zeros instead of audio at the moment of
+        # sink swap, which is sub-3 ms and inaudible).
+        # AUDIT VERDICT: existing locking is sufficient.
         from collections import deque
         # 1 s buffer at 48 kHz — caps unbounded growth if the demod
         # produces faster than the EP2 builder consumes.
