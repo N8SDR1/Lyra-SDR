@@ -1531,11 +1531,14 @@ class DspPanel(GlassPanel):
         self.nr_source_badge.setObjectName("nr_source_badge")
         self.nr_source_badge.setFlat(True)
         self.nr_source_badge.setCursor(Qt.PointingHandCursor)
-        # Left-align text inside the button.
+        # Left-align text inside the button.  Bump left padding so
+        # the colored emoji dot doesn't visually clip against the
+        # button's rounded edge — Qt's emoji rendering sometimes
+        # has a tight bounding box and 8 px wasn't enough.
         self.nr_source_badge.setStyleSheet(
             "QPushButton#nr_source_badge {"
             "  text-align: left;"
-            "  padding: 3px 8px;"
+            "  padding: 4px 10px 4px 14px;"
             "  border: 1px solid transparent;"
             "  border-radius: 4px;"
             "  font-family: 'Segoe UI', sans-serif;"
@@ -2085,32 +2088,29 @@ class DspPanel(GlassPanel):
 
         if not has_cap:
             # No profile — Live source is forced; badge is
-            # informational only.
+            # informational only.  Two extra spaces after the
+            # emoji avoid visual clipping in Qt's emoji metrics.
             badge.setEnabled(False)
-            badge.setText(
-                "🔵  Source: Live (VAD)   ·   no captured profile loaded")
+            badge.setText("🔵   Live (VAD)   ·   no captured profile")
             badge.setToolTip(
-                "Noise Reduction is using the live VAD-tracked "
-                "estimate of band noise.\n\n"
+                "Noise Reduction source: Live (VAD-tracked estimate).\n\n"
                 "Capture a noise profile (📷 Cap button) to unlock "
-                "the Captured source option.")
+                "the Captured source option.\n\n"
+                "Right-click the NR button to change subtraction "
+                "strength (Light / Medium / Aggressive).")
             return
 
         # A profile is loaded — badge is clickable to flip source.
         badge.setEnabled(True)
         if not use_cap:
             # Live source, but a profile is loaded and ready.
-            badge.setText(
-                f"🔵  Source: Live (VAD)   ⇄   click to use captured: "
-                f"{cap_name}")
+            badge.setText(f"🔵   Live (VAD)   ⇄   use: {cap_name}")
             badge.setToolTip(
-                "Noise Reduction is using the live VAD-tracked "
-                "estimate.\n\n"
+                "Noise Reduction source: Live (VAD-tracked estimate).\n\n"
                 f"Click to switch to the loaded captured profile "
-                f"({cap_name!r})."
-                "\n\nNR aggression profile "
-                "(Light/Medium/Aggressive) is independent of source — "
-                "right-click the NR button to change it.")
+                f"{cap_name!r}.\n\n"
+                "Right-click the NR button to change subtraction "
+                "strength.")
             return
 
         # Captured source active.  Show name + age + band/mode +
@@ -2130,7 +2130,11 @@ class DspPanel(GlassPanel):
         mismatch = (cap_mode and cur_mode
                     and cap_mode.lower() != cur_mode.lower())
 
-        bits = [f"🟢  Source: Captured: {cap_name}"]
+        # Lead with three spaces after the emoji to avoid clipping.
+        # Drop the "Source:" / "Captured:" prefixes — the green dot
+        # plus profile name already conveys the source state, and
+        # those prefixes were inflating the badge length unnecessarily.
+        bits = [f"🟢   {cap_name}"]
         if age_text:
             bits.append(age_text)
         if band_mode:
@@ -2138,13 +2142,15 @@ class DspPanel(GlassPanel):
         if mismatch:
             bits.append(f"⚠ captured on {cap_mode}")
         bits.append("⇄")
-        badge.setText("   ·   ".join(bits))
+        badge.setText("  ·  ".join(bits))
 
-        # Apply age coloring via inline stylesheet override.
+        # Apply age coloring via inline stylesheet override.  Same
+        # bumped left padding as the default stylesheet so the dot
+        # doesn't clip against the rounded edge.
         badge.setStyleSheet(
             f"QPushButton#nr_source_badge {{"
             f"  text-align: left;"
-            f"  padding: 3px 8px;"
+            f"  padding: 4px 10px 4px 14px;"
             f"  border: 1px solid transparent;"
             f"  border-radius: 4px;"
             f"  font-family: 'Segoe UI', sans-serif;"
@@ -2157,15 +2163,17 @@ class DspPanel(GlassPanel):
             f"}}")
 
         tooltip_lines = [
-            f"Noise Reduction is using the captured profile "
-            f"{cap_name!r}.",
+            f"Noise Reduction source: Captured profile {cap_name!r}.",
             "",
             "Click to switch back to the live VAD-tracked estimate.",
+            "",
+            "Right-click the NR button to change subtraction "
+            "strength (Light / Medium / Aggressive).",
         ]
         if mismatch:
             tooltip_lines.append(
                 f"\n⚠  This profile was captured on {cap_mode} "
-                f"but you are currently on {cur_mode}.\n"
+                f"but you're currently on {cur_mode}.\n"
                 f"NR will still subtract the captured noise, but "
                 f"the model may not perfectly match your current "
                 f"audio chain.")
