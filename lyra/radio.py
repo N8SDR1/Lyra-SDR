@@ -83,6 +83,17 @@ class Radio(QObject):
     pc_audio_device_changed = Signal(object)   # int index, or None for auto
     ip_changed           = Signal(str)
 
+    # Phase 3.B B.5 — sink-swap channel for worker mode.
+    # When DSP runs on the worker thread, the worker keeps its OWN
+    # reference to the audio sink (so it never sees the sink getting
+    # closed mid-write under its feet).  On every sink swap (start,
+    # stop, set_audio_output, PC device change) Radio emits this
+    # signal carrying the NEW sink object; the worker's slot updates
+    # its local reference and closes the old sink between blocks.
+    # Single-thread mode never connects this signal — Radio mutates
+    # _audio_sink directly as it always has.
+    worker_audio_sink_changed = Signal(object)  # AudioSink-like or NullSink
+
     # HL2 hardware telemetry (temperature, supply voltage, fwd/rev power).
     # Emitted at ~2 Hz from a QTimer that polls FrameStats so the UI
     # never has to touch the protocol layer directly. Values are in
@@ -2942,22 +2953,38 @@ class Radio(QObject):
         #      physical device sometimes races; a tiny sleep gives
         #      Windows the moment it needs to release exclusive-use
         #      handles before we ask for them again.
-        try:
-            self._audio_sink.close()
-        except Exception:
-            pass
-        self._rx_channel.reset()
-        # 30 ms — long enough for PortAudio/WASAPI to fully release
-        # the device handle, short enough to be imperceptible to the
-        # operator. Tested across AK4951↔PC swaps with no recurrence
-        # of the robotic-sound symptom.
-        import time as _time
-        _time.sleep(0.030)
-        self._audio_sink = self._make_sink() if self._stream else NullSink()
-        # New sink starts at default L/R (equal-power center) — push
-        # the operator's current balance so the new sink picks up the
-        # pan immediately, not on the next set_balance.
-        self._push_balance_to_sink()
+        if self._dsp_worker is not None:
+            # B.5 — worker mode: build the new sink on main, hand it
+            # to the worker, and let the worker close the old one
+            # AFTER it stops writing to it.  No 30 ms sleep needed
+            # because the worker serializes close() with its run
+            # loop (the slot can't fire mid-block).
+            new_sink = self._make_sink() if self._stream else NullSink()
+            self._rx_channel.reset()
+            self._audio_sink = new_sink
+            self._push_balance_to_sink()
+            self.worker_audio_sink_changed.emit(new_sink)
+        else:
+            # Single-thread (default) path — close-then-rebuild on
+            # the main thread, with the small WASAPI grace sleep.
+            try:
+                self._audio_sink.close()
+            except Exception:
+                pass
+            self._rx_channel.reset()
+            # 30 ms — long enough for PortAudio/WASAPI to fully
+            # release the device handle, short enough to be
+            # imperceptible to the operator. Tested across AK4951↔PC
+            # swaps with no recurrence of the robotic-sound symptom.
+            import time as _time
+            _time.sleep(0.030)
+            self._audio_sink = (
+                self._make_sink() if self._stream else NullSink())
+            # New sink starts at default L/R (equal-power center) —
+            # push the operator's current balance so the new sink
+            # picks up the pan immediately, not on the next
+            # set_balance.
+            self._push_balance_to_sink()
         self.audio_output_changed.emit(output)
 
     # ── Stream lifecycle ──────────────────────────────────────────────
@@ -2977,6 +3004,12 @@ class Radio(QObject):
             return
         self._audio_sink = self._make_sink()
         self._push_balance_to_sink()
+        # B.5 — in worker mode, hand the freshly-built sink to the
+        # worker so it writes to it directly (and closes the
+        # previous NullSink seed) without the main-thread close
+        # race.  No-op in single-thread mode.
+        if self._dsp_worker is not None:
+            self.worker_audio_sink_changed.emit(self._audio_sink)
         # Push the filter-board OC pattern now that the stream is live
         if self._filter_board_enabled:
             self._apply_oc_for_current_freq()
@@ -2994,11 +3027,19 @@ class Radio(QObject):
         # Stop the HL2 telemetry poll so the banner shows stale-then-NaN
         # rather than continuing to emit the last-seen reading forever.
         self._hl2_telem_timer.stop()
-        try:
-            self._audio_sink.close()
-        except Exception:
-            pass
-        self._audio_sink = NullSink()
+        if self._dsp_worker is not None:
+            # B.5 — worker mode: install NullSink on Radio and hand
+            # it to the worker, which closes the old (real) sink
+            # between blocks.  Avoids close-while-writing race.
+            new_sink = NullSink()
+            self._audio_sink = new_sink
+            self.worker_audio_sink_changed.emit(new_sink)
+        else:
+            try:
+                self._audio_sink.close()
+            except Exception:
+                pass
+            self._audio_sink = NullSink()
         # Drop the USB-BCD cable to a safe (zero) state when stopping
         if self._usb_bcd_cable is not None:
             try:
@@ -3077,6 +3118,13 @@ class Radio(QObject):
         self._dsp_worker.set_muted(self._muted)
         self._dsp_worker.set_bin_enabled(self._bin_enabled)
         self._dsp_worker.set_bin_depth(self._bin_depth)
+        # B.5 — seed the worker's audio sink reference so it has a
+        # valid sink from the very first IQ block (before stream
+        # start, the sink is NullSink — write() is a no-op).  Direct
+        # attribute assignment is safe here because moveToThread
+        # hasn't run yet, so the worker still lives on the main
+        # thread for this brief construction window.
+        self._dsp_worker._audio_sink = self._audio_sink
         # Move to dedicated thread.  parent=None for the QThread is
         # required by Qt — moveToThread fails if the source thread
         # owns a parented object that's also being moved.  We track
@@ -3096,6 +3144,13 @@ class Radio(QObject):
             self._dsp_worker.set_bin_enabled, _qc)
         self.bin_depth_changed.connect(
             self._dsp_worker.set_bin_depth, _qc)
+        # B.5 — sink swap channel.  When Radio rebuilds the audio
+        # sink (start/stop, set_audio_output, PC device change), the
+        # worker swaps its local reference between blocks AND closes
+        # the old sink (so PortAudio/AK4951 close() never runs while
+        # the worker is mid-write to that same object).
+        self.worker_audio_sink_changed.connect(
+            self._dsp_worker._on_audio_sink_changed, _qc)
         # AF Gain, Volume, Muted aren't currently exposed as Qt
         # signals on Radio (single-thread path reads them directly
         # from `_af_gain_db` / `_volume` / `_muted` each block).
@@ -3596,15 +3651,24 @@ class Radio(QObject):
         # device choice takes effect right away. Same swap-cleanup
         # treatment as set_audio_output.
         if self._audio_output != "AK4951" and self._stream:
-            try:
-                self._audio_sink.close()
-            except Exception:
-                pass
-            self._rx_channel.reset()
-            import time as _time
-            _time.sleep(0.030)
-            self._audio_sink = self._make_sink()
-            self._push_balance_to_sink()
+            if self._dsp_worker is not None:
+                # B.5 — worker mode: build new, hand off, worker
+                # closes the old between blocks.
+                new_sink = self._make_sink()
+                self._rx_channel.reset()
+                self._audio_sink = new_sink
+                self._push_balance_to_sink()
+                self.worker_audio_sink_changed.emit(new_sink)
+            else:
+                try:
+                    self._audio_sink.close()
+                except Exception:
+                    pass
+                self._rx_channel.reset()
+                import time as _time
+                _time.sleep(0.030)
+                self._audio_sink = self._make_sink()
+                self._push_balance_to_sink()
 
     def _radio_debug_maybe_print(self):
         """Once per ~5 seconds, print a one-line Radio-side diagnostic

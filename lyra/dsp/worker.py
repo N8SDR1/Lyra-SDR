@@ -178,15 +178,20 @@ class DspWorker(QObject):
         self._reset_requested: bool = False
         # Phase 3.B B.3 — back-reference to Radio for the audio chain.
         # The worker calls radio._rx_channel.process(), radio._apply_
-        # agc_and_volume(), radio._binaural.process(), and radio.
-        # _audio_sink.write() from worker thread when worker mode is
-        # active.  Future sub-tasks (B.5+) progressively migrate the
-        # ownership of these objects from Radio to the worker — until
-        # then, the back-reference pattern works because at any one
-        # time only ONE path drives DSP (single-thread main OR worker,
-        # never both).  Wired by Radio after construction via
-        # ``attach_to_radio()``.
+        # agc_and_volume(), radio._binaural.process() from worker thread
+        # when worker mode is active.  Future sub-tasks (B.6 / B.8 / B.9)
+        # progressively migrate the ownership of LNA peak tracking,
+        # FFT, and reset state from Radio to the worker.  Wired by
+        # Radio after construction via ``attach_to_radio()``.
         self._radio = None
+        # Phase 3.B B.5 — worker-owned audio sink reference.  Seeded
+        # by Radio just before ``moveToThread`` so the worker has a
+        # valid sink from frame zero, then updated via signal+slot on
+        # every sink swap (start / stop / output change / PC device
+        # change).  The worker writes audio to THIS reference, not to
+        # ``radio._audio_sink``, so a main-thread sink swap can never
+        # close the underlying object mid-write.
+        self._audio_sink = None
 
     # ── Public API: producer-side (rx thread, main thread) ─────
 
@@ -297,6 +302,46 @@ class DspWorker(QObject):
     @Slot(float)
     def set_bin_depth(self, depth: float) -> None:
         self._config.bin_depth = float(depth)
+
+    # ── Audio-sink ownership (B.5) ─────────────────────────────
+    # Sink lifecycle in worker mode: main thread CONSTRUCTS the sink
+    # (PortAudio device open, AK4951 stream wiring) and hands it to
+    # the worker via this slot.  The worker swaps its local reference
+    # AND closes the old sink — that close is safe because it runs on
+    # the worker thread, BETWEEN process_block calls (Qt's queued
+    # connection serializes slot delivery with the run-loop body).
+    # Main thread therefore never closes a sink that the worker might
+    # still be writing to, eliminating the "PortAudio close-while-
+    # writing" race.
+
+    @Slot(object)
+    def _on_audio_sink_changed(self, new_sink) -> None:
+        """Replace the worker's audio-sink reference.
+
+        Called via Qt::QueuedConnection from
+        ``Radio.worker_audio_sink_changed`` whenever Radio constructs
+        a new sink (start, stop=NullSink, set_audio_output, PC device
+        change).  Runs on the WORKER thread between blocks — no race
+        with ``process_block``'s ``self._audio_sink.write(audio)``.
+
+        Steps:
+        1. Save the current sink reference as ``old``.
+        2. Install the new sink.
+        3. Close ``old`` if it's a different instance — drains any
+           internal buffers (PortAudio CallbackStream stop, AK4951
+           inject_audio_tx=False + clear_tx_audio).
+
+        Errors during close are logged but never propagate; a half-
+        closed sink is acceptable (worst case: a sliver of stale
+        audio finishes draining; new sink starts clean).
+        """
+        old = self._audio_sink
+        self._audio_sink = new_sink
+        if old is not None and old is not new_sink:
+            try:
+                old.close()
+            except Exception as exc:
+                print(f"[DspWorker] old sink close error: {exc}")
 
     # ── Run loop (worker thread) ───────────────────────────────
 
@@ -445,9 +490,16 @@ class DspWorker(QObject):
             # Continue with whatever audio we had — better than
             # silence.
 
-        # Stage 4 — write to audio sink (AK4951 or PC Soundcard)
+        # Stage 4 — write to audio sink (AK4951 or PC Soundcard).
+        # B.5: use the worker's OWN sink reference, kept in sync with
+        # Radio's via ``worker_audio_sink_changed``.  Falls back to
+        # Radio's reference for any narrow window before the first
+        # signal lands (defensive — in practice Radio seeds the
+        # reference before moveToThread, so it's never None here).
+        sink = self._audio_sink if self._audio_sink is not None \
+            else radio._audio_sink
         try:
-            radio._audio_sink.write(audio)
+            sink.write(audio)
         except Exception as exc:
             print(f"[DspWorker] sink write error: {exc}")
             # Continue; next block may succeed.
