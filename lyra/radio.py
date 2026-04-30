@@ -3159,6 +3159,18 @@ class Radio(QObject):
         # lists that Auto-LNA + the toolbar readout already consume.
         self._dsp_worker.lna_peak_update.connect(
             self._on_worker_lna_peak, _qc)
+        # B.8 — raw spectrum feed from worker.  The single-thread
+        # path runs FFT on a wall-clock QTimer (_fft_timer) reading
+        # _sample_ring directly.  In worker mode the worker owns
+        # its own sample ring and runs FFT block-counter-driven;
+        # it emits spectrum_raw_ready (just the spec_db array) and
+        # this main-thread slot runs everything downstream
+        # (_process_spec_db: S-meter, noise floor, auto-scale,
+        # zoom, panadapter + waterfall emits).  _fft_timer keeps
+        # firing so _radio_debug_maybe_print stays alive but its
+        # FFT body short-circuits in worker mode.
+        self._dsp_worker.spectrum_raw_ready.connect(
+            self._on_worker_spectrum_raw, _qc)
         # AF Gain, Volume, Muted aren't currently exposed as Qt
         # signals on Radio (single-thread path reads them directly
         # from `_af_gain_db` / `_volume` / `_muted` each block).
@@ -3779,9 +3791,36 @@ class Radio(QObject):
         if self._radio_debug:
             self._dbg_fft_ticks += 1
             self._radio_debug_maybe_print()
+        # B.8 — in worker mode the FFT runs on the DSP worker thread
+        # (driven by IQ block count, not this wall-clock timer).  The
+        # worker emits raw spec_db via spectrum_raw_ready; Radio's
+        # _on_worker_spectrum_raw slot does the post-FFT processing
+        # (S-meter, noise floor, auto-scale, zoom, emits).  We keep
+        # this timer running in worker mode so _radio_debug_maybe_print
+        # still fires every 5 s — useful for verifying that worker
+        # mode bypasses the main-thread DSP path (iq_batches stays 0).
+        if self._dsp_worker is not None:
+            return
+        # Single-thread mode — read ring, compute FFT, post-process.
+        spec_db = self._compute_spec_db()
+        if spec_db is None:
+            return
+        self._process_spec_db(spec_db)
+
+    def _compute_spec_db(self):
+        """Read the sample ring, run FFT, apply un-mirror + cal,
+        return ``spec_db`` (np.float32 array of length ``_fft_size``)
+        or ``None`` if the ring isn't yet full enough.
+
+        Refactored out of ``_tick_fft`` (B.8) so the same FFT body
+        can run on the DSP worker thread in worker mode.  No state
+        is mutated here — purely a read-and-transform of the sample
+        ring.  Caller passes the returned array to
+        ``_process_spec_db`` for everything downstream.
+        """
         with self._ring_lock:
             if len(self._sample_ring) < self._fft_size:
-                return
+                return None
             arr = np.fromiter(self._sample_ring, dtype=np.complex64,
                               count=len(self._sample_ring))
         seg = arr[-self._fft_size:] * self._window
@@ -3801,7 +3840,43 @@ class Radio(QObject):
         # the ~6 Hz FFT loop cheap.
         spec_db = (10.0 * np.log10((np.abs(f) ** 2) / self._win_norm + 1e-20)
                    + self._spectrum_cal_db)
+        return spec_db
 
+    def _on_worker_spectrum_raw(self, spec_db) -> None:
+        """Slot for ``DspWorker.spectrum_raw_ready`` (B.8).
+
+        Runs on the main thread (queued connection from the worker).
+        Receives the raw post-FFT spectrum from the worker and runs
+        all the UI-side post-processing through ``_process_spec_db``
+        — identical to the back half of ``_tick_fft``.
+
+        Splitting the FFT compute from the UI processing lets the
+        worker handle the heavy numerical lift (np.fft.fft on a
+        4096-point complex64 array) while keeping all UI / state
+        machinery (auto-scale, zoom, S-meter mode, waterfall
+        cadence) on the main thread where the rest of the UI lives.
+        """
+        if spec_db is None or len(spec_db) == 0:
+            return
+        # _dbg_fft_emits is incremented inside _process_spec_db right
+        # after spectrum_ready.emit — no double-counting needed here.
+        self._process_spec_db(spec_db)
+
+    def _process_spec_db(self, spec_db):
+        """Post-FFT processing — S-meter, noise floor, auto-scale,
+        zoom, panadapter emit, waterfall emit.  Refactored out of
+        ``_tick_fft`` (B.8) so the same body runs in both single-
+        thread mode (called from ``_tick_fft`` on the main thread
+        timer) and worker mode (called from
+        ``_on_worker_spectrum_raw`` slot, also on main thread but
+        triggered by a worker-thread signal).
+
+        All state mutated here lives on the Radio instance and is
+        only read/written from the main thread, so no synchronization
+        is needed even in worker mode — Qt's queued connection
+        ensures the slot runs on main, serialized with all other
+        main-thread events.
+        """
         # S-meter uses the full (un-zoomed) spectrum — it must measure
         # the tuned signal regardless of display zoom. Bins are now in
         # sky-frequency order after the un-mirror flip above, but the

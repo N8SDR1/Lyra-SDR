@@ -71,6 +71,7 @@ field testing.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from queue import Empty, Full, Queue
 from typing import Optional
@@ -133,11 +134,20 @@ class DspWorker(QObject):
     # These are delivered to main-thread slots via Qt's queued
     # connection mechanism (the default for cross-thread signals).
 
-    spectrum_ready = Signal(object, float, int)
-    """spec_db (np.ndarray), center_hz (float), rate (int).
+    spectrum_raw_ready = Signal(object)
+    """Raw post-FFT spectrum (np.float32 array, length _fft_size).
 
-    Same shape as Radio.spectrum_ready so existing UI slots wire up
-    1:1 once Phase 3.B B.8 migrates FFT into the worker."""
+    Carries ONLY the spec_db array — center_hz / rate / zoom /
+    waterfall cadence / S-meter / auto-scale all stay on the main
+    thread (read live from Radio in ``_process_spec_db``).  The
+    worker does the heavy numerical lift (FFT itself), main does
+    the small-but-stateful UI work.
+
+    The signal name was ``spectrum_ready`` in the B.1 shell — renamed
+    to ``spectrum_raw_ready`` in B.8 to make the contract explicit
+    (Radio's spectrum_ready, which the UI subscribes to, is still
+    emitted from main thread inside ``_process_spec_db`` after this
+    raw spectrum is post-processed)."""
 
     smeter_reading = Signal(float)
     """Linear-power running average for S-meter, sampled at meter
@@ -192,6 +202,22 @@ class DspWorker(QObject):
         # ``radio._audio_sink``, so a main-thread sink swap can never
         # close the underlying object mid-write.
         self._audio_sink = None
+        # Phase 3.B B.8 — worker-owned sample ring + FFT cadence.
+        # When worker mode is active the ring lives here (not on
+        # Radio) so there's no cross-thread contention with the
+        # main-thread FFT timer (which is a no-op in worker mode).
+        # Capacity matches Radio's: ``_fft_size * 4`` so the latest
+        # ``_fft_size`` samples are always available even if FFT
+        # cadence drifts.  Lazy-allocated in ``process_block`` once
+        # we can read ``radio._fft_size`` (avoids a hard dependency
+        # on attach order).
+        self._sample_ring = None  # type: Optional[deque]
+        # Block counter — increments every IQ batch process_block
+        # is called with; FFT runs when it crosses
+        # ``_fft_block_threshold``, computed from current rate +
+        # operator's FPS preference (re-evaluated each block so FPS
+        # / rate changes take effect immediately).
+        self._fft_block_counter: int = 0
 
     # ── Public API: producer-side (rx thread, main thread) ─────
 
@@ -525,24 +551,119 @@ class DspWorker(QObject):
             print(f"[DspWorker] sink write error: {exc}")
             # Continue; next block may succeed.
 
+        # Stage 5 — FFT cadence (B.8).  Append IQ to worker-owned
+        # sample ring; every N blocks (where N tracks the operator's
+        # FPS preference + sample rate), run the FFT and emit the
+        # raw spectrum to Radio's main-thread post-processing slot.
+        # Errors here NEVER stop audio; they'd just freeze the
+        # panadapter for a frame.
+        try:
+            self._maybe_run_fft(samples)
+        except Exception as exc:
+            print(f"[DspWorker] fft error: {exc}")
+
+    def _maybe_run_fft(self, samples: np.ndarray) -> None:
+        """Append IQ to the worker-owned sample ring; if the FFT
+        cadence threshold is crossed, compute one FFT and emit the
+        raw spec_db via ``spectrum_raw_ready`` (B.8).
+
+        Cadence math
+        ------------
+        The single-thread path uses a wall-clock QTimer firing every
+        ``radio._fft_interval_ms``.  In worker mode we instead count
+        IQ blocks and fire when the elapsed-block count corresponds
+        to that same interval at the current sample rate:
+
+            blocks_per_fft = rate * interval_ms / (batch_size * 1000)
+
+        At 96k IQ + 2048 batch + 25 ms interval (40 fps) that's ~1
+        block per FFT (every batch).  At 384k IQ + 2048 batch + 25
+        ms that's ~5 blocks per FFT.  ``max(1, ...)`` guards against
+        divide-by-zero / corner cases where rate or interval are
+        unset.
+
+        Re-evaluated every block so operator FPS / rate changes
+        take effect on the next block boundary — same UX as the
+        wall-clock timer.
+        """
+        radio = self._radio
+        if radio is None:
+            return
+        # Lazy-init the ring once we know radio._fft_size.
+        if self._sample_ring is None:
+            try:
+                fft_size = int(radio._fft_size)
+            except (AttributeError, TypeError, ValueError):
+                return
+            self._sample_ring = deque(maxlen=fft_size * 4)
+        # Append current IQ batch.  Iterates over ndarray — cheap
+        # for a 2048-sample batch (batch is much smaller than the
+        # ring's capacity).  Storing complex64 elements; deque is
+        # GIL-protected so worker-thread reads/writes are coherent
+        # without an explicit lock (no other thread touches it).
+        self._sample_ring.extend(samples)
+
+        # Cadence check.
+        self._fft_block_counter += 1
+        try:
+            rate = int(radio._rate)
+            interval_ms = int(radio._fft_interval_ms)
+            batch_size = int(radio._rx_batch_size)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if rate <= 0 or interval_ms <= 0 or batch_size <= 0:
+            return
+        blocks_per_fft = (rate * interval_ms) / (batch_size * 1000.0)
+        threshold = max(1, int(round(blocks_per_fft)))
+        if self._fft_block_counter < threshold:
+            return
+        self._fft_block_counter = 0
+
+        # FFT body — mirrors Radio._compute_spec_db.  Reads window /
+        # win_norm / spectrum_cal_db / fft_size from radio directly;
+        # those are set once at radio __init__ and never mutated, so
+        # cross-thread reads are safe (no lock, no race).
+        try:
+            fft_size = int(radio._fft_size)
+            window = radio._window
+            win_norm = float(radio._win_norm)
+            cal_db = float(radio._spectrum_cal_db)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if len(self._sample_ring) < fft_size:
+            return
+        arr = np.fromiter(self._sample_ring, dtype=np.complex64,
+                          count=len(self._sample_ring))
+        seg = arr[-fft_size:] * window
+        f = np.fft.fftshift(np.fft.fft(seg))
+        # HL2 baseband is spectrum-mirrored relative to sky frequency
+        # (see _compute_spec_db on Radio for the full rationale).
+        f = f[::-1]
+        spec_db = (10.0 * np.log10((np.abs(f) ** 2) / win_norm + 1e-20)
+                   + cal_db)
+        self.spectrum_raw_ready.emit(spec_db)
+
     def _reset(self) -> None:
         """Flush in-flight DSP state.  Triggered by
         ``request_reset()`` from the main thread on freq, mode, or
         rate change.
 
-        SHELL — only drains the input queue in B.1.  Subsequent
-        sub-tasks add:
-
-        - ``rx_channel.reset()``  (B.3)
-        - AGC peak / hang counter zero  (B.4)
-        - Binaural FIR state + delay buffer reset  (B.5)
-        - Sample-ring clear  (B.8)
+        Currently flushes the input queue + sample ring + FFT block
+        counter.  Channel reset + AGC reset + binaural reset land
+        in B.9 (Reset/flush via signal) when Radio.reset() routes
+        through the worker.
         """
         # Drain queued IQ so we don't process stale-mode samples
-        # against new-mode state.  Subsequent sub-tasks reset the
-        # downstream DSP objects too.
+        # against new-mode state.
         while True:
             try:
                 self._input_queue.get_nowait()
             except Empty:
                 break
+        # B.8 — clear sample ring + reset FFT cadence so the next
+        # FFT after a freq/rate/mode change is built from fresh
+        # post-reset samples (matching the single-thread behavior
+        # where Radio.reset() clears the ring).
+        if self._sample_ring is not None:
+            self._sample_ring.clear()
+        self._fft_block_counter = 0
