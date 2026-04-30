@@ -105,6 +105,54 @@ and/or threaded demod.
   turn on Notch first — right-click is gated on NF state so the
   gesture stays free for other spectrum features when NF is off.
 
+## ANF is killing my CW signal
+
+CW dits are tones too — ANF's LMS predictor can lock onto them
+just like a heterodyne. Aggressive μ values will eat fast keying.
+
+**Fix:**
+
+1. Right-click the **ANF** button on the DSP+Audio panel.
+2. Pick **Gentle** — slow adapt rate, fast keying outpaces it.
+3. Or simply **Off** — for CW you usually want
+   [APF](./apf.md) to *boost* the pitch, not ANF to null it.
+
+Rule of thumb: if you can hear ANF chewing on your CW, it's on
+the wrong setting for that mode. Gentle or Off when listening
+to CW you actually care about.
+
+## ANF doing nothing on an obvious heterodyne
+
+Two common causes:
+
+1. **Adapt rate too slow** — try **Aggressive** (μ = 4×10⁻⁴),
+   or pick **Custom** in Settings → Noise → μ slider and dial up.
+2. **Heterodyne is too wide** — ANF works on narrow tones. A
+   "carrier" with significant audio modulation looks broadband
+   to the LMS predictor. Use a manual notch filter instead.
+
+If the tone is brief/transient (under ~100 ms), even Aggressive
+profile may not have time to lock on. Brief tones aren't usually
+worth notching — they're gone before you'd notice.
+
+## ANF makes voice sound muffled / hollow
+
+ANF is too aggressive — it's nulling vowel formants (the tonal
+peaks in vowel sounds).
+
+**Fix:**
+
+1. Try **Standard** profile (μ = 1.5×10⁻⁴) — fast enough for
+   real heterodynes, slow enough that vowels survive.
+2. If Standard still feels off, try **Gentle** (μ = 5×10⁻⁵).
+3. Or **Off** — manually notch known carriers via the spectrum
+   right-click menu.
+
+The tradeoff is fundamental: faster adapt rate kills more tones
+but takes more bites out of speech. The Standard preset is
+calibrated for typical SSB voice; only step up to Aggressive on
+bands where heterodynes are appearing/disappearing rapidly.
+
 ## NB is clipping my CW signal
 
 Aggressive NB at low threshold can mistake the leading edge of a

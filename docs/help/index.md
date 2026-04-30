@@ -43,6 +43,9 @@ up changes.
   (Audacity-style), neural roadmap
 - **Noise Blanker** — IQ-domain impulse suppression, profiles
   (Off / Light / Medium / Aggressive / Custom), threshold tuning
+- **Auto Notch Filter** — LMS adaptive notch, surgical removal
+  of hetorodynes / carriers / RTTY spurs, profiles
+  (Off / Gentle / Standard / Aggressive / Custom)
 - **APF (Audio Peaking Filter)** — narrow CW boost at the operator's pitch
 - **BIN (Binaural)** — pseudo-stereo headphone listening for CW + SSB
 - **Spectrum & Waterfall** — pan, zoom, drag, palettes
