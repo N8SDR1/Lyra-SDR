@@ -500,7 +500,7 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self):
         """Main toolbar — explicit left-to-right order:
 
-            Start  ●Streaming  ◌TCI Ready  ⚙Settings  Reset Panel Layout
+            Start  ◌TCI Ready  ⚙Settings
             [dock toggles — Tuning / Mode+Filter / View / Band / Meters / DSP+Audio]
             ── spacer ── [ADC pk/rms]
             ── spacer ── [Local clock] [UTC clock]   (centered)
@@ -509,6 +509,14 @@ class MainWindow(QMainWindow):
         Three Expanding spacers between ADC, Clocks, and HL2/CPU
         distribute them evenly so the clocks land in the visual
         center of the bar and the HL2/CPU cluster sits on the right.
+
+        The "● streaming / ● not streaming" status dot was removed —
+        the Start/Stop button's own toggled state + label change
+        (▶ Start ↔ ⏹ Stop) plus the live spectrum is already an
+        unambiguous indicator that streaming is running.  TCI keeps
+        its indicator because it has multi-state info (off /
+        listening / N connected clients) that isn't otherwise
+        visible.
         """
         from PySide6.QtWidgets import QLabel, QWidget, QSizePolicy
         from PySide6.QtCore import QTimer
@@ -525,12 +533,7 @@ class MainWindow(QMainWindow):
         self.start_action.toggled.connect(self._on_start_toggled)
         tb.addAction(self.start_action)
 
-        # ── 2. Streaming status dot ────────────────────────────────
-        self.status_dot = QLabel("  ●  not streaming  ")
-        self.status_dot.setStyleSheet("color: #8a9aac; font-weight: 600;")
-        tb.addWidget(self.status_dot)
-
-        # ── 3. TCI Ready indicator ─────────────────────────────────
+        # ── 2. TCI Ready indicator ─────────────────────────────────
         # Replaces the former TCI dock panel — shows server state +
         # client count at a glance. Click to open Network settings.
         self.tci_indicator = QLabel("  ◌  TCI off  ")
@@ -883,12 +886,7 @@ class MainWindow(QMainWindow):
         self.start_action.setChecked(running)
         self.start_action.setText("⏹  Stop" if running else "▶  Start")
         self.start_action.blockSignals(False)
-        if running:
-            self.status_dot.setText("  ●  streaming  ")
-            self.status_dot.setStyleSheet("color: #39ff14; font-weight: 700;")
-        else:
-            self.status_dot.setText("  ●  not streaming  ")
-            self.status_dot.setStyleSheet("color: #8a9aac; font-weight: 600;")
+        if not running:
             # Reset the ADC peak indicator to a dim placeholder — no
             # stream, no meaningful reading.
             self._adc_peak_db = -160.0
