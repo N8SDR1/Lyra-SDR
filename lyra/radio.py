@@ -1012,19 +1012,17 @@ class Radio(QObject):
         # Flush the audio chain. Field test on AM 10 MHz WWV → DIGU
         # 7.074 MHz FT8: audio could get stuck silent across big
         # freq jumps until the operator cycled the sample rate.
-        # channel.reset() drops in-flight audio buffer + forces
-        # decimator rebuild (matches what set_in_rate did, which
-        # was the only previous escape hatch). Also reset AGC peak
-        # so a stale loud-signal peak from the prior band doesn't
-        # clamp gain to silence on the new band while it slowly
-        # decays.
-        self._rx_channel.reset()
-        self._agc_peak = 1e-4
-        self._agc_hang_counter = 0
-        self._smeter_avg_lin = 0.0
-        # BIN — clear Hilbert state + delay line so a freq/mode jump
-        # doesn't bleed the prior band's audio across the discontinuity.
-        self._binaural.reset()
+        # The reset drops in-flight audio buffer + forces decimator
+        # rebuild + zeroes AGC peak (so a stale loud-signal peak
+        # from the prior band doesn't clamp gain to silence on the
+        # new band while it slowly decays) + zeroes binaural state
+        # (Hilbert + delay line — prevents prior band's audio
+        # bleeding across the discontinuity).
+        #
+        # B.9: in worker mode this routes through DspWorker so the
+        # reset runs between blocks (no race with worker's
+        # process_block).  Single-thread mode: synchronous on main.
+        self._request_dsp_reset_full()
         # NOTE: previous version called _stream.reassert_rate_keepalive()
         # here as a band-aid for stuck-audio after big freq jumps.
         # That's now redundant because the stream uses round-robin
@@ -2960,7 +2958,8 @@ class Radio(QObject):
             # because the worker serializes close() with its run
             # loop (the slot can't fire mid-block).
             new_sink = self._make_sink() if self._stream else NullSink()
-            self._rx_channel.reset()
+            # B.9: channel reset routed through worker (between blocks).
+            self._request_dsp_reset_channel_only()
             self._audio_sink = new_sink
             self._push_balance_to_sink()
             self.worker_audio_sink_changed.emit(new_sink)
@@ -2971,7 +2970,7 @@ class Radio(QObject):
                 self._audio_sink.close()
             except Exception:
                 pass
-            self._rx_channel.reset()
+            self._request_dsp_reset_channel_only()
             # 30 ms — long enough for PortAudio/WASAPI to fully
             # release the device handle, short enough to be
             # imperceptible to the operator. Tested across AK4951↔PC
@@ -3051,7 +3050,9 @@ class Radio(QObject):
             self._stream = None
         with self._ring_lock:
             self._sample_ring.clear()
-        self._rx_channel.reset()
+        # B.9: channel reset routed through worker in worker mode
+        # (worker also clears its own sample ring + FFT counter).
+        self._request_dsp_reset_channel_only()
         self._lna_peaks = []
         self._lna_rms = []
         self.stream_state_changed.emit(False)
@@ -3214,6 +3215,51 @@ class Radio(QObject):
         # Drop references so any second call is a no-op
         self._dsp_worker = None
         self._dsp_worker_thread = None
+
+    def _request_dsp_reset_full(self) -> None:
+        """Reset the full audio chain: rx_channel + binaural + AGC
+        envelope + S-meter running average.  Used at freq / mode /
+        rate change — any operator action that introduces a
+        legitimate audio discontinuity.
+
+        Worker mode (B.9): defers to the worker, which performs the
+        same reset between blocks (no race with worker's
+        process_block).  Single-thread mode: runs synchronously
+        on the calling (main) thread, identical to v0.0.5
+        behavior.
+        """
+        if self._dsp_worker is not None:
+            # Worker performs ALL the resets between blocks; main
+            # thread doesn't touch DSP state directly.
+            self._dsp_worker.request_reset()
+            return
+        # Single-thread path — synchronous reset on main.
+        self._rx_channel.reset()
+        self._agc_peak = 1e-4
+        self._agc_hang_counter = 0
+        self._smeter_avg_lin = 0.0
+        self._binaural.reset()
+
+    def _request_dsp_reset_channel_only(self) -> None:
+        """Reset just the rx_channel — drops the in-flight audio
+        buffer + forces decimator rebuild.  Used at sink swap +
+        stream stop, where AGC envelope and binaural state should
+        be preserved across the discontinuity.
+
+        Worker mode (B.9): worker's request_reset is currently
+        coarse-grained (always does the full reset).  That over-
+        resets AGC + binaural on sink swap — operator-noticeable
+        as a brief AGC re-attack, but not a regression to safety
+        (the swap was already an audio discontinuity).  A finer-
+        grained worker reset can land if field testing surfaces
+        the AGC re-attack as objectionable.
+
+        Single-thread mode: runs synchronously, identical to v0.0.5.
+        """
+        if self._dsp_worker is not None:
+            self._dsp_worker.request_reset()
+            return
+        self._rx_channel.reset()
 
     def _on_worker_lna_peak(self, peak: float, rms: float) -> None:
         """Slot for ``DspWorker.lna_peak_update`` (B.6).
@@ -3695,7 +3741,8 @@ class Radio(QObject):
                 # B.5 — worker mode: build new, hand off, worker
                 # closes the old between blocks.
                 new_sink = self._make_sink()
-                self._rx_channel.reset()
+                # B.9: channel reset routed through worker.
+                self._request_dsp_reset_channel_only()
                 self._audio_sink = new_sink
                 self._push_balance_to_sink()
                 self.worker_audio_sink_changed.emit(new_sink)
@@ -3704,7 +3751,7 @@ class Radio(QObject):
                     self._audio_sink.close()
                 except Exception:
                     pass
-                self._rx_channel.reset()
+                self._request_dsp_reset_channel_only()
                 import time as _time
                 _time.sleep(0.030)
                 self._audio_sink = self._make_sink()

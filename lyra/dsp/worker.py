@@ -645,13 +645,24 @@ class DspWorker(QObject):
 
     def _reset(self) -> None:
         """Flush in-flight DSP state.  Triggered by
-        ``request_reset()`` from the main thread on freq, mode, or
-        rate change.
+        ``request_reset()`` from the main thread on freq, mode,
+        rate change, or sink swap.
 
-        Currently flushes the input queue + sample ring + FFT block
-        counter.  Channel reset + AGC reset + binaural reset land
-        in B.9 (Reset/flush via signal) when Radio.reset() routes
-        through the worker.
+        Runs on the WORKER thread between blocks (driven by the
+        ``_reset_requested`` flag check in ``run_loop``), so it
+        can safely mutate channel / binaural / AGC state that
+        ``process_block`` also touches — Qt's run-loop ordering
+        guarantees these don't interleave.
+
+        Resets cover:
+        - Worker-internal: input queue, sample ring, FFT counter
+        - Radio-side DSP state (called via back-reference): rx
+          channel, binaural, AGC peak / hang counter, S-meter
+          running average
+
+        Operator-side reset of UI / hardware state (notch rebuild,
+        waterfall counter, OC pattern) stays on the main thread —
+        it's not in the worker's audio path.
         """
         # Drain queued IQ so we don't process stale-mode samples
         # against new-mode state.
@@ -662,8 +673,33 @@ class DspWorker(QObject):
                 break
         # B.8 — clear sample ring + reset FFT cadence so the next
         # FFT after a freq/rate/mode change is built from fresh
-        # post-reset samples (matching the single-thread behavior
-        # where Radio.reset() clears the ring).
+        # post-reset samples.
         if self._sample_ring is not None:
             self._sample_ring.clear()
         self._fft_block_counter = 0
+        # B.9 — reset Radio-owned DSP state via the back-reference.
+        # These are the same calls the single-thread path makes from
+        # main thread; in worker mode they run here, between blocks,
+        # so process_block never sees a half-reset channel / binaural
+        # / AGC.
+        radio = self._radio
+        if radio is None:
+            return
+        try:
+            radio._rx_channel.reset()
+        except Exception as exc:
+            print(f"[DspWorker] channel reset error: {exc}")
+        try:
+            radio._binaural.reset()
+        except Exception as exc:
+            print(f"[DspWorker] binaural reset error: {exc}")
+        # AGC + S-meter are plain Python attributes on radio; direct
+        # writes are GIL-safe and the consumer (_apply_agc_and_volume)
+        # reads them inside process_block on this same worker thread,
+        # so the writes here are serialized w.r.t. the next block.
+        try:
+            radio._agc_peak = 1e-4
+            radio._agc_hang_counter = 0
+            radio._smeter_avg_lin = 0.0
+        except AttributeError as exc:
+            print(f"[DspWorker] AGC/smeter reset error: {exc}")
