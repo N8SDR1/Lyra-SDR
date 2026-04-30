@@ -6,23 +6,53 @@ domain subtraction. A VAD-like rule updates the noise floor estimate
 only on frames quieter than the current estimate, so speech doesn't
 pollute the noise model.
 
-Three profiles tune the aggression / artifact trade-off:
+Four profiles tune the aggression / artifact trade-off:
 
     Light       — SSB ragchew, subtle hiss reduction, minimal artifacts
     Medium      — standard speech NR (default)
     Aggressive  — weak-signal DX, noisy bands; accept more "musical
                   noise" artifacts for deeper noise suppression
+    Captured    — Audacity-style: operator records a noise-only sample
+                  via begin_noise_capture(); the captured per-bin
+                  magnitude profile becomes the locked noise model.
+                  Much more accurate than the live VAD estimate
+                  because it's measured on actual noise without any
+                  signal contamination.
 
 The "musical noise" artifact of classical subtraction is a known
 limitation; the aggressive profile spreads this by using a higher
-spectral floor. Neural NR (RNNoise / DeepFilterNet — planned)
-eliminates it almost entirely. See docs/backlog.md.
+spectral floor. Captured-profile mode generally has cleaner output
+than the live profiles because the noise model is more accurate.
+Neural NR (RNNoise / DeepFilterNet — planned) eliminates the
+musical-noise artifact almost entirely. See docs/backlog.md.
 
 Integration: Radio calls `.process(audio_block)` once per demod
 block. The module is length-preserving: input N samples → output N
 samples (with ~2.7 ms internal latency, one FFT frame of 256 at 48k).
+
+Captured-profile workflow (Phase 3.D #1):
+    1. Operator tunes to noise-only frequency / transmission gap
+    2. UI calls nr.begin_noise_capture(seconds=2.0)
+    3. Lyra accumulates per-bin magnitudes for `seconds` of audio
+       inside process()
+    4. When done, the average becomes _captured_noise_mag, state
+       flips to "ready", and the registered done-callback fires
+       (Radio's signal-emit shim — see set_capture_done_callback)
+    5. Operator (or UI auto-) selects profile = "captured"; from
+       then on, subtraction uses the locked profile instead of the
+       live VAD-tracked estimate.
+    6. Operator can re-capture at will, save/load via the JSON
+       persistence layer (lyra/dsp/noise_profile_store), or clear
+       via clear_captured_profile().
+
+Smart-guard (always on by default): after capture finishes,
+inspect frame-to-frame power variance. High variance suggests a
+signal was riding through the capture window; smart_guard_verdict()
+returns "suspect" so the UI can warn the operator before they save.
 """
 from __future__ import annotations
+
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -35,13 +65,41 @@ class SpectralSubtractionNR:
     #   alpha        — over-subtraction factor (higher = more noise removed)
     #   beta         — spectral floor (higher = less musical-noise artifact)
     #   noise_track  — exp-smoothing rate for noise-floor estimate
+    #                  (0.0 = locked, no live update — used by Captured)
     #   vad_gate     — frame is "noise" if power < noise_est × this factor
+    #                  (ignored when noise_track == 0.0)
     PROFILES: dict[str, dict[str, float]] = {
         "light":      {"alpha": 1.0, "beta": 0.20, "noise_track": 0.03,  "vad_gate": 3.0},
         "medium":     {"alpha": 1.8, "beta": 0.12, "noise_track": 0.015, "vad_gate": 3.0},
         "aggressive": {"alpha": 2.8, "beta": 0.06, "noise_track": 0.008, "vad_gate": 4.0},
+        # Phase 3.D #1 — Captured-noise-profile mode.  Uses the
+        # operator-recorded _captured_noise_mag instead of the live
+        # _noise_mag.  noise_track = 0 disables adaptive update —
+        # the profile stays locked to whatever the operator captured.
+        # alpha / beta sit between Medium and Aggressive: a locked
+        # profile is more accurate than the live estimate, so we can
+        # subtract a bit harder without the musical-noise artifact
+        # getting worse.  If profile is set to "captured" but no
+        # captured profile is loaded, process() falls back to live
+        # _noise_mag (effectively NR1 with these tuning values) so
+        # the operator hears something rather than nothing — but UI
+        # should normally prevent this state.
+        "captured":   {"alpha": 1.5, "beta": 0.10, "noise_track": 0.0,   "vad_gate": 0.0},
     }
     DEFAULT_PROFILE = "medium"
+
+    # Smart-guard threshold — coefficient of variation (std/mean) of
+    # per-frame power during capture above which we flag "suspect".
+    # Quiet band noise has CV well under 0.5 (frame-to-frame power
+    # stable); CW keying or SSB syllables push CV above 0.5 quickly.
+    GUARD_VARIANCE_THRESHOLD: float = 0.5
+
+    # Capture duration sanity bounds (seconds).  Operator UI exposes
+    # 1.0 - 5.0 sec range per locked operator decision; these are the
+    # absolute bounds applied at the DSP layer in case a programmatic
+    # caller passes something silly.
+    CAPTURE_MIN_SEC: float = 0.5
+    CAPTURE_MAX_SEC: float = 30.0
 
     def __init__(self, rate: int = 48000):
         self.rate = rate
@@ -63,6 +121,45 @@ class SpectralSubtractionNR:
         self.profile = self.DEFAULT_PROFILE
         self._apply_profile()
 
+        # ── Phase 3.D #1: captured-noise-profile state ────────────
+        # ``_captured_noise_mag`` holds the locked per-bin magnitude
+        # array when a profile is loaded (n_bins float32).  None
+        # means "no profile loaded" — the "captured" NR profile
+        # falls back to live noise tracking in that case (UI should
+        # prevent the operator from reaching that state, but safer
+        # to handle it gracefully than crash).
+        self._captured_noise_mag: Optional[np.ndarray] = None
+        # Capture lifecycle:
+        #   "idle"       — no capture in progress, no recent result
+        #   "capturing"  — accumulating frames; process() is feeding
+        #                  the accumulator
+        #   "ready"      — last capture finished; results in
+        #                  _captured_noise_mag and _capture_verdict
+        # State transitions are single-attribute writes (GIL-safe);
+        # the worker thread reads "capturing"/"idle" inside process()
+        # and the main thread reads "ready" after the done-callback
+        # fires.
+        self._capture_state: str = "idle"
+        self._capture_frames_target: int = 0
+        self._capture_frames_done: int = 0
+        self._capture_accum: Optional[np.ndarray] = None
+        # Per-frame total-power list for the smart-guard variance
+        # check.  Cleared at begin_noise_capture; populated during
+        # capture; inspected at finalize.  Kept around afterwards so
+        # the UI can re-query smart_guard_verdict() if it wants.
+        self._capture_per_frame_powers: list[float] = []
+        self._capture_verdict: str = "n/a"  # n/a | clean | suspect
+        # Operator-tunable in v2 (Settings → Noise tab).  For day 1
+        # the smart guard is always on; UI exposes a toggle later.
+        self._smart_guard_enabled: bool = True
+        # Done-callback: Radio registers a function here that emits
+        # a Qt signal so the UI can react.  Fires from inside
+        # process() on whatever thread is running it (worker thread
+        # in worker mode, Qt main in single-thread).  The callback
+        # is responsible for any cross-thread dispatch (Qt signals
+        # with QueuedConnection handle this for free).
+        self._capture_done_callback: Optional[Callable[[], None]] = None
+
     # ── public API ────────────────────────────────────────────────
     def set_profile(self, name: str):
         if name in self.PROFILES:
@@ -71,20 +168,252 @@ class SpectralSubtractionNR:
 
     def reset(self):
         """Drop all streaming state — call on mode / rate / stream
-        transitions so a stale overlap tail doesn't leak into new audio."""
+        transitions so a stale overlap tail doesn't leak into new audio.
+
+        Cancels any in-progress capture (the audio discontinuity
+        that triggered reset is exactly the kind of thing that
+        would corrupt a noise profile).  The captured profile
+        itself — operator-locked — is preserved across reset.
+        """
         self._in_buf = np.zeros(0, dtype=np.float32)
         self._out_carry = np.zeros(self._hop, dtype=np.float32)
         n_bins = self._fft // 2 + 1
         self._noise_mag = np.full(n_bins, 1e-3, dtype=np.float32)
+        if self._capture_state == "capturing":
+            self.cancel_noise_capture()
+
+    # ── Captured noise profile API (Phase 3.D #1) ─────────────────
+
+    def begin_noise_capture(self, seconds: float = 2.0) -> None:
+        """Start capturing the noise profile from the next ``seconds``
+        of incoming audio.
+
+        Returns immediately; the actual capture happens inside the
+        ``process()`` loop over the next ~``seconds * rate / hop``
+        frames.  Caller can poll ``capture_progress()`` to drive a
+        progress bar, or rely on the registered done-callback (see
+        ``set_capture_done_callback``) to fire when capture finishes.
+
+        If a capture is already in progress, the call is a no-op
+        (UI should disable the button while ``_capture_state ==
+        "capturing"`` to prevent this case in the first place, but
+        the silent no-op is the safest fallback).
+
+        ``seconds`` is clamped to ``[CAPTURE_MIN_SEC, CAPTURE_MAX_SEC]``;
+        the operator UI normally constrains it to 1.0 - 5.0 per the
+        locked operator decision.
+        """
+        if self._capture_state == "capturing":
+            return
+        seconds = float(max(self.CAPTURE_MIN_SEC,
+                            min(seconds, self.CAPTURE_MAX_SEC)))
+        # Frames per second = rate / hop (~375 fps at 48k / 128 hop).
+        frames = max(1, int(round(seconds * self.rate / self._hop)))
+        n_bins = self._fft // 2 + 1
+        # Use float64 for the accumulator — capture can run for
+        # thousands of frames and float32 sums lose precision.
+        # Cast back to float32 at finalize.
+        self._capture_accum = np.zeros(n_bins, dtype=np.float64)
+        self._capture_per_frame_powers = []
+        self._capture_frames_target = frames
+        self._capture_frames_done = 0
+        self._capture_verdict = "n/a"
+        # Last write — flips state for process() to start
+        # accumulating on its next frame.  Single-attribute write
+        # is atomic under GIL; safe across thread boundaries.
+        self._capture_state = "capturing"
+
+    def cancel_noise_capture(self) -> None:
+        """Abort an in-progress capture.
+
+        State returns to "idle"; partial accumulator is discarded;
+        the active captured profile (if any) is preserved.  No-op
+        if no capture is in progress.
+        """
+        if self._capture_state != "capturing":
+            return
+        self._capture_state = "idle"
+        self._capture_accum = None
+        self._capture_per_frame_powers = []
+        self._capture_frames_target = 0
+        self._capture_frames_done = 0
+        self._capture_verdict = "n/a"
+
+    def has_captured_profile(self) -> bool:
+        """True if a captured profile is currently loaded.
+
+        Note: this is independent of which NR profile is selected —
+        ``has_captured_profile()`` can be True while ``profile`` is
+        e.g. "medium" (operator captured a profile but is using
+        live NR), and False while ``profile == "captured"`` (operator
+        selected the captured mode but no profile is loaded —
+        process() falls back to live tracking)."""
+        return self._captured_noise_mag is not None
+
+    def captured_profile_array(self) -> Optional[np.ndarray]:
+        """Return a copy of the active captured noise magnitudes,
+        or None if no profile is loaded.
+
+        Used by the JSON persistence layer (Day 2) to serialize the
+        profile to disk.  Always returns a copy so callers can't
+        mutate the live NR state."""
+        if self._captured_noise_mag is None:
+            return None
+        return self._captured_noise_mag.copy()
+
+    def load_captured_profile(self, mag: np.ndarray) -> None:
+        """Install a previously-saved captured profile (loaded from
+        the JSON persistence layer).
+
+        Validates the array size against the current FFT bin count
+        and raises ValueError on mismatch — used to flag profiles
+        from a different FFT_SIZE as incompatible at load time
+        rather than silently producing wrong-sized output.
+        """
+        n_bins = self._fft // 2 + 1
+        arr = np.asarray(mag, dtype=np.float32)
+        if arr.shape != (n_bins,):
+            raise ValueError(
+                f"captured profile size {arr.shape} does not match "
+                f"current FFT bin count ({n_bins},) — "
+                f"profile was likely saved with a different FFT_SIZE")
+        # Defensive: ensure no zero / negative bins (would divide-
+        # by-zero in the gain calc).  Floor at 1e-6 (well below any
+        # real noise, well above zero).
+        arr = np.maximum(arr, 1e-6).astype(np.float32, copy=False)
+        self._captured_noise_mag = arr.copy()
+
+    def clear_captured_profile(self) -> None:
+        """Drop the active captured profile.
+
+        After this call, ``has_captured_profile()`` returns False.
+        If ``profile == "captured"`` was active, ``process()`` will
+        fall back to live noise tracking with the captured-profile
+        tuning values (UI normally switches profile back to a live
+        mode in this case)."""
+        self.cancel_noise_capture()
+        self._captured_noise_mag = None
+
+    def capture_progress(self) -> tuple[str, float]:
+        """Return ``(state, fraction_complete)`` for UI progress
+        reporting.
+
+        - state ∈ {"idle", "capturing", "ready"}
+        - fraction is 0.0 - 1.0 while capturing, 0.0 in other states
+        """
+        if self._capture_state != "capturing":
+            return (self._capture_state, 0.0)
+        if self._capture_frames_target <= 0:
+            return ("capturing", 0.0)
+        frac = self._capture_frames_done / self._capture_frames_target
+        return ("capturing", min(1.0, max(0.0, frac)))
+
+    def smart_guard_verdict(self) -> str:
+        """Verdict from the most recent capture's smart-guard check.
+
+        - "clean"   — low frame-to-frame power variance (= band noise)
+        - "suspect" — high variance suggests a signal was present
+        - "n/a"     — guard disabled, or no recent capture
+        """
+        return self._capture_verdict
+
+    def set_capture_done_callback(
+            self, fn: Optional[Callable[[], None]]) -> None:
+        """Register (or clear) a function to be called when a
+        capture completes — i.e., the state transitions from
+        "capturing" → "ready".
+
+        The callback is invoked from inside ``process()`` on
+        whatever thread is currently running the audio chain.  In
+        worker mode this is the DSP worker thread; in single-thread
+        mode it's the Qt main thread.  The callback is responsible
+        for any cross-thread dispatch — typical pattern is to emit
+        a Qt signal with QueuedConnection so the slot runs on main
+        regardless of where it was emitted.
+
+        Pass None to clear an existing callback.  Multiple calls
+        replace; we don't support multiple subscribers (Radio is
+        the only intended caller).
+        """
+        self._capture_done_callback = fn
+
+    def _evaluate_capture_quality(self) -> str:
+        """Smart-guard heuristic: inspect the per-frame total-power
+        list collected during capture.  Quiet noise has stable
+        frame-to-frame power; signals (CW keying, SSB syllables,
+        AM modulation) drive frame power up and down sharply.
+
+        Coefficient of variation (CV = stdev / mean) is the metric:
+        - CV ≲ 0.3  → clean noise
+        - CV ≳ 0.5  → suspect (signal likely present in capture)
+        - in between is ambiguous; we conservatively flag as suspect
+          above the threshold so the UI can warn the operator.
+
+        Returns "n/a" if the smart-guard is disabled or no per-frame
+        data exists.
+        """
+        if not self._smart_guard_enabled:
+            return "n/a"
+        if not self._capture_per_frame_powers:
+            return "n/a"
+        powers = np.asarray(self._capture_per_frame_powers,
+                            dtype=np.float64)
+        if powers.size < 4:
+            # Too few frames for a meaningful variance estimate.
+            return "n/a"
+        mean = float(np.mean(powers))
+        if mean <= 0.0:
+            return "n/a"
+        cv = float(np.std(powers)) / mean
+        return "suspect" if cv > self.GUARD_VARIANCE_THRESHOLD else "clean"
 
     def process(self, audio: np.ndarray) -> np.ndarray:
         """Process one demod block. Returns the same length of audio
         (possibly delayed by one hop on the very first call) or the
-        input unchanged when `enabled == False`."""
-        if not self.enabled or audio.size == 0:
+        input unchanged when both NR is disabled and no capture is
+        running.
+
+        Behavior gates:
+        - ``enabled == False`` and not capturing → input returned
+          unchanged (full NR bypass; cheapest path)
+        - ``enabled == False`` and capturing → input returned
+          unchanged BUT a parallel FFT loop accumulates noise
+          magnitudes for the capture profile; lets the operator
+          capture without first turning NR on
+        - ``enabled == True`` → full NR processing; if capturing
+          also runs, the same FFT serves both purposes
+        - ``profile == "captured"`` and a captured profile is loaded
+          → uses the captured magnitudes as the noise reference;
+          live VAD tracker still runs in the background as a
+          fallback in case the captured profile is cleared
+        """
+        if audio.size == 0:
+            return audio
+        capturing = (self._capture_state == "capturing")
+
+        # Fast path: NR disabled, not capturing — nothing to do.
+        if not self.enabled and not capturing:
             return audio
 
-        # Append new samples to the pending-input buffer
+        # Capture-without-NR path: do a lightweight FFT loop that
+        # accumulates magnitudes but does NOT modify the audio.
+        # Operator hears their unchanged audio while the profile
+        # builds up in the background.
+        if not self.enabled and capturing:
+            x = audio.astype(np.float32, copy=False)
+            self._in_buf = np.concatenate([self._in_buf, x])
+            while self._in_buf.size >= self._fft:
+                frame = self._in_buf[:self._fft] * self._window
+                spec = np.fft.rfft(frame)
+                mag = np.abs(spec)
+                self._accumulate_capture_frame(mag)
+                # Advance — overlap by hop, NO out_chunks emitted,
+                # NO _out_carry update.  Audio is untouched.
+                self._in_buf = self._in_buf[self._hop:]
+            return audio
+
+        # NR enabled — full processing path (with optional capture
+        # piggybacking on the same FFT).
         x = audio.astype(np.float32, copy=False)
         self._in_buf = np.concatenate([self._in_buf, x])
 
@@ -94,17 +423,39 @@ class SpectralSubtractionNR:
             spec = np.fft.rfft(frame)
             mag = np.abs(spec)
 
+            # Phase 3.D #1 — capture accumulation, when active.
+            # Runs in the same FFT loop as NR for efficiency — one
+            # FFT serves both purposes.
+            if capturing:
+                self._accumulate_capture_frame(mag)
+                # Re-read state — _accumulate may have flipped it
+                # to "ready" via _finalize_capture().
+                capturing = (self._capture_state == "capturing")
+
             # Noise-floor tracking — simple VAD: update only when the
             # frame is quieter than vad_gate × the current estimate.
-            frame_pow = float(np.mean(mag * mag))
-            noise_pow = float(np.mean(self._noise_mag * self._noise_mag))
-            if frame_pow <= noise_pow * self._vad_gate:
-                a = self._noise_track
-                self._noise_mag = (1.0 - a) * self._noise_mag + a * mag
+            # Skipped for the captured profile (noise_track == 0);
+            # the captured magnitudes are locked, no live update.
+            if self._noise_track > 0.0:
+                frame_pow = float(np.mean(mag * mag))
+                noise_pow = float(np.mean(self._noise_mag * self._noise_mag))
+                if frame_pow <= noise_pow * self._vad_gate:
+                    a = self._noise_track
+                    self._noise_mag = (1.0 - a) * self._noise_mag + a * mag
+
+            # Choose the noise reference: captured profile wins when
+            # active and loaded; otherwise live tracker (which also
+            # serves as the fallback if the captured profile is
+            # cleared mid-stream).
+            if (self.profile == "captured"
+                    and self._captured_noise_mag is not None):
+                noise_ref = self._captured_noise_mag
+            else:
+                noise_ref = self._noise_mag
 
             # Magnitude-domain subtraction with spectral floor
             denom = np.maximum(mag, 1e-10)
-            gain = np.maximum(1.0 - self._alpha * self._noise_mag / denom,
+            gain = np.maximum(1.0 - self._alpha * noise_ref / denom,
                               self._beta).astype(np.float32)
             time_frame = np.fft.irfft(spec * gain, self._fft).astype(np.float32)
 
@@ -143,3 +494,65 @@ class SpectralSubtractionNR:
         self._beta = p["beta"]
         self._noise_track = p["noise_track"]
         self._vad_gate = p["vad_gate"]
+
+    def _accumulate_capture_frame(self, mag: np.ndarray) -> None:
+        """Add one frame's magnitude spectrum + total power into the
+        capture accumulator.  When the target frame count is hit,
+        finalize via :meth:`_finalize_capture`.
+
+        Called from inside ``process()``'s per-frame loop on
+        whatever thread is running NR (worker thread in worker
+        mode, Qt main in single-thread mode).
+        """
+        if self._capture_accum is None:
+            return
+        self._capture_accum += mag.astype(np.float64)
+        self._capture_per_frame_powers.append(float(np.sum(mag * mag)))
+        self._capture_frames_done += 1
+        if self._capture_frames_done >= self._capture_frames_target:
+            self._finalize_capture()
+
+    def _finalize_capture(self) -> None:
+        """Convert the accumulated frame sum into a captured profile,
+        run the smart-guard quality check, transition state to
+        "ready", and fire the registered done-callback.
+
+        Always called from inside ``process()`` (i.e. on the audio
+        thread).  The done-callback is responsible for any cross-
+        thread dispatch (Radio's wrapper emits a Qt signal with
+        QueuedConnection).
+        """
+        if self._capture_accum is None or self._capture_frames_target <= 0:
+            # Defensive — _accumulate_capture_frame guards against
+            # this but belt-and-suspenders if state is somehow
+            # inconsistent.
+            self._capture_state = "idle"
+            return
+        # Average over the actual frame count we collected (matches
+        # _capture_frames_done — should equal _capture_frames_target
+        # at this point but use the actual count for safety).
+        n = max(1, self._capture_frames_done)
+        avg_mag = (self._capture_accum / n).astype(np.float32)
+        # Floor at 1e-6 — same protection load_captured_profile()
+        # applies for externally-loaded profiles.
+        avg_mag = np.maximum(avg_mag, 1e-6).astype(np.float32, copy=False)
+        self._captured_noise_mag = avg_mag
+        self._capture_verdict = self._evaluate_capture_quality()
+        # Drop the accumulator; per-frame-power list is kept around
+        # in case the UI re-queries the verdict, and gets reset on
+        # the next begin_noise_capture() call.
+        self._capture_accum = None
+        # Last write — flips state.  Done before the callback so
+        # the callback can rely on state == "ready".
+        self._capture_state = "ready"
+        cb = self._capture_done_callback
+        if cb is not None:
+            try:
+                cb()
+            except Exception as exc:
+                # Never let a bad callback crash the audio thread.
+                # Print for diagnostics; capture is still complete
+                # and the profile is available via the public API
+                # if the UI polls instead of relying on the callback.
+                print(f"[SpectralSubtractionNR] capture-done "
+                      f"callback raised: {exc}")
