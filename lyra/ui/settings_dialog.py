@@ -768,12 +768,26 @@ class DspSettingsTab(QWidget):
         self.auto_thresh_btn.clicked.connect(self._on_auto_threshold)
         ga.addWidget(self.auto_thresh_btn, 3, 4)
 
-        # Live action meter
-        ga.addWidget(QLabel("Current AGC action:"), 4, 0, 1, 2)
+        # Live action meter.  Shows the live AGC gain reduction in
+        # dB when AGC is actively running.  Falls back to a sentinel
+        # string when there's no live data:
+        #   "—"            → stream is stopped (no demod blocks
+        #                     flowing → no agc_action_db emissions)
+        #   "(AGC off)"    → AGC profile is "off" (Radio short-
+        #                     circuits before emitting agc_action_db,
+        #                     so the live signal never fires)
+        #   "+X.X dB"      → live readout from agc_action_db
+        # The state-aware text is updated by _refresh_agc_action_label
+        # which is wired to stream_state_changed + agc_profile_changed
+        # below; the live numeric updates come from _on_action_db.
+        # Span the label across 3 cols (was 2) so the colon doesn't
+        # crowd the value field even with the widest "Custom" radio
+        # column setting the row pitch.
+        ga.addWidget(QLabel("Current AGC action:"), 4, 0, 1, 3)
         self.action_label = QLabel("—")
         self.action_label.setStyleSheet(
             "color: #50d0ff; font-family: Consolas, monospace; font-weight: 700;")
-        ga.addWidget(self.action_label, 4, 2, 1, 3)
+        ga.addWidget(self.action_label, 4, 3, 1, 3)
 
         v.addWidget(grp_agc)
 
@@ -1047,6 +1061,20 @@ class DspSettingsTab(QWidget):
         radio.agc_profile_changed.connect(self._on_profile_changed)
         radio.agc_action_db.connect(self._on_action_db)
         radio.agc_threshold_changed.connect(self._on_threshold_changed)
+        # Initialize and keep the AGC-action label state-aware so it
+        # never sits at the placeholder "—" when AGC is on and the
+        # stream is running, and shows a sensible label ("AGC off",
+        # "stream stopped") otherwise.  Radio's _apply_agc_and_volume
+        # short-circuits before emitting agc_action_db when the
+        # profile is "off", so without this we'd show stale data.
+        radio.stream_state_changed.connect(
+            lambda _on: self._refresh_agc_action_label())
+        # agc_profile_changed already wired above for the radio
+        # button selection; piggyback the action-label refresh on
+        # the same signal via a separate connection.
+        radio.agc_profile_changed.connect(
+            lambda _name: self._refresh_agc_action_label())
+        self._refresh_agc_action_label()
 
     def _on_custom_changed(self):
         release = self.release_slider.value() / 1000.0
@@ -1101,7 +1129,45 @@ class DspSettingsTab(QWidget):
         self._update_custom_enabled(name)
 
     def _on_action_db(self, action_db: float):
+        """Live AGC gain reduction in dB, fired from
+        ``Radio.agc_action_db`` once per demod block (~40 Hz).
+
+        Skipped when AGC profile is "off": Radio doesn't emit in
+        that case, but a stale subscriber from a previous active-
+        AGC session could still fire one last value during the
+        teardown.  Belt-and-suspenders — re-check the profile
+        before writing live numbers over the "(AGC off)" sentinel.
+        """
+        if self.radio.agc_profile == "off" or not self.radio.is_streaming:
+            return
         self.action_label.setText(f"{action_db:+.1f} dB")
+
+    def _refresh_agc_action_label(self) -> None:
+        """Update the AGC-action label to reflect the current
+        stream + profile state.
+
+        Called at dialog construction and whenever stream state or
+        AGC profile changes.  Resolves the label to one of three
+        states:
+        - "—"          → stream is stopped (no live AGC data)
+        - "(AGC off)"  → AGC profile is "off" (Radio short-
+                          circuits agc_action_db emission)
+        - last live    → otherwise leave whatever the latest
+                          _on_action_db update wrote there;
+                          will be overwritten within ~25 ms
+        """
+        if not self.radio.is_streaming:
+            self.action_label.setText("—")
+            return
+        if self.radio.agc_profile == "off":
+            self.action_label.setText("(AGC off)")
+            return
+        # Stream live + AGC active — _on_action_db handles the
+        # live numeric update.  Show a transient placeholder until
+        # the next emission lands so the operator sees movement
+        # rather than potentially-stale values from before a
+        # profile change.
+        self.action_label.setText("…")
 
     # ── DSP Threading (Phase 3.B+) ─────────────────────────────────
     def _on_threading_combo(self, idx: int):
