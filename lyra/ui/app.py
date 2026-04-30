@@ -83,6 +83,17 @@ class MainWindow(QMainWindow):
         self._settings = QSettings("N8SDR", "Lyra")
         self._migrate_legacy_settings()
         self.radio = Radio()
+        # Phase 3.D #1 — auto-restore the captured noise profile that
+        # was last active before Lyra closed (if any).  Silently no-ops
+        # if the saved file is gone or incompatible.  Runs after Radio
+        # construction so the channel's NR processor is alive and
+        # ready to receive load_captured_profile() calls.
+        try:
+            self.radio.autoload_active_noise_profile()
+        except Exception as exc:
+            # Belt-and-suspenders — autoload is opt-in convenience,
+            # never block app startup if something goes sideways.
+            print(f"[app] noise-profile autoload error: {exc}")
 
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.

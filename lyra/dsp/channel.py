@@ -272,6 +272,54 @@ class PythonRxChannel(DspChannel):
     def set_nr_profile(self, profile: str) -> None:
         self._nr.set_profile(profile)
 
+    # ── Captured noise profile API (Phase 3.D #1) ─────────────────────
+    # Thin proxies onto the embedded SpectralSubtractionNR.  Channel is
+    # the operator-facing layer Radio talks to; we don't want Radio
+    # reaching into _nr directly.
+
+    def begin_noise_capture(self, seconds: float = 2.0) -> None:
+        """Start an N-second noise-profile capture.  See
+        :meth:`SpectralSubtractionNR.begin_noise_capture` for details."""
+        self._nr.begin_noise_capture(float(seconds))
+
+    def cancel_noise_capture(self) -> None:
+        self._nr.cancel_noise_capture()
+
+    def has_captured_profile(self) -> bool:
+        return self._nr.has_captured_profile()
+
+    def captured_profile_array(self):
+        """Return a copy of the active captured-noise magnitudes,
+        or None if no profile is loaded.  Used by Radio's
+        save_current_capture_as() to persist the latest capture."""
+        return self._nr.captured_profile_array()
+
+    def load_captured_profile(self, mag) -> None:
+        """Install a captured-profile magnitudes array (loaded from
+        the JSON store).  Raises ValueError on size mismatch."""
+        self._nr.load_captured_profile(mag)
+
+    def clear_captured_profile(self) -> None:
+        self._nr.clear_captured_profile()
+
+    def nr_capture_progress(self) -> tuple[str, float]:
+        return self._nr.capture_progress()
+
+    def nr_smart_guard_verdict(self) -> str:
+        return self._nr.smart_guard_verdict()
+
+    def set_nr_capture_done_callback(self, fn) -> None:
+        """Register the function NR fires when a capture finalizes.
+        Radio uses this to emit a Qt signal so the UI can react."""
+        self._nr.set_capture_done_callback(fn)
+
+    @property
+    def nr_fft_size(self) -> int:
+        """FFT size used by the embedded NR processor.  Profiles
+        saved on disk store this so the manager UI can grey out
+        incompatible files at load time."""
+        return int(self._nr.FFT_SIZE)
+
     def set_apf_enabled(self, enabled: bool) -> None:
         self._apf.set_enabled(bool(enabled))
 

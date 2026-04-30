@@ -184,6 +184,20 @@ class Radio(QObject):
     nr_enabled_changed = Signal(bool)
     nr_profile_changed = Signal(str)
 
+    # Phase 3.D #1 — Captured-noise-profile signals.
+    # noise_capture_done fires when a capture finalizes inside the
+    # NR processor; payload is the smart-guard verdict
+    # ("clean" | "suspect" | "n/a") so the UI can warn about
+    # questionable captures before the operator saves.
+    # noise_active_profile_changed fires whenever the loaded
+    # captured profile is replaced or cleared; payload is the
+    # display name (or "" when cleared) so the panel badge updates.
+    # noise_profiles_changed fires after save / delete / rename
+    # so the manager dialog refreshes its list view.
+    noise_capture_done = Signal(str)            # verdict
+    noise_active_profile_changed = Signal(str)  # name or ""
+    noise_profiles_changed = Signal()
+
     # APF (Audio Peaking Filter) — CW-only narrow peaking biquad
     # centered on cw_pitch_hz. Boosts the CW tone without the ringing
     # tail of a brick-wall narrow filter. Channel mode-gates inside
@@ -493,6 +507,18 @@ class Radio(QObject):
         self._rx_channel: PythonRxChannel = PythonRxChannel(
             in_rate=self._rate, block_size=self._audio_block,
         )
+        # Phase 3.D #1 — register the NR capture-done callback so
+        # captures complete with a Qt signal emission.  The callback
+        # runs on whatever thread NR.process() lives on (worker
+        # thread in worker mode, Qt main otherwise); Qt signal emit
+        # is thread-safe and the slot connection lands on the main
+        # thread via auto/queued connection.
+        self._rx_channel.set_nr_capture_done_callback(
+            self._on_nr_capture_done)
+        # Track the active captured profile name so the UI can show
+        # which profile is currently loaded (and so we can persist
+        # the selection across Lyra restarts).  "" = no profile.
+        self._active_captured_profile_name: str = ""
 
         # AGC: peak-track with hang time. Profile presets select
         # (release rate, hang blocks); Custom exposes the parameters
@@ -1610,7 +1636,10 @@ class Radio(QObject):
                 5000)
 
     # ── Noise Reduction API ──────────────────────────────────────────
-    NR_PROFILES = ("light", "medium", "aggressive", "neural")
+    # "captured" added in Phase 3.D #1 — uses an operator-recorded
+    # spectral profile instead of the live VAD-tracked estimate.  See
+    # docs/architecture/noise_toolkit.md §3.1 and lyra/dsp/nr.py.
+    NR_PROFILES = ("light", "medium", "aggressive", "captured", "neural")
 
     @staticmethod
     def neural_nr_available() -> bool:
@@ -1654,9 +1683,282 @@ class Radio(QObject):
             # DspChannel subclass), this branch will swap the channel.
             # For now fall back to medium so audio still flows.
             self._rx_channel.set_nr_profile("medium")
+        elif name == "captured":
+            # Phase 3.D #1 — captured-profile mode.  The channel's
+            # NR processor uses _captured_noise_mag as the noise
+            # reference if a profile is loaded; falls back to live
+            # tracking if not.  UI normally prevents the operator
+            # from selecting "captured" without a loaded profile,
+            # but the fallback keeps audio flowing if they do.
+            self._rx_channel.set_nr_profile("captured")
         else:
             self._rx_channel.set_nr_profile(name)
         self.nr_profile_changed.emit(name)
+
+    # ── Captured noise profile API (Phase 3.D #1) ────────────────────
+
+    def begin_noise_capture(self, seconds: float = 2.0) -> None:
+        """Start an N-second capture of the current band noise.
+
+        Operator-driven entry point.  UI button hooks into this.
+        Caller is responsible for tuning to a noise-only frequency
+        (or being inside a transmission gap) before invoking.
+        Capture progresses inside the audio chain on subsequent
+        IQ blocks; when it completes, ``noise_capture_done`` fires
+        with the smart-guard verdict so UI can prompt for a save
+        name (and warn about questionable captures).
+
+        ``seconds`` is clamped to NR's CAPTURE_MIN_SEC..MAX_SEC
+        range (1.0..5.0 in normal operator UI).
+        """
+        self._rx_channel.begin_noise_capture(float(seconds))
+
+    def cancel_noise_capture(self) -> None:
+        """Abort an in-progress capture.  No-op if none running."""
+        self._rx_channel.cancel_noise_capture()
+
+    def has_captured_profile(self) -> bool:
+        """True if a captured profile is currently loaded into NR."""
+        return self._rx_channel.has_captured_profile()
+
+    def nr_capture_progress(self) -> tuple[str, float]:
+        """Return ``(state, fraction_complete)`` for UI progress
+        bar.  state ∈ {"idle", "capturing", "ready"}."""
+        return self._rx_channel.nr_capture_progress()
+
+    def nr_smart_guard_verdict(self) -> str:
+        """Smart-guard verdict from the most recent capture:
+        "clean" / "suspect" / "n/a"."""
+        return self._rx_channel.nr_smart_guard_verdict()
+
+    @property
+    def active_captured_profile_name(self) -> str:
+        """Display name of the currently-loaded captured profile,
+        or "" if none is loaded.  Lyra-restart-persistent via
+        QSettings."""
+        return self._active_captured_profile_name
+
+    def clear_captured_profile(self) -> None:
+        """Drop the loaded captured profile.  If NR profile was
+        "captured", caller should typically also switch to a live
+        NR profile (UI handles that)."""
+        had = self.has_captured_profile()
+        self._rx_channel.clear_captured_profile()
+        if self._active_captured_profile_name:
+            self._active_captured_profile_name = ""
+            self.noise_active_profile_changed.emit("")
+        # Persist the cleared state so the next Lyra start doesn't
+        # try to auto-restore a no-longer-active profile.
+        self._save_active_profile_name_setting("")
+        if had:
+            # Fire profiles_changed too — manager UI may want to
+            # update the "currently loaded" indicator dot.
+            self.noise_profiles_changed.emit()
+
+    # ── Captured-profile JSON persistence wrappers ───────────────────
+
+    @property
+    def noise_profile_folder(self):
+        """Pathlib.Path to the active noise-profile storage folder.
+
+        Resolved lazily from QSettings ``noise/profile_folder``;
+        falls back to the OS-default user-data folder
+        (%APPDATA%/Lyra/noise_profiles on Windows etc.).  See
+        :func:`lyra.dsp.noise_profile_store.resolve_profile_folder`."""
+        from lyra.dsp import noise_profile_store as nps
+        from PySide6.QtCore import QSettings
+        s = QSettings("N8SDR", "Lyra")
+        custom = str(s.value("noise/profile_folder", "", type=str) or "")
+        return nps.resolve_profile_folder(custom)
+
+    def set_noise_profile_folder(self, path: str) -> None:
+        """Set a custom storage folder.  Empty string restores the
+        default.  Persisted via QSettings; takes effect immediately
+        for subsequent save/load operations.
+        """
+        from PySide6.QtCore import QSettings
+        s = QSettings("N8SDR", "Lyra")
+        s.setValue("noise/profile_folder", str(path or ""))
+        # The manager-dialog list view will re-scan the new folder;
+        # signal lets it know to refresh.
+        self.noise_profiles_changed.emit()
+
+    def list_saved_noise_profiles(self):
+        """Scan the active profile folder and return a list of
+        :class:`ProfileMeta` records (newest first)."""
+        from lyra.dsp import noise_profile_store as nps
+        return nps.list_profiles(self.noise_profile_folder)
+
+    def save_current_capture_as(self, name: str,
+                                overwrite: bool = False):
+        """Persist the currently-loaded captured profile to disk
+        under ``name``.
+
+        Pulls the live magnitudes array from NR plus current
+        operator metadata (freq, mode, capture duration as
+        recorded) and packages it via the noise_profile_store.
+
+        Returns the Path the profile was saved to.  Raises
+        FileExistsError if a profile with the same name already
+        exists and ``overwrite`` is False; ValueError if there's
+        no captured profile to save.
+        """
+        from lyra.dsp import noise_profile_store as nps
+        from lyra import __version__ as lyra_version
+
+        mag = self._rx_channel.captured_profile_array()
+        if mag is None:
+            raise ValueError(
+                "no captured profile loaded — capture one first")
+        # Capture duration: try to recover from NR's stored target.
+        # If NR has been re-armed since the capture, the stored
+        # values won't represent the *saved* capture, so we fall
+        # back to a sentinel of 0.0.  UI typically passes the
+        # actual duration via a kwarg in a future enhancement;
+        # for v1 we just store the live NR's target.
+        nr = self._rx_channel._nr  # noqa: SLF001 — controlled access
+        target_frames = getattr(nr, "_capture_frames_target", 0)
+        # frames-per-second = rate / hop; reverse-derive seconds.
+        if target_frames > 0:
+            duration = float(target_frames * nr.HOP / nr.rate)
+        else:
+            duration = 0.0
+        profile = nps.make_profile_from_nr(
+            name=name,
+            magnitudes=mag,
+            freq_hz=int(self._freq_hz),
+            mode=str(self._mode),
+            duration_sec=duration,
+            fft_size=int(self._rx_channel.nr_fft_size),
+            lyra_version=str(lyra_version),
+        )
+        path = nps.save_profile(self.noise_profile_folder,
+                                profile, overwrite=overwrite)
+        # Mark this profile as the active one (it IS what's loaded
+        # in NR right now) so a subsequent Lyra restart auto-
+        # restores it.
+        self._active_captured_profile_name = name
+        self._save_active_profile_name_setting(name)
+        self.noise_active_profile_changed.emit(name)
+        self.noise_profiles_changed.emit()
+        return path
+
+    def load_saved_noise_profile(self, name: str) -> None:
+        """Load a profile from disk into NR.
+
+        Raises FileNotFoundError if the profile doesn't exist,
+        ValueError if it's incompatible (different FFT size, bad
+        schema)."""
+        from lyra.dsp import noise_profile_store as nps
+        prof = nps.load_profile(self.noise_profile_folder, name)
+        if prof.fft_size != self._rx_channel.nr_fft_size:
+            raise ValueError(
+                f"profile {name!r} was saved with FFT size "
+                f"{prof.fft_size}; current NR uses "
+                f"{self._rx_channel.nr_fft_size} — incompatible")
+        self._rx_channel.load_captured_profile(prof.magnitudes)
+        self._active_captured_profile_name = prof.name
+        self._save_active_profile_name_setting(prof.name)
+        self.noise_active_profile_changed.emit(prof.name)
+
+    def delete_saved_noise_profile(self, name: str) -> bool:
+        from lyra.dsp import noise_profile_store as nps
+        deleted = nps.delete_profile(self.noise_profile_folder, name)
+        if deleted:
+            # If the deleted profile was the active one, clear the
+            # active marker (the in-NR magnitudes stay until the
+            # operator clears them or loads another — deletion of
+            # the disk file shouldn't disrupt audio).
+            if name == self._active_captured_profile_name:
+                self._active_captured_profile_name = ""
+                self._save_active_profile_name_setting("")
+                self.noise_active_profile_changed.emit("")
+            self.noise_profiles_changed.emit()
+        return deleted
+
+    def rename_saved_noise_profile(self, old_name: str,
+                                   new_name: str,
+                                   overwrite: bool = False):
+        from lyra.dsp import noise_profile_store as nps
+        path = nps.rename_profile(
+            self.noise_profile_folder, old_name, new_name,
+            overwrite=overwrite)
+        if old_name == self._active_captured_profile_name:
+            self._active_captured_profile_name = new_name
+            self._save_active_profile_name_setting(new_name)
+            self.noise_active_profile_changed.emit(new_name)
+        self.noise_profiles_changed.emit()
+        return path
+
+    def export_saved_noise_profile(self, name: str, dst_path):
+        from lyra.dsp import noise_profile_store as nps
+        return nps.export_profile(
+            self.noise_profile_folder, name, dst_path)
+
+    def import_saved_noise_profile(self, src_path,
+                                   rename_to: str | None = None,
+                                   overwrite: bool = False) -> str:
+        from lyra.dsp import noise_profile_store as nps
+        name = nps.import_profile(
+            src_path, self.noise_profile_folder,
+            rename_to=rename_to, overwrite=overwrite)
+        self.noise_profiles_changed.emit()
+        return name
+
+    # ── Internal: capture-done callback + settings persistence ───────
+
+    def _on_nr_capture_done(self) -> None:
+        """Called from inside NR.process() when a capture finalizes.
+
+        Runs on whatever thread the audio chain is on (worker thread
+        in worker mode, Qt main otherwise).  We just emit the Qt
+        signal — Qt's queued connection delivers the slot on the
+        main thread regardless of where we emit from.  Slots
+        (typically the UI's "save profile" prompt) handle the rest.
+        """
+        try:
+            verdict = self._rx_channel.nr_smart_guard_verdict()
+        except Exception:
+            verdict = "n/a"
+        self.noise_capture_done.emit(str(verdict))
+
+    def _save_active_profile_name_setting(self, name: str) -> None:
+        """Persist the active-profile name to QSettings so the next
+        Lyra start can auto-restore it.  Centralised here so all
+        write sites (load, save, delete, clear, rename) hit the
+        same key."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/active_profile_name", str(name or ""))
+        except Exception as exc:
+            # Non-fatal — operator just won't see auto-restore.
+            print(f"[Radio] could not persist active-profile name: {exc}")
+
+    def autoload_active_noise_profile(self) -> None:
+        """Try to load the profile recorded in QSettings as the
+        last-active one.  Called by the UI after Radio is fully
+        constructed (see lyra/ui/app.py startup path).  Silently
+        no-ops if there's no recorded name, the file is gone, or
+        the profile is incompatible — operator can re-load
+        manually from the manager dialog."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            name = str(s.value("noise/active_profile_name", "", type=str)
+                       or "")
+        except Exception:
+            return
+        if not name:
+            return
+        try:
+            self.load_saved_noise_profile(name)
+            print(f"[Radio] auto-loaded captured profile: {name!r}")
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"[Radio] could not auto-load captured profile "
+                  f"{name!r}: {exc}")
+            # Clear the stale pointer so we don't keep retrying.
+            self._save_active_profile_name_setting("")
 
     # ── APF (Audio Peaking Filter) ─────────────────────────────────
     @property
