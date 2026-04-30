@@ -2738,7 +2738,12 @@ class NoiseSettingsTab(QWidget):
             "Right-click the NB button on the DSP+Audio panel for "
             "quick profile switching during operating.")
         nb_hint.setWordWrap(True)
-        nb_hint.setStyleSheet("color: #6a7a8c; font-size: 10px;")
+        # Drop the explicit font-size override — match the intro
+        # paragraph above so the operator-facing text is at the
+        # same readability tier as the rest of the tab.  Slightly
+        # dimmer color than the intro keeps the visual hierarchy
+        # ("intro" > "hint") without shrinking the type.
+        nb_hint.setStyleSheet("color: #7a8a9c;")
         nbv.addWidget(nb_hint)
 
         # Refresh slider/radio when Radio fires its change signals
