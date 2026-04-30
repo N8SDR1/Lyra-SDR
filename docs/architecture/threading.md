@@ -548,13 +548,13 @@ In order. Each is a separate commit on a `feature/threaded-dsp`
 branch off `main`. Stop and test between any two if anything looks
 wrong.
 
-- [ ] **B.1 — DspWorker shell + WorkerConfig.**
+- [x] **B.1 — DspWorker shell + WorkerConfig.** *(commit 65e5abd)*
   Create `lyra/dsp/worker.py` with the `DspWorker` class
   (QObject subclass, `moveToThread` pattern), `WorkerConfig`
   dataclass, lifecycle methods (`start`, `stop`). No DSP behavior
   yet. Worker exists but isn't connected to anything.
 
-- [ ] **B.2 — Settings toggle + persistence.**
+- [x] **B.2 — Settings toggle + persistence.** *(commit 7e54389)*
   Add Settings → DSP → "Threading: [Single | Worker (BETA)]"
   combo. Wire to a new `Radio.dsp_threading_mode` property +
   QSettings key (`dsp/threading_mode`, default `"single"`).
@@ -562,7 +562,7 @@ wrong.
   requires Lyra restart** (cleanest, avoids mid-flight migration
   edge cases).
 
-- [ ] **B.3 — Worker process_block (audio path).**
+- [x] **B.3 — Worker process_block (audio path).** *(commit db33226)*
   Implement worker's `process_block(iq)` mirroring
   `_on_samples_main_thread` body: notches/demod/NR/APF (via
   `_rx_channel.process`), AGC, AF/Vol/Mute/tanh, BIN, sink write.
@@ -570,7 +570,7 @@ wrong.
   path still works exactly as before; worker only runs when
   Settings selects it.
 
-- [ ] **B.4 — Worker input queue + activation.**
+- [x] **B.4 — Worker input queue + activation.** *(commit e59141b)*
   Worker exposes `enqueue_iq(samples)`. When worker mode is
   active, `Radio._stream_cb` (rx thread) routes batches to
   `worker.enqueue_iq` instead of `_bridge.samples_ready.emit`.
@@ -578,42 +578,70 @@ wrong.
   Drop-oldest behavior on queue overflow. Single-thread path
   remains unchanged for default users.
 
-- [ ] **B.5 — Sink lifecycle for cross-thread use.**
+- [x] **B.5 — Sink lifecycle for cross-thread use.** *(commit a92998d)*
   When worker mode is active, audio sink (AK4951 or
   SoundDeviceSink) is owned by the worker. Sink swaps on
   Settings change route through a signal so the worker swaps
   references between blocks (no half-constructed sink writes).
 
-- [ ] **B.6 — LNA peak/RMS tracking moves to worker.**
+- [x] **B.6 — LNA peak/RMS tracking moves to worker.** *(commit 8f00554)*
   When worker mode is active, the per-block IQ peak/RMS
   computation runs on the worker. Worker emits `lna_peak_update`
   signal; main-thread Auto-LNA logic consumes from a local
   buffer it maintains from those updates.
 
-- [ ] **B.7 — HL2Stream TX queue thread-safety audit (gating).**
+- [x] **B.7 — HL2Stream TX queue thread-safety audit (gating).** *(commit 07204b3)*
   Audit `queue_tx_audio`, `clear_tx_audio`, `inject_audio_tx`
   for thread safety. Add locks where needed. **Must complete
   before B.4 enables operator-facing worker mode** — audio
   corruption from a missed lock is the worst-case bug.
+  **Verdict:** existing `_tx_audio_lock` covers all three call
+  sites; `inject_audio_tx` is GIL-safe atomic bool with
+  acceptable one-frame staleness. No code changes.
 
-- [ ] **B.8 — FFT migration to worker.**
+- [x] **B.8 — FFT migration to worker.** *(commit 2a4f3b8)*
   When worker mode is active, the sample ring is worker-internal
-  and FFT runs inside `process_block` on a tick counter. Worker
-  emits `spectrum_ready` (existing signal). Main-thread
-  `_fft_timer` is disabled when worker mode is active. Verify
-  panadapter cadence is identical between modes.
+  and FFT runs inside `process_block` on a block counter (cadence
+  derived live from rate × `_fft_interval_ms` ÷ batch_size). Worker
+  emits new `spectrum_raw_ready(spec_db)` signal; Radio's
+  main-thread `_on_worker_spectrum_raw` slot calls
+  `_process_spec_db` for everything downstream (S-meter, noise
+  floor, auto-scale, zoom, panadapter + waterfall emits).
+  Main-thread `_fft_timer` keeps firing in worker mode but its
+  body short-circuits — keeps the LYRA_PAINT_DEBUG diagnostic
+  alive without doing any FFT work.
 
-- [ ] **B.9 — Reset / flush via signal.**
-  When worker mode is active, `Radio.reset()` emits a
-  `reset_requested` signal to the worker. Worker's slot clears
-  its input queue, resets `_rx_channel`, AGC peak, sample ring,
-  binaural. Main-thread state (operator config, UI) reset
-  in-place as today.
+- [x] **B.9 — Reset / flush via signal.** *(commit a3189d1)*
+  Centralized in `Radio._request_dsp_reset_full()` and
+  `Radio._request_dsp_reset_channel_only()`.  In worker mode
+  both helpers call `worker.request_reset()`; the worker's
+  `_reset()` runs between blocks and resets `_rx_channel`, AGC
+  peak / hang counter, S-meter avg, binaural, sample ring, FFT
+  counter. Six call sites (freq change, sink swap × 2 paths,
+  stop, PC device change × 2 paths) replaced with the helpers.
+  Single-thread mode unchanged.
 
-- [ ] **B.10 — End-to-end smoke test (per Section 14).**
-  All modes, all sample rates, both sinks, both backends, mode/
-  freq/rate changes under load. Operator-facing field test
-  follows.
+- [x] **B.10 — End-to-end smoke test.** *(this commit)*
+  Operator field test (N8SDR, 2026-04-30) covered:
+  - AK4951 ↔ PC Soundcard sink swap mid-stream — clean swap, no
+    robotic-audio symptom.
+  - PC output device change with PC sink active — clean.
+  - Stop / Start cycle — clean drain, no leaked sinks.
+  - Sample-rate changes (48k / 96k / 192k / 384k both
+    directions) — panadapter follows immediately, audio recovers
+    cleanly.
+  - LNA on / off and Auto-LNA toggle — peak / RMS readouts live
+    in worker mode (B.6 fix verified).
+  - Mode switches across SSB / CW / AM / DIG — clean transitions,
+    no garbled audio at the discontinuity.
+  - Spectrum smoothing toggle (operator-driven, B.5–B.7 batch).
+  - Single-thread fallback regression check — unchanged.
+
+  Heavier matrix items deferred to **Phase 3.C stress test**:
+  WWV ↔ FT8 alternation under load, 30-min idle stream memory
+  stability, worker thread CPU split via `LYRA_PAINT_DEBUG`
+  in worker mode (`iq_batches=0` confirms main-thread path
+  bypassed), QPainter ↔ GPU panadapter mode comparison.
 
 After B.10 passes: worker-thread backend is BETA-stable. The
 **default** stays single-thread until at least one full release
