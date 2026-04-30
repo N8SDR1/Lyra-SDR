@@ -201,6 +201,16 @@ class PythonRxChannel(DspChannel):
         from lyra.dsp.nr import SpectralSubtractionNR
         self._nr = SpectralSubtractionNR(rate=self.audio_rate)
 
+        # NB (Impulse Blanker) — owned by the channel.  Operates on
+        # the IQ input rate (PRE-decimation) so impulses stay narrow
+        # and easy to detect; bandpass filtering inside the
+        # decimator would otherwise spread each impulse across many
+        # output samples and make it hard to surgically blank.
+        # Default profile = off; operator opts in via the DSP-row
+        # NB button or Settings → Noise tab.
+        from lyra.dsp.nb import ImpulseBlanker
+        self._nb = ImpulseBlanker(rate=self.in_rate)
+
         # APF (Audio Peaking Filter) — owned by the channel. Mode-
         # gated to CWU/CWL inside process(). Center freq tracks the
         # CW pitch automatically, so the operator only needs to
@@ -230,6 +240,10 @@ class PythonRxChannel(DspChannel):
         # actually in effect when audio starts.
         self._decimator = None
         self._audio_buf.clear()
+        # NB tracks the input rate (it operates pre-decimation).
+        # ImpulseBlanker.set_rate is a no-op when rate is unchanged
+        # and recomputes coefficients + resets state otherwise.
+        self._nb.set_rate(rate)
 
     def set_mode(self, mode: str) -> None:
         if mode == self._mode:
@@ -318,6 +332,31 @@ class PythonRxChannel(DspChannel):
         math).  False otherwise."""
         return self._nr.is_using_captured_source()
 
+    # ── Noise blanker proxies (Phase 3.D #2) ──────────────────────────
+
+    def set_nb_profile(self, profile: str) -> None:
+        """Apply an NB preset: off / light / medium / aggressive /
+        custom.  See ImpulseBlanker.PROFILES."""
+        self._nb.set_profile(profile)
+
+    def set_nb_threshold(self, threshold: float) -> None:
+        """Operator-tunable NB threshold (Custom profile).  Multiplier
+        on the background-power reference.  Clamped to NB's
+        [THRESHOLD_MIN, THRESHOLD_MAX]."""
+        self._nb.set_threshold(threshold)
+
+    @property
+    def nb_enabled(self) -> bool:
+        return bool(self._nb.enabled)
+
+    @property
+    def nb_profile(self) -> str:
+        return self._nb.profile
+
+    @property
+    def nb_threshold(self) -> float:
+        return float(self._nb._threshold)
+
     def nr_capture_progress(self) -> tuple[str, float]:
         return self._nr.capture_progress()
 
@@ -358,6 +397,11 @@ class PythonRxChannel(DspChannel):
         _Decimator instance via _decimate_to_48k."""
         self._audio_buf.clear()
         self._nr.reset()
+        # NB state — bg tracker, last-clean memory, blank-run counter.
+        # Same justification as the others: reset() runs on operator-
+        # driven discontinuities (freq/mode change) where a fresh
+        # bg tracker is appropriate.
+        self._nb.reset()
         # APF state — safe to clear here because reset() is only
         # called on freq/mode changes, where an audio discontinuity
         # is already expected.
@@ -430,6 +474,13 @@ class PythonRxChannel(DspChannel):
         if mode in ("Off", "Tone"):
             # Channel produces no audio for these — Radio handles them.
             return np.zeros(0, dtype=np.float32)
+
+        # ── Impulse blanker (NB, Phase 3.D #2) ────────────────────
+        # Runs PRE-decimation so impulses are still narrow time-
+        # domain spikes that the detect-then-replace algorithm can
+        # surgically blank.  Bypass-fast when NB is disabled (the
+        # default).
+        iq = self._nb.process(iq)
 
         iq_48k = self._decimate_to_48k(iq)
         if iq_48k.size == 0:

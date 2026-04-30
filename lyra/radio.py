@@ -184,6 +184,15 @@ class Radio(QObject):
     nr_enabled_changed = Signal(bool)
     nr_profile_changed = Signal(str)
 
+    # Phase 3.D #2 — Noise blanker (impulse suppression, IQ-domain).
+    # Profile = preset name (off / light / medium / aggressive /
+    # custom).  Threshold = numerical multiplier on background-
+    # power reference (operator-tunable in Custom; presets pick
+    # reasonable values).  See lyra/dsp/nb.py and
+    # docs/architecture/noise_toolkit.md §3.4.
+    nb_profile_changed = Signal(str)
+    nb_threshold_changed = Signal(float)
+
     # Phase 3.D #1 — Captured-noise-profile signals.
     # noise_capture_done fires when a capture finalizes inside the
     # NR processor; payload is the smart-guard verdict
@@ -1996,6 +2005,99 @@ class Radio(QObject):
         return name
 
     # ── Internal: capture-done callback + settings persistence ───────
+
+    # ── Noise Blanker (NB) API — Phase 3.D #2 ─────────────────────
+
+    NB_PROFILES = ("off", "light", "medium", "aggressive", "custom")
+
+    @property
+    def nb_enabled(self) -> bool:
+        """True if NB is currently doing work (profile != 'off' AND
+        threshold is at/above the minimum useful value)."""
+        return self._rx_channel.nb_enabled
+
+    @property
+    def nb_profile(self) -> str:
+        return self._rx_channel.nb_profile
+
+    @property
+    def nb_threshold(self) -> float:
+        return self._rx_channel.nb_threshold
+
+    def set_nb_profile(self, name: str) -> None:
+        """Apply an NB profile preset.
+
+        Names: ``off`` / ``light`` / ``medium`` / ``aggressive`` /
+        ``custom``.  Custom retains the current threshold; other
+        names install the preset's threshold.  Persists via
+        QSettings.
+        """
+        name = (name or "").strip().lower()
+        if name not in self.NB_PROFILES:
+            name = "off"
+        self._rx_channel.set_nb_profile(name)
+        # Persist for next Lyra start.
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/nb_profile", name)
+            # Save the threshold too — the channel may have changed
+            # it (presets bake their own values).
+            s.setValue("noise/nb_threshold",
+                       float(self._rx_channel.nb_threshold))
+        except Exception as exc:
+            print(f"[Radio] could not persist NB profile: {exc}")
+        self.nb_profile_changed.emit(name)
+        self.nb_threshold_changed.emit(self._rx_channel.nb_threshold)
+
+    def set_nb_threshold(self, threshold: float) -> None:
+        """Operator-tunable NB threshold (Custom profile).
+
+        Switches profile to ``custom`` because the operator is
+        hand-tuning.  Clamped to the underlying ImpulseBlanker's
+        [THRESHOLD_MIN, THRESHOLD_MAX].  Persists via QSettings.
+        """
+        self._rx_channel.set_nb_threshold(float(threshold))
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/nb_profile", "custom")
+            s.setValue("noise/nb_threshold",
+                       float(self._rx_channel.nb_threshold))
+        except Exception as exc:
+            print(f"[Radio] could not persist NB threshold: {exc}")
+        self.nb_profile_changed.emit("custom")
+        self.nb_threshold_changed.emit(self._rx_channel.nb_threshold)
+
+    def autoload_nb_settings(self) -> None:
+        """Restore NB profile + threshold from QSettings on Lyra
+        startup.  Called from app.py alongside the captured-profile
+        autoload.  Silently no-ops if the saved values are missing
+        or out of range — operator can reconfigure from the Settings
+        → Noise tab."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            profile = str(s.value("noise/nb_profile", "off",
+                                  type=str) or "off")
+            threshold = float(s.value("noise/nb_threshold", 6.0,
+                                      type=float))
+        except Exception:
+            return
+        # Apply threshold first (in case profile is "custom"), then
+        # the profile.  Profile presets overwrite threshold; "custom"
+        # preserves it.
+        try:
+            if profile == "custom":
+                self.set_nb_threshold(threshold)
+            else:
+                # Pre-seed the threshold so a later switch to
+                # custom recalls the operator's last hand-tuned
+                # value.
+                self._rx_channel.set_nb_threshold(threshold)
+                self.set_nb_profile(profile)
+        except Exception as exc:
+            print(f"[Radio] could not autoload NB settings: {exc}")
 
     def _on_nr_capture_done(self) -> None:
         """Called from inside NR.process() when a capture finalizes.

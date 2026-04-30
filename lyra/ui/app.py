@@ -94,6 +94,13 @@ class MainWindow(QMainWindow):
             # Belt-and-suspenders — autoload is opt-in convenience,
             # never block app startup if something goes sideways.
             print(f"[app] noise-profile autoload error: {exc}")
+        # Phase 3.D #2 — restore NB profile + threshold across Lyra
+        # restarts so the operator's last NB setting is in effect
+        # from frame zero.  Same belt-and-suspenders pattern.
+        try:
+            self.radio.autoload_nb_settings()
+        except Exception as exc:
+            print(f"[app] NB autoload error: {exc}")
 
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.

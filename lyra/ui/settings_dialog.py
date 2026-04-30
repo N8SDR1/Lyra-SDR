@@ -975,21 +975,12 @@ class DspSettingsTab(QWidget):
         gl.addWidget(self.lna_pullup_chk)
         v.addWidget(grp_lna)
 
-        # Placeholders for the DSP features still being built
-        grp_nb = QGroupBox("Noise Blanker (impulse suppression)")
-        gb = QVBoxLayout(grp_nb)
-        gb.addWidget(QLabel("Threshold / pulse-width controls — coming soon."))
-        grp_nb.setEnabled(False)
-        v.addWidget(grp_nb)
-
-        grp_nr = QGroupBox("Noise Reduction (adaptive / spectral subtraction)")
-        gnr = QVBoxLayout(grp_nr)
-        gnr.addWidget(QLabel(
-            "Classical spectral subtraction + optional neural "
-            "(RNNoise / DeepFilterNet) — coming soon."))
-        grp_nr.setEnabled(False)
-        v.addWidget(grp_nr)
-
+        # NB and NR moved to Settings → Noise tab when those
+        # features shipped (Phase 3.D #1 NR / #2 NB).  EQ stays as a
+        # placeholder — it's a future feature with no current
+        # backend, and once it ships it'll get its own tab so the
+        # parametric controls (per-band freq/gain/Q with bypass)
+        # have room to breathe.
         grp_eq = QGroupBox("Equalizer (parametric)")
         geq = QVBoxLayout(grp_eq)
         geq.addWidget(QLabel("Parametric RX / TX equalizer — coming soon."))
@@ -2660,6 +2651,106 @@ class NoiseSettingsTab(QWidget):
         gv.addLayout(action_row)
 
         v.addWidget(grp_cap)
+
+        # ── Noise Blanker (NB, Phase 3.D #2) ──────────────────────
+        grp_nb = QGroupBox("Noise Blanker (NB)")
+        nbv = QVBoxLayout(grp_nb)
+        nbv.setSpacing(8)
+
+        nb_intro = QLabel(
+            "IQ-domain impulse suppression.  Detects narrow impulse "
+            "noise (ignition, lightning crashes, switching power "
+            "supplies) before the bandpass filter spreads it across "
+            "the audio passband.\n\n"
+            "Profile sets a sensitivity preset; threshold is the "
+            "underlying multiplier on the background-power reference.")
+        nb_intro.setWordWrap(True)
+        nb_intro.setStyleSheet("color: #8a9aac;")
+        nbv.addWidget(nb_intro)
+
+        # Profile combo — radio buttons in a row, matching the AGC
+        # tab convention.
+        from PySide6.QtWidgets import QRadioButton, QButtonGroup
+        nb_prof_row = QHBoxLayout()
+        nb_prof_row.addWidget(QLabel("Profile:"))
+        self._nb_radio_group = QButtonGroup(self)
+        self._nb_radios: dict[str, QRadioButton] = {}
+        for key, label in (
+                ("off", "Off"),
+                ("light", "Light"),
+                ("medium", "Medium"),
+                ("aggressive", "Aggressive"),
+                ("custom", "Custom"),
+        ):
+            rb = QRadioButton(label)
+            self._nb_radio_group.addButton(rb)
+            self._nb_radios[key] = rb
+            nb_prof_row.addWidget(rb)
+            rb.toggled.connect(
+                lambda checked, k=key: self._on_nb_radio_toggled(
+                    checked, k))
+        nb_prof_row.addStretch(1)
+        nbv.addLayout(nb_prof_row)
+        # Sync radio with current state.  Block signals during the
+        # initial setChecked so the toggled handler doesn't fire
+        # against widgets (the threshold slider) that are constructed
+        # below this row — toggled handler calls
+        # _update_nb_threshold_enabled which reaches for nb_thr_slider.
+        target_rb = self._nb_radios.get(
+            radio.nb_profile, self._nb_radios["off"])
+        target_rb.blockSignals(True)
+        target_rb.setChecked(True)
+        target_rb.blockSignals(False)
+
+        # Threshold slider (only directly meaningful when Custom is
+        # active; greyed out on the presets but still readable).
+        from lyra.dsp.nb import ImpulseBlanker
+        thr_row = QHBoxLayout()
+        thr_row.addWidget(QLabel("Threshold:"))
+        self.nb_thr_slider = QSlider(Qt.Horizontal)
+        # Range maps slider integer 15..500 to threshold 1.5..50.0
+        # (×10 internal scaling for finer resolution).
+        self.nb_thr_slider.setRange(
+            int(ImpulseBlanker.THRESHOLD_MIN * 10),
+            int(ImpulseBlanker.THRESHOLD_MAX * 10))
+        self.nb_thr_slider.setValue(
+            max(self.nb_thr_slider.minimum(),
+                int(round(radio.nb_threshold * 10))))
+        self.nb_thr_slider.setSingleStep(1)
+        self.nb_thr_slider.setPageStep(10)
+        self.nb_thr_label = QLabel(
+            f"{radio.nb_threshold:.1f}×  background")
+        self.nb_thr_label.setMinimumWidth(120)
+        self.nb_thr_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700;")
+        self.nb_thr_slider.valueChanged.connect(
+            self._on_nb_threshold_slider)
+        thr_row.addWidget(self.nb_thr_slider, 1)
+        thr_row.addWidget(self.nb_thr_label)
+        nbv.addLayout(thr_row)
+
+        nb_hint = QLabel(
+            "Higher threshold = fewer false positives but lets more "
+            "subtle impulses through.  Lower threshold = catches "
+            "more but may clip the leading edge of fast CW dits or "
+            "sharp keying transients.\n\n"
+            "Right-click the NB button on the DSP+Audio panel for "
+            "quick profile switching during operating.")
+        nb_hint.setWordWrap(True)
+        nb_hint.setStyleSheet("color: #6a7a8c; font-size: 10px;")
+        nbv.addWidget(nb_hint)
+
+        # Refresh slider/radio when Radio fires its change signals
+        # (e.g. operator toggles via DSP-row button).
+        radio.nb_profile_changed.connect(self._on_nb_profile_signal)
+        radio.nb_threshold_changed.connect(
+            self._on_nb_threshold_signal)
+        # Initial enabled-state for the threshold slider — only
+        # active when Custom is selected.
+        self._update_nb_threshold_enabled(radio.nb_profile)
+
+        v.addWidget(grp_nb)
         v.addStretch(1)
 
     # ── Slot implementations ─────────────────────────────────────
@@ -2740,6 +2831,50 @@ class NoiseSettingsTab(QWidget):
         # an "this folder doesn't exist" error.
         nps.ensure_folder(folder)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    # ── NB section slot implementations (Phase 3.D #2) ───────────
+
+    def _on_nb_radio_toggled(self, checked: bool, key: str) -> None:
+        """Operator picked an NB profile radio button."""
+        if not checked:
+            return
+        # Custom doesn't change the threshold; presets do.  Apply
+        # via Radio so the channel + signals + persistence all
+        # update together.
+        self.radio.set_nb_profile(key)
+        self._update_nb_threshold_enabled(key)
+
+    def _on_nb_threshold_slider(self, val_x10: int) -> None:
+        threshold = val_x10 / 10.0
+        self.nb_thr_label.setText(f"{threshold:.1f}×  background")
+        # Setting the threshold switches profile to Custom (Radio
+        # handles that side-effect), which the radio button group
+        # then mirrors via the nb_profile_changed signal.
+        self.radio.set_nb_threshold(threshold)
+
+    def _on_nb_profile_signal(self, name: str) -> None:
+        """Mirror an external profile change (e.g., from the
+        DSP-row NB button right-click menu) into the radio group."""
+        rb = self._nb_radios.get(name)
+        if rb and not rb.isChecked():
+            rb.blockSignals(True)
+            rb.setChecked(True)
+            rb.blockSignals(False)
+        self._update_nb_threshold_enabled(name)
+
+    def _on_nb_threshold_signal(self, threshold: float) -> None:
+        """Mirror an external threshold change into the slider."""
+        target = int(round(threshold * 10))
+        if self.nb_thr_slider.value() != target:
+            self.nb_thr_slider.blockSignals(True)
+            self.nb_thr_slider.setValue(target)
+            self.nb_thr_slider.blockSignals(False)
+        self.nb_thr_label.setText(f"{threshold:.1f}×  background")
+
+    def _update_nb_threshold_enabled(self, profile: str) -> None:
+        """The threshold slider is only directly tunable in Custom;
+        on presets it shows the preset value but is greyed."""
+        self.nb_thr_slider.setEnabled(profile == "custom")
 
 
 class SettingsDialog(QDialog):

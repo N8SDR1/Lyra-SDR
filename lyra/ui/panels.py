@@ -1350,6 +1350,29 @@ class DspPanel(GlassPanel):
             dsp_row.addWidget(btn)
             self.dsp_btns[label] = btn
 
+        # ── NB (Noise Blanker, Phase 3.D #2) ──────────────────────
+        # Left-click  = toggle on/off (cycles between Off and the
+        #               last non-Off profile, default Medium)
+        # Right-click = profile picker (Off / Light / Medium /
+        #               Aggressive / Custom) + Open Noise settings
+        nb_btn = self.dsp_btns["NB"]
+        nb_btn.setChecked(radio.nb_enabled)
+        nb_btn.toggled.connect(self._on_nb_btn_toggled)
+        nb_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        nb_btn.customContextMenuRequested.connect(self._show_nb_menu)
+        nb_btn.setToolTip(
+            "Noise Blanker — IQ-domain impulse suppression.\n"
+            "Targets ignition / power-line / lightning impulses.\n"
+            "Left-click: toggle on/off.\n"
+            "Right-click: pick profile (Off / Light / Medium / Aggressive).")
+        radio.nb_profile_changed.connect(self._on_nb_profile_changed)
+        # Remember the operator's last non-Off profile so a
+        # left-click toggle returns there instead of always picking
+        # Medium.  Initialized from the loaded profile if it's not Off.
+        cur_profile = radio.nb_profile
+        self._nb_last_active_profile = (
+            cur_profile if cur_profile != "off" else "medium")
+
         # Wire the ones we already implement; rest are visual-only stubs.
         # NF is now the single enable/disable button for notches — the
         # earlier standalone "Notch" button on the row above was
@@ -2074,6 +2097,87 @@ class DspPanel(GlassPanel):
         operator's NR aggression profile (Light/Medium/Aggressive)
         keeps working with the live VAD estimate."""
         self.radio.clear_captured_profile()
+
+    # ── NB (Noise Blanker) handlers — Phase 3.D #2 ───────────────────
+
+    _NB_PROFILE_LABELS = {
+        "off":        "Off",
+        "light":      "Light",
+        "medium":     "Medium",
+        "aggressive": "Aggressive",
+        # "custom" handled inline (label includes the threshold value)
+    }
+
+    def _on_nb_btn_toggled(self, checked: bool) -> None:
+        """Left-click on the NB button toggles between Off and the
+        operator's last non-Off profile.  If they've never picked
+        a non-Off profile yet, defaults to Medium.
+
+        Right-click is the full profile picker — see _show_nb_menu.
+        """
+        if checked:
+            target = self._nb_last_active_profile
+            if target == "off":
+                target = "medium"
+            self.radio.set_nb_profile(target)
+        else:
+            self.radio.set_nb_profile("off")
+
+    def _show_nb_menu(self, pos):
+        """Right-click on the NB button — profile picker."""
+        btn = self.dsp_btns["NB"]
+        menu = QMenu(self)
+        current = self.radio.nb_profile
+        for key in ("off", "light", "medium", "aggressive"):
+            label = self._NB_PROFILE_LABELS[key]
+            act = QAction(label, menu)
+            act.setCheckable(True)
+            act.setChecked(key == current)
+            act.triggered.connect(
+                lambda _=False, k=key: self.radio.set_nb_profile(k))
+            menu.addAction(act)
+        # Custom shows the current threshold for context.
+        cust_label = "Custom"
+        if current == "custom":
+            cust_label = (f"Custom  (threshold = "
+                          f"{self.radio.nb_threshold:.1f}×)")
+        cust_act = QAction(cust_label, menu)
+        cust_act.setCheckable(True)
+        cust_act.setChecked(current == "custom")
+        # Custom is opened via the Settings → Noise tab (where the
+        # operator gets a slider for the threshold value), not
+        # directly settable from this menu.
+        cust_act.triggered.connect(self._open_noise_settings)
+        menu.addAction(cust_act)
+        menu.addSeparator()
+        settings_act = QAction("Open Noise settings…", menu)
+        settings_act.triggered.connect(self._open_noise_settings)
+        menu.addAction(settings_act)
+        menu.exec(btn.mapToGlobal(pos))
+
+    def _on_nb_profile_changed(self, name: str) -> None:
+        """Slot for ``Radio.nb_profile_changed``.  Sync the NB
+        button's checked state with whether the profile is
+        non-Off."""
+        if name != "off":
+            # Operator picked a real profile — remember it for the
+            # next left-click toggle.
+            self._nb_last_active_profile = name
+        nb_btn = self.dsp_btns["NB"]
+        target_checked = (name != "off")
+        if nb_btn.isChecked() != target_checked:
+            nb_btn.blockSignals(True)
+            nb_btn.setChecked(target_checked)
+            nb_btn.blockSignals(False)
+        # Refresh tooltip so hover reflects active profile.
+        label = self._NB_PROFILE_LABELS.get(
+            name, f"Custom ({self.radio.nb_threshold:.1f}×)")
+        nb_btn.setToolTip(
+            f"Noise Blanker — IQ-domain impulse suppression.\n"
+            f"  Profile: {label}\n"
+            f"\n"
+            f"Left-click: toggle on/off.\n"
+            f"Right-click: pick profile or open Noise settings.")
 
     # ── NR noise-source badge (Phase 3.D #1) ─────────────────────────
 
