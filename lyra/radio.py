@@ -197,6 +197,9 @@ class Radio(QObject):
     noise_capture_done = Signal(str)            # verdict
     noise_active_profile_changed = Signal(str)  # name or ""
     noise_profiles_changed = Signal()
+    # NR source toggle — fires when set_nr_use_captured_profile flips.
+    # UI binds to this to update menu check-states + status badges.
+    nr_use_captured_profile_changed = Signal(bool)
 
     # APF (Audio Peaking Filter) — CW-only narrow peaking biquad
     # centered on cw_pitch_hz. Boosts the CW tone without the ringing
@@ -782,6 +785,14 @@ class Radio(QObject):
         # the processor itself only supports the classical profiles.
         from lyra.dsp.nr import SpectralSubtractionNR as _SSNR
         self._nr_profile = _SSNR.DEFAULT_PROFILE
+        # Phase 3.D #1 — NR noise SOURCE toggle.  Independent of
+        # _nr_profile (which only controls subtraction aggression).
+        # Default off — fresh install gets the live VAD-tracked
+        # estimate, same as v0.0.5 NR1 behavior.  Operator flips on
+        # when they have a captured profile they want to use, OR
+        # save_current_capture_as auto-flips it on after a successful
+        # save.  Persisted via QSettings noise/use_captured_profile.
+        self._nr_use_captured_profile: bool = False
 
         # APF — Audio Peaking Filter (CW only). Defaults match the
         # AudioPeakFilter class constants so a fresh install gets a
@@ -1636,10 +1647,14 @@ class Radio(QObject):
                 5000)
 
     # ── Noise Reduction API ──────────────────────────────────────────
-    # "captured" added in Phase 3.D #1 — uses an operator-recorded
-    # spectral profile instead of the live VAD-tracked estimate.  See
-    # docs/architecture/noise_toolkit.md §3.1 and lyra/dsp/nr.py.
-    NR_PROFILES = ("light", "medium", "aggressive", "captured", "neural")
+    # NR profile = subtraction AGGRESSION (Light / Medium / Aggressive).
+    # Whether the noise reference is the live VAD-tracked estimate or
+    # the operator's captured profile is independent of profile — see
+    # the source-toggle API below (set_nr_use_captured_profile,
+    # nr_use_captured_profile property).  Earlier draft tangled the
+    # two as a 4th "captured" profile entry; separating them gives
+    # the operator the full 3 × 2 combinations.
+    NR_PROFILES = ("light", "medium", "aggressive", "neural")
 
     @staticmethod
     def neural_nr_available() -> bool:
@@ -1674,6 +1689,15 @@ class Radio(QObject):
 
     def set_nr_profile(self, name: str):
         name = (name or "").strip().lower()
+        # Migration: an earlier build of Phase 3.D #1 had "captured"
+        # as a profile name (entangled source + aggression).  If we
+        # see that value coming from QSettings or operator config
+        # written under the old design, treat it as Medium aggression
+        # plus source-toggle ON so the operator's prior intent is
+        # preserved.
+        if name == "captured":
+            self.set_nr_use_captured_profile(True)
+            name = "medium"
         if name not in self.NR_PROFILES:
             name = "medium"
         self._nr_profile = name
@@ -1683,17 +1707,39 @@ class Radio(QObject):
             # DspChannel subclass), this branch will swap the channel.
             # For now fall back to medium so audio still flows.
             self._rx_channel.set_nr_profile("medium")
-        elif name == "captured":
-            # Phase 3.D #1 — captured-profile mode.  The channel's
-            # NR processor uses _captured_noise_mag as the noise
-            # reference if a profile is loaded; falls back to live
-            # tracking if not.  UI normally prevents the operator
-            # from selecting "captured" without a loaded profile,
-            # but the fallback keeps audio flowing if they do.
-            self._rx_channel.set_nr_profile("captured")
         else:
             self._rx_channel.set_nr_profile(name)
         self.nr_profile_changed.emit(name)
+
+    # ── Noise SOURCE toggle (Phase 3.D #1, orthogonal to profile) ────
+
+    @property
+    def nr_use_captured_profile(self) -> bool:
+        """Operator's preference for the NR noise SOURCE.
+
+        True  → use the loaded captured profile as the noise reference
+                (falls back to live tracking if no profile is loaded)
+        False → always use the live VAD-tracked estimate
+
+        Independent of ``nr_profile`` — operator picks aggression
+        (Light/Medium/Aggressive) and source separately."""
+        return self._nr_use_captured_profile
+
+    def set_nr_use_captured_profile(self, on: bool) -> None:
+        on = bool(on)
+        if on == self._nr_use_captured_profile:
+            return
+        self._nr_use_captured_profile = on
+        self._rx_channel.set_use_captured_profile(on)
+        self.nr_use_captured_profile_changed.emit(on)
+        # Persist the toggle state so the next Lyra start matches
+        # what the operator left running.
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/use_captured_profile", bool(on))
+        except Exception as exc:
+            print(f"[Radio] could not persist nr source toggle: {exc}")
 
     # ── Captured noise profile API (Phase 3.D #1) ────────────────────
 
@@ -1747,6 +1793,12 @@ class Radio(QObject):
         if self._active_captured_profile_name:
             self._active_captured_profile_name = ""
             self.noise_active_profile_changed.emit("")
+        # If the source toggle was on, flip it back to Live — there's
+        # no captured profile to use anymore, so the source flag
+        # would just be a misleading UI state.  NR aggression
+        # profile (Light/Medium/Aggressive) is left alone.
+        if self._nr_use_captured_profile:
+            self.set_nr_use_captured_profile(False)
         # Persist the cleared state so the next Lyra start doesn't
         # try to auto-restore a no-longer-active profile.
         self._save_active_profile_name_setting("")
@@ -1937,23 +1989,37 @@ class Radio(QObject):
 
     def autoload_active_noise_profile(self) -> None:
         """Try to load the profile recorded in QSettings as the
-        last-active one.  Called by the UI after Radio is fully
-        constructed (see lyra/ui/app.py startup path).  Silently
-        no-ops if there's no recorded name, the file is gone, or
-        the profile is incompatible — operator can re-load
-        manually from the manager dialog."""
+        last-active one + restore the source toggle the operator
+        had set when Lyra last closed.  Called by the UI after
+        Radio is fully constructed (see lyra/ui/app.py startup
+        path).  Silently no-ops if there's no recorded name, the
+        file is gone, or the profile is incompatible — operator
+        can re-load manually from the manager dialog."""
         try:
             from PySide6.QtCore import QSettings
             s = QSettings("N8SDR", "Lyra")
             name = str(s.value("noise/active_profile_name", "", type=str)
                        or "")
+            use_captured = bool(s.value(
+                "noise/use_captured_profile", False, type=bool))
         except Exception:
             return
         if not name:
+            # No saved profile name — nothing to load.  Still honor
+            # the source toggle preference in case the operator had
+            # it on with a profile that's since been deleted: if
+            # that's the case, the toggle is harmless (NR's process()
+            # falls back to live tracking when no profile is loaded).
+            if use_captured:
+                self.set_nr_use_captured_profile(True)
             return
         try:
             self.load_saved_noise_profile(name)
             print(f"[Radio] auto-loaded captured profile: {name!r}")
+            # Restore the source toggle — operator may have left
+            # the profile loaded but switched source to Live before
+            # closing.
+            self.set_nr_use_captured_profile(use_captured)
         except (FileNotFoundError, ValueError) as exc:
             print(f"[Radio] could not auto-load captured profile "
                   f"{name!r}: {exc}")

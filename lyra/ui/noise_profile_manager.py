@@ -280,11 +280,13 @@ class NoiseProfileManager(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "Load failed", str(exc))
             return
-        # Switch NR profile to "captured" so the loaded profile is
-        # actually USED — operators expect "Use Selected" to mean
-        # "make this the active NR profile too".
-        if self.radio.nr_profile != "captured":
-            self.radio.set_nr_profile("captured")
+        # Flip the NR source toggle to "captured" so the loaded
+        # profile is actually USED — operators expect "Use Selected"
+        # to mean "make this the active noise source too".  NR
+        # profile (Light/Medium/Aggressive aggression) is left
+        # alone — operator's preferred aggression continues to apply
+        # to the new noise source.
+        self.radio.set_nr_use_captured_profile(True)
         self.radio.status_message.emit(
             f"Active noise profile: {meta.name}", 4000)
 

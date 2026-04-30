@@ -302,6 +302,22 @@ class PythonRxChannel(DspChannel):
     def clear_captured_profile(self) -> None:
         self._nr.clear_captured_profile()
 
+    def set_use_captured_profile(self, on: bool) -> None:
+        """Toggle the NR noise SOURCE.
+
+        When True (and a profile is loaded), NR uses the captured
+        per-bin magnitudes as the subtraction reference.  When False,
+        always uses the live VAD-tracked estimate.  Independent of
+        which profile (Light/Medium/Aggressive) is active.
+        """
+        self._nr.set_use_captured_profile(bool(on))
+
+    def is_using_captured_source(self) -> bool:
+        """True if the source toggle is on AND a profile is loaded
+        (i.e. captured magnitudes are actively driving the gain
+        math).  False otherwise."""
+        return self._nr.is_using_captured_source()
+
     def nr_capture_progress(self) -> tuple[str, float]:
         return self._nr.capture_progress()
 

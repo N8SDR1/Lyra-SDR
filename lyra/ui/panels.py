@@ -1424,6 +1424,12 @@ class DspPanel(GlassPanel):
         radio.noise_capture_done.connect(self._on_noise_capture_done)
         radio.noise_active_profile_changed.connect(
             self._on_noise_active_profile_changed)
+        # Source-toggle changes also update tooltips/labels via the
+        # active-profile-changed slot (it re-paints the Cap button +
+        # NR button tooltip with current state).
+        radio.nr_use_captured_profile_changed.connect(
+            lambda _on: self._on_noise_active_profile_changed(
+                self.radio.active_captured_profile_name))
 
         # ── APF (Audio Peaking Filter) ────────────────────────────
         # Left-click  = toggle enable/disable
@@ -1756,42 +1762,59 @@ class DspPanel(GlassPanel):
         neural_ok = Radio.neural_nr_available()
         has_captured = self.radio.has_captured_profile()
         captured_name = self.radio.active_captured_profile_name
+        use_captured = self.radio.nr_use_captured_profile
 
-        # Live NR profiles (same order as before — Light / Medium /
-        # Aggressive).
+        # ── Aggression profile section (Light / Medium / Aggressive
+        # / Neural).  Mutually exclusive — operator picks one.  This
+        # controls subtraction strength only; whether the noise
+        # model is the live VAD estimate or the captured profile is
+        # the SOURCE section below.
+        prof_header = QAction("Profile (subtraction strength):", menu)
+        prof_header.setEnabled(False)
+        menu.addAction(prof_header)
         for key in ("light", "medium", "aggressive"):
             label = self._NR_PROFILE_LABELS[key]
-            act = QAction(label, menu)
+            act = QAction(f"   {label}", menu)
             act.setCheckable(True)
             act.setChecked(key == current)
             act.triggered.connect(
                 lambda _=False, k=key: self.radio.set_nr_profile(k))
             menu.addAction(act)
-
-        # Captured-profile entry — operator's recorded noise model
-        # (Phase 3.D #1).  Disabled when no profile is loaded.
-        cap_label = (f"Captured: {captured_name}"
-                     if has_captured else "Captured  (no profile loaded)")
-        cap_act = QAction(cap_label, menu)
-        cap_act.setCheckable(True)
-        cap_act.setChecked(current == "captured")
-        cap_act.setEnabled(has_captured)
-        cap_act.triggered.connect(
-            lambda _=False: self.radio.set_nr_profile("captured"))
-        menu.addAction(cap_act)
-
-        # Neural placeholder — same handling as before.
+        # Neural placeholder.
         neural_label = self._NR_PROFILE_LABELS["neural"]
-        neu_act = QAction(neural_label, menu)
+        neu_act = QAction(f"   {neural_label}", menu)
         neu_act.setCheckable(True)
         neu_act.setChecked(current == "neural")
         if not neural_ok:
             neu_act.setEnabled(False)
             neu_act.setText(
-                f"{neural_label}  (install RNNoise or DeepFilterNet)")
+                f"   {neural_label}  (install RNNoise or DeepFilterNet)")
         neu_act.triggered.connect(
             lambda _=False: self.radio.set_nr_profile("neural"))
         menu.addAction(neu_act)
+
+        menu.addSeparator()
+
+        # ── Noise SOURCE section — independent of profile.
+        src_header = QAction("Noise source:", menu)
+        src_header.setEnabled(False)
+        menu.addAction(src_header)
+        live_act = QAction("   Live (VAD-tracked)", menu)
+        live_act.setCheckable(True)
+        live_act.setChecked(not use_captured)
+        live_act.triggered.connect(
+            lambda _=False: self.radio.set_nr_use_captured_profile(False))
+        menu.addAction(live_act)
+        cap_label = (f"   Captured: {captured_name}"
+                     if has_captured
+                     else "   Captured  (no profile loaded)")
+        cap_act = QAction(cap_label, menu)
+        cap_act.setCheckable(True)
+        cap_act.setChecked(use_captured and has_captured)
+        cap_act.setEnabled(has_captured)
+        cap_act.triggered.connect(
+            lambda _=False: self.radio.set_nr_use_captured_profile(True))
+        menu.addAction(cap_act)
 
         menu.addSeparator()
         toggle_act = QAction(
@@ -1962,11 +1985,12 @@ class DspPanel(GlassPanel):
             self.radio.save_current_capture_as(name, overwrite=False)
             self.radio.status_message.emit(
                 f"Saved noise profile: {name}", 4000)
-            # Auto-switch NR profile to "captured" on a successful
-            # save — the operator just captured and saved a profile,
-            # almost certainly wants to use it.
-            if self.radio.nr_profile != "captured":
-                self.radio.set_nr_profile("captured")
+            # Auto-flip the NR source toggle to "captured" — the
+            # operator just captured and saved a profile, almost
+            # certainly wants the next audio block to use it.  NR
+            # aggression profile (Light/Medium/Aggressive) stays as
+            # operator had it; only the source flips.
+            self.radio.set_nr_use_captured_profile(True)
         except FileExistsError:
             # Re-prompt with overwrite confirmation.
             ans = QMessageBox.question(
@@ -1981,8 +2005,7 @@ class DspPanel(GlassPanel):
                         name, overwrite=True)
                     self.radio.status_message.emit(
                         f"Saved noise profile: {name}", 4000)
-                    if self.radio.nr_profile != "captured":
-                        self.radio.set_nr_profile("captured")
+                    self.radio.set_nr_use_captured_profile(True)
                 except Exception as exc:
                     QMessageBox.warning(
                         self, "Save failed", str(exc))
@@ -1990,12 +2013,11 @@ class DspPanel(GlassPanel):
             QMessageBox.warning(self, "Save failed", str(exc))
 
     def _on_clear_captured_profile(self) -> None:
-        """Drop the loaded profile + switch NR off "captured" mode."""
+        """Drop the loaded profile.  Radio.clear_captured_profile()
+        also flips the noise-source toggle back to Live so the
+        operator's NR aggression profile (Light/Medium/Aggressive)
+        keeps working with the live VAD estimate."""
         self.radio.clear_captured_profile()
-        if self.radio.nr_profile == "captured":
-            # No longer makes sense to be on "captured" with no
-            # profile loaded.  Fall back to medium.
-            self.radio.set_nr_profile("medium")
 
     def _open_noise_profile_manager(self) -> None:
         """Open the Manage Profiles dialog (created in Day 3 piece 3)."""
@@ -2030,13 +2052,21 @@ class DspPanel(GlassPanel):
 
     def _on_nr_profile_changed(self, name: str):
         """Update the NR button's tooltip so hover reflects the
-        active profile. The button itself only shows 'NR' text (no
-        room for the profile on the compact button row)."""
+        active profile + noise source. The button itself only shows
+        'NR' text (no room for the profile on the compact button row)."""
         label = self._NR_PROFILE_LABELS.get(name, name)
+        if self.radio.nr_use_captured_profile and self.radio.has_captured_profile():
+            source = (f"Captured: "
+                      f"{self.radio.active_captured_profile_name}")
+        else:
+            source = "Live (VAD)"
         self.dsp_btns["NR"].setToolTip(
-            f"Noise Reduction — active profile: {label}.\n"
-            "Left-click: toggle on/off.\n"
-            "Right-click: change profile.")
+            f"Noise Reduction\n"
+            f"  Profile: {label}\n"
+            f"  Source:  {source}\n"
+            f"\n"
+            f"Left-click: toggle on/off.\n"
+            f"Right-click: change profile or noise source.")
 
     # ── APF button handlers ────────────────────────────────────────
     def _show_apf_menu(self, pos):

@@ -6,12 +6,22 @@ domain subtraction. A VAD-like rule updates the noise floor estimate
 only on frames quieter than the current estimate, so speech doesn't
 pollute the noise model.
 
-Four profiles tune the aggression / artifact trade-off:
+The NR processor exposes TWO INDEPENDENT operator controls:
+
+    profile       — subtraction aggression (alpha / beta tuning)
+    noise source  — where the noise estimate comes from
+
+Profiles (alpha / beta tuning):
 
     Light       — SSB ragchew, subtle hiss reduction, minimal artifacts
     Medium      — standard speech NR (default)
     Aggressive  — weak-signal DX, noisy bands; accept more "musical
                   noise" artifacts for deeper noise suppression
+
+Noise source (selectable independently of profile):
+
+    Live (VAD)  — Lyra's adaptive estimator updates the noise model
+                  on quiet frames during normal listening
     Captured    — Audacity-style: operator records a noise-only sample
                   via begin_noise_capture(); the captured per-bin
                   magnitude profile becomes the locked noise model.
@@ -19,12 +29,24 @@ Four profiles tune the aggression / artifact trade-off:
                   because it's measured on actual noise without any
                   signal contamination.
 
+Operator picks both:
+
+    Light + Captured       → gentle subtraction, locked profile
+    Medium + Captured      → standard subtraction, locked profile
+    Aggressive + Live      → harder subtraction with live tracking
+    ... etc.
+
+Profile and source were tangled in an earlier draft (a 4th "captured"
+profile entry that bundled both choices); separating them gives the
+operator the full 3×2 = 6 combinations of "how aggressive" × "what
+noise model".
+
 The "musical noise" artifact of classical subtraction is a known
 limitation; the aggressive profile spreads this by using a higher
-spectral floor. Captured-profile mode generally has cleaner output
-than the live profiles because the noise model is more accurate.
-Neural NR (RNNoise / DeepFilterNet — planned) eliminates the
-musical-noise artifact almost entirely. See docs/backlog.md.
+spectral floor. Captured-source mode generally has cleaner output
+than live-source because the noise model is more accurate.  Neural
+NR (RNNoise / DeepFilterNet — planned) eliminates the musical-noise
+artifact almost entirely.  See docs/backlog.md.
 
 Integration: Radio calls `.process(audio_block)` once per demod
 block. The module is length-preserving: input N samples → output N
@@ -64,27 +86,17 @@ class SpectralSubtractionNR:
     # Per-profile DSP parameters:
     #   alpha        — over-subtraction factor (higher = more noise removed)
     #   beta         — spectral floor (higher = less musical-noise artifact)
-    #   noise_track  — exp-smoothing rate for noise-floor estimate
-    #                  (0.0 = locked, no live update — used by Captured)
+    #   noise_track  — exp-smoothing rate for live noise estimator
     #   vad_gate     — frame is "noise" if power < noise_est × this factor
-    #                  (ignored when noise_track == 0.0)
+    #
+    # Profiles control AGGRESSION ONLY.  Whether the noise reference
+    # used in the gain math is the live VAD-tracked estimate or the
+    # operator's captured profile is independent — see
+    # ``set_use_captured_profile`` below.
     PROFILES: dict[str, dict[str, float]] = {
         "light":      {"alpha": 1.0, "beta": 0.20, "noise_track": 0.03,  "vad_gate": 3.0},
         "medium":     {"alpha": 1.8, "beta": 0.12, "noise_track": 0.015, "vad_gate": 3.0},
         "aggressive": {"alpha": 2.8, "beta": 0.06, "noise_track": 0.008, "vad_gate": 4.0},
-        # Phase 3.D #1 — Captured-noise-profile mode.  Uses the
-        # operator-recorded _captured_noise_mag instead of the live
-        # _noise_mag.  noise_track = 0 disables adaptive update —
-        # the profile stays locked to whatever the operator captured.
-        # alpha / beta sit between Medium and Aggressive: a locked
-        # profile is more accurate than the live estimate, so we can
-        # subtract a bit harder without the musical-noise artifact
-        # getting worse.  If profile is set to "captured" but no
-        # captured profile is loaded, process() falls back to live
-        # _noise_mag (effectively NR1 with these tuning values) so
-        # the operator hears something rather than nothing — but UI
-        # should normally prevent this state.
-        "captured":   {"alpha": 1.5, "beta": 0.10, "noise_track": 0.0,   "vad_gate": 0.0},
     }
     DEFAULT_PROFILE = "medium"
 
@@ -124,11 +136,15 @@ class SpectralSubtractionNR:
         # ── Phase 3.D #1: captured-noise-profile state ────────────
         # ``_captured_noise_mag`` holds the locked per-bin magnitude
         # array when a profile is loaded (n_bins float32).  None
-        # means "no profile loaded" — the "captured" NR profile
-        # falls back to live noise tracking in that case (UI should
-        # prevent the operator from reaching that state, but safer
-        # to handle it gracefully than crash).
+        # means "no profile loaded" — the source toggle below has no
+        # effect when the array is None (graceful fallback to live
+        # tracking).
         self._captured_noise_mag: Optional[np.ndarray] = None
+        # Source toggle: when True AND _captured_noise_mag is loaded,
+        # the gain math substitutes the captured magnitudes for the
+        # live VAD-tracked estimate.  Independent of self.profile
+        # (operator picks aggression and source separately).
+        self._use_captured_profile: bool = False
         # Capture lifecycle:
         #   "idle"       — no capture in progress, no recent result
         #   "capturing"  — accumulating frames; process() is feeding
@@ -242,13 +258,35 @@ class SpectralSubtractionNR:
     def has_captured_profile(self) -> bool:
         """True if a captured profile is currently loaded.
 
-        Note: this is independent of which NR profile is selected —
-        ``has_captured_profile()`` can be True while ``profile`` is
-        e.g. "medium" (operator captured a profile but is using
-        live NR), and False while ``profile == "captured"`` (operator
-        selected the captured mode but no profile is loaded —
-        process() falls back to live tracking)."""
+        Independent of the source toggle: a profile may be loaded
+        but the source toggle could be Live (operator listening
+        with live tracking).  Use ``is_using_captured_source()``
+        to check whether the captured profile is actively driving
+        the gain math."""
         return self._captured_noise_mag is not None
+
+    def set_use_captured_profile(self, on: bool) -> None:
+        """Operator toggles the noise SOURCE.
+
+        When True, ``process()`` uses ``_captured_noise_mag`` as the
+        noise reference (assuming a profile is loaded; falls back to
+        live tracking if not).  When False, always uses the live
+        VAD-tracked estimate.
+
+        Independent of which profile (Light/Medium/Aggressive) is
+        active — those control subtraction aggression, this controls
+        which noise model the subtraction works against.
+        """
+        self._use_captured_profile = bool(on)
+
+    def is_using_captured_source(self) -> bool:
+        """True if the source toggle is set to "Captured" AND a
+        profile is loaded — i.e., process() will actually use the
+        captured magnitudes for this block.  False otherwise (either
+        the toggle is off, OR there's no profile loaded so we're
+        falling back to live anyway)."""
+        return (self._use_captured_profile
+                and self._captured_noise_mag is not None)
 
     def captured_profile_array(self) -> Optional[np.ndarray]:
         """Return a copy of the active captured noise magnitudes,
@@ -434,20 +472,21 @@ class SpectralSubtractionNR:
 
             # Noise-floor tracking — simple VAD: update only when the
             # frame is quieter than vad_gate × the current estimate.
-            # Skipped for the captured profile (noise_track == 0);
-            # the captured magnitudes are locked, no live update.
-            if self._noise_track > 0.0:
-                frame_pow = float(np.mean(mag * mag))
-                noise_pow = float(np.mean(self._noise_mag * self._noise_mag))
-                if frame_pow <= noise_pow * self._vad_gate:
-                    a = self._noise_track
-                    self._noise_mag = (1.0 - a) * self._noise_mag + a * mag
+            # Always runs even when the captured source is active,
+            # so the live estimate stays warm as a fallback if the
+            # operator clears or re-toggles the captured profile.
+            frame_pow = float(np.mean(mag * mag))
+            noise_pow = float(np.mean(self._noise_mag * self._noise_mag))
+            if frame_pow <= noise_pow * self._vad_gate:
+                a = self._noise_track
+                self._noise_mag = (1.0 - a) * self._noise_mag + a * mag
 
-            # Choose the noise reference: captured profile wins when
-            # active and loaded; otherwise live tracker (which also
-            # serves as the fallback if the captured profile is
-            # cleared mid-stream).
-            if (self.profile == "captured"
+            # Choose the noise reference based on the source toggle.
+            # Captured source wins when the toggle is on AND a
+            # profile is loaded; otherwise fall back to the live
+            # VAD-tracked estimate (both for "source = Live" and
+            # for "source = Captured but no profile loaded yet").
+            if (self._use_captured_profile
                     and self._captured_noise_mag is not None):
                 noise_ref = self._captured_noise_mag
             else:
