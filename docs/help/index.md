@@ -41,6 +41,8 @@ up changes.
 - **Noise Reduction** — spectral-subtraction NR, profiles
   (Light / Medium / Aggressive), captured-noise-profile workflow
   (Audacity-style), neural roadmap
+- **Noise Blanker** — IQ-domain impulse suppression, profiles
+  (Off / Light / Medium / Aggressive / Custom), threshold tuning
 - **APF (Audio Peaking Filter)** — narrow CW boost at the operator's pitch
 - **BIN (Binaural)** — pseudo-stereo headphone listening for CW + SSB
 - **Spectrum & Waterfall** — pan, zoom, drag, palettes

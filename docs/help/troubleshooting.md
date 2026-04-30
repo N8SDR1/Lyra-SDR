@@ -105,6 +105,55 @@ and/or threaded demod.
   turn on Notch first — right-click is gated on NF state so the
   gesture stays free for other spectrum features when NF is off.
 
+## NB is clipping my CW signal
+
+Aggressive NB at low threshold can mistake the leading edge of a
+strong CW dit for an impulse — especially if your band background
+is very quiet and the signal is much stronger than the surrounding
+noise.
+
+**Fix:** raise the threshold or pick a gentler profile.
+
+1. Right-click the **NB** button on the DSP+Audio panel.
+2. Pick **Light** (12× background) — the highest preset.
+3. If Light still clips, switch to **Custom** and use Settings →
+   Noise → Threshold to dial in a value above 12 (try 15–20).
+
+If Light + threshold ≥15 still clips, NB probably isn't right
+for the situation — try turning it Off and using narrow filters
++ APF instead.
+
+## NB is doing nothing on impulse noise I can clearly hear
+
+Two common causes:
+
+1. **Threshold too high** — try **Aggressive** (3× background) or
+   pick **Custom** and dial the slider down.
+2. **Impulses are wider than NB's blanking window** — NB caps
+   consecutive blanked samples at 25 ms to protect legitimate
+   signal. Storms with fast-repeating crashes (rapid CW-like
+   QRN) can sometimes look continuous to the bg tracker. NR or
+   a captured-noise profile may help instead/in addition.
+
+If you switch to Aggressive and STILL hear no NB action, double-
+check NB is actually on — the DSP-row NB button should be lit
+(not dim).
+
+## NB makes audio sound thin / hollow
+
+NB is over-active. Either:
+- Threshold is too low (catching too many normal noise excursions)
+- Continuous wide-band crud is being interpreted as impulses
+
+**Fix:**
+
+1. Try **Light** profile first.
+2. If Light still feels thin, switch NB **Off** and assess whether
+   the band noise is genuinely impulsive or just sandpapery.
+   Sandpapery / steady noise is NR's territory, not NB's.
+3. Birdies from local PC hardware can persistently trigger NB.
+   Notch them with a manual notch filter instead.
+
 ## Captured noise profile is muting real signals
 
 If a captured profile makes your signal-of-interest quieter than
