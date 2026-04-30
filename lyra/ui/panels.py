@@ -1350,6 +1350,26 @@ class DspPanel(GlassPanel):
             dsp_row.addWidget(btn)
             self.dsp_btns[label] = btn
 
+        # ── ANF (Auto Notch Filter, Phase 3.D #3) ─────────────────
+        # Left-click  = toggle on/off (cycles between Off and the
+        #               last non-Off profile, default Standard)
+        # Right-click = profile picker (Off / Gentle / Standard /
+        #               Aggressive / Custom) + Open Noise settings
+        anf_btn = self.dsp_btns["ANF"]
+        anf_btn.setChecked(radio.anf_enabled)
+        anf_btn.toggled.connect(self._on_anf_btn_toggled)
+        anf_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        anf_btn.customContextMenuRequested.connect(self._show_anf_menu)
+        anf_btn.setToolTip(
+            "Auto Notch Filter — LMS adaptive predictor.\n"
+            "Surgically nulls hetorodynes / carriers / RTTY spurs.\n"
+            "Left-click: toggle on/off.\n"
+            "Right-click: pick profile (Off / Gentle / Standard / Aggressive).")
+        radio.anf_profile_changed.connect(self._on_anf_profile_changed)
+        cur_anf = radio.anf_profile
+        self._anf_last_active_profile = (
+            cur_anf if cur_anf != "off" else "standard")
+
         # ── NB (Noise Blanker, Phase 3.D #2) ──────────────────────
         # Left-click  = toggle on/off (cycles between Off and the
         #               last non-Off profile, default Medium)
@@ -2174,6 +2194,75 @@ class DspPanel(GlassPanel):
             name, f"Custom ({self.radio.nb_threshold:.1f}×)")
         nb_btn.setToolTip(
             f"Noise Blanker — IQ-domain impulse suppression.\n"
+            f"  Profile: {label}\n"
+            f"\n"
+            f"Left-click: toggle on/off.\n"
+            f"Right-click: pick profile or open Noise settings.")
+
+    # ── ANF (Auto Notch Filter) handlers — Phase 3.D #3 ─────────────
+
+    _ANF_PROFILE_LABELS = {
+        "off":        "Off",
+        "gentle":     "Gentle",
+        "standard":   "Standard",
+        "aggressive": "Aggressive",
+        # "custom" handled inline (label includes mu)
+    }
+
+    def _on_anf_btn_toggled(self, checked: bool) -> None:
+        """Left-click on the ANF button toggles between Off and
+        the operator's last non-Off profile (default Standard)."""
+        if checked:
+            target = self._anf_last_active_profile
+            if target == "off":
+                target = "standard"
+            self.radio.set_anf_profile(target)
+        else:
+            self.radio.set_anf_profile("off")
+
+    def _show_anf_menu(self, pos):
+        """Right-click on the ANF button — profile picker."""
+        btn = self.dsp_btns["ANF"]
+        menu = QMenu(self)
+        current = self.radio.anf_profile
+        for key in ("off", "gentle", "standard", "aggressive"):
+            label = self._ANF_PROFILE_LABELS[key]
+            act = QAction(label, menu)
+            act.setCheckable(True)
+            act.setChecked(key == current)
+            act.triggered.connect(
+                lambda _=False, k=key: self.radio.set_anf_profile(k))
+            menu.addAction(act)
+        cust_label = "Custom"
+        if current == "custom":
+            cust_label = (f"Custom  (μ = {self.radio.anf_mu:.1e})")
+        cust_act = QAction(cust_label, menu)
+        cust_act.setCheckable(True)
+        cust_act.setChecked(current == "custom")
+        # Custom is set via the Settings → Noise tab slider.
+        cust_act.triggered.connect(self._open_noise_settings)
+        menu.addAction(cust_act)
+        menu.addSeparator()
+        settings_act = QAction("Open Noise settings…", menu)
+        settings_act.triggered.connect(self._open_noise_settings)
+        menu.addAction(settings_act)
+        menu.exec(btn.mapToGlobal(pos))
+
+    def _on_anf_profile_changed(self, name: str) -> None:
+        """Slot for ``Radio.anf_profile_changed``.  Sync the ANF
+        button's checked state."""
+        if name != "off":
+            self._anf_last_active_profile = name
+        anf_btn = self.dsp_btns["ANF"]
+        target_checked = (name != "off")
+        if anf_btn.isChecked() != target_checked:
+            anf_btn.blockSignals(True)
+            anf_btn.setChecked(target_checked)
+            anf_btn.blockSignals(False)
+        label = self._ANF_PROFILE_LABELS.get(
+            name, f"Custom (μ={self.radio.anf_mu:.1e})")
+        anf_btn.setToolTip(
+            f"Auto Notch Filter — LMS adaptive notch.\n"
             f"  Profile: {label}\n"
             f"\n"
             f"Left-click: toggle on/off.\n"

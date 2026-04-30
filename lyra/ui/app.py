@@ -101,6 +101,11 @@ class MainWindow(QMainWindow):
             self.radio.autoload_nb_settings()
         except Exception as exc:
             print(f"[app] NB autoload error: {exc}")
+        # Phase 3.D #3 — same pattern for ANF (auto notch filter).
+        try:
+            self.radio.autoload_anf_settings()
+        except Exception as exc:
+            print(f"[app] ANF autoload error: {exc}")
 
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.

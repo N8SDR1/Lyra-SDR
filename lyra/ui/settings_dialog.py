@@ -2756,6 +2756,91 @@ class NoiseSettingsTab(QWidget):
         self._update_nb_threshold_enabled(radio.nb_profile)
 
         v.addWidget(grp_nb)
+
+        # ── Auto Notch Filter (ANF, Phase 3.D #3) ─────────────────
+        grp_anf = QGroupBox("Auto Notch Filter (ANF)")
+        anfv = QVBoxLayout(grp_anf)
+        anfv.setSpacing(8)
+
+        anf_intro = QLabel(
+            "LMS adaptive notch.  Hunts and surgically removes "
+            "narrow tonal interference — heterodynes, BFO whistles, "
+            "single-frequency carriers, RTTY spurs.  Operator turns "
+            "it on; the filter learns whatever tones are present "
+            "and nulls them without taking out genuine speech.\n\n"
+            "Profile sets adaptation speed; μ is the underlying LMS "
+            "step size that operator hand-tunes in Custom.")
+        anf_intro.setWordWrap(True)
+        anf_intro.setStyleSheet("color: #8a9aac;")
+        anfv.addWidget(anf_intro)
+
+        anf_prof_row = QHBoxLayout()
+        anf_prof_row.addWidget(QLabel("Profile:"))
+        self._anf_radio_group = QButtonGroup(self)
+        self._anf_radios: dict[str, QRadioButton] = {}
+        for key, label in (
+                ("off", "Off"),
+                ("gentle", "Gentle"),
+                ("standard", "Standard"),
+                ("aggressive", "Aggressive"),
+                ("custom", "Custom"),
+        ):
+            rb = QRadioButton(label)
+            self._anf_radio_group.addButton(rb)
+            self._anf_radios[key] = rb
+            anf_prof_row.addWidget(rb)
+            rb.toggled.connect(
+                lambda checked, k=key: self._on_anf_radio_toggled(
+                    checked, k))
+        anf_prof_row.addStretch(1)
+        anfv.addLayout(anf_prof_row)
+        # Block signals during initial setChecked so the toggled
+        # handler doesn't fire against the μ slider before it's
+        # built (same construction-order pattern as the NB section).
+        anf_target = self._anf_radios.get(
+            radio.anf_profile, self._anf_radios["off"])
+        anf_target.blockSignals(True)
+        anf_target.setChecked(True)
+        anf_target.blockSignals(False)
+
+        # μ slider — operator-tunable in Custom; presets show the
+        # value but disabled.  Uses log scale for ergonomic feel
+        # since μ ranges over 2 decades (1e-5 to 1e-3).
+        from lyra.dsp.anf import AutoNotchFilter
+        anf_mu_row = QHBoxLayout()
+        anf_mu_row.addWidget(QLabel("μ (adapt rate):"))
+        self.anf_mu_slider = QSlider(Qt.Horizontal)
+        # Map slider int 0..200 to log μ over [MU_MIN, MU_MAX].
+        self.anf_mu_slider.setRange(0, 200)
+        self.anf_mu_slider.setValue(
+            self._anf_mu_to_slider(radio.anf_mu))
+        self.anf_mu_slider.setSingleStep(1)
+        self.anf_mu_slider.setPageStep(20)
+        self.anf_mu_label = QLabel(f"μ = {radio.anf_mu:.2e}")
+        self.anf_mu_label.setMinimumWidth(120)
+        self.anf_mu_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700;")
+        self.anf_mu_slider.valueChanged.connect(
+            self._on_anf_mu_slider)
+        anf_mu_row.addWidget(self.anf_mu_slider, 1)
+        anf_mu_row.addWidget(self.anf_mu_label)
+        anfv.addLayout(anf_mu_row)
+
+        anf_hint = QLabel(
+            "Higher μ = faster adaptation but noisier residual; "
+            "lower μ = slower lock but cleaner output.\n\n"
+            "Right-click the ANF button on the DSP+Audio panel "
+            "for quick profile switching during operating.")
+        anf_hint.setWordWrap(True)
+        anf_hint.setStyleSheet("color: #7a8a9c;")
+        anfv.addWidget(anf_hint)
+
+        radio.anf_profile_changed.connect(self._on_anf_profile_signal)
+        radio.anf_mu_changed.connect(self._on_anf_mu_signal)
+        self._update_anf_mu_enabled(radio.anf_profile)
+
+        v.addWidget(grp_anf)
         v.addStretch(1)
 
     # ── Slot implementations ─────────────────────────────────────
@@ -2880,6 +2965,63 @@ class NoiseSettingsTab(QWidget):
         """The threshold slider is only directly tunable in Custom;
         on presets it shows the preset value but is greyed."""
         self.nb_thr_slider.setEnabled(profile == "custom")
+
+    # ── ANF section slot implementations (Phase 3.D #3) ──────────
+
+    def _on_anf_radio_toggled(self, checked: bool, key: str) -> None:
+        if not checked:
+            return
+        self.radio.set_anf_profile(key)
+        self._update_anf_mu_enabled(key)
+
+    def _on_anf_mu_slider(self, slider_int: int) -> None:
+        mu = self._anf_slider_to_mu(slider_int)
+        self.anf_mu_label.setText(f"μ = {mu:.2e}")
+        self.radio.set_anf_mu(mu)
+
+    def _on_anf_profile_signal(self, name: str) -> None:
+        rb = self._anf_radios.get(name)
+        if rb and not rb.isChecked():
+            rb.blockSignals(True)
+            rb.setChecked(True)
+            rb.blockSignals(False)
+        self._update_anf_mu_enabled(name)
+
+    def _on_anf_mu_signal(self, mu: float) -> None:
+        target = self._anf_mu_to_slider(mu)
+        if self.anf_mu_slider.value() != target:
+            self.anf_mu_slider.blockSignals(True)
+            self.anf_mu_slider.setValue(target)
+            self.anf_mu_slider.blockSignals(False)
+        self.anf_mu_label.setText(f"μ = {mu:.2e}")
+
+    def _update_anf_mu_enabled(self, profile: str) -> None:
+        self.anf_mu_slider.setEnabled(profile == "custom")
+
+    @staticmethod
+    def _anf_mu_to_slider(mu: float) -> int:
+        """Map μ ∈ [1e-5, 1e-3] to slider int 0..200 logarithmically.
+
+        Log scale ergonomics: equal slider movement is equal
+        multiplicative change in μ.
+        """
+        import math
+        from lyra.dsp.anf import AutoNotchFilter as ANF
+        mu = max(ANF.MU_MIN, min(ANF.MU_MAX, mu))
+        # log10(MU_MIN) = -5, log10(MU_MAX) = -3 → 2 decades.
+        log_min = math.log10(ANF.MU_MIN)
+        log_max = math.log10(ANF.MU_MAX)
+        frac = (math.log10(mu) - log_min) / (log_max - log_min)
+        return int(round(frac * 200))
+
+    @staticmethod
+    def _anf_slider_to_mu(slider_int: int) -> float:
+        import math
+        from lyra.dsp.anf import AutoNotchFilter as ANF
+        log_min = math.log10(ANF.MU_MIN)
+        log_max = math.log10(ANF.MU_MAX)
+        frac = max(0, min(200, slider_int)) / 200.0
+        return 10.0 ** (log_min + frac * (log_max - log_min))
 
 
 class SettingsDialog(QDialog):

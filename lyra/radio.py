@@ -193,6 +193,13 @@ class Radio(QObject):
     nb_profile_changed = Signal(str)
     nb_threshold_changed = Signal(float)
 
+    # Phase 3.D #3 — Auto Notch Filter (LMS adaptive).  Profile =
+    # preset name (off / gentle / standard / aggressive / custom).
+    # Mu = adaptation step size (operator-tunable in Custom).
+    # See lyra/dsp/anf.py and docs/architecture/noise_toolkit.md §3.3.
+    anf_profile_changed = Signal(str)
+    anf_mu_changed = Signal(float)
+
     # Phase 3.D #1 — Captured-noise-profile signals.
     # noise_capture_done fires when a capture finalizes inside the
     # NR processor; payload is the smart-guard verdict
@@ -2098,6 +2105,82 @@ class Radio(QObject):
                 self.set_nb_profile(profile)
         except Exception as exc:
             print(f"[Radio] could not autoload NB settings: {exc}")
+
+    # ── Auto Notch Filter (ANF) API — Phase 3.D #3 ────────────────
+
+    ANF_PROFILES = ("off", "gentle", "standard", "aggressive", "custom")
+
+    @property
+    def anf_enabled(self) -> bool:
+        """True if ANF is currently doing work (profile != 'off')."""
+        return self._rx_channel.anf_enabled
+
+    @property
+    def anf_profile(self) -> str:
+        return self._rx_channel.anf_profile
+
+    @property
+    def anf_mu(self) -> float:
+        return self._rx_channel.anf_mu
+
+    def set_anf_profile(self, name: str) -> None:
+        """Apply an ANF profile preset.
+
+        Names: off / gentle / standard / aggressive / custom.
+        Custom retains the current μ; presets install the
+        preset's value.  Persists via QSettings.
+        """
+        name = (name or "").strip().lower()
+        if name not in self.ANF_PROFILES:
+            name = "off"
+        self._rx_channel.set_anf_profile(name)
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/anf_profile", name)
+            s.setValue("noise/anf_mu",
+                       float(self._rx_channel.anf_mu))
+        except Exception as exc:
+            print(f"[Radio] could not persist ANF profile: {exc}")
+        self.anf_profile_changed.emit(name)
+        self.anf_mu_changed.emit(self._rx_channel.anf_mu)
+
+    def set_anf_mu(self, mu: float) -> None:
+        """Operator-tunable ANF adaptation step size.
+
+        Switches profile to 'custom'.  Clamped to ANF's
+        [MU_MIN, MU_MAX].  Persists via QSettings.
+        """
+        self._rx_channel.set_anf_mu(float(mu))
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/anf_profile", "custom")
+            s.setValue("noise/anf_mu",
+                       float(self._rx_channel.anf_mu))
+        except Exception as exc:
+            print(f"[Radio] could not persist ANF mu: {exc}")
+        self.anf_profile_changed.emit("custom")
+        self.anf_mu_changed.emit(self._rx_channel.anf_mu)
+
+    def autoload_anf_settings(self) -> None:
+        """Restore ANF profile + μ from QSettings on Lyra startup."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            profile = str(s.value("noise/anf_profile", "off",
+                                  type=str) or "off")
+            mu = float(s.value("noise/anf_mu", 1.5e-4, type=float))
+        except Exception:
+            return
+        try:
+            if profile == "custom":
+                self.set_anf_mu(mu)
+            else:
+                self._rx_channel.set_anf_mu(mu)
+                self.set_anf_profile(profile)
+        except Exception as exc:
+            print(f"[Radio] could not autoload ANF settings: {exc}")
 
     def _on_nr_capture_done(self) -> None:
         """Called from inside NR.process() when a capture finalizes.

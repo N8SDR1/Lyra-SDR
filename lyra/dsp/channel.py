@@ -211,6 +211,14 @@ class PythonRxChannel(DspChannel):
         from lyra.dsp.nb import ImpulseBlanker
         self._nb = ImpulseBlanker(rate=self.in_rate)
 
+        # ANF (Auto Notch Filter, LMS adaptive) — owned by the
+        # channel.  Operates on the AUDIO rate (post-demod, 48 kHz),
+        # between the demodulator output and the NR processor.
+        # Default profile = off; operator opts in via DSP-row ANF
+        # button or Settings → Noise tab.
+        from lyra.dsp.anf import AutoNotchFilter
+        self._anf = AutoNotchFilter(rate=self.audio_rate)
+
         # APF (Audio Peaking Filter) — owned by the channel. Mode-
         # gated to CWU/CWL inside process(). Center freq tracks the
         # CW pitch automatically, so the operator only needs to
@@ -357,6 +365,30 @@ class PythonRxChannel(DspChannel):
     def nb_threshold(self) -> float:
         return float(self._nb._threshold)
 
+    # ── Auto Notch Filter proxies (Phase 3.D #3) ──────────────────────
+
+    def set_anf_profile(self, profile: str) -> None:
+        """Apply an ANF preset: off / gentle / standard / aggressive
+        / custom.  See AutoNotchFilter.PROFILES."""
+        self._anf.set_profile(profile)
+
+    def set_anf_mu(self, mu: float) -> None:
+        """Operator-tunable ANF adaptation step size (Custom profile).
+        Clamped to AutoNotchFilter's [MU_MIN, MU_MAX]."""
+        self._anf.set_mu(mu)
+
+    @property
+    def anf_enabled(self) -> bool:
+        return bool(self._anf.enabled)
+
+    @property
+    def anf_profile(self) -> str:
+        return self._anf.profile
+
+    @property
+    def anf_mu(self) -> float:
+        return float(self._anf._mu)
+
     def nr_capture_progress(self) -> tuple[str, float]:
         return self._nr.capture_progress()
 
@@ -402,6 +434,11 @@ class PythonRxChannel(DspChannel):
         # driven discontinuities (freq/mode change) where a fresh
         # bg tracker is appropriate.
         self._nb.reset()
+        # ANF state — adaptive weights + delay line.  Tones learned
+        # on the prior band are unlikely to be present on the new
+        # one, so a fresh start is right.  Profile + enabled flag
+        # are preserved (operator's setting sticks).
+        self._anf.reset()
         # APF state — safe to clear here because reset() is only
         # called on freq/mode changes, where an audio discontinuity
         # is already expected.
@@ -514,6 +551,15 @@ class PythonRxChannel(DspChannel):
                                 getattr(n, "filter", None) is not None:
                             chunk = n.filter.process(chunk)
                 audio = demod.process(chunk)
+                # ANF (Phase 3.D #3) — LMS adaptive notch.  Slots
+                # between demod and NR per the canonical ham-SDR
+                # noise-toolkit chain (see docs/architecture/
+                # noise_toolkit.md §6): manual notches handle KNOWN
+                # carriers (already done up above when notch_enabled);
+                # ANF handles UNKNOWN / drifting tones; NR handles
+                # whatever broadband residual is left.
+                # Bypass-fast when ANF is disabled.
+                audio = self._anf.process(audio)
                 audio = self._nr.process(audio)
                 # APF — only useful in CW. The operator's enable
                 # state is preserved across mode switches (button
