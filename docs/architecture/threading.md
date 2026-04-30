@@ -773,6 +773,39 @@ Pass criteria for the **worker** backend:
 If any fail: bug fix on the worker path before the BETA toggle
 ships in a release. Single-thread path is unaffected.
 
+### Phase 3.C status (closeout, 2026-04-30)
+
+Most of the matrix was covered organically during Phase 3.B
+development — the operator field-tested mode / freq / rate
+changes, AK4951 ↔ PC Soundcard sink swaps, sample-rate cycling
+(48 / 96 / 192 / 384 k), heavy DSP combos (smoothing + NR + multi-
+notch), single-thread fallback regression, and full Lyra
+lifecycle (Start → operate → Stop → close) over multiple sessions
+without regressions.
+
+Two items are deferred to **operator-as-released-tester** rather
+than blocking the v0.0.6 cut:
+
+- **WWV ↔ FT8 alternation every 5 s for 5 min** — exercises the
+  reset path at a cadence well above normal operating use.
+  Bug-hiding probability is low given the reset path has worked
+  cleanly during the slower freq/mode flux already field-tested.
+  Will surface naturally if real operator workflows hit it.
+- **GPU ↔ QPainter panadapter parity in worker mode** — quick
+  visual A/B during normal use. Both backends consume the same
+  `spectrum_ready` signal payload, so divergence would have to
+  come from inside the widget rendering path which Phase 3.B
+  didn't touch.
+
+Memory stability over a 30-min idle stream is implicit from the
+multi-hour development sessions on the same code; the bounded
+input queue + drop-oldest design has no obvious unbounded-growth
+path.
+
+**Phase 3.C verdict:** worker backend is BETA-stable for v0.0.6.
+Promotion from BETA to default still happens in a future release
+after sustained field testing as originally planned (see §13).
+
 ## 15. Rollback plan
 
 The Settings-toggle approach makes rollback trivial:
