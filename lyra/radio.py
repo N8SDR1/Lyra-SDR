@@ -3151,6 +3151,14 @@ class Radio(QObject):
         # the worker is mid-write to that same object).
         self.worker_audio_sink_changed.connect(
             self._dsp_worker._on_audio_sink_changed, _qc)
+        # B.6 — LNA peak / RMS feed from worker.  The single-thread
+        # path computes peak/RMS in _on_samples_main_thread (which
+        # is bypassed in worker mode); the worker computes them in
+        # its process_block and emits via lna_peak_update.  Main-
+        # thread slot appends to the same _lna_peaks / _lna_rms
+        # lists that Auto-LNA + the toolbar readout already consume.
+        self._dsp_worker.lna_peak_update.connect(
+            self._on_worker_lna_peak, _qc)
         # AF Gain, Volume, Muted aren't currently exposed as Qt
         # signals on Radio (single-thread path reads them directly
         # from `_af_gain_db` / `_volume` / `_muted` each block).
@@ -3194,6 +3202,26 @@ class Radio(QObject):
         # Drop references so any second call is a no-op
         self._dsp_worker = None
         self._dsp_worker_thread = None
+
+    def _on_worker_lna_peak(self, peak: float, rms: float) -> None:
+        """Slot for ``DspWorker.lna_peak_update`` (B.6).
+
+        Runs on the main thread because the connection is queued.
+        Mirrors the per-block append that
+        ``_on_samples_main_thread`` does in single-thread mode, so
+        Auto-LNA logic + the toolbar peak/RMS readout sees the same
+        history regardless of threading mode.
+
+        Cheap — two list appends + bounded trim.  Called at IQ-batch
+        cadence (~tens to low-hundreds of Hz), well within the main
+        thread's signal-handling capacity.
+        """
+        self._lna_peaks.append(float(peak))
+        self._lna_rms.append(float(rms))
+        if len(self._lna_peaks) > self._lna_peaks_max:
+            self._lna_peaks.pop(0)
+        if len(self._lna_rms) > self._lna_peaks_max:
+            self._lna_rms.pop(0)
 
     # ── Internal: sample flow ─────────────────────────────────────────
     def _stream_cb(self, samples, _stats):

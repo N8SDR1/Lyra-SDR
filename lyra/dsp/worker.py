@@ -438,6 +438,27 @@ class DspWorker(QObject):
             return
         if mode == "Off":
             return
+
+        # B.6 — LNA peak / RMS tracking (was on main thread in
+        # _on_samples_main_thread).  In worker mode the main-thread
+        # path is bypassed (rx-thread routes IQ straight to the
+        # worker queue), so the worker has to do this measurement
+        # or Auto-LNA goes blind.  Cheap: two scalar reductions
+        # over the IQ block.  Result is emitted to the main thread
+        # via ``lna_peak_update`` so Radio's existing _lna_peaks /
+        # _lna_rms history (read by Auto-LNA + toolbar readout)
+        # stays current.
+        try:
+            if samples.size > 0:
+                mag_sq = (samples.real * samples.real
+                          + samples.imag * samples.imag)
+                peak = float(np.sqrt(np.max(mag_sq)))
+                rms = float(np.sqrt(np.mean(mag_sq)))
+                self.lna_peak_update.emit(peak, rms)
+        except Exception as exc:
+            print(f"[DspWorker] lna peak/rms error: {exc}")
+            # Never block DSP on a measurement glitch.
+
         if mode == "Tone":
             # Tone generation lives on Radio (uses radio._tone_phase
             # state).  Worker calls it from worker thread; Radio's
