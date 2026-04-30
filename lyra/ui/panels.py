@@ -1412,7 +1412,11 @@ class DspPanel(GlassPanel):
         # Slight visual distinction: action-button (not a toggle),
         # so we leave it un-checkable.
         self.nr_cap_btn.setCheckable(False)
-        dsp_row.addWidget(self.nr_cap_btn)
+        # NOTE: nr_cap_btn isn't added to dsp_row — it gets parented
+        # below in the nr_status_row alongside the source badge so
+        # all noise-profile-related controls cluster on one line
+        # (operator UX feedback: keeps the DSP buttons row uncluttered
+        # and groups capture/source visually).
         # Live capture-progress poll — drives the button label
         # while a capture is in progress.  Stopped when state goes
         # back to idle/ready.
@@ -1555,7 +1559,13 @@ class DspPanel(GlassPanel):
             self._on_nr_source_badge_clicked)
         nr_status_row = QHBoxLayout()
         nr_status_row.setContentsMargins(0, 0, 0, 0)
-        nr_status_row.setSpacing(0)
+        nr_status_row.setSpacing(4)
+        # Capture button leads the row (was originally on the DSP
+        # buttons row above; moved here so all noise-profile
+        # controls cluster together).  Then the source badge fills
+        # the remaining horizontal space so the row balances even
+        # when the badge text is short.
+        nr_status_row.addWidget(self.nr_cap_btn)
         nr_status_row.addWidget(self.nr_source_badge, 1)
         self.content_layout().addLayout(nr_status_row)
         # Refresh on any of the events that affect what the badge
