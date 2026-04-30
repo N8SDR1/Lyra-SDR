@@ -522,6 +522,12 @@ class Radio(QObject):
         # which profile is currently loaded (and so we can persist
         # the selection across Lyra restarts).  "" = no profile.
         self._active_captured_profile_name: str = ""
+        # And the small metadata bundle the inline status badge needs
+        # for display: when the profile was captured, on what freq
+        # and in what mode.  Populated by load_saved_noise_profile
+        # and save_current_capture_as.  None = no profile loaded
+        # (or one captured before this metadata was tracked).
+        self._active_captured_profile_meta: Optional[dict] = None
 
         # AGC: peak-track with hang time. Profile presets select
         # (release rate, hang blocks); Custom exposes the parameters
@@ -1784,6 +1790,15 @@ class Radio(QObject):
         QSettings."""
         return self._active_captured_profile_name
 
+    @property
+    def active_captured_profile_meta(self) -> Optional[dict]:
+        """Metadata bundle for the active captured profile, or
+        None if no profile is loaded.  Keys: name, captured_at_iso,
+        freq_hz, mode, duration_sec, fft_size.  Used by the inline
+        status badge on the DSP+Audio panel for age coloring +
+        mode/band mismatch warnings."""
+        return self._active_captured_profile_meta
+
     def clear_captured_profile(self) -> None:
         """Drop the loaded captured profile.  If NR profile was
         "captured", caller should typically also switch to a live
@@ -1792,6 +1807,7 @@ class Radio(QObject):
         self._rx_channel.clear_captured_profile()
         if self._active_captured_profile_name:
             self._active_captured_profile_name = ""
+            self._active_captured_profile_meta = None
             self.noise_active_profile_changed.emit("")
         # If the source toggle was on, flip it back to Live — there's
         # no captured profile to use anymore, so the source flag
@@ -1890,6 +1906,18 @@ class Radio(QObject):
         # in NR right now) so a subsequent Lyra restart auto-
         # restores it.
         self._active_captured_profile_name = name
+        # Cache the metadata bundle the inline badge needs.  We use
+        # the same fields that get serialized to JSON so the badge
+        # can display matching info whether the profile was just
+        # captured or loaded from disk.
+        self._active_captured_profile_meta = {
+            "name": name,
+            "captured_at_iso": profile.captured_at_iso,
+            "freq_hz": profile.freq_hz,
+            "mode": profile.mode,
+            "duration_sec": profile.duration_sec,
+            "fft_size": profile.fft_size,
+        }
         self._save_active_profile_name_setting(name)
         self.noise_active_profile_changed.emit(name)
         self.noise_profiles_changed.emit()
@@ -1910,6 +1938,16 @@ class Radio(QObject):
                 f"{self._rx_channel.nr_fft_size} — incompatible")
         self._rx_channel.load_captured_profile(prof.magnitudes)
         self._active_captured_profile_name = prof.name
+        # Cache the metadata so the inline badge has freq/mode/age
+        # info to display without re-reading the JSON file.
+        self._active_captured_profile_meta = {
+            "name": prof.name,
+            "captured_at_iso": prof.captured_at_iso,
+            "freq_hz": prof.freq_hz,
+            "mode": prof.mode,
+            "duration_sec": prof.duration_sec,
+            "fft_size": prof.fft_size,
+        }
         self._save_active_profile_name_setting(prof.name)
         self.noise_active_profile_changed.emit(prof.name)
 

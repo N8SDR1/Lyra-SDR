@@ -1521,6 +1521,62 @@ class DspPanel(GlassPanel):
 
         self.content_layout().addLayout(dsp_row)
 
+        # ── NR noise-source status badge (Phase 3.D #1) ─────────
+        # Sits on its own thin sub-row directly below the DSP
+        # buttons.  Always visible; click toggles Live ⇄ Captured
+        # (when a profile is loaded; greyed otherwise).  Shows the
+        # active profile name + age + mode/band — the operator
+        # never has to open a menu to check what NR is using.
+        self.nr_source_badge = QPushButton()
+        self.nr_source_badge.setObjectName("nr_source_badge")
+        self.nr_source_badge.setFlat(True)
+        self.nr_source_badge.setCursor(Qt.PointingHandCursor)
+        # Left-align text inside the button.
+        self.nr_source_badge.setStyleSheet(
+            "QPushButton#nr_source_badge {"
+            "  text-align: left;"
+            "  padding: 3px 8px;"
+            "  border: 1px solid transparent;"
+            "  border-radius: 4px;"
+            "  font-family: 'Segoe UI', sans-serif;"
+            "  font-size: 11px;"
+            "}"
+            "QPushButton#nr_source_badge:hover:!disabled {"
+            "  background-color: rgba(80, 208, 255, 0.10);"
+            "  border-color: rgba(80, 208, 255, 0.35);"
+            "}"
+            "QPushButton#nr_source_badge:disabled {"
+            "  color: #6a7a8c;"
+            "}")
+        self.nr_source_badge.clicked.connect(
+            self._on_nr_source_badge_clicked)
+        nr_status_row = QHBoxLayout()
+        nr_status_row.setContentsMargins(0, 0, 0, 0)
+        nr_status_row.setSpacing(0)
+        nr_status_row.addWidget(self.nr_source_badge, 1)
+        self.content_layout().addLayout(nr_status_row)
+        # Refresh on any of the events that affect what the badge
+        # should display.
+        radio.nr_use_captured_profile_changed.connect(
+            lambda _on: self._refresh_nr_source_badge())
+        radio.noise_active_profile_changed.connect(
+            lambda _name: self._refresh_nr_source_badge())
+        radio.mode_changed.connect(
+            lambda _m: self._refresh_nr_source_badge())
+        radio.freq_changed.connect(
+            lambda _f: self._refresh_nr_source_badge())
+        # Periodic age-color refresh — the badge color depends on
+        # captured-at age, which advances even when nothing else
+        # changes.  60s timer is plenty (age thresholds are in
+        # hours/days).
+        self._nr_badge_age_timer = QTimer(self)
+        self._nr_badge_age_timer.setInterval(60_000)
+        self._nr_badge_age_timer.timeout.connect(
+            self._refresh_nr_source_badge)
+        self._nr_badge_age_timer.start()
+        # Initial paint.
+        self._refresh_nr_source_badge()
+
         # Wire the live readouts to radio signals
         self._update_agc_profile(radio.agc_profile)
         self._update_agc_threshold(radio.agc_threshold)
@@ -1760,21 +1816,17 @@ class DspPanel(GlassPanel):
         menu = QMenu(self)
         current = self.radio.nr_profile
         neural_ok = Radio.neural_nr_available()
-        has_captured = self.radio.has_captured_profile()
-        captured_name = self.radio.active_captured_profile_name
-        use_captured = self.radio.nr_use_captured_profile
 
-        # ── Aggression profile section (Light / Medium / Aggressive
-        # / Neural).  Mutually exclusive — operator picks one.  This
-        # controls subtraction strength only; whether the noise
-        # model is the live VAD estimate or the captured profile is
-        # the SOURCE section below.
-        prof_header = QAction("Profile (subtraction strength):", menu)
-        prof_header.setEnabled(False)
-        menu.addAction(prof_header)
+        # NR right-click menu is now SINGLE-PURPOSE: profile picker
+        # (subtraction strength only).  The noise SOURCE toggle
+        # (Live ⇄ Captured) lives on the inline status badge below
+        # the DSP button row — see NoiseSourceBadge.  Keeping the
+        # menu single-purpose matches the standard Qt menu UX
+        # convention ("pick one thing") rather than asking the
+        # operator to navigate two parallel exclusive groups.
         for key in ("light", "medium", "aggressive"):
             label = self._NR_PROFILE_LABELS[key]
-            act = QAction(f"   {label}", menu)
+            act = QAction(label, menu)
             act.setCheckable(True)
             act.setChecked(key == current)
             act.triggered.connect(
@@ -1782,39 +1834,16 @@ class DspPanel(GlassPanel):
             menu.addAction(act)
         # Neural placeholder.
         neural_label = self._NR_PROFILE_LABELS["neural"]
-        neu_act = QAction(f"   {neural_label}", menu)
+        neu_act = QAction(neural_label, menu)
         neu_act.setCheckable(True)
         neu_act.setChecked(current == "neural")
         if not neural_ok:
             neu_act.setEnabled(False)
             neu_act.setText(
-                f"   {neural_label}  (install RNNoise or DeepFilterNet)")
+                f"{neural_label}  (install RNNoise or DeepFilterNet)")
         neu_act.triggered.connect(
             lambda _=False: self.radio.set_nr_profile("neural"))
         menu.addAction(neu_act)
-
-        menu.addSeparator()
-
-        # ── Noise SOURCE section — independent of profile.
-        src_header = QAction("Noise source:", menu)
-        src_header.setEnabled(False)
-        menu.addAction(src_header)
-        live_act = QAction("   Live (VAD-tracked)", menu)
-        live_act.setCheckable(True)
-        live_act.setChecked(not use_captured)
-        live_act.triggered.connect(
-            lambda _=False: self.radio.set_nr_use_captured_profile(False))
-        menu.addAction(live_act)
-        cap_label = (f"   Captured: {captured_name}"
-                     if has_captured
-                     else "   Captured  (no profile loaded)")
-        cap_act = QAction(cap_label, menu)
-        cap_act.setCheckable(True)
-        cap_act.setChecked(use_captured and has_captured)
-        cap_act.setEnabled(has_captured)
-        cap_act.triggered.connect(
-            lambda _=False: self.radio.set_nr_use_captured_profile(True))
-        menu.addAction(cap_act)
 
         menu.addSeparator()
         toggle_act = QAction(
@@ -2018,6 +2047,183 @@ class DspPanel(GlassPanel):
         operator's NR aggression profile (Light/Medium/Aggressive)
         keeps working with the live VAD estimate."""
         self.radio.clear_captured_profile()
+
+    # ── NR noise-source badge (Phase 3.D #1) ─────────────────────────
+
+    def _on_nr_source_badge_clicked(self) -> None:
+        """Click on the inline badge — toggle Live ⇄ Captured.
+
+        Disabled in stylesheet+setEnabled when no profile is loaded,
+        so this slot only fires when a profile exists.  Belt-and-
+        suspenders: re-check has_captured_profile() and bail if
+        somehow the click landed without one (e.g., race during
+        clear)."""
+        if not self.radio.has_captured_profile():
+            return
+        self.radio.set_nr_use_captured_profile(
+            not self.radio.nr_use_captured_profile)
+
+    def _refresh_nr_source_badge(self) -> None:
+        """Repaint the inline badge to match current state.
+
+        States the badge can show:
+        - No profile loaded:
+            "Source: Live (VAD)  ·  no captured profile loaded"
+            (greyed, not clickable)
+        - Profile loaded, source = Live:
+            "Source: Live (VAD)  ⇄  click to use captured: Powerline 80m"
+        - Profile loaded, source = Captured:
+            "Source: Captured: Powerline 80m  ·  3d · 80m LSB  ⇄"
+            (text colored per age threshold; ⚠ if mode mismatch)
+        """
+        from PySide6.QtCore import QSettings
+        badge = self.nr_source_badge
+        has_cap = self.radio.has_captured_profile()
+        use_cap = self.radio.nr_use_captured_profile
+        meta = self.radio.active_captured_profile_meta or {}
+        cap_name = self.radio.active_captured_profile_name
+
+        if not has_cap:
+            # No profile — Live source is forced; badge is
+            # informational only.
+            badge.setEnabled(False)
+            badge.setText(
+                "🔵  Source: Live (VAD)   ·   no captured profile loaded")
+            badge.setToolTip(
+                "Noise Reduction is using the live VAD-tracked "
+                "estimate of band noise.\n\n"
+                "Capture a noise profile (📷 Cap button) to unlock "
+                "the Captured source option.")
+            return
+
+        # A profile is loaded — badge is clickable to flip source.
+        badge.setEnabled(True)
+        if not use_cap:
+            # Live source, but a profile is loaded and ready.
+            badge.setText(
+                f"🔵  Source: Live (VAD)   ⇄   click to use captured: "
+                f"{cap_name}")
+            badge.setToolTip(
+                "Noise Reduction is using the live VAD-tracked "
+                "estimate.\n\n"
+                f"Click to switch to the loaded captured profile "
+                f"({cap_name!r})."
+                "\n\nNR aggression profile "
+                "(Light/Medium/Aggressive) is independent of source — "
+                "right-click the NR button to change it.")
+            return
+
+        # Captured source active.  Show name + age + band/mode +
+        # mismatch warning.  Resolve age coloring from QSettings
+        # thresholds.
+        s = QSettings("N8SDR", "Lyra")
+        amber_h = int(s.value("noise/age_amber_hours", 24, type=int))
+        red_d = int(s.value("noise/age_red_days", 7, type=int))
+
+        age_text, age_color = self._format_profile_age(
+            meta.get("captured_at_iso", ""), amber_h, red_d)
+        band_mode = self._format_profile_band_mode(meta)
+        # Mode-mismatch warning glyph.
+        cap_mode = str(meta.get("mode", "")).strip()
+        cur_mode = str(self.radio.mode).strip() if hasattr(
+            self.radio, "mode") else ""
+        mismatch = (cap_mode and cur_mode
+                    and cap_mode.lower() != cur_mode.lower())
+
+        bits = [f"🟢  Source: Captured: {cap_name}"]
+        if age_text:
+            bits.append(age_text)
+        if band_mode:
+            bits.append(band_mode)
+        if mismatch:
+            bits.append(f"⚠ captured on {cap_mode}")
+        bits.append("⇄")
+        badge.setText("   ·   ".join(bits))
+
+        # Apply age coloring via inline stylesheet override.
+        badge.setStyleSheet(
+            f"QPushButton#nr_source_badge {{"
+            f"  text-align: left;"
+            f"  padding: 3px 8px;"
+            f"  border: 1px solid transparent;"
+            f"  border-radius: 4px;"
+            f"  font-family: 'Segoe UI', sans-serif;"
+            f"  font-size: 11px;"
+            f"  color: {age_color};"
+            f"}}"
+            f"QPushButton#nr_source_badge:hover:!disabled {{"
+            f"  background-color: rgba(80, 208, 255, 0.10);"
+            f"  border-color: rgba(80, 208, 255, 0.35);"
+            f"}}")
+
+        tooltip_lines = [
+            f"Noise Reduction is using the captured profile "
+            f"{cap_name!r}.",
+            "",
+            "Click to switch back to the live VAD-tracked estimate.",
+        ]
+        if mismatch:
+            tooltip_lines.append(
+                f"\n⚠  This profile was captured on {cap_mode} "
+                f"but you are currently on {cur_mode}.\n"
+                f"NR will still subtract the captured noise, but "
+                f"the model may not perfectly match your current "
+                f"audio chain.")
+        badge.setToolTip("\n".join(tooltip_lines))
+
+    def _format_profile_age(
+            self, captured_at_iso: str,
+            amber_hours: int, red_days: int
+            ) -> tuple[str, str]:
+        """Returns ('3 days old', '#ffb84a') style tuple.
+
+        Color rule matches the manager dialog's:
+        - <amber_hours: grey
+        - amber_hours .. red_days*24h: amber
+        - >red_days: red
+        """
+        from datetime import datetime, timezone
+        if not captured_at_iso:
+            return ("", "#cdd9e5")
+        try:
+            iso = captured_at_iso.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(iso)
+        except (ValueError, TypeError):
+            return ("", "#cdd9e5")
+        delta = datetime.now(timezone.utc) - dt
+        hours = delta.total_seconds() / 3600.0
+        if hours < 1.0:
+            text = "just now"
+        elif hours < 24:
+            text = f"{int(hours)}h old"
+        else:
+            days = hours / 24.0
+            if days < 7:
+                text = f"{int(days)}d old"
+            else:
+                text = f"{int(days)}d old"
+        if hours > red_days * 24:
+            return (text, "#ff6060")
+        if hours > amber_hours:
+            return (text, "#ffb84a")
+        return (text, "#cdd9e5")
+
+    def _format_profile_band_mode(self, meta: dict) -> str:
+        """Resolve '80m LSB' / '40m USB' / etc. for badge display."""
+        mode = str(meta.get("mode", "")).strip()
+        freq_hz = int(meta.get("freq_hz", 0))
+        try:
+            from lyra.bands import band_for_freq_hz
+            band = band_for_freq_hz(freq_hz) or ""
+        except Exception:
+            band = ""
+        if band and mode:
+            return f"{band} {mode}"
+        if mode:
+            return mode
+        if freq_hz > 0:
+            return f"{freq_hz/1e6:.3f} MHz"
+        return ""
 
     def _open_noise_profile_manager(self) -> None:
         """Open the Manage Profiles dialog (created in Day 3 piece 3)."""
