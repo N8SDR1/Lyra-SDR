@@ -744,14 +744,11 @@ class MainWindow(QMainWindow):
         # See git history if you ever need to bring it back —
         # the NVML / PDH polling code is preserved there.
 
-        # Right-click affordance on CPU and HL2 for show/hide
-        # toggles.  CPU defaults to hidden (operator UX call —
-        # most operators don't want the load percentage on the
-        # toolbar all the time); the Settings → Radio tab has a
-        # tick box to bring it back.
-        self.cpu_label.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.cpu_label.customContextMenuRequested.connect(
-            lambda pos: self._show_readout_menu(self.cpu_label, "cpu", pos))
+        # Right-click affordance on HL2 telemetry only.  CPU's show/
+        # hide toggle lives in Settings → Radio → Toolbar readouts now,
+        # so a separate right-click menu would just be a redundant
+        # second path with two different mental models.  HL2 telemetry
+        # has no Settings equivalent, so it keeps its quick toggle.
         self.hl2_telem_label.setContextMenuPolicy(Qt.CustomContextMenu)
         self.hl2_telem_label.customContextMenuRequested.connect(
             lambda pos: self._show_readout_menu(self.hl2_telem_label, "hl2", pos))

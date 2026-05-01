@@ -10,10 +10,52 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QMenu,
-    QPushButton, QSizePolicy, QSlider, QSpinBox, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QComboBox, QDoubleSpinBox, QHBoxLayout, QInputDialog, QLabel,
+    QLineEdit, QMenu, QPushButton, QSizePolicy, QSlider, QSpinBox,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
+
+
+# ── Captured-noise-profile name length cap ──────────────────────────
+# Why this exists: the inline source-badge on the DSP+Audio panel has
+# a fixed maximum width.  Without a length cap, an operator who types
+# a long profile name ("Ridgewood AM-broadcast carrier 1490 kHz")
+# gets it elided to "Ridgewood AM-bro…" on the badge — confusing,
+# because the UI silently changes what they entered.  Better: cap
+# at the prompt so what they type is what they see.  24 chars fits
+# the badge cleanly along with age + band/mode + ⇄ glyph.
+MAX_PROFILE_NAME_CHARS = 24
+
+
+def _prompt_profile_name(
+    parent, title: str, prompt: str, default_text: str = "") -> tuple[str, bool]:
+    """Show a single-line text prompt with a hard length cap.
+
+    Wraps QInputDialog so the underlying QLineEdit gets setMaxLength
+    applied — QInputDialog.getText() doesn't expose that knob, so
+    we build a QInputDialog manually and reach into its line edit.
+    Returns (text, ok) — same shape as QInputDialog.getText.
+    """
+    dlg = QInputDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.setLabelText(prompt)
+    dlg.setTextValue(default_text)
+    dlg.setInputMode(QInputDialog.TextInput)
+    # Reach the internal QLineEdit and clamp it.  Qt's docs aren't
+    # explicit about which child object hosts it, but findChild on
+    # QLineEdit reliably returns the prompt's editor.
+    #
+    # Legacy-name preservation: if the dialog is pre-populated with
+    # a name that already exceeds the cap (operator created it before
+    # the cap was added), don't silently truncate — let them round-
+    # trip the existing name through rename without losing chars.
+    # New names are still capped at MAX_PROFILE_NAME_CHARS.
+    le = dlg.findChild(QLineEdit)
+    if le is not None:
+        cap = max(MAX_PROFILE_NAME_CHARS, len(default_text))
+        le.setMaxLength(cap)
+    ok = bool(dlg.exec())
+    return dlg.textValue(), ok
 
 
 class SteppedSlider(QSlider):
@@ -1669,10 +1711,13 @@ class DspPanel(GlassPanel):
         # Source badge gets a max width so it doesn't span the
         # whole panel — looks visually balanced with the cap
         # button + nr2 strider.  ~360 px fits the typical
-        # "Captured: <name>  ·  3h old  ·  80m LSB  ⇄" string with
-        # margin to spare; longer profile names truncate
-        # gracefully via Qt's text-eliding.
-        self.nr_source_badge.setMaximumWidth(360)
+        # "🟢  <name>  ·  3h old  ·  80m LSB  ⇄" string at the 24-char
+        # name cap (enforced at the save/rename prompts) with margin
+        # to spare; longer profile names truncate gracefully via Qt's
+        # text-eliding.  Bumped from 360 to 460 after operator
+        # feedback that the right edge was clipping the "⇄" arrow on
+        # mid-length names.
+        self.nr_source_badge.setMaximumWidth(460)
 
         nr_status_row = QHBoxLayout()
         nr_status_row.setContentsMargins(0, 0, 0, 0)
@@ -2176,9 +2221,8 @@ class DspPanel(GlassPanel):
                 "The profile may suppress real signals when used.  "
                 "Consider re-capturing on a quieter spot.\n\n"
                 "Save anyway as:")
-        name, ok = QInputDialog.getText(
-            self, title,
-            prompt, text=default_name)
+        name, ok = _prompt_profile_name(
+            self, title, prompt, default_name)
         if not ok:
             return
         name = name.strip()

@@ -344,10 +344,15 @@ class NoiseProfileManager(QDialog):
         meta = self._selected_meta()
         if meta is None:
             return
-        new_name, ok = QInputDialog.getText(
+        # Use the shared name-prompt helper from panels.py so the
+        # rename dialog enforces the same MAX_PROFILE_NAME_CHARS cap
+        # as the initial save dialog — keeps the inline source badge
+        # readable regardless of which path the operator used.
+        from lyra.ui.panels import _prompt_profile_name
+        new_name, ok = _prompt_profile_name(
             self, "Rename profile",
             f"New name for {meta.name!r}:",
-            text=meta.name)
+            default_text=meta.name)
         if not ok:
             return
         new_name = new_name.strip()
