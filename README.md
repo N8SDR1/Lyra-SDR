@@ -88,6 +88,46 @@ Lyra v0.0.6 onward is **GNU General Public License v3 or later**
 specifically to enable WDSP integration — see `NOTICE.md` for the
 full attribution and license history.
 
+### Neural noise reduction (opt-in, post-v0.0.6)
+
+DeepFilterNet integration is wired but the package is **not bundled**
+with the installer.  Operators who want it run:
+
+```
+pip install deepfilternet
+```
+
+(~500 MB, includes PyTorch).  After installing, restart Lyra and:
+
+1. Settings → Noise → "Neural NR (DeepFilterNet)"
+2. Read the orange-bordered warning panel (latency / CPU implications)
+3. Tick **"I understand the latency / CPU implications and want to test or enable Neural NR"**
+4. Click **"🔬 Test on your system (5 sec)"**
+5. Read the color-coded verdict (green / yellow / orange / red)
+6. If your hardware can handle it, right-click the NR button on the
+   DSP+Audio panel and pick "Neural" as the backend
+
+Notes:
+
+- Native 48 kHz, no resampling (matches Lyra's audio chain)
+- ~30-50 ms additional latency vs NR1/NR2
+- 5-15 % CPU on a modern desktop in CPU mode; < 1 % CPU + ~100 MB VRAM
+  with a CUDA GPU
+- Soft-fails to NR1 if `deepfilternet` isn't installed or if
+  the operator hasn't acknowledged the warning
+- Works best on SSB voice in heavy noise.  CW / digital modes don't
+  benefit (model trained on speech corpora).
+- A small `🧠 12.3 ms` badge appears on the toolbar header when
+  Neural NR is active, showing real-time per-frame inference cost
+
+### Minimum Windows version
+
+Lyra requires **Windows 10 build 17763 (1809, October 2018) or later**.
+This is the official baseline for PyTorch 2.x (DeepFilterNet
+dependency), winrt modern toast notifications (weather alerts), and
+PySide6 6.5+.  Older Windows installs are rejected by the installer
+with a clear error message.
+
 ## What was in 0.0.5 — "Listening Tools"
 
 A meaningful audio-DSP and panadapter release driven by extended

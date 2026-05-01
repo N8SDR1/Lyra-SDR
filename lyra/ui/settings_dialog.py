@@ -3916,9 +3916,11 @@ class NoiseSettingsTab(QWidget):
         self._refresh_neural_controls_enabled()
 
     def _on_neural_device_changed(self, idx: int) -> None:
+        """Operator picked a different device — push to Radio
+        (which persists + reloads the model if neural is the
+        current active backend)."""
         dev = self.neural_dev_combo.itemData(idx) or "auto"
-        s = self._QSettings("N8SDR", "Lyra")
-        s.setValue("noise/neural_device", dev)
+        self.radio.set_neural_device(dev)
 
     def _refresh_neural_controls_enabled(self) -> None:
         """Benchmark + device picker only active when the operator

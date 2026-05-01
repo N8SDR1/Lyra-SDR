@@ -608,6 +608,44 @@ class PythonRxChannel(DspChannel):
     def lms_strength(self) -> float:
         return float(self._lms.strength)
 
+    # ── Neural NR proxies ──────────────────────────────────────────────
+
+    def set_neural_device(self, device: str) -> None:
+        """Set the DFN inference device preference: 'auto', 'cpu',
+        'cuda'.  Takes effect on next model reload (call
+        force_neural_reload() if currently active)."""
+        self._nr_neural.set_device(device)
+
+    def force_neural_reload(self) -> bool:
+        """Force the neural model to (re)load with current device
+        preference.  Returns True on success, False if the package
+        isn't installed or the load fails."""
+        return self._nr_neural.reload()
+
+    @property
+    def neural_device_pref(self) -> str:
+        return str(self._nr_neural.device_pref)
+
+    @property
+    def neural_device_actual(self) -> str:
+        """Device the model is currently running on — 'cuda' / 'cpu'
+        / '' if not loaded."""
+        return str(self._nr_neural.device_actual)
+
+    @property
+    def neural_avg_inference_ms(self) -> float:
+        """Recent per-frame inference time.  UI badge can show this
+        to give the operator real-time visibility into the cost."""
+        return float(self._nr_neural.avg_inference_ms)
+
+    @property
+    def neural_is_active(self) -> bool:
+        """True if the audio path is currently routing through the
+        neural processor (operator picked 'neural' AND it loaded
+        successfully)."""
+        return (self._active_nr == "neural"
+                and self._nr_neural.is_loaded)
+
     # ── All-mode squelch proxies ──────────────────────────────────────
 
     def set_squelch_enabled(self, on: bool) -> None:
