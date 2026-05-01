@@ -101,56 +101,21 @@ class SpectralSubtractionNR:
     # the profile was tuned for, not just an intensity level.
     # Legacy QSettings values ("aggressive") are accepted via
     # _CANONICAL_ALIASES so old saves still load.
-    # Profile parameter tuning (re-tuned 2026-05-01 after operator
-    # listening test):
+    # Profile parameter tuning (operator-validated original values,
+    # restored 2026-05-01 after a brief retune attempt that the
+    # operator field-tested as making Light and Medium sound worse
+    # while Heavy was already correct as-is):
     #
     # alpha — over-subtraction factor.  Higher = more noise removed
     #          per bin.  Larger alpha means bins near the noise
-    #          floor get pushed harder toward zero.  Range used
-    #          here (1.5..3.0) is the standard Berouti-Schwartz
-    #          range for speech NR.
-    # beta  — spectral floor.  Caps how low gain can drop.  IMPORTANT
-    #          UX nuance: a HIGH beta keeps "comfort noise" but also
-    #          lets per-bin gain modulate randomly between beta and
-    #          1.0, producing audible "watery / underwater" musical-
-    #          noise artifacts.  A LOW beta pushes quiet bins to
-    #          near-silence — bins stay low instead of fluctuating,
-    #          so musical noise is much less audible even though
-    #          subtraction is more aggressive overall.  We keep beta
-    #          low across all three tiers; the tiers vary alpha to
-    #          control HOW MUCH gets subtracted, not how loud the
-    #          residue is.
-    # gain_smooth — temporal smoothing factor for the per-bin gain.
-    #          Each frame: g[n] = gain_smooth * g[n-1] + (1-gain_smooth) * g_raw
-    #          0.0 = no smoothing (raw gain — strong musical noise)
-    #          0.7 = strong smoothing (clean but slower response)
-    #          Light gets the heaviest smoothing because the user
-    #          expects "Light = barely processed = clean."  Heavy
-    #          gets lighter smoothing — operators picking Heavy are
-    #          accepting some processing character in exchange for
-    #          deeper hiss reduction.
+    #          floor get pushed harder toward zero.
+    # beta  — spectral floor.  Caps how low gain can drop.  Operator
+    #          tested these specific values and prefers them; do
+    #          not adjust without a fresh listening test.
     PROFILES: dict[str, dict[str, float]] = {
-        # Light: subtle subtraction; only the loudest noise bins get
-        # cut.  Heavy temporal smoothing (gain_smooth=0.7) kills the
-        # "watery / underwater" musical-noise artifact that bothered
-        # operators in the previous tuning.  Should sound "barely
-        # processed" — minor hiss reduction without artifact.
-        "light":      {"alpha": 1.5, "beta": 0.05, "noise_track": 0.020,
-                       "vad_gate": 3.0, "gain_smooth": 0.70},
-        # Medium: standard speech-NR setting.  Moderate smoothing
-        # keeps the artifact down while letting the gain track real
-        # noise-floor changes (someone switching from a quiet band
-        # to a noisy one shouldn't take 5 seconds to converge).
-        "medium":     {"alpha": 2.2, "beta": 0.04, "noise_track": 0.012,
-                       "vad_gate": 3.0, "gain_smooth": 0.55},
-        # Heavy: aggressive subtraction for noisy bands and
-        # weak-signal DX.  Lighter smoothing (0.35) — at this
-        # subtraction depth, most quiet bins are clamped at the
-        # beta floor anyway, so the dominant audible quality is
-        # the depth not the modulation.  Faster response is more
-        # valuable here than artifact suppression.
-        "heavy":      {"alpha": 3.0, "beta": 0.03, "noise_track": 0.008,
-                       "vad_gate": 4.0, "gain_smooth": 0.35},
+        "light":      {"alpha": 1.0, "beta": 0.20, "noise_track": 0.03,  "vad_gate": 3.0},
+        "medium":     {"alpha": 1.8, "beta": 0.12, "noise_track": 0.015, "vad_gate": 3.0},
+        "heavy":      {"alpha": 2.8, "beta": 0.06, "noise_track": 0.008, "vad_gate": 4.0},
     }
     _CANONICAL_ALIASES: dict[str, str] = {
         "aggressive": "heavy",
@@ -179,25 +144,27 @@ class SpectralSubtractionNR:
         n_bins = self._fft // 2 + 1
         # Initial noise-floor guess — very small so the first speech
         # frame won't be obliterated while the estimator catches up.
-        # NOTE: this gets OVERWRITTEN on the first real frame via
-        # the seed-from-first-frame logic in process().  Without
-        # seeding, the VAD gate (which compares frame_pow against
-        # noise_pow*vad_gate) never triggers because real noise sits
-        # in the 0.05-0.5 magnitude range and the threshold here
-        # (1e-3)^2 * 3 = 3e-6 is too small to ever be crossed.
+        #
+        # KNOWN LIMITATION: the live VAD-gated tracker has a
+        # chicken-and-egg problem — the gate condition
+        # (frame_pow <= noise_pow * vad_gate) never fires when
+        # noise_pow starts at 1e-6 because real audio frames are
+        # always much louder.  Result: the live noise estimate stays
+        # frozen at 1e-3, which means LIVE-source NR1 produces
+        # essentially zero subtraction regardless of profile choice
+        # (alpha * 1e-3 / |X| is microscopic).
+        #
+        # An attempt to fix this (2026-05-01) added first-frame
+        # seeding + temporal gain smoothing, but field-test feedback
+        # was that the resulting subtraction had audible "watery /
+        # underwater" artifacts at all three tiers.  Reverted.
+        # Operators get effective NR via:
+        #   - Captured noise profiles (bypass the live tracker)
+        #   - NR2 (Ephraim-Malah MMSE-LSA, no musical noise)
+        # A proper redesign of the live tracker (likely
+        # minimum-statistics + spectral smoothing) is queued as
+        # backlog work.
         self._noise_mag = np.full(n_bins, 1e-3, dtype=np.float32)
-        # Tracks whether the first frame has seeded _noise_mag yet.
-        # Reset() clears this so the seed re-runs after audio
-        # discontinuities (mode switch, freq jump, etc.).
-        self._noise_mag_seeded: bool = False
-        # Previous frame's gain — used for temporal gain smoothing
-        # to suppress the "musical noise" artifact (random per-bin
-        # gain modulation between frames creates audible "watery /
-        # underwater" tones).  Smoothing rate is per-profile so
-        # Light gets stronger smoothing (cleaner sound, less
-        # processing depth) and Heavy gets lighter smoothing (faster
-        # response to changing noise).
-        self._prev_gain = np.ones(n_bins, dtype=np.float32)
 
         # Streaming state
         self._in_buf = np.zeros(0, dtype=np.float32)
@@ -274,16 +241,6 @@ class SpectralSubtractionNR:
         self._out_carry = np.zeros(self._hop, dtype=np.float32)
         n_bins = self._fft // 2 + 1
         self._noise_mag = np.full(n_bins, 1e-3, dtype=np.float32)
-        # Re-seed _noise_mag from the first frame after reset so the
-        # VAD gate has a sensible threshold relative to the new
-        # mode/band's noise floor.  Without this re-seed, post-reset
-        # NR would inherit the chicken-and-egg dead-tracker problem
-        # the seeding was added to fix.
-        self._noise_mag_seeded = False
-        # Temporal gain smoother — reset to unity so the first frame
-        # after a reset doesn't blend with stale state from the
-        # previous mode / freq.
-        self._prev_gain = np.ones(n_bins, dtype=np.float32)
         if self._capture_state == "capturing":
             self.cancel_noise_capture()
 
@@ -596,39 +553,17 @@ class SpectralSubtractionNR:
                 # to "ready" via _finalize_capture().
                 capturing = (self._capture_state == "capturing")
 
-            # First-frame seed: real noise floors live in the
-            # 0.05..0.5 magnitude range, but _noise_mag starts at
-            # 1e-3.  Without seeding, the VAD-gate threshold
-            # (noise_pow * vad_gate ~= 3e-6) is so far below real
-            # frame power (~0.01..1.0) that the gate condition
-            # NEVER fires — the tracker stays frozen at 1e-3 and
-            # all profiles produce essentially identical output
-            # because alpha * 1e-3 / |X| is microscopic.  Seeding
-            # from the first real frame gives the tracker a
-            # sensible starting point so the VAD gate works as
-            # designed thereafter.  If the first frame happens to
-            # contain signal (not noise-only), the seed is too
-            # high but subsequent quieter frames will pass the
-            # now-correctly-sized gate and pull the estimate down.
-            if not self._noise_mag_seeded:
-                self._noise_mag = mag.copy().astype(np.float32)
-                self._noise_mag_seeded = True
-
-            # Noise-floor tracking — VAD-gated update.  Now that the
-            # tracker is properly seeded above, the gate condition
-            # (frame_pow <= noise_pow * vad_gate) actually fires on
-            # quiet frames and pulls _noise_mag toward real noise
-            # levels.  Always runs even when the captured source is
-            # active so the live estimate stays warm as a fallback
-            # if the operator clears or re-toggles the captured
-            # profile.
+            # Noise-floor tracking — simple VAD: update only when the
+            # frame is quieter than vad_gate × the current estimate.
+            # Always runs even when the captured source is active,
+            # so the live estimate stays warm as a fallback if the
+            # operator clears or re-toggles the captured profile.
             #
-            # Earlier draft of this fix added a per-bin minimum-pull
-            # for "spectral valley tracking" but it caused tone
-            # sidelobes (FFT leakage) to get tracked AS noise,
-            # producing audible musical-noise artifacts on Light/
-            # Medium profiles.  Removed.  The VAD gate alone is
-            # sufficient now that seeding is in place.
+            # NOTE: with the initial _noise_mag of 1e-3 this gate
+            # rarely fires on real audio (see KNOWN LIMITATION in
+            # __init__).  Live-source NR1 is therefore not the
+            # recommended path for noise reduction; operators should
+            # use captured profiles or NR2 instead.
             frame_pow = float(np.mean(mag * mag))
             noise_pow = float(np.mean(self._noise_mag * self._noise_mag))
             if frame_pow <= noise_pow * self._vad_gate:
@@ -650,21 +585,6 @@ class SpectralSubtractionNR:
             denom = np.maximum(mag, 1e-10)
             gain = np.maximum(1.0 - self._alpha * noise_ref / denom,
                               self._beta).astype(np.float32)
-
-            # Temporal gain smoothing — eliminates the per-bin random
-            # gain modulation between frames that produces audible
-            # "watery / underwater" musical-noise artifacts.  Each
-            # bin's gain is a weighted average with the previous
-            # frame's gain for that bin.  Per-profile smoothing rate
-            # (gain_smooth) sets how aggressive the smoothing is:
-            # Light gets the heaviest smoothing because operators
-            # picking Light expect "barely processed = clean."
-            if self._gain_smooth > 0.0:
-                s = self._gain_smooth
-                gain = (s * self._prev_gain + (1.0 - s) * gain).astype(
-                    np.float32)
-            self._prev_gain = gain
-
             time_frame = np.fft.irfft(spec * gain, self._fft).astype(np.float32)
 
             # Overlap-add: first hop samples get combined with the
@@ -696,16 +616,12 @@ class SpectralSubtractionNR:
         return output
 
     # ── internals ─────────────────────────────────────────────────
-    def _apply_profile(self):  # noqa: pre-existing name
+    def _apply_profile(self):
         p = self.PROFILES[self.profile]
         self._alpha = p["alpha"]
         self._beta = p["beta"]
         self._noise_track = p["noise_track"]
         self._vad_gate = p["vad_gate"]
-        # Temporal gain smoothing factor.  Defaults to 0.0 (no
-        # smoothing) so any future profile variant that omits the
-        # key gets backwards-compatible behavior.
-        self._gain_smooth = float(p.get("gain_smooth", 0.0))
 
     def _accumulate_capture_frame(self, mag: np.ndarray) -> None:
         """Add one frame's magnitude spectrum + total power into the
