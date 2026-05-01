@@ -3625,17 +3625,19 @@ class NoiseSettingsTab(QWidget):
         # Install instructions panel.
         from lyra.dsp.nr_neural import is_available, import_error_message
         dfn_available = is_available()
+        from lyra.dsp.nr_neural import (
+            import_error_message, active_model_path,
+            DEFAULT_MODEL_FILENAME)
         if dfn_available:
             inst_text = QLabel(
                 "✓  <b>Neural NR is installed</b> and the model "
                 "file was found.  Pick it from the NR backend "
-                "right-click menu on the DSP+Audio panel.")
+                "right-click menu on the DSP+Audio panel.<br><br>"
+                f"<b>Model:</b> <code style='font-size:10px;'>"
+                f"{active_model_path()}</code>")
             inst_text.setStyleSheet(
                 "color: #6acb6a; font-size: 12px;")
         else:
-            from lyra.dsp.nr_neural import (
-                import_error_message, _model_path,
-                DEFAULT_MODEL_FILENAME)
             err = import_error_message()
             # Two distinct failure modes — guide differently for each.
             if "onnxruntime" in err.lower():
@@ -3650,26 +3652,45 @@ class NoiseSettingsTab(QWidget):
                     "Restart Lyra after installing.")
             else:
                 inst_text = QLabel(
-                    "⚠  <b>onnxruntime is installed but the "
-                    "neural-NR model file is missing.</b><br><br>"
-                    f"Lyra expects the model at:<br>"
-                    f"<code style='background:#222;padding:3px 6px;"
-                    f"border-radius:3px;color:#50d0ff;font-size:11px;'>"
-                    f"{_model_path()}</code><br><br>"
-                    "<b>Default model:</b> Microsoft NSNet2 "
-                    "(MIT-licensed, ~3 MB).  Download from "
+                    "⚠  <b>onnxruntime is installed but no "
+                    "neural-NR model file was found.</b><br><br>"
+                    "<b>Recommended model:</b> Microsoft NSNet2 "
+                    "(MIT-licensed, ~3 MB).  Download "
+                    f"<code>{DEFAULT_MODEL_FILENAME}</code> from "
                     "<a href='https://github.com/microsoft/"
                     "DNS-Challenge' style='color:#50d0ff;'>"
-                    "DNS-Challenge releases</a>, save as "
-                    f"<code>{DEFAULT_MODEL_FILENAME}</code> in the "
-                    "directory above.<br><br>"
-                    "Restart Lyra after placing the model.")
+                    "Microsoft DNS-Challenge</a> or any ONNX model "
+                    "zoo, save it anywhere on disk, then click "
+                    "<b>Browse...</b> below to point Lyra at it.")
             inst_text.setOpenExternalLinks(True)
             inst_text.setStyleSheet(
                 "color: #ff8c00; font-size: 12px;")
         inst_text.setWordWrap(True)
         inst_text.setTextFormat(Qt.RichText)
         nv.addWidget(inst_text)
+
+        # Browse-for-model button row.  Operator can point Lyra at
+        # any ONNX file anywhere on disk, sidestepping the bundled-
+        # default-location convention entirely.
+        browse_row = QHBoxLayout()
+        self.neural_model_path_label = QLabel(
+            f"<code style='font-size:10px;'>"
+            f"Current model file:  {active_model_path()}</code>")
+        self.neural_model_path_label.setWordWrap(True)
+        self.neural_model_path_label.setTextFormat(Qt.RichText)
+        self.neural_model_path_label.setStyleSheet(
+            "color: #8a9aac; font-size: 11px;")
+        browse_btn = QPushButton("Browse...")
+        browse_btn.setFixedWidth(100)
+        browse_btn.setToolTip(
+            "Point Lyra at any ONNX noise-suppression model file. "
+            "Path is stored in QSettings — survives across restarts. "
+            "Leave the default if you've placed the model in "
+            "Lyra's assets/models/ folder.")
+        browse_btn.clicked.connect(self._on_neural_browse_model)
+        browse_row.addWidget(self.neural_model_path_label, 1)
+        browse_row.addWidget(browse_btn)
+        nv.addLayout(browse_row)
 
         # Acknowledgment checkbox — gates the benchmark + enable.
         s_neural = QSettings("N8SDR", "Lyra")
@@ -4024,6 +4045,53 @@ class NoiseSettingsTab(QWidget):
         ok = self.neural_ack_chk.isChecked() and is_available()
         self.neural_bench_btn.setEnabled(ok)
         self.neural_dev_combo.setEnabled(ok)
+
+    def _on_neural_browse_model(self) -> None:
+        """Open a file dialog so the operator can point Lyra at
+        any ONNX model file.  Stores the chosen path in QSettings
+        so it persists across restarts and is loaded by the
+        wrapper's active_model_path() at next reload.
+        """
+        from pathlib import Path
+        from PySide6.QtWidgets import QFileDialog
+        from lyra.dsp.nr_neural import active_model_path
+        # Default starting location — folder of the currently-
+        # configured model, falling back to the user's home dir.
+        cur = active_model_path()
+        start_dir = (str(cur.parent) if cur.parent.exists()
+                     else str(Path.home()))
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select ONNX noise-suppression model",
+            start_dir,
+            "ONNX models (*.onnx);;All files (*)")
+        if not path:
+            return
+        # Persist + force a model reload so the choice takes
+        # effect immediately.
+        s = self._QSettings("N8SDR", "Lyra")
+        s.setValue("noise/neural_model_path", path)
+        # Update the label so the operator sees the new path
+        # without having to reopen the Settings dialog.
+        from lyra.dsp.nr_neural import active_model_path as _amp
+        self.neural_model_path_label.setText(
+            f"<code style='font-size:10px;'>"
+            f"Current model file:  {_amp()}</code>")
+        # If neural is the active backend, force a reload to load
+        # the new file.
+        try:
+            self.radio._rx_channel.force_neural_reload()
+        except Exception:
+            pass
+        # Refresh the dependency status text.  Easiest path is
+        # just a soft-refresh hint to the operator.
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(
+            self, "Model selected",
+            f"Lyra will use:\n\n{path}\n\n"
+            "If Neural NR is currently active, the new model is "
+            "loading now.  Otherwise, restart Lyra (or just pick "
+            "Neural from the NR backend menu) to start using it.")
 
     def _on_neural_benchmark(self) -> None:
         """Run the DFN benchmark on the operator's hardware.  This

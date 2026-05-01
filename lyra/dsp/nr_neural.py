@@ -87,10 +87,10 @@ _ort_import_error: Optional[Exception] = None
 
 
 def is_available() -> bool:
-    """Probe whether onnxruntime is importable AND a model file is
-    present at the expected location.  Used by Radio's
-    ``neural_nr_available()`` and by the Settings UI to grey out
-    the Neural option when the package or model is missing."""
+    """Probe whether onnxruntime is importable AND a model file
+    is reachable.  Used by Radio's ``neural_nr_available()`` and
+    by the Settings UI to grey out the Neural option when the
+    package or model is missing."""
     global _ort, _ort_import_error
     if _ort is None:
         try:
@@ -99,7 +99,7 @@ def is_available() -> bool:
         except Exception as exc:
             _ort_import_error = exc
             return False
-    return _model_path().exists()
+    return active_model_path().exists()
 
 
 def import_error_message() -> str:
@@ -108,24 +108,21 @@ def import_error_message() -> str:
     """
     if _ort_import_error is not None:
         return f"onnxruntime not importable: {_ort_import_error}"
-    if not _model_path().exists():
-        return (f"Model file not found at: {_model_path()}\n"
-                f"See Settings → Noise → Neural NR for download "
-                f"instructions.")
+    p = active_model_path()
+    if not p.exists():
+        return (f"Model file not found at: {p}\n"
+                f"Use Settings → Noise → Neural NR → Browse... "
+                f"to point Lyra at a downloaded ONNX file.")
     return ""
 
 
-def _model_dir() -> Path:
-    """Where Lyra looks for ONNX model files.  Defaults to a
-    ``models/`` folder next to the running interpreter for the
-    self-compile case; PyInstaller bundles override via the
-    LYRA_MODEL_DIR env var (set in the .spec file).
+def _default_model_dir() -> Path:
+    """Default location Lyra looks for bundled ONNX model files.
+    Used as a fallback when the operator hasn't set a custom path.
     """
     override = os.environ.get("LYRA_MODEL_DIR")
     if override:
         return Path(override)
-    # Resource root from lyra package — works in dev tree AND in
-    # PyInstaller bundles (sets sys._MEIPASS to the bundle root).
     try:
         from lyra import resource_root
         return resource_root() / "assets" / "models"
@@ -135,12 +132,48 @@ def _model_dir() -> Path:
 
 DEFAULT_MODEL_FILENAME = "nsnet2-20ms-baseline.onnx"
 """Default model — Microsoft NSNet2, public release.  Operators
-can drop any compatible ONNX file in the same folder and pick it
-via the Settings UI."""
+can drop any compatible ONNX file in the same folder OR point
+Lyra at any path via the Settings → Browse... button."""
 
 
+def _default_model_path(filename: str = DEFAULT_MODEL_FILENAME) -> Path:
+    """Built-in default search path — the assets/models/ folder
+    bundled with Lyra.  Used when the operator hasn't specified
+    a custom path via QSettings."""
+    return _default_model_dir() / filename
+
+
+def active_model_path() -> Path:
+    """The model path Lyra will actually load from.
+
+    Resolution order:
+        1. QSettings ``noise/neural_model_path`` (operator's
+           explicit Browse selection — absolute path)
+        2. Default ``assets/models/nsnet2-20ms-baseline.onnx``
+           (bundled, when present)
+
+    The Settings UI Browse-button writes to the QSettings key,
+    so ``active_model_path()`` reflects it immediately.
+    """
+    try:
+        from PySide6.QtCore import QSettings
+        s = QSettings("N8SDR", "Lyra")
+        custom = str(s.value("noise/neural_model_path", "", type=str))
+        if custom:
+            return Path(custom)
+    except Exception:
+        pass
+    return _default_model_path()
+
+
+# Backwards-compat alias for any code that imported the old name.
 def _model_path(filename: str = DEFAULT_MODEL_FILENAME) -> Path:
-    return _model_dir() / filename
+    """Deprecated alias.  External callers should use
+    active_model_path() to honor the operator's Browse selection.
+    """
+    if filename == DEFAULT_MODEL_FILENAME:
+        return active_model_path()
+    return _default_model_path(filename)
 
 
 class NeuralNR:
@@ -212,7 +245,9 @@ class NeuralNR:
         if not is_available():
             self._session = None
             return False
-        path = _model_path(self.model_filename)
+        # Honor operator's Browse selection if any (via QSettings),
+        # otherwise fall back to the bundled default location.
+        path = active_model_path()
         if not path.exists():
             logger.warning(
                 "NeuralNR: model file missing at %s", path)
