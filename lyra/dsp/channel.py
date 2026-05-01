@@ -219,6 +219,24 @@ class PythonRxChannel(DspChannel):
         from lyra.dsp.anf import AutoNotchFilter
         self._anf = AutoNotchFilter(rate=self.audio_rate)
 
+        # NR2 (Phase 3.D #4) — Ephraim-Malah MMSE-LSA noise reducer.
+        # Lives alongside NR1 (self._nr).  Channel routes audio
+        # through whichever is active based on the operator's NR
+        # profile selection — see set_nr_profile() and process().
+        # Both stay in memory; switching is sample-accurate (same
+        # STFT framing).  Default disabled — operator opts in via
+        # the "High Quality (NR2)" entry in the DSP-row right-click
+        # menu.
+        from lyra.dsp.nr2 import EphraimMalahNR
+        self._nr2 = EphraimMalahNR(rate=self.audio_rate)
+        # Tracks which NR processor process() should route through.
+        # Mirror of operator's active NR profile string:
+        #   "light"|"medium"|"aggressive"|"neural" → use _nr (NR1)
+        #   "nr2"                                  → use _nr2
+        # The "off" / NR-disabled state is independent of this flag
+        # — it's controlled by the active NR's .enabled attribute.
+        self._active_nr: str = "nr1"
+
         # APF (Audio Peaking Filter) — owned by the channel. Mode-
         # gated to CWU/CWL inside process(). Center freq tracks the
         # CW pitch automatically, so the operator only needs to
@@ -287,12 +305,40 @@ class PythonRxChannel(DspChannel):
         self._notch_enabled = bool(enabled)
 
     def set_nr_enabled(self, enabled: bool) -> None:
-        self._nr.enabled = bool(enabled)
-        if not enabled:
+        """Master enable for whichever NR is currently active.
+        Both processors track the same enabled flag so switching
+        the active processor preserves operator's on/off intent."""
+        on = bool(enabled)
+        self._nr.enabled = on
+        self._nr2.enabled = on
+        if not on:
+            # Reset whichever was active so resuming starts clean.
             self._nr.reset()
+            self._nr2.reset()
 
     def set_nr_profile(self, profile: str) -> None:
-        self._nr.set_profile(profile)
+        """Apply an NR profile selection.
+
+        - "light" / "medium" / "aggressive" → NR1 with that
+          subtraction strength preset
+        - "nr2"                              → NR2 (MMSE-LSA);
+          NR2's own knobs (aggression, smoothing, speech-aware)
+          live separately
+        - "neural" / "captured" → forwarded to NR1's set_profile
+          for backwards-compat; legacy "captured" was migrated
+          to (medium + source-toggle ON) in Radio.set_nr_profile.
+
+        Both NR1 and NR2 stay alive; the active one is selected
+        by ``_active_nr`` and consumed in ``process()``.
+        """
+        if profile == "nr2":
+            self._active_nr = "nr2"
+            # Don't change NR1's profile — leave operator's last
+            # NR1 setting intact so flipping back to NR1 picks up
+            # right where they left off.
+        else:
+            self._active_nr = "nr1"
+            self._nr.set_profile(profile)
 
     # ── Captured noise profile API (Phase 3.D #1) ─────────────────────
     # Thin proxies onto the embedded SpectralSubtractionNR.  Channel is
@@ -389,6 +435,48 @@ class PythonRxChannel(DspChannel):
     def anf_mu(self) -> float:
         return float(self._anf._mu)
 
+    # ── NR2 proxies (Phase 3.D #4) ────────────────────────────────────
+
+    def set_nr2_aggression(self, value: float) -> None:
+        """Operator-tunable NR2 suppression strength (0.0..1.5).
+
+        0.0 ≈ NR off (unity gain); 1.0 = full MMSE-LSA;
+        >1.0 = power-law for harder cleanup at the cost of some
+        thinning.  See AutoNotchFilter docstring for details."""
+        self._nr2.set_aggression(value)
+
+    def set_nr2_musical_noise_smoothing(self, on: bool) -> None:
+        """Toggle the decision-directed ξ smoothing (α=0.98) that
+        kills the musical-noise artifact.  False switches to α=0.5
+        for diagnostic A/B comparison against NR1-like behavior."""
+        self._nr2.set_musical_noise_smoothing(on)
+
+    def set_nr2_speech_aware(self, on: bool) -> None:
+        """Toggle the simple-VAD mode that reduces NR2 suppression
+        during detected voice.  Off by default."""
+        self._nr2.set_speech_aware(on)
+
+    @property
+    def nr2_aggression(self) -> float:
+        return float(self._nr2.aggression)
+
+    @property
+    def nr2_musical_noise_smoothing(self) -> bool:
+        return bool(self._nr2.musical_noise_smoothing)
+
+    @property
+    def nr2_speech_aware(self) -> bool:
+        return bool(self._nr2.speech_aware)
+
+    @property
+    def active_nr(self) -> str:
+        """Which NR processor is currently active.  'nr1' for the
+        spectral-subtraction variants (light/medium/aggressive),
+        'nr2' for the Ephraim-Malah MMSE-LSA processor.  Used by
+        Radio + UI to know whether the captured-source toggle and
+        NR2 knobs apply."""
+        return self._active_nr
+
     def nr_capture_progress(self) -> tuple[str, float]:
         return self._nr.capture_progress()
 
@@ -439,6 +527,9 @@ class PythonRxChannel(DspChannel):
         # one, so a fresh start is right.  Profile + enabled flag
         # are preserved (operator's setting sticks).
         self._anf.reset()
+        # NR2 state — noise estimate per bin, prev-frame gain,
+        # decision-directed memory.  Discontinuity = clean start.
+        self._nr2.reset()
         # APF state — safe to clear here because reset() is only
         # called on freq/mode changes, where an audio discontinuity
         # is already expected.
@@ -560,7 +651,17 @@ class PythonRxChannel(DspChannel):
                 # whatever broadband residual is left.
                 # Bypass-fast when ANF is disabled.
                 audio = self._anf.process(audio)
-                audio = self._nr.process(audio)
+                # Route NR through whichever processor the operator
+                # selected.  Both have identical STFT framing and
+                # length-preserving contracts, so switching is
+                # sample-accurate.  Inactive processor's process()
+                # returns input unchanged (when its .enabled is
+                # False) — bypass cost is one attribute-check per
+                # block.
+                if self._active_nr == "nr2":
+                    audio = self._nr2.process(audio)
+                else:
+                    audio = self._nr.process(audio)
                 # APF — only useful in CW. The operator's enable
                 # state is preserved across mode switches (button
                 # stays "on"), but the filter only runs when there's

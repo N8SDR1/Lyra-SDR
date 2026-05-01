@@ -210,6 +210,15 @@ class Radio(QObject):
     leveler_ratio_changed = Signal(float)
     leveler_makeup_changed = Signal(float)
 
+    # NR2 (Ephraim-Malah MMSE-LSA).  Active when nr_profile == "nr2"
+    # (orthogonal to the live/captured source toggle).  Three
+    # operator-facing knobs each get a dedicated change signal so
+    # both the panel slider and the Settings tab checkboxes can
+    # bind without spurious cross-firing.
+    nr2_aggression_changed = Signal(float)
+    nr2_musical_noise_smoothing_changed = Signal(bool)
+    nr2_speech_aware_changed = Signal(bool)
+
     # Phase 3.D #1 — Captured-noise-profile signals.
     # noise_capture_done fires when a capture finalizes inside the
     # NR processor; payload is the smart-guard verdict
@@ -1690,14 +1699,20 @@ class Radio(QObject):
                 5000)
 
     # ── Noise Reduction API ──────────────────────────────────────────
-    # NR profile = subtraction AGGRESSION (Light / Medium / Aggressive).
+    # NR profile = subtraction AGGRESSION for the NR1 path (Light /
+    # Medium / Aggressive), OR a selector for an alternative NR
+    # algorithm ("nr2" → Ephraim-Malah MMSE-LSA; "neural" → reserved
+    # for RNNoise / DeepFilterNet when those are wired in).
+    #
     # Whether the noise reference is the live VAD-tracked estimate or
     # the operator's captured profile is independent of profile — see
     # the source-toggle API below (set_nr_use_captured_profile,
     # nr_use_captured_profile property).  Earlier draft tangled the
     # two as a 4th "captured" profile entry; separating them gives
-    # the operator the full 3 × 2 combinations.
-    NR_PROFILES = ("light", "medium", "aggressive", "neural")
+    # the operator the full 3 × 2 combinations for NR1.  For NR2 the
+    # source toggle still applies (NR2 + Captured = best classical
+    # NR).
+    NR_PROFILES = ("light", "medium", "aggressive", "nr2", "neural")
 
     @staticmethod
     def neural_nr_available() -> bool:
@@ -1750,6 +1765,14 @@ class Radio(QObject):
             # DspChannel subclass), this branch will swap the channel.
             # For now fall back to medium so audio still flows.
             self._rx_channel.set_nr_profile("medium")
+        elif name == "nr2":
+            # Phase 3.D #4 — channel routes audio through NR2
+            # (Ephraim-Malah MMSE-LSA) instead of NR1.  NR2's
+            # operator knobs (aggression, musical-noise smoothing,
+            # speech-aware) are independently controlled via the
+            # set_nr2_* methods.  Captured-source toggle still
+            # applies orthogonally (NR2 + Captured combo).
+            self._rx_channel.set_nr_profile("nr2")
         else:
             self._rx_channel.set_nr_profile(name)
         self.nr_profile_changed.emit(name)
@@ -2328,6 +2351,85 @@ class Radio(QObject):
         except Exception as exc:
             print(f"[Radio] could not autoload leveler settings: "
                   f"{exc}")
+
+    # ── NR2 (Ephraim-Malah MMSE-LSA) API — Phase 3.D #4 ─────────────
+
+    @property
+    def nr2_aggression(self) -> float:
+        return self._rx_channel.nr2_aggression
+
+    @property
+    def nr2_musical_noise_smoothing(self) -> bool:
+        return self._rx_channel.nr2_musical_noise_smoothing
+
+    @property
+    def nr2_speech_aware(self) -> bool:
+        return self._rx_channel.nr2_speech_aware
+
+    def set_nr2_aggression(self, value: float) -> None:
+        """Operator-tunable NR2 suppression strength.
+
+        0.0 = unity gain (effectively NR off)
+        1.0 = full MMSE-LSA (default)
+        1.5 = harder cleanup with mild thinning
+        Clamped to [0.0, 1.5] inside EphraimMalahNR.
+        Persists to QSettings.
+        """
+        self._rx_channel.set_nr2_aggression(float(value))
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/nr2_aggression",
+                       float(self._rx_channel.nr2_aggression))
+        except Exception as exc:
+            print(f"[Radio] could not persist nr2 aggression: {exc}")
+        self.nr2_aggression_changed.emit(self._rx_channel.nr2_aggression)
+
+    def set_nr2_musical_noise_smoothing(self, on: bool) -> None:
+        """Toggle the decision-directed ξ smoothing that eliminates
+        the musical-noise artifact.  On (default) = full MMSE-LSA;
+        Off = closer to NR1 behavior (diagnostic A/B).  Persists."""
+        self._rx_channel.set_nr2_musical_noise_smoothing(bool(on))
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/nr2_musical_noise_smoothing", bool(on))
+        except Exception as exc:
+            print(f"[Radio] could not persist nr2 smoothing: {exc}")
+        self.nr2_musical_noise_smoothing_changed.emit(bool(on))
+
+    def set_nr2_speech_aware(self, on: bool) -> None:
+        """Toggle simple-VAD speech-aware mode.  Reduces NR2
+        suppression during detected voice (preserves consonants).
+        Off by default.  Persists."""
+        self._rx_channel.set_nr2_speech_aware(bool(on))
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/nr2_speech_aware", bool(on))
+        except Exception as exc:
+            print(f"[Radio] could not persist nr2 speech_aware: {exc}")
+        self.nr2_speech_aware_changed.emit(bool(on))
+
+    def autoload_nr2_settings(self) -> None:
+        """Restore NR2's three operator knobs from QSettings."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            agg = float(s.value("noise/nr2_aggression", 1.0,
+                                type=float))
+            smooth = bool(s.value("noise/nr2_musical_noise_smoothing",
+                                  True, type=bool))
+            speech = bool(s.value("noise/nr2_speech_aware", False,
+                                  type=bool))
+        except Exception:
+            return
+        try:
+            self.set_nr2_aggression(agg)
+            self.set_nr2_musical_noise_smoothing(smooth)
+            self.set_nr2_speech_aware(speech)
+        except Exception as exc:
+            print(f"[Radio] could not autoload NR2 settings: {exc}")
 
     def _on_nr_capture_done(self) -> None:
         """Called from inside NR.process() when a capture finalizes.

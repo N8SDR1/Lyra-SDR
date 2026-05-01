@@ -1430,6 +1430,11 @@ class DspPanel(GlassPanel):
             "(Light / Medium / Aggressive / Neural)")
         radio.nr_enabled_changed.connect(self._on_nr_enabled_changed)
         radio.nr_profile_changed.connect(self._on_nr_profile_changed)
+        # Initialize NR button text + tooltip from current state.
+        # The signal-driven update only fires on FUTURE changes;
+        # without this push we'd have stale "NR" button text when
+        # operator restarts Lyra with NR profile already set to NR2.
+        self._on_nr_profile_changed(radio.nr_profile)
 
         # ── Capture Noise Profile button (Phase 3.D #1) ──────────
         # Compact action button paired with NR — left-click starts
@@ -1611,6 +1616,61 @@ class DspPanel(GlassPanel):
         nr_status_row.addWidget(self.nr_cap_btn)
         nr_status_row.addWidget(self.nr_source_badge, 1)
         self.content_layout().addLayout(nr_status_row)
+
+        # ── NR2 aggression slider (Phase 3.D #4) ─────────────────
+        # Sits on its own sub-row below the noise-controls row.
+        # Visible only when the active NR profile is "nr2" — when
+        # operator picks Light/Medium/Aggressive/Neural, this row
+        # hides to keep the panel uncluttered.  Slider is the
+        # primary tunable; smoothing + speech-aware checkboxes
+        # live in Settings → Noise tab (less-frequently-touched).
+        self.nr2_row_widget = QWidget()
+        nr2_row = QHBoxLayout(self.nr2_row_widget)
+        nr2_row.setContentsMargins(0, 2, 0, 0)
+        nr2_row.setSpacing(6)
+        nr2_label = QLabel("NR2 strength:")
+        nr2_label.setStyleSheet(
+            "color: #cdd9e5; font-family: 'Segoe UI', sans-serif; "
+            "font-size: 11px;")
+        nr2_row.addWidget(nr2_label)
+        # Slider maps integer 0..150 → aggression 0.0..1.5 (×100
+        # internal scaling for 0.01-step precision).
+        self.nr2_agg_slider = QSlider(Qt.Horizontal)
+        self.nr2_agg_slider.setRange(0, 150)
+        self.nr2_agg_slider.setValue(
+            int(round(radio.nr2_aggression * 100)))
+        self.nr2_agg_slider.setSingleStep(5)
+        self.nr2_agg_slider.setPageStep(25)
+        self.nr2_agg_slider.setTickPosition(QSlider.TicksBelow)
+        self.nr2_agg_slider.setTickInterval(50)
+        self.nr2_agg_slider.setToolTip(
+            "NR2 suppression strength.\n"
+            "  0   = unity gain (effectively NR off)\n"
+            "  100 = full Ephraim-Malah MMSE-LSA (default)\n"
+            "  150 = harder cleanup at cost of some thinning\n"
+            "\n"
+            "Right-click the NR button to switch between NR1 "
+            "(Light/Medium/Aggressive) and NR2.")
+        self.nr2_agg_slider.valueChanged.connect(
+            self._on_nr2_agg_slider)
+        nr2_row.addWidget(self.nr2_agg_slider, 1)
+        self.nr2_agg_label = QLabel(
+            f"{int(round(radio.nr2_aggression * 100))} %")
+        self.nr2_agg_label.setMinimumWidth(50)
+        self.nr2_agg_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700; font-size: 11px;")
+        nr2_row.addWidget(self.nr2_agg_label)
+        self.content_layout().addWidget(self.nr2_row_widget)
+        # Hide by default; show only when nr_profile == "nr2".
+        self.nr2_row_widget.setVisible(radio.nr_profile == "nr2")
+        # Two-way sync so the slider mirrors Radio's state when the
+        # operator changes it via Settings or QSettings autoload.
+        radio.nr2_aggression_changed.connect(
+            self._on_nr2_agg_signal)
+        # Show/hide the row when the active NR profile changes.
+        radio.nr_profile_changed.connect(
+            lambda name: self.nr2_row_widget.setVisible(name == "nr2"))
         # Refresh on any of the events that affect what the badge
         # should display.
         radio.nr_use_captured_profile_changed.connect(
@@ -1856,6 +1916,10 @@ class DspPanel(GlassPanel):
         "light":      "Light",
         "medium":     "Medium",
         "aggressive": "Aggressive",
+        # "nr2" is the Phase 3.D #4 Ephraim-Malah MMSE-LSA processor.
+        # Independent algorithm from Light/Medium/Aggressive (which
+        # are NR1 spectral-subtraction tunings).
+        "nr2":        "High Quality (NR2)",
         # "captured" is inserted dynamically in _show_nr_menu so its
         # enabled state can reflect whether a profile is loaded.
         "neural":     "Neural (RNNoise / DeepFilterNet)",
@@ -1888,6 +1952,18 @@ class DspPanel(GlassPanel):
             act.triggered.connect(
                 lambda _=False, k=key: self.radio.set_nr_profile(k))
             menu.addAction(act)
+        # NR2 — Ephraim-Malah MMSE-LSA processor (Phase 3.D #4).
+        # Different algorithm from Light/Medium/Aggressive; sits in
+        # the same menu as a peer choice.  Knobs (aggression,
+        # smoothing, speech-aware) live on the panel slider + the
+        # Settings → Noise tab.
+        nr2_label = self._NR_PROFILE_LABELS["nr2"]
+        nr2_act = QAction(nr2_label, menu)
+        nr2_act.setCheckable(True)
+        nr2_act.setChecked(current == "nr2")
+        nr2_act.triggered.connect(
+            lambda _=False: self.radio.set_nr_profile("nr2"))
+        menu.addAction(nr2_act)
         # Neural placeholder.
         neural_label = self._NR_PROFILE_LABELS["neural"]
         neu_act = QAction(neural_label, menu)
@@ -2117,6 +2193,24 @@ class DspPanel(GlassPanel):
         operator's NR aggression profile (Light/Medium/Aggressive)
         keeps working with the live VAD estimate."""
         self.radio.clear_captured_profile()
+
+    # ── NR2 panel-slider handlers — Phase 3.D #4 ─────────────────────
+
+    def _on_nr2_agg_slider(self, slider_int: int) -> None:
+        """Operator dragged the NR2 strength slider."""
+        agg = slider_int / 100.0
+        self.nr2_agg_label.setText(f"{slider_int} %")
+        self.radio.set_nr2_aggression(agg)
+
+    def _on_nr2_agg_signal(self, agg: float) -> None:
+        """Mirror an external aggression change (e.g. from Settings
+        → Noise tab) into the panel slider."""
+        target = int(round(agg * 100))
+        if self.nr2_agg_slider.value() != target:
+            self.nr2_agg_slider.blockSignals(True)
+            self.nr2_agg_slider.setValue(target)
+            self.nr2_agg_slider.blockSignals(False)
+        self.nr2_agg_label.setText(f"{target} %")
 
     # ── NB (Noise Blanker) handlers — Phase 3.D #2 ───────────────────
 
@@ -2482,16 +2576,25 @@ class DspPanel(GlassPanel):
             btn.blockSignals(False)
 
     def _on_nr_profile_changed(self, name: str):
-        """Update the NR button's tooltip so hover reflects the
-        active profile + noise source. The button itself only shows
-        'NR' text (no room for the profile on the compact button row)."""
+        """Update the NR button's text + tooltip to reflect the
+        active profile + noise source.
+
+        Button text:
+        - "NR"   when NR1 is active (Light / Medium / Aggressive /
+                 Neural placeholder)
+        - "NR2"  when the Ephraim-Malah MMSE-LSA processor is
+                 active — operators see at a glance which
+                 algorithm is running.
+        """
         label = self._NR_PROFILE_LABELS.get(name, name)
         if self.radio.nr_use_captured_profile and self.radio.has_captured_profile():
             source = (f"Captured: "
                       f"{self.radio.active_captured_profile_name}")
         else:
             source = "Live (VAD)"
-        self.dsp_btns["NR"].setToolTip(
+        nr_btn = self.dsp_btns["NR"]
+        nr_btn.setText("NR2" if name == "nr2" else "NR")
+        nr_btn.setToolTip(
             f"Noise Reduction\n"
             f"  Profile: {label}\n"
             f"  Source:  {source}\n"

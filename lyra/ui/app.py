@@ -111,6 +111,13 @@ class MainWindow(QMainWindow):
             self.radio.autoload_leveler_settings()
         except Exception as exc:
             print(f"[app] leveler autoload error: {exc}")
+        # Phase 3.D #4 — NR2 operator knobs (aggression, smoothing,
+        # speech-aware).  NR profile selection itself is handled by
+        # the standard nr_profile QSettings key (loaded elsewhere).
+        try:
+            self.radio.autoload_nr2_settings()
+        except Exception as exc:
+            print(f"[app] NR2 autoload error: {exc}")
 
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.

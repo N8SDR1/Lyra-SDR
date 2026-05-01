@@ -3044,6 +3044,103 @@ class NoiseSettingsTab(QWidget):
         self._update_anf_mu_enabled(radio.anf_profile)
 
         v.addWidget(grp_anf)
+
+        # ── NR2 (Ephraim-Malah MMSE-LSA, Phase 3.D #4) ───────────
+        grp_nr2 = QGroupBox("Noise Reduction (NR2 — Ephraim-Malah)")
+        nr2v = QVBoxLayout(grp_nr2)
+        nr2v.setSpacing(8)
+
+        nr2_intro = QLabel(
+            "Selectable as the 'High Quality (NR2)' entry in the "
+            "NR profile picker on the DSP+Audio panel right-click "
+            "menu.  MMSE-LSA gain function with a continuous-"
+            "spectral-minimum noise tracker — eliminates the "
+            "'musical noise' / 'underwater' artifact that NR1's "
+            "spectral subtraction can produce.  About 2× the CPU "
+            "of NR1; feels noticeably cleaner on voice and "
+            "digital signals.")
+        nr2_intro.setWordWrap(True)
+        nr2_intro.setStyleSheet("color: #8a9aac;")
+        nr2v.addWidget(nr2_intro)
+
+        # Aggression slider (mirror of the panel slider).  Same
+        # 0..150 → 0.0..1.5 mapping.
+        agg_row = QHBoxLayout()
+        agg_row.addWidget(QLabel("Aggression:"))
+        self.nr2_agg_slider_settings = QSlider(Qt.Horizontal)
+        self.nr2_agg_slider_settings.setRange(0, 150)
+        self.nr2_agg_slider_settings.setValue(
+            int(round(radio.nr2_aggression * 100)))
+        self.nr2_agg_slider_settings.setSingleStep(5)
+        self.nr2_agg_slider_settings.setPageStep(25)
+        self.nr2_agg_slider_settings.setTickPosition(
+            QSlider.TicksBelow)
+        self.nr2_agg_slider_settings.setTickInterval(50)
+        self.nr2_agg_label_settings = QLabel(
+            f"{int(round(radio.nr2_aggression * 100))} %")
+        self.nr2_agg_label_settings.setMinimumWidth(60)
+        self.nr2_agg_label_settings.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700;")
+        self.nr2_agg_slider_settings.valueChanged.connect(
+            self._on_nr2_agg_settings_slider)
+        agg_row.addWidget(self.nr2_agg_slider_settings, 1)
+        agg_row.addWidget(self.nr2_agg_label_settings)
+        nr2v.addLayout(agg_row)
+
+        agg_hint = QLabel(
+            "0 = unity gain (effectively NR off);  100 = full "
+            "MMSE-LSA;  150 = harder cleanup with mild thinning.")
+        agg_hint.setWordWrap(True)
+        agg_hint.setStyleSheet("color: #7a8a9c;")
+        nr2v.addWidget(agg_hint)
+
+        # Musical-noise smoothing toggle.
+        self.nr2_smoothing_chk = QCheckBox(
+            "Eliminate musical noise (decision-directed "
+            "smoothing)")
+        self.nr2_smoothing_chk.setToolTip(
+            "Decision-directed α=0.98 smoothing of the a-priori "
+            "SNR estimate — the key Ephraim-Malah trick that "
+            "kills the bin-flicker / 'musical noise' artifact.\n"
+            "\n"
+            "On (default): full MMSE-LSA behavior, smooth output.\n"
+            "Off: drops α to 0.5; output gets closer to NR1 "
+            "behavior (bin flicker more audible).  Useful for "
+            "diagnostic A/B comparison only — leave on for "
+            "everyday operating.")
+        self.nr2_smoothing_chk.setChecked(
+            radio.nr2_musical_noise_smoothing)
+        self.nr2_smoothing_chk.toggled.connect(
+            self._on_nr2_smoothing_toggled)
+        nr2v.addWidget(self.nr2_smoothing_chk)
+
+        # Speech-aware mode toggle.
+        self.nr2_speech_aware_chk = QCheckBox(
+            "Speech-aware mode (preserve consonants)")
+        self.nr2_speech_aware_chk.setToolTip(
+            "When enabled, a simple energy-based VAD detects "
+            "voice activity and reduces NR2's suppression "
+            "during detected speech.  Better preservation of "
+            "consonants and speech transients at the cost of "
+            "slightly less noise reduction during voice.\n"
+            "\n"
+            "Off (default): uniform suppression.\n"
+            "On:            voice-aware reduction.")
+        self.nr2_speech_aware_chk.setChecked(radio.nr2_speech_aware)
+        self.nr2_speech_aware_chk.toggled.connect(
+            self._on_nr2_speech_aware_toggled)
+        nr2v.addWidget(self.nr2_speech_aware_chk)
+
+        # Two-way sync.
+        radio.nr2_aggression_changed.connect(
+            self._on_nr2_agg_signal_settings)
+        radio.nr2_musical_noise_smoothing_changed.connect(
+            self._on_nr2_smoothing_signal)
+        radio.nr2_speech_aware_changed.connect(
+            self._on_nr2_speech_aware_signal)
+
+        v.addWidget(grp_nr2)
         v.addStretch(1)
 
     # ── Slot implementations ─────────────────────────────────────
@@ -3200,6 +3297,43 @@ class NoiseSettingsTab(QWidget):
 
     def _update_anf_mu_enabled(self, profile: str) -> None:
         self.anf_mu_slider.setEnabled(profile == "custom")
+
+    # ── NR2 section slot implementations (Phase 3.D #4) ──────────
+
+    def _on_nr2_agg_settings_slider(self, slider_int: int) -> None:
+        """Operator dragged the NR2 aggression slider in Settings.
+        Mirrors the panel slider via the change signal."""
+        agg = slider_int / 100.0
+        self.nr2_agg_label_settings.setText(f"{slider_int} %")
+        self.radio.set_nr2_aggression(agg)
+
+    def _on_nr2_agg_signal_settings(self, agg: float) -> None:
+        """Mirror an external aggression change (e.g. from the
+        panel slider) into the Settings-tab slider."""
+        target = int(round(agg * 100))
+        if self.nr2_agg_slider_settings.value() != target:
+            self.nr2_agg_slider_settings.blockSignals(True)
+            self.nr2_agg_slider_settings.setValue(target)
+            self.nr2_agg_slider_settings.blockSignals(False)
+        self.nr2_agg_label_settings.setText(f"{target} %")
+
+    def _on_nr2_smoothing_toggled(self, checked: bool) -> None:
+        self.radio.set_nr2_musical_noise_smoothing(checked)
+
+    def _on_nr2_smoothing_signal(self, on: bool) -> None:
+        if self.nr2_smoothing_chk.isChecked() != on:
+            self.nr2_smoothing_chk.blockSignals(True)
+            self.nr2_smoothing_chk.setChecked(on)
+            self.nr2_smoothing_chk.blockSignals(False)
+
+    def _on_nr2_speech_aware_toggled(self, checked: bool) -> None:
+        self.radio.set_nr2_speech_aware(checked)
+
+    def _on_nr2_speech_aware_signal(self, on: bool) -> None:
+        if self.nr2_speech_aware_chk.isChecked() != on:
+            self.nr2_speech_aware_chk.blockSignals(True)
+            self.nr2_speech_aware_chk.setChecked(on)
+            self.nr2_speech_aware_chk.blockSignals(False)
 
     @staticmethod
     def _anf_mu_to_slider(mu: float) -> int:
