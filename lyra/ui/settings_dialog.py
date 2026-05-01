@@ -3360,18 +3360,176 @@ class NoiseSettingsTab(QWidget):
 
         v.addWidget(grp_nr2)
 
+        # ── NR2 gain-method picker ────────────────────────────────
+        # Mirrors the right-click menu on the NR2 strength slider in
+        # the DSP+Audio panel.  Operators reading Settings without
+        # right-clicking the panel slider would otherwise miss this
+        # option entirely.
+        method_box = QGroupBox("NR2 Gain Function")
+        method_v = QVBoxLayout(method_box)
+        method_v.setSpacing(4)
+        method_intro = QLabel(
+            "Choose the per-bin gain function NR2 uses.  Both are "
+            "MMSE-derived (Ephraim-Malah variants) and ported from "
+            "WDSP emnr.c.")
+        method_intro.setWordWrap(True)
+        method_intro.setStyleSheet("color: #8a9aac; font-size: 12px;")
+        method_v.addWidget(method_intro)
+
+        from PySide6.QtWidgets import QButtonGroup
+        self.nr2_method_group = QButtonGroup(self)
+        self.nr2_method_radios = {}
+        for key, label in (
+            ("mmse_lsa",
+             "MMSE-LSA  — classical, sharper attack on noise (default)"),
+            ("wiener",
+             "Wiener   — smoother per-bin transitions, fuller residue"),
+        ):
+            rb = QRadioButton(label)
+            rb.setChecked(radio.nr2_gain_method == key)
+            rb.toggled.connect(
+                lambda on, k=key:
+                    on and self.radio.set_nr2_gain_method(k))
+            method_v.addWidget(rb)
+            self.nr2_method_radios[key] = rb
+            self.nr2_method_group.addButton(rb)
+        radio.nr2_gain_method_changed.connect(self._on_nr2_method_signal)
+        v.addWidget(method_box)
+
+        # ── LMS section (NR3 line enhancer) ───────────────────────
+        grp_lms = QGroupBox("LMS Line Enhancer (NR3)")
+        lmsv = QVBoxLayout(grp_lms)
+        lmsv.setSpacing(8)
+        lms_intro = QLabel(
+            "Adaptive predictor that lifts periodic content (CW "
+            "tones, voice formants) above broadband noise.  "
+            "Predictive — runs alongside NR1/NR2 (subtractive).  "
+            "Operator slider on the DSP+Audio panel sets strength "
+            "0..100; this group is for diagnostics + the master "
+            "enable mirror.")
+        lms_intro.setWordWrap(True)
+        lms_intro.setStyleSheet("color: #8a9aac; font-size: 12px;")
+        lmsv.addWidget(lms_intro)
+
+        # Master enable mirror — same toggle as the DSP+Audio button.
+        self.lms_enable_chk = QCheckBox("Enable LMS line enhancer")
+        self.lms_enable_chk.setChecked(radio.lms_enabled)
+        self.lms_enable_chk.toggled.connect(self.radio.set_lms_enabled)
+        radio.lms_enabled_changed.connect(self.lms_enable_chk.setChecked)
+        lmsv.addWidget(self.lms_enable_chk)
+
+        # Strength slider — mirror of panel slider, finer-grained
+        # increments via the spin box for power users.
+        lms_str_row = QHBoxLayout()
+        lms_str_row.addWidget(QLabel("Strength:"))
+        self.lms_str_slider = QSlider(Qt.Horizontal)
+        self.lms_str_slider.setRange(0, 100)
+        self.lms_str_slider.setValue(int(round(radio.lms_strength * 100)))
+        self.lms_str_slider.setTickPosition(QSlider.TicksBelow)
+        self.lms_str_slider.setTickInterval(25)
+        self.lms_str_slider.valueChanged.connect(
+            lambda v: self.radio.set_lms_strength(v / 100.0))
+        radio.lms_strength_changed.connect(self._on_lms_strength_signal)
+        self.lms_str_label = QLabel(
+            f"{int(round(radio.lms_strength * 100))} %")
+        self.lms_str_label.setMinimumWidth(50)
+        self.lms_str_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700;")
+        lms_str_row.addWidget(self.lms_str_slider, 1)
+        lms_str_row.addWidget(self.lms_str_label)
+        lmsv.addLayout(lms_str_row)
+
+        lms_hint = QLabel(
+            "0 = light effect (slow adapt, gentle).  50 = WDSP "
+            "default (Pratt's classic-ANR tuning).  100 = aggressive "
+            "(fast adapt, stronger).  Most useful in CW mode for "
+            "weak DX in band hiss.  Underlying parameters (taps, "
+            "delay, μ, γ) are interpolated between empirically-"
+            "tuned anchors — direct exposure of those four knobs "
+            "is on the v0.0.7 backlog.")
+        lms_hint.setWordWrap(True)
+        lms_hint.setStyleSheet("color: #7a8a9c; font-size: 11px;")
+        lmsv.addWidget(lms_hint)
+        v.addWidget(grp_lms)
+
+        # ── Squelch section (all-mode SSQL) ───────────────────────
+        grp_sq = QGroupBox("All-Mode Squelch")
+        sqv = QVBoxLayout(grp_sq)
+        sqv.setSpacing(8)
+        sq_intro = QLabel(
+            "Voice-presence detector that mutes audio between "
+            "transmissions on every modulation type (SSB, AM, FM, "
+            "CW).  Tracks RMS level vs auto-tracked noise floor "
+            "with hysteresis + hang time so natural speech pauses "
+            "don't close the gate mid-syllable.")
+        sq_intro.setWordWrap(True)
+        sq_intro.setStyleSheet("color: #8a9aac; font-size: 12px;")
+        sqv.addWidget(sq_intro)
+
+        # Master enable mirror.
+        self.sq_enable_chk = QCheckBox("Enable all-mode squelch")
+        self.sq_enable_chk.setChecked(radio.squelch_enabled)
+        self.sq_enable_chk.toggled.connect(self.radio.set_squelch_enabled)
+        radio.squelch_enabled_changed.connect(
+            self.sq_enable_chk.setChecked)
+        sqv.addWidget(self.sq_enable_chk)
+
+        # Threshold slider mirror.
+        sq_thr_row = QHBoxLayout()
+        sq_thr_row.addWidget(QLabel("Threshold:"))
+        self.sq_thr_slider = QSlider(Qt.Horizontal)
+        self.sq_thr_slider.setRange(0, 100)
+        self.sq_thr_slider.setValue(
+            int(round(radio.squelch_threshold * 100)))
+        self.sq_thr_slider.setTickPosition(QSlider.TicksBelow)
+        self.sq_thr_slider.setTickInterval(25)
+        self.sq_thr_slider.valueChanged.connect(
+            lambda v: self.radio.set_squelch_threshold(v / 100.0))
+        radio.squelch_threshold_changed.connect(
+            self._on_sq_threshold_signal)
+        self.sq_thr_label = QLabel(
+            f"{int(round(radio.squelch_threshold * 100))}")
+        self.sq_thr_label.setMinimumWidth(50)
+        self.sq_thr_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700;")
+        sq_thr_row.addWidget(self.sq_thr_slider, 1)
+        sq_thr_row.addWidget(self.sq_thr_label)
+        sqv.addLayout(sq_thr_row)
+
+        sq_hint = QLabel(
+            "0 = effectively off (gate always open).  10 = barely-"
+            "on, opens on faintest signal.  20 = voice-friendly "
+            "default.  40 = mutes on quiet bands.  60+ = strong "
+            "signals only.\n"
+            "Internal hang time (~300 ms) bridges natural speech "
+            "pauses — direct exposure of hang / attack / release "
+            "is on the v0.0.7 backlog.")
+        sq_hint.setWordWrap(True)
+        sq_hint.setStyleSheet("color: #7a8a9c; font-size: 11px;")
+        sqv.addWidget(sq_hint)
+        v.addWidget(grp_sq)
+
         # ── Right-column reassignments ───────────────────────────
         # The above v.addWidget(grp_xxx) calls landed grp_nb,
-        # grp_anf, and grp_nr2 in the LEFT column via the alias.
-        # Reparent them into the right column to balance the
-        # layout.  Captured Noise Profile (the largest section)
-        # stays alone in the left column.
+        # grp_anf, grp_nr2, method_box, grp_lms, and grp_sq in the
+        # LEFT column via the alias.  Reparent the active-filter
+        # groups into the right column to balance the layout.
+        # Captured Noise Profile (the largest section) stays alone
+        # in the left column.
         col_left.removeWidget(grp_nb)
         col_left.removeWidget(grp_anf)
         col_left.removeWidget(grp_nr2)
+        col_left.removeWidget(method_box)
+        col_left.removeWidget(grp_lms)
+        col_left.removeWidget(grp_sq)
         col_right.addWidget(grp_nb)
         col_right.addWidget(grp_anf)
         col_right.addWidget(grp_nr2)
+        col_right.addWidget(method_box)
+        col_right.addWidget(grp_lms)
+        col_right.addWidget(grp_sq)
         # Stretch on both columns so the groups stack from the top
         # rather than spreading to fill.  Without this, the layout
         # tries to vertically distribute the groups across the
@@ -3595,6 +3753,35 @@ class NoiseSettingsTab(QWidget):
         log_max = math.log10(ANF.MU_MAX)
         frac = max(0, min(200, slider_int)) / 200.0
         return 10.0 ** (log_min + frac * (log_max - log_min))
+
+    # ── NR2 method picker / LMS / Squelch slot implementations ─────
+
+    def _on_nr2_method_signal(self, method: str) -> None:
+        """Mirror an external gain-method change (e.g. via the panel
+        slider's right-click menu) into the radio buttons here."""
+        rb = self.nr2_method_radios.get(method)
+        if rb and not rb.isChecked():
+            rb.blockSignals(True)
+            rb.setChecked(True)
+            rb.blockSignals(False)
+
+    def _on_lms_strength_signal(self, value: float) -> None:
+        """Mirror an external LMS strength change into the slider."""
+        target = int(round(value * 100))
+        if self.lms_str_slider.value() != target:
+            self.lms_str_slider.blockSignals(True)
+            self.lms_str_slider.setValue(target)
+            self.lms_str_slider.blockSignals(False)
+        self.lms_str_label.setText(f"{target} %")
+
+    def _on_sq_threshold_signal(self, value: float) -> None:
+        """Mirror an external squelch threshold change into slider."""
+        target = int(round(value * 100))
+        if self.sq_thr_slider.value() != target:
+            self.sq_thr_slider.blockSignals(True)
+            self.sq_thr_slider.setValue(target)
+            self.sq_thr_slider.blockSignals(False)
+        self.sq_thr_label.setText(f"{target}")
 
 
 class WxAlertsSettingsTab(QWidget):

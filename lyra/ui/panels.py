@@ -2267,7 +2267,12 @@ class DspPanel(GlassPanel):
             lambda _=False: self.radio.set_nr_profile("nr2"))
         menu.addAction(nr2_act)
 
-        # Neural placeholder.
+        # Neural placeholder — backend integration is on the v0.0.7
+        # roadmap.  The menu entry stays so operators see what's
+        # coming, but it's disabled until either RNNoise or
+        # DeepFilterNet is wired in (the import-probe in
+        # neural_nr_available() will start returning True at that
+        # point and the entry lights up).
         neural_label = self._NR_PROFILE_LABELS["neural"]
         neu_act = QAction(neural_label, menu)
         neu_act.setCheckable(True)
@@ -2275,7 +2280,7 @@ class DspPanel(GlassPanel):
         if not neural_ok:
             neu_act.setEnabled(False)
             neu_act.setText(
-                f"{neural_label}  (install RNNoise or DeepFilterNet)")
+                f"{neural_label}  (coming in v0.0.7)")
         neu_act.triggered.connect(
             lambda _=False: self.radio.set_nr_profile("neural"))
         menu.addAction(neu_act)
