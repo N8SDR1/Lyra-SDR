@@ -659,6 +659,13 @@ class PythonRxChannel(DspChannel):
                 # False) — bypass cost is one attribute-check per
                 # block.
                 if self._active_nr == "nr2":
+                    # Keep the Cap button working in NR2 mode: NR1
+                    # owns the capture accumulator (it's the only
+                    # processor with the FFT-magnitude collector +
+                    # smart-guard logic), so feed it on the side
+                    # whenever a capture is in progress.  Cheap when
+                    # idle (single state-check + early return).
+                    self._nr.feed_capture(audio)
                     audio = self._nr2.process(audio)
                 else:
                     audio = self._nr.process(audio)

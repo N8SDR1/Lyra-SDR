@@ -346,6 +346,43 @@ class SpectralSubtractionNR:
         frac = self._capture_frames_done / self._capture_frames_target
         return ("capturing", min(1.0, max(0.0, frac)))
 
+    def feed_capture(self, audio: np.ndarray) -> None:
+        """FFT-only path that accumulates magnitudes into the capture
+        buffer WITHOUT touching the output audio.
+
+        Why this exists: when NR2 is the active processor, Channel
+        routes audio through ``_nr2.process()`` and never calls
+        ``_nr.process()`` — so this accumulator never advances and
+        the Cap button appears dead.  ``feed_capture()`` lets
+        Channel run the lightweight FFT-and-accumulate loop on the
+        side regardless of which NR is active, so Cap works
+        identically in NR1 and NR2 modes.
+
+        Behavior:
+        - If no capture is in progress: returns immediately, no work
+        - Otherwise: walks ``audio`` through the same STFT framing
+          ``process()`` uses, accumulates frame magnitudes into
+          ``_capture_accum``, and increments ``_capture_frames_done``
+        - Audio is NOT modified and NOT returned (caller's audio
+          pipeline already has its samples)
+
+        Implementation note: this reuses ``_in_buf`` (NR1's STFT
+        ring) the same way the capture-without-NR branch in
+        ``process()`` does.  If the operator switches back to NR1
+        mid-capture, the buffer state is exactly what it would be
+        had NR1 been running with ``enabled=False`` the whole time
+        — so the switch is sample-clean.
+        """
+        if self._capture_state != "capturing" or audio.size == 0:
+            return
+        x = audio.astype(np.float32, copy=False)
+        self._in_buf = np.concatenate([self._in_buf, x])
+        while self._in_buf.size >= self._fft:
+            frame = self._in_buf[:self._fft] * self._window
+            mag = np.abs(np.fft.rfft(frame))
+            self._accumulate_capture_frame(mag)
+            self._in_buf = self._in_buf[self._hop:]
+
     def smart_guard_verdict(self) -> str:
         """Verdict from the most recent capture's smart-guard check.
 
