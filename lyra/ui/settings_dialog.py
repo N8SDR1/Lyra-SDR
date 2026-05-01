@@ -472,6 +472,27 @@ class RadioSettingsTab(QWidget):
 
         v.addWidget(grp_bp)
 
+        # ── Toolbar readouts (cosmetic) ──────────────────────────
+        # CPU% toggle.  Defaults to hidden — most operators don't
+        # want a load percentage on the toolbar all the time.
+        # Re-enable here if you do want it.
+        from PySide6.QtCore import QSettings as _QSettings
+        grp_tb = QGroupBox("Toolbar readouts")
+        gtb = QVBoxLayout(grp_tb)
+        s = _QSettings("N8SDR", "Lyra")
+        cpu_hidden = bool(s.value(
+            "toolbar/readout_hidden_cpu", True, type=bool))
+        self.show_cpu_chk = QCheckBox("Show CPU% on toolbar")
+        self.show_cpu_chk.setChecked(not cpu_hidden)
+        self.show_cpu_chk.setToolTip(
+            "Show or hide the live CPU usage percentage on the\n"
+            "toolbar.  Hidden by default — re-enable here if you\n"
+            "want it visible (e.g. for diagnosing whether DSP load\n"
+            "is bottlenecking the audio chain).")
+        self.show_cpu_chk.toggled.connect(self._on_show_cpu_toggled)
+        gtb.addWidget(self.show_cpu_chk)
+        v.addWidget(grp_tb)
+
         v.addStretch(1)
 
         # Track state from radio
@@ -517,6 +538,30 @@ class RadioSettingsTab(QWidget):
             "color: #39ff14;" if running else "color: #8a9aac;")
         self.status_label.setText(
             "●  streaming" if running else "●  not connected")
+
+    def _on_show_cpu_toggled(self, checked: bool) -> None:
+        """Toggle the toolbar CPU% readout's visibility.
+
+        Writes to QSettings so the choice persists across restarts,
+        and tells MainWindow to apply the change immediately so the
+        operator doesn't have to relaunch.
+        """
+        from PySide6.QtCore import QSettings
+        s = QSettings("N8SDR", "Lyra")
+        s.setValue("toolbar/readout_hidden_cpu", not checked)
+        # Reach up through the dialog's parent chain to find
+        # MainWindow and apply the change live.  Settings dialogs
+        # in Lyra are constructed with parent=MainWindow so
+        # self.window().parent() resolves it.
+        try:
+            mw = self.window().parent()
+            if hasattr(mw, "_set_readout_visible"):
+                mw._set_readout_visible("cpu", checked)
+        except Exception as exc:
+            # Live-apply failed (parent chain unexpected) — the
+            # QSettings write will pick up on next Lyra start.
+            print(f"[settings] could not apply CPU visibility "
+                  f"live: {exc}")
 
 
 class HardwareSettingsTab(QWidget):

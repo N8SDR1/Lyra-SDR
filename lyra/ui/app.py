@@ -732,140 +732,23 @@ class MainWindow(QMainWindow):
         self._cpu_timer.timeout.connect(self._tick_cpu)
         self._cpu_timer.start()
 
-        # ── 11. GPU usage indicator ────────────────────────────────
-        # System-wide GPU utilisation %. Useful for diagnosing whether
-        # window-compositor / Lyra paint workload is putting load on
-        # the GPU. Lyra's spectrum/waterfall use QPainter (CPU paint),
-        # so Lyra itself contributes little to GPU; this readout is
-        # mainly for spotting external GPU load competing with the
-        # PC's general responsiveness.
-        #
-        # Tries pynvml first (real NVIDIA per-GPU% with no extra
-        # process spawn). Falls back to "n/a" if the lib isn't
-        # installed or no NVIDIA GPU is present — graceful, the rest
-        # of the toolbar keeps working unchanged.
-        # Label prefix is "GPU·Sys" so operators don't read the
-        # number as Lyra-specific.  Lyra's QPainter panadapter
-        # contributes near-zero to GPU% so an apparent reading of
-        # 30-60% would otherwise be misleading.  Per-process Lyra%
-        # is on the backlog as a separate readout — when it lands
-        # this label gets a "Lyra X% / Sys Y%" two-number form.
-        self.gpu_label = QLabel("GPU·Sys --%")
-        self.gpu_label.setStyleSheet(
-            "color: #cdd9e5; font-family: Consolas, monospace; "
-            "font-weight: 700; padding: 0 6px;")
-        self.gpu_label.setToolTip(
-            "GPU utilization — SYSTEM-WIDE (all apps combined).\n\n"
-            "This is NOT Lyra's GPU usage.  Lyra's spectrum and\n"
-            "waterfall paint with QPainter (CPU), so Lyra's own\n"
-            "GPU contribution rounds to 0%.  The readout is for\n"
-            "spotting EXTERNAL apps competing for GPU resources,\n"
-            "or for confirming that the OS compositor isn't the\n"
-            "bottleneck on slower PCs.\n\n"
-            "Reads NVIDIA GPUs via NVML; AMD / Intel via Windows\n"
-            "Performance Counters (PDH); no driver = 'n/a'.\n\n"
-            "Right-click → Hide if you're investigating spectrum\n"
-            "paint stutter — PDH calls are usually fast but can\n"
-            "occasionally hit slow paths on Windows. Toggling this\n"
-            "off is the fastest A/B test for that suspicion.")
-        tb.addWidget(self.gpu_label)
-        # GPU monitor — try two paths in order of preference:
-        #
-        # 1. NVML (NVIDIA only)  — precise per-card utilisation; works
-        #    on any OS where the NVIDIA driver is installed. Lower
-        #    overhead than the PDH path.
-        # 2. Windows Performance Counters (any vendor)  — uses Win10+'s
-        #    `\GPU Engine(*)\Utilization Percentage` counter set, which
-        #    Microsoft populates from WDDM regardless of the GPU
-        #    vendor. So AMD / Intel iGPU / NVIDIA (without NVML) all
-        #    work via this path.
-        # 3. None of the above — label stays "GPU n/a" and the rest
-        #    of the toolbar is unaffected.
-        self._gpu_mode = None        # "nvml" | "pdh" | None
-        self._gpu_handle = None      # nvml device handle if mode == nvml
-        self._gpu_nvml = None
-        self._gpu_pdh_query = None   # PDH query handle if mode == pdh
-        self._gpu_pdh_counter = None
-        # Try NVML first.
-        try:
-            # The PyPI package is `nvidia-ml-py` (modern, non-deprecated).
-            # It exposes its module as `pynvml` for legacy compatibility,
-            # which triggers a FutureWarning from the older `pynvml`
-            # deprecation shim if both are installed. Suppress that
-            # warning scoped to this import only.
-            import warnings
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=FutureWarning)
-                import pynvml as _nvml
-            _nvml.nvmlInit()
-            if _nvml.nvmlDeviceGetCount() > 0:
-                self._gpu_handle = _nvml.nvmlDeviceGetHandleByIndex(0)
-                self._gpu_nvml = _nvml
-                self._gpu_mode = "nvml"
-        except Exception:
-            pass
-        # If NVML didn't bind, try Windows PDH (works for any vendor).
-        if self._gpu_mode is None:
-            try:
-                import win32pdh
-                self._gpu_pdh_module = win32pdh
-                self._gpu_pdh_query = win32pdh.OpenQuery()
-                self._gpu_pdh_counter = win32pdh.AddCounter(
-                    self._gpu_pdh_query,
-                    r"\GPU Engine(*)\Utilization Percentage")
-                # PDH counters require two samples to compute a delta;
-                # prime the query so the first _tick_gpu reads valid
-                # data instead of zeroes.
-                win32pdh.CollectQueryData(self._gpu_pdh_query)
-                self._gpu_mode = "pdh"
-            except Exception:
-                # No pywin32, no Win10+ GPU counters, or PDH refused
-                # the wildcard — silently fall back to "n/a".
-                self._gpu_mode = None
-        self._gpu_timer = QTimer(self)
-        self._gpu_timer.setInterval(1000)
-        self._gpu_timer.timeout.connect(self._tick_gpu)
-        # ── EMERGENCY OFF-SWITCH (LYRA_NO_GPU_READOUT=1) ─────────────
-        # The PDH wildcard query `\GPU Engine(*)\Utilization Percentage`
-        # enumerates every GPU engine instance in the system. Windows
-        # leaves "ghost" instances in the counter set after processes
-        # exit, so the list can grow into the hundreds over a long
-        # session. CollectQueryData + GetFormattedCounterArray run on
-        # the Qt main thread and can block it for tens-to-hundreds of
-        # ms when the instance count is high — visible to the operator
-        # as spectrum/waterfall lag, sluggish dropdowns, and "molasses"
-        # UI even though CPU/GPU usage is near zero.
-        #
-        # Set the env var LYRA_NO_GPU_READOUT=1 to launch without the
-        # GPU readout timer at all. The label shows "GPU off" and the
-        # timer never starts. Confirms whether PDH polling is the lag
-        # source on a given operator's machine. The proper fix (move
-        # PDH to a worker thread, periodic query reset) lands later.
-        import os as _os
-        if _os.environ.get("LYRA_NO_GPU_READOUT", "").strip() in ("1", "true", "True"):
-            self.gpu_label.setText("GPU·Sys off")
-            self.gpu_label.setToolTip(
-                "GPU readout disabled by LYRA_NO_GPU_READOUT=1. "
-                "Restart without the env var to re-enable.")
-            print("[Lyra] GPU readout disabled (LYRA_NO_GPU_READOUT=1) "
-                  "— PDH timer not started.")
-        else:
-            self._gpu_timer.start()
-            # Slow-tick instrumentation: print a one-liner whenever a
-            # tick takes longer than 25 ms so we have evidence whether
-            # PDH polling is the source of any reported UI lag.
-            self._gpu_slow_threshold_ms = 25.0
-        # Right-click to hide — useful for A/B-testing whether the
-        # GPU readout's PDH polling is contributing to spectrum
-        # paint stutter on this hardware. PDH calls are usually fast
-        # but can hit slow paths (counter reload, GPU-engine enum)
-        # that block the calling thread for tens of ms.
-        self.gpu_label.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.gpu_label.customContextMenuRequested.connect(
-            lambda pos: self._show_readout_menu(self.gpu_label, "gpu", pos))
-        # Same right-click affordance on CPU and HL2 for symmetry
-        # and so the operator can isolate any of the three timers
-        # if they want to.
+        # GPU readout removed (operator UX cleanup).  Was a system-
+        # wide GPU% indicator that operators reasonably read as
+        # Lyra-specific even though Lyra's QPainter panadapter
+        # contributes near-zero GPU.  The diagnostic value during
+        # Phase 3 paint-stutter debugging has been mostly replaced
+        # by worker-mode threading; for the rare operator who
+        # genuinely needs to check whether external apps are
+        # hogging the GPU, Task Manager → Performance → GPU is
+        # more informative than a one-number readout anyway.
+        # See git history if you ever need to bring it back —
+        # the NVML / PDH polling code is preserved there.
+
+        # Right-click affordance on CPU and HL2 for show/hide
+        # toggles.  CPU defaults to hidden (operator UX call —
+        # most operators don't want the load percentage on the
+        # toolbar all the time); the Settings → Radio tab has a
+        # tick box to bring it back.
         self.cpu_label.setContextMenuPolicy(Qt.CustomContextMenu)
         self.cpu_label.customContextMenuRequested.connect(
             lambda pos: self._show_readout_menu(self.cpu_label, "cpu", pos))
@@ -873,7 +756,7 @@ class MainWindow(QMainWindow):
         self.hl2_telem_label.customContextMenuRequested.connect(
             lambda pos: self._show_readout_menu(self.hl2_telem_label, "hl2", pos))
 
-        # ── Small fixed right margin — keeps HL2/CPU/GPU breathing
+        # ── Small fixed right margin — keeps HL2/CPU breathing
         #     room from the right edge of the toolbar instead of
         #     being jammed against the window border.
         gap_right = QWidget()
@@ -1034,74 +917,9 @@ class MainWindow(QMainWindow):
             f"color: {color}; font-family: Consolas, monospace; "
             "font-weight: 700; padding: 0 6px;")
 
-    def _tick_gpu(self):
-        """1 Hz tick — refresh the GPU% label.
-
-        Two backend paths (see _build_toolbar):
-        - "nvml" : NVIDIA per-card utilisation via NVML
-        - "pdh"  : Windows Performance Counters wildcard query that
-                   sums per-process per-engine utilisation across the
-                   whole system. Vendor-agnostic.
-
-        PDH values can briefly exceed 100% because they sum 3D + Copy
-        + Compute + Video engines — those engines run in parallel on
-        modern GPUs, so a hot frame can saturate two engines at once.
-        We clamp the displayed value at 100% (the conceptual max for a
-        "busy GPU" indicator) but the raw could be higher."""
-        if self._gpu_mode is None:
-            self.gpu_label.setText("GPU·Sys n/a ")
-            return
-        # Slow-tick instrumentation: time the actual PDH/NVML work so
-        # we can correlate lag reports with main-thread blocking. Print
-        # a one-liner only when the tick exceeds the slow threshold so
-        # the console doesn't get spammed in the healthy case.
-        import time as _ttime
-        _t0 = _ttime.perf_counter()
-        try:
-            if self._gpu_mode == "nvml":
-                rates = self._gpu_nvml.nvmlDeviceGetUtilizationRates(
-                    self._gpu_handle)
-                pct = float(rates.gpu)
-            else:   # pdh
-                pdh = self._gpu_pdh_module
-                pdh.CollectQueryData(self._gpu_pdh_query)
-                values = pdh.GetFormattedCounterArray(
-                    self._gpu_pdh_counter, pdh.PDH_FMT_DOUBLE)
-                # values is a dict {instance_name: float}; sum gives
-                # total system GPU activity across all engines + procs.
-                pct = float(sum(values.values()))
-                # Clamp display: the raw can exceed 100 when multiple
-                # engines saturate simultaneously, but for a single
-                # "busy GPU" readout 100% is the visual ceiling.
-                if pct > 100.0:
-                    pct = 100.0
-        except Exception:
-            self.gpu_label.setText("GPU·Sys n/a ")
-            return
-        # Slow-tick instrumentation: log if the poll took long enough
-        # that the main thread would have noticeably stuttered.
-        _dt_ms = (_ttime.perf_counter() - _t0) * 1000.0
-        thr = getattr(self, "_gpu_slow_threshold_ms", 25.0)
-        if _dt_ms >= thr:
-            n_inst = len(values) if self._gpu_mode == "pdh" else 0
-            print(f"[Lyra] GPU readout SLOW tick: {_dt_ms:.1f} ms "
-                  f"(mode={self._gpu_mode}, instances={n_inst}). "
-                  f"If lag persists, set LYRA_NO_GPU_READOUT=1 and "
-                  f"restart Lyra to confirm.")
-        self.gpu_label.setText(f"GPU·Sys {pct:4.1f}%")
-        # Color thresholds matched to CPU label so a glance at both
-        # gives a consistent "load = green/yellow/orange/red" reading.
-        if pct >= 75:
-            color = "#ff4040"
-        elif pct >= 50:
-            color = "#ff8c3a"
-        elif pct >= 25:
-            color = "#ffd54f"
-        else:
-            color = "#39ff14"
-        self.gpu_label.setStyleSheet(
-            f"color: {color}; font-family: Consolas, monospace; "
-            "font-weight: 700; padding: 0 6px;")
+    # _tick_gpu and the GPU label widget were removed — see git
+    # history for the NVML / PDH polling implementation if it ever
+    # needs to come back.
 
     def _maybe_show_opengl_nag(self):
         """One-time prompt suggesting the operator switch to the
@@ -1256,7 +1074,6 @@ class MainWindow(QMainWindow):
     _READOUT_LABELS = {
         "hl2": "HL2 telemetry",
         "cpu": "CPU usage",
-        "gpu": "GPU usage",
     }
 
     def _show_readout_menu(self, label_widget, key: str, pos):
@@ -1285,7 +1102,6 @@ class MainWindow(QMainWindow):
         widget, timer_attr = {
             "hl2": (self.hl2_telem_label, None),  # no per-tick UI timer; data comes from radio
             "cpu": (self.cpu_label, "_cpu_timer"),
-            "gpu": (self.gpu_label, "_gpu_timer"),
         }[key]
         widget.setVisible(visible)
         if timer_attr is not None:
@@ -1314,11 +1130,21 @@ class MainWindow(QMainWindow):
 
     def _apply_readout_visibility_from_settings(self):
         """Read persisted hidden-state and apply on launch — called
-        from _load_settings() so an operator's "I always want CPU
-        hidden" preference carries over restarts."""
+        from _load_settings() so an operator's preference carries
+        over restarts.
+
+        Per-key defaults (when no QSettings value exists yet — fresh
+        install or new-key migration):
+          hl2: visible (operator wants HL2 telemetry by default)
+          cpu: hidden  (most operators don't want a load percentage
+                       on the toolbar all the time; Settings → Radio
+                       has a tick box to turn it back on)
+        """
+        defaults_hidden = {"cpu": True, "hl2": False}
         for key in self._READOUT_LABELS:
             hidden = self._settings.value(
-                f"toolbar/readout_hidden_{key}", False, type=bool)
+                f"toolbar/readout_hidden_{key}",
+                defaults_hidden.get(key, False), type=bool)
             if hidden:
                 self._set_readout_visible(key, False)
 
@@ -2346,6 +2172,11 @@ class MainWindow(QMainWindow):
         if s.contains("tci/running") and s.value("tci/running") in (True, "true", "True", 1, "1"):
             self.pnl_tci.enable_btn.setChecked(True)
         self.pnl_tci._update_status()
+        # Apply persisted toolbar-readout visibility (was a previously
+        # dead method — defined but never called, so right-click "Hide"
+        # only persisted state that was never reloaded).  Apply defaults
+        # too: CPU starts hidden on fresh installs (operator request).
+        self._apply_readout_visibility_from_settings()
 
     def _save_settings(self):
         s = self._settings
