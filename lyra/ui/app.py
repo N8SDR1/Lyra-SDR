@@ -732,17 +732,24 @@ class MainWindow(QMainWindow):
         # process spawn). Falls back to "n/a" if the lib isn't
         # installed or no NVIDIA GPU is present — graceful, the rest
         # of the toolbar keeps working unchanged.
-        self.gpu_label = QLabel("GPU --%")
+        # Label prefix is "GPU·Sys" so operators don't read the
+        # number as Lyra-specific.  Lyra's QPainter panadapter
+        # contributes near-zero to GPU% so an apparent reading of
+        # 30-60% would otherwise be misleading.  Per-process Lyra%
+        # is on the backlog as a separate readout — when it lands
+        # this label gets a "Lyra X% / Sys Y%" two-number form.
+        self.gpu_label = QLabel("GPU·Sys --%")
         self.gpu_label.setStyleSheet(
             "color: #cdd9e5; font-family: Consolas, monospace; "
             "font-weight: 700; padding: 0 6px;")
         self.gpu_label.setToolTip(
-            "GPU utilization (system-wide %).\n\n"
-            "Lyra's spectrum/waterfall paint with QPainter (CPU),\n"
-            "so Lyra itself contributes little to GPU load — but\n"
-            "this readout is useful for spotting external apps\n"
-            "competing for GPU resources, or for confirming that\n"
-            "the OS compositor isn't the bottleneck on slower PCs.\n\n"
+            "GPU utilization — SYSTEM-WIDE (all apps combined).\n\n"
+            "This is NOT Lyra's GPU usage.  Lyra's spectrum and\n"
+            "waterfall paint with QPainter (CPU), so Lyra's own\n"
+            "GPU contribution rounds to 0%.  The readout is for\n"
+            "spotting EXTERNAL apps competing for GPU resources,\n"
+            "or for confirming that the OS compositor isn't the\n"
+            "bottleneck on slower PCs.\n\n"
             "Reads NVIDIA GPUs via NVML; AMD / Intel via Windows\n"
             "Performance Counters (PDH); no driver = 'n/a'.\n\n"
             "Right-click → Hide if you're investigating spectrum\n"
@@ -824,7 +831,7 @@ class MainWindow(QMainWindow):
         # PDH to a worker thread, periodic query reset) lands later.
         import os as _os
         if _os.environ.get("LYRA_NO_GPU_READOUT", "").strip() in ("1", "true", "True"):
-            self.gpu_label.setText("GPU off")
+            self.gpu_label.setText("GPU·Sys off")
             self.gpu_label.setToolTip(
                 "GPU readout disabled by LYRA_NO_GPU_READOUT=1. "
                 "Restart without the env var to re-enable.")
@@ -1030,7 +1037,7 @@ class MainWindow(QMainWindow):
         We clamp the displayed value at 100% (the conceptual max for a
         "busy GPU" indicator) but the raw could be higher."""
         if self._gpu_mode is None:
-            self.gpu_label.setText("GPU  n/a ")
+            self.gpu_label.setText("GPU·Sys n/a ")
             return
         # Slow-tick instrumentation: time the actual PDH/NVML work so
         # we can correlate lag reports with main-thread blocking. Print
@@ -1057,7 +1064,7 @@ class MainWindow(QMainWindow):
                 if pct > 100.0:
                     pct = 100.0
         except Exception:
-            self.gpu_label.setText("GPU  n/a ")
+            self.gpu_label.setText("GPU·Sys n/a ")
             return
         # Slow-tick instrumentation: log if the poll took long enough
         # that the main thread would have noticeably stuttered.
@@ -1069,7 +1076,7 @@ class MainWindow(QMainWindow):
                   f"(mode={self._gpu_mode}, instances={n_inst}). "
                   f"If lag persists, set LYRA_NO_GPU_READOUT=1 and "
                   f"restart Lyra to confirm.")
-        self.gpu_label.setText(f"GPU {pct:4.1f}%")
+        self.gpu_label.setText(f"GPU·Sys {pct:4.1f}%")
         # Color thresholds matched to CPU label so a glance at both
         # gives a consistent "load = green/yellow/orange/red" reading.
         if pct >= 75:
