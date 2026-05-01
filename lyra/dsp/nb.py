@@ -44,7 +44,7 @@ Two refinements:
 
 Operator-facing knobs (Phase 3.D #2 first cut):
 
-  - **Profile**: Off / Light / Medium / Aggressive / Custom
+  - **Profile**: Off / Light / Medium / Heavy / Custom
   - **Threshold**: numerical multiplier of the background reference
     (operator-tunable in Custom; presets pick reasonable values)
 
@@ -108,6 +108,13 @@ class ImpulseBlanker:
     # whose instantaneous power exceeds threshold × bg are flagged
     # as impulses.  Higher threshold → fewer false positives, fewer
     # flagged samples; lower threshold → more aggressive blanking.
+    # Profile naming canonical across noise-rejection modules
+    # (NB / ANF / NR1): off / light / medium / heavy.  Operator
+    # mental model: "how hard does this thing work."  Leveler
+    # uses a different scheme (latenight) because that profile is
+    # tuned for a specific use case rather than a generic
+    # intensity level.  Legacy "aggressive" is accepted via
+    # _CANONICAL_ALIASES so saved QSettings still load.
     PROFILES: dict[str, dict[str, float]] = {
         "off":        {"threshold": 0.0,  "enabled": False},
         # Catches obvious lightning crashes and high-energy spikes
@@ -119,7 +126,10 @@ class ImpulseBlanker:
         "medium":     {"threshold": 6.0,  "enabled": True},
         # Catches subtle impulse noise too, but more likely to
         # clip the leading edge of fast CW dits or sharp keying.
-        "aggressive": {"threshold": 3.0,  "enabled": True},
+        "heavy":      {"threshold": 3.0,  "enabled": True},
+    }
+    _CANONICAL_ALIASES: dict[str, str] = {
+        "aggressive": "heavy",
     }
     DEFAULT_PROFILE: str = "off"
 
@@ -196,8 +206,14 @@ class ImpulseBlanker:
         self.reset()
 
     def set_profile(self, name: str) -> None:
-        """Apply a named preset.  Unknown name falls back to 'off'."""
+        """Apply a named preset.  Unknown name falls back to 'off'.
+
+        Canonicalizes legacy names ("aggressive" → "heavy") so
+        saved QSettings from prior Lyra versions load with the
+        intended preset.
+        """
         name = (name or "").strip().lower()
+        name = self._CANONICAL_ALIASES.get(name, name)
         if name not in self.PROFILES and name != "custom":
             name = self.DEFAULT_PROFILE
         self.profile = name

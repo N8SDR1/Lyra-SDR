@@ -15,7 +15,7 @@ Profiles (alpha / beta tuning):
 
     Light       — SSB ragchew, subtle hiss reduction, minimal artifacts
     Medium      — standard speech NR (default)
-    Aggressive  — weak-signal DX, noisy bands; accept more "musical
+    Heavy       — weak-signal DX, noisy bands; accept more "musical
                   noise" artifacts for deeper noise suppression
 
 Noise source (selectable independently of profile):
@@ -33,7 +33,7 @@ Operator picks both:
 
     Light + Captured       → gentle subtraction, locked profile
     Medium + Captured      → standard subtraction, locked profile
-    Aggressive + Live      → harder subtraction with live tracking
+    Heavy + Live           → harder subtraction with live tracking
     ... etc.
 
 Profile and source were tangled in an earlier draft (a 4th "captured"
@@ -93,10 +93,21 @@ class SpectralSubtractionNR:
     # used in the gain math is the live VAD-tracked estimate or the
     # operator's captured profile is independent — see
     # ``set_use_captured_profile`` below.
+    # Profile naming canonical across the noise-rejection modules
+    # (NB / ANF / NR1) is "light" / "medium" / "heavy" — operator
+    # mental model: "how hard does this thing work."  Leveler is
+    # different: it uses "latenight" for its strongest tier because
+    # that name describes the actual late-night-listening use case
+    # the profile was tuned for, not just an intensity level.
+    # Legacy QSettings values ("aggressive") are accepted via
+    # _CANONICAL_ALIASES so old saves still load.
     PROFILES: dict[str, dict[str, float]] = {
         "light":      {"alpha": 1.0, "beta": 0.20, "noise_track": 0.03,  "vad_gate": 3.0},
         "medium":     {"alpha": 1.8, "beta": 0.12, "noise_track": 0.015, "vad_gate": 3.0},
-        "aggressive": {"alpha": 2.8, "beta": 0.06, "noise_track": 0.008, "vad_gate": 4.0},
+        "heavy":      {"alpha": 2.8, "beta": 0.06, "noise_track": 0.008, "vad_gate": 4.0},
+    }
+    _CANONICAL_ALIASES: dict[str, str] = {
+        "aggressive": "heavy",
     }
     DEFAULT_PROFILE = "medium"
 
@@ -178,8 +189,12 @@ class SpectralSubtractionNR:
 
     # ── public API ────────────────────────────────────────────────
     def set_profile(self, name: str):
-        if name in self.PROFILES:
-            self.profile = name
+        # Canonicalize legacy names ("aggressive") so saved QSettings
+        # from prior Lyra versions still resolve.  Unknown names are
+        # ignored (silent no-op preserves existing behavior).
+        canonical = self._CANONICAL_ALIASES.get(name, name)
+        if canonical in self.PROFILES:
+            self.profile = canonical
             self._apply_profile()
 
     def reset(self):
@@ -273,7 +288,7 @@ class SpectralSubtractionNR:
         live tracking if not).  When False, always uses the live
         VAD-tracked estimate.
 
-        Independent of which profile (Light/Medium/Aggressive) is
+        Independent of which profile (Light/Medium/Heavy) is
         active — those control subtraction aggression, this controls
         which noise model the subtraction works against.
         """

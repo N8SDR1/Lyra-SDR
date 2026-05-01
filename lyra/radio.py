@@ -177,10 +177,11 @@ class Radio(QObject):
     lna_rms_dbfs       = Signal(float)       # live ADC RMS, companion to peak
 
     # Noise Reduction (NR) — classical spectral subtraction backend.
-    # Profile name ∈ {"light","medium","aggressive","neural"}; "neural"
-    # is a placeholder reserved for future RNNoise / DeepFilterNet
-    # integration, greyed out in the UI until a suitable package is
-    # importable.
+    # Profile name ∈ {"light","medium","heavy","nr2","neural"};
+    # "neural" is a placeholder reserved for future RNNoise /
+    # DeepFilterNet integration, greyed out in the UI until a
+    # suitable package is importable.  Legacy "aggressive" maps to
+    # "heavy" via _NR_PROFILE_ALIASES for QSettings backwards compat.
     nr_enabled_changed = Signal(bool)
     nr_profile_changed = Signal(str)
 
@@ -1709,7 +1710,7 @@ class Radio(QObject):
 
     # ── Noise Reduction API ──────────────────────────────────────────
     # NR profile = subtraction AGGRESSION for the NR1 path (Light /
-    # Medium / Aggressive), OR a selector for an alternative NR
+    # Medium / Heavy), OR a selector for an alternative NR
     # algorithm ("nr2" → Ephraim-Malah MMSE-LSA; "neural" → reserved
     # for RNNoise / DeepFilterNet when those are wired in).
     #
@@ -1721,7 +1722,11 @@ class Radio(QObject):
     # the operator the full 3 × 2 combinations for NR1.  For NR2 the
     # source toggle still applies (NR2 + Captured = best classical
     # NR).
-    NR_PROFILES = ("light", "medium", "aggressive", "nr2", "neural")
+    # NR1 strength tiers + NR2 + neural slot.  "aggressive" is the
+    # legacy name for "heavy"; set_nr_profile() canonicalizes it
+    # below so old QSettings still load.
+    NR_PROFILES = ("light", "medium", "heavy", "nr2", "neural")
+    _NR_PROFILE_ALIASES = {"aggressive": "heavy"}
 
     @staticmethod
     def neural_nr_available() -> bool:
@@ -1765,6 +1770,9 @@ class Radio(QObject):
         if name == "captured":
             self.set_nr_use_captured_profile(True)
             name = "medium"
+        # Canonicalize legacy strength-tier names so saved QSettings
+        # from prior Lyra versions still resolve.
+        name = self._NR_PROFILE_ALIASES.get(name, name)
         if name not in self.NR_PROFILES:
             name = "medium"
         self._nr_profile = name
@@ -1797,7 +1805,7 @@ class Radio(QObject):
         False → always use the live VAD-tracked estimate
 
         Independent of ``nr_profile`` — operator picks aggression
-        (Light/Medium/Aggressive) and source separately."""
+        (Light/Medium/Heavy) and source separately."""
         return self._nr_use_captured_profile
 
     def set_nr_use_captured_profile(self, on: bool) -> None:
@@ -1881,7 +1889,7 @@ class Radio(QObject):
         # If the source toggle was on, flip it back to Live — there's
         # no captured profile to use anymore, so the source flag
         # would just be a misleading UI state.  NR aggression
-        # profile (Light/Medium/Aggressive) is left alone.
+        # profile (Light/Medium/Heavy) is left alone.
         if self._nr_use_captured_profile:
             self.set_nr_use_captured_profile(False)
         # Persist the cleared state so the next Lyra start doesn't
@@ -2068,7 +2076,10 @@ class Radio(QObject):
 
     # ── Noise Blanker (NB) API — Phase 3.D #2 ─────────────────────
 
-    NB_PROFILES = ("off", "light", "medium", "aggressive", "custom")
+    # Strength tiers + custom slot.  Old name "aggressive" canonicalizes
+    # to "heavy" via _NB_PROFILE_ALIASES so saved QSettings still load.
+    NB_PROFILES = ("off", "light", "medium", "heavy", "custom")
+    _NB_PROFILE_ALIASES = {"aggressive": "heavy"}
 
     @property
     def nb_enabled(self) -> bool:
@@ -2087,12 +2098,14 @@ class Radio(QObject):
     def set_nb_profile(self, name: str) -> None:
         """Apply an NB profile preset.
 
-        Names: ``off`` / ``light`` / ``medium`` / ``aggressive`` /
+        Names: ``off`` / ``light`` / ``medium`` / ``heavy`` /
         ``custom``.  Custom retains the current threshold; other
         names install the preset's threshold.  Persists via
-        QSettings.
+        QSettings.  Legacy ``aggressive`` is canonicalized to
+        ``heavy``.
         """
         name = (name or "").strip().lower()
+        name = self._NB_PROFILE_ALIASES.get(name, name)
         if name not in self.NB_PROFILES:
             name = "off"
         self._rx_channel.set_nb_profile(name)
@@ -2161,7 +2174,15 @@ class Radio(QObject):
 
     # ── Auto Notch Filter (ANF) API — Phase 3.D #3 ────────────────
 
-    ANF_PROFILES = ("off", "gentle", "standard", "aggressive", "custom")
+    # Strength tiers + custom slot.  Old names (gentle/standard/
+    # aggressive) canonicalize to (light/medium/heavy) via
+    # _ANF_PROFILE_ALIASES so saved QSettings still load.
+    ANF_PROFILES = ("off", "light", "medium", "heavy", "custom")
+    _ANF_PROFILE_ALIASES = {
+        "gentle":     "light",
+        "standard":   "medium",
+        "aggressive": "heavy",
+    }
 
     @property
     def anf_enabled(self) -> bool:
@@ -2179,11 +2200,13 @@ class Radio(QObject):
     def set_anf_profile(self, name: str) -> None:
         """Apply an ANF profile preset.
 
-        Names: off / gentle / standard / aggressive / custom.
-        Custom retains the current μ; presets install the
-        preset's value.  Persists via QSettings.
+        Names: off / light / medium / heavy / custom.  Custom
+        retains the current μ; presets install the preset's
+        value.  Persists via QSettings.  Legacy names
+        (gentle/standard/aggressive) are canonicalized.
         """
         name = (name or "").strip().lower()
+        name = self._ANF_PROFILE_ALIASES.get(name, name)
         if name not in self.ANF_PROFILES:
             name = "off"
         self._rx_channel.set_anf_profile(name)

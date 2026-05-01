@@ -2927,7 +2927,7 @@ class NoiseSettingsTab(QWidget):
                 ("off", "Off"),
                 ("light", "Light"),
                 ("medium", "Medium"),
-                ("aggressive", "Aggressive"),
+                ("heavy", "Heavy"),
                 ("custom", "Custom"),
         ):
             rb = QRadioButton(label)
@@ -3028,9 +3028,9 @@ class NoiseSettingsTab(QWidget):
         self._anf_radios: dict[str, QRadioButton] = {}
         for key, label in (
                 ("off", "Off"),
-                ("gentle", "Gentle"),
-                ("standard", "Standard"),
-                ("aggressive", "Aggressive"),
+                ("light", "Light"),
+                ("medium", "Medium"),
+                ("heavy", "Heavy"),
                 ("custom", "Custom"),
         ):
             rb = QRadioButton(label)

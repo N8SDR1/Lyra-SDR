@@ -283,7 +283,7 @@ class NoiseProfileManager(QDialog):
         # Flip the NR source toggle to "captured" so the loaded
         # profile is actually USED — operators expect "Use Selected"
         # to mean "make this the active noise source too".  NR
-        # profile (Light/Medium/Aggressive aggression) is left
+        # profile (Light/Medium/Heavy strength) is left
         # alone — operator's preferred aggression continues to apply
         # to the new noise source.
         self.radio.set_nr_use_captured_profile(True)

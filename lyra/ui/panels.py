@@ -1406,9 +1406,9 @@ class DspPanel(GlassPanel):
 
         # ── ANF (Auto Notch Filter, Phase 3.D #3) ─────────────────
         # Left-click  = toggle on/off (cycles between Off and the
-        #               last non-Off profile, default Standard)
-        # Right-click = profile picker (Off / Gentle / Standard /
-        #               Aggressive / Custom) + Open Noise settings
+        #               last non-Off profile, default Medium)
+        # Right-click = profile picker (Off / Light / Medium /
+        #               Heavy / Custom) + Open Noise settings
         anf_btn = self.dsp_btns["ANF"]
         anf_btn.setChecked(radio.anf_enabled)
         anf_btn.toggled.connect(self._on_anf_btn_toggled)
@@ -1418,17 +1418,17 @@ class DspPanel(GlassPanel):
             "Auto Notch Filter — LMS adaptive predictor.\n"
             "Surgically nulls hetorodynes / carriers / RTTY spurs.\n"
             "Left-click: toggle on/off.\n"
-            "Right-click: pick profile (Off / Gentle / Standard / Aggressive).")
+            "Right-click: pick profile (Off / Light / Medium / Heavy).")
         radio.anf_profile_changed.connect(self._on_anf_profile_changed)
         cur_anf = radio.anf_profile
         self._anf_last_active_profile = (
-            cur_anf if cur_anf != "off" else "standard")
+            cur_anf if cur_anf != "off" else "medium")
 
         # ── NB (Noise Blanker, Phase 3.D #2) ──────────────────────
         # Left-click  = toggle on/off (cycles between Off and the
         #               last non-Off profile, default Medium)
         # Right-click = profile picker (Off / Light / Medium /
-        #               Aggressive / Custom) + Open Noise settings
+        #               Heavy / Custom) + Open Noise settings
         nb_btn = self.dsp_btns["NB"]
         nb_btn.setChecked(radio.nb_enabled)
         nb_btn.toggled.connect(self._on_nb_btn_toggled)
@@ -1438,7 +1438,7 @@ class DspPanel(GlassPanel):
             "Noise Blanker — IQ-domain impulse suppression.\n"
             "Targets ignition / power-line / lightning impulses.\n"
             "Left-click: toggle on/off.\n"
-            "Right-click: pick profile (Off / Light / Medium / Aggressive).")
+            "Right-click: pick profile (Off / Light / Medium / Heavy).")
         radio.nb_profile_changed.connect(self._on_nb_profile_changed)
         # Remember the operator's last non-Off profile so a
         # left-click toggle returns there instead of always picking
@@ -1470,7 +1470,7 @@ class DspPanel(GlassPanel):
 
         # ── NR (Noise Reduction) ─────────────────────────────────
         # Left-click  = toggle enable/disable
-        # Right-click = profile menu (Light / Medium / Aggressive /
+        # Right-click = profile menu (Light / Medium / Heavy /
         #               Neural[disabled until a neural package ships])
         nr_btn = self.dsp_btns["NR"]
         nr_btn.setChecked(radio.nr_enabled)
@@ -1481,7 +1481,7 @@ class DspPanel(GlassPanel):
             "Noise Reduction — spectral subtraction.\n"
             "Left-click: toggle on/off.\n"
             "Right-click: pick profile "
-            "(Light / Medium / Aggressive / Neural)")
+            "(Light / Medium / Heavy / Neural)")
         radio.nr_enabled_changed.connect(self._on_nr_enabled_changed)
         radio.nr_profile_changed.connect(self._on_nr_profile_changed)
         # Initialize NR button text + tooltip from current state.
@@ -1698,7 +1698,7 @@ class DspPanel(GlassPanel):
             "  150 = harder cleanup at cost of some thinning\n"
             "\n"
             "Right-click the NR button to switch between NR1 "
-            "(Light/Medium/Aggressive) and NR2.")
+            "(Light/Medium/Heavy) and NR2.")
         self.nr2_agg_slider.valueChanged.connect(
             self._on_nr2_agg_slider)
         self.nr2_agg_label = QLabel(
@@ -1988,10 +1988,10 @@ class DspPanel(GlassPanel):
     _NR_PROFILE_LABELS = {
         "light":      "Light",
         "medium":     "Medium",
-        "aggressive": "Aggressive",
+        "heavy":      "Heavy",
         # "nr2" is the Phase 3.D #4 Ephraim-Malah MMSE-LSA processor.
-        # Independent algorithm from Light/Medium/Aggressive (which
-        # are NR1 spectral-subtraction tunings).
+        # Independent algorithm from Light/Medium/Heavy (which are
+        # NR1 spectral-subtraction tunings).
         "nr2":        "High Quality (NR2)",
         # "captured" is inserted dynamically in _show_nr_menu so its
         # enabled state can reflect whether a profile is loaded.
@@ -2017,7 +2017,7 @@ class DspPanel(GlassPanel):
         # menu single-purpose matches the standard Qt menu UX
         # convention ("pick one thing") rather than asking the
         # operator to navigate two parallel exclusive groups.
-        for key in ("light", "medium", "aggressive"):
+        for key in ("light", "medium", "heavy"):
             label = self._NR_PROFILE_LABELS[key]
             act = QAction(label, menu)
             act.setCheckable(True)
@@ -2026,7 +2026,7 @@ class DspPanel(GlassPanel):
                 lambda _=False, k=key: self.radio.set_nr_profile(k))
             menu.addAction(act)
         # NR2 — Ephraim-Malah MMSE-LSA processor (Phase 3.D #4).
-        # Different algorithm from Light/Medium/Aggressive; sits in
+        # Different algorithm from Light/Medium/Heavy; sits in
         # the same menu as a peer choice.  Knobs (aggression,
         # smoothing, speech-aware) live on the panel slider + the
         # Settings → Noise tab.
@@ -2235,7 +2235,7 @@ class DspPanel(GlassPanel):
             # Auto-flip the NR source toggle to "captured" — the
             # operator just captured and saved a profile, almost
             # certainly wants the next audio block to use it.  NR
-            # aggression profile (Light/Medium/Aggressive) stays as
+            # aggression profile (Light/Medium/Heavy) stays as
             # operator had it; only the source flips.
             self.radio.set_nr_use_captured_profile(True)
         except FileExistsError:
@@ -2262,7 +2262,7 @@ class DspPanel(GlassPanel):
     def _on_clear_captured_profile(self) -> None:
         """Drop the loaded profile.  Radio.clear_captured_profile()
         also flips the noise-source toggle back to Live so the
-        operator's NR aggression profile (Light/Medium/Aggressive)
+        operator's NR aggression profile (Light/Medium/Heavy)
         keeps working with the live VAD estimate."""
         self.radio.clear_captured_profile()
 
@@ -2303,7 +2303,7 @@ class DspPanel(GlassPanel):
         "off":        "Off",
         "light":      "Light",
         "medium":     "Medium",
-        "aggressive": "Aggressive",
+        "heavy":      "Heavy",
         # "custom" handled inline (label includes the threshold value)
     }
 
@@ -2327,7 +2327,7 @@ class DspPanel(GlassPanel):
         btn = self.dsp_btns["NB"]
         menu = QMenu(self)
         current = self.radio.nb_profile
-        for key in ("off", "light", "medium", "aggressive"):
+        for key in ("off", "light", "medium", "heavy"):
             label = self._NB_PROFILE_LABELS[key]
             act = QAction(label, menu)
             act.setCheckable(True)
@@ -2382,19 +2382,19 @@ class DspPanel(GlassPanel):
 
     _ANF_PROFILE_LABELS = {
         "off":        "Off",
-        "gentle":     "Gentle",
-        "standard":   "Standard",
-        "aggressive": "Aggressive",
+        "light":      "Light",
+        "medium":     "Medium",
+        "heavy":      "Heavy",
         # "custom" handled inline (label includes mu)
     }
 
     def _on_anf_btn_toggled(self, checked: bool) -> None:
         """Left-click on the ANF button toggles between Off and
-        the operator's last non-Off profile (default Standard)."""
+        the operator's last non-Off profile (default Medium)."""
         if checked:
             target = self._anf_last_active_profile
             if target == "off":
-                target = "standard"
+                target = "medium"
             self.radio.set_anf_profile(target)
         else:
             self.radio.set_anf_profile("off")
@@ -2404,7 +2404,7 @@ class DspPanel(GlassPanel):
         btn = self.dsp_btns["ANF"]
         menu = QMenu(self)
         current = self.radio.anf_profile
-        for key in ("off", "gentle", "standard", "aggressive"):
+        for key in ("off", "light", "medium", "heavy"):
             label = self._ANF_PROFILE_LABELS[key]
             act = QAction(label, menu)
             act.setCheckable(True)
@@ -2493,7 +2493,7 @@ class DspPanel(GlassPanel):
                 "Capture a noise profile (📷 Cap button) to unlock "
                 "the Captured source option.\n\n"
                 "Right-click the NR button to change subtraction "
-                "strength (Light / Medium / Aggressive).")
+                "strength (Light / Medium / Heavy).")
             return
 
         # A profile is loaded — badge is clickable to flip source.
@@ -2564,7 +2564,7 @@ class DspPanel(GlassPanel):
             "Click to switch back to the live VAD-tracked estimate.",
             "",
             "Right-click the NR button to change subtraction "
-            "strength (Light / Medium / Aggressive).",
+            "strength (Light / Medium / Heavy).",
         ]
         if mismatch:
             tooltip_lines.append(
@@ -2665,7 +2665,7 @@ class DspPanel(GlassPanel):
         active profile + noise source.
 
         Button text:
-        - "NR"   when NR1 is active (Light / Medium / Aggressive /
+        - "NR"   when NR1 is active (Light / Medium / Heavy /
                  Neural placeholder)
         - "NR2"  when the Ephraim-Malah MMSE-LSA processor is
                  active — operators see at a glance which

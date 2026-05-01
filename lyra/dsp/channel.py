@@ -231,8 +231,8 @@ class PythonRxChannel(DspChannel):
         self._nr2 = EphraimMalahNR(rate=self.audio_rate)
         # Tracks which NR processor process() should route through.
         # Mirror of operator's active NR profile string:
-        #   "light"|"medium"|"aggressive"|"neural" → use _nr (NR1)
-        #   "nr2"                                  → use _nr2
+        #   "light"|"medium"|"heavy"|"neural" → use _nr (NR1)
+        #   "nr2"                             → use _nr2
         # The "off" / NR-disabled state is independent of this flag
         # — it's controlled by the active NR's .enabled attribute.
         self._active_nr: str = "nr1"
@@ -323,7 +323,7 @@ class PythonRxChannel(DspChannel):
     def set_nr_profile(self, profile: str) -> None:
         """Apply an NR profile selection.
 
-        - "light" / "medium" / "aggressive" → NR1 with that
+        - "light" / "medium" / "heavy" → NR1 with that
           subtraction strength preset
         - "nr2"                              → NR2 (MMSE-LSA);
           NR2's own knobs (aggression, smoothing, speech-aware)

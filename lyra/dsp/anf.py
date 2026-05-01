@@ -77,7 +77,7 @@ Rationale (from docs/architecture/noise_toolkit.md §6):
 
 Operator-facing knobs
 ---------------------
-- Profile: Off / Gentle / Standard / Aggressive / Custom
+- Profile: Off / Light / Medium / Heavy / Custom
 - (Custom exposes mu via a slider in Settings → Noise; taps and
    delay stay at defaults — these are mechanical parameters
    operators rarely tune.)
@@ -111,23 +111,33 @@ class AutoNotchFilter:
     # ── Profile presets ──────────────────────────────────────────
     # mu = adaptation step size.  Higher = faster lock onto new
     # tones but noisier residual; lower = slower but cleaner.
-    # The values bracket what's useful in practice — Gentle barely
-    # touches transient tones, Aggressive locks onto anything that
+    # The values bracket what's useful in practice — Light barely
+    # touches transient tones, Heavy locks onto anything that
     # looks tonal for more than ~50 ms.
+    # Profile naming canonical across noise-rejection modules
+    # (NB / ANF / NR1): off / light / medium / heavy.  Operator
+    # mental model: "how hard does this thing work."  Old names
+    # (gentle / standard / aggressive) are accepted via
+    # _CANONICAL_ALIASES so saved QSettings still load.
     PROFILES: dict[str, dict[str, float]] = {
         "off":        {"mu": 0.0,    "enabled": False},
         # Slow adapter — only locks on prolonged steady tones.
         # Best for operators who listen for transient signals
         # (CW, FT8) and don't want ANF interfering with their
         # signal of interest.
-        "gentle":     {"mu": 5e-5,   "enabled": True},
+        "light":      {"mu": 5e-5,   "enabled": True},
         # Standard balance — typical heterodyne is gone in ~200 ms
         # without ANF chewing on speech consonants.
-        "standard":   {"mu": 1.5e-4, "enabled": True},
-        # Aggressive — fast lock on any tonal energy; may briefly
-        # null short speech tones / vowel formants but recovers
-        # quickly because they're not persistent.
-        "aggressive": {"mu": 4e-4,   "enabled": True},
+        "medium":     {"mu": 1.5e-4, "enabled": True},
+        # Strongest setting — fast lock on any tonal energy; may
+        # briefly null short speech tones / vowel formants but
+        # recovers quickly because they're not persistent.
+        "heavy":      {"mu": 4e-4,   "enabled": True},
+    }
+    _CANONICAL_ALIASES: dict[str, str] = {
+        "gentle":     "light",
+        "standard":   "medium",
+        "aggressive": "heavy",
     }
     DEFAULT_PROFILE: str = "off"
 
@@ -155,7 +165,7 @@ class AutoNotchFilter:
     GAMMA: float = 0.10
 
     # Operator-tunable mu range (Custom profile).  The fastest
-    # value here (1e-3) is faster than Aggressive and is at the
+    # value here (1e-3) is faster than Heavy and is at the
     # edge of stability for typical audio dynamics.  Anything
     # below 1e-5 essentially doesn't adapt — useful for diagnostics
     # but not as an operator setting.
@@ -204,11 +214,16 @@ class AutoNotchFilter:
     def set_profile(self, name: str) -> None:
         """Apply a named preset.
 
-        Names: ``off`` / ``gentle`` / ``standard`` / ``aggressive``
-        / ``custom``.  Custom retains the current μ; presets
-        install their own μ.  Unknown names fall back to ``off``.
+        Names: ``off`` / ``light`` / ``medium`` / ``latenight`` /
+        ``custom``.  Custom retains the current μ; presets install
+        their own μ.  Unknown names fall back to ``off``.
+
+        Legacy names (``gentle`` / ``standard`` / ``aggressive``)
+        are canonicalized via ``_CANONICAL_ALIASES`` so saved
+        QSettings from prior Lyra versions still load.
         """
         name = (name or "").strip().lower()
+        name = self._CANONICAL_ALIASES.get(name, name)
         if name not in self.PROFILES and name != "custom":
             name = self.DEFAULT_PROFILE
         self.profile = name
