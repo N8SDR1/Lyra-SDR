@@ -82,3 +82,4 @@ New Text Document*.txt
 # Runtime logs
 *.log
 logs/
+scratch/

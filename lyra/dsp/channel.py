@@ -279,8 +279,12 @@ class PythonRxChannel(DspChannel):
         # Demods themselves don't change on mode switch (they're all
         # built up-front in _rebuild_demods); we just route to a
         # different one. NR state is mode-dependent in character (a
-        # CW noise floor is different from AM), so flush it.
+        # CW noise floor is different from AM), so flush both NR
+        # processors — operator may toggle between them at any time
+        # and we don't want NR2's decision-directed smoothing to
+        # blend in stale spectral state from the previous mode.
         self._nr.reset()
+        self._nr2.reset()
 
     def set_rx_bw(self, mode: str, bw_hz: int) -> None:
         self._rx_bw_by_mode[mode] = int(bw_hz)
@@ -367,9 +371,40 @@ class PythonRxChannel(DspChannel):
         the JSON store) into BOTH NR1 and NR2 — they share the same
         operator-facing source-toggle, so both must be primed with
         the profile or switching processors mid-session would lose
-        the noise reference.  Raises ValueError on size mismatch."""
-        self._nr.load_captured_profile(mag)
-        self._nr2.load_captured_profile(mag)
+        the noise reference.  Raises ValueError on size mismatch.
+
+        Atomic across NR1+NR2: if either load fails (e.g., bin-count
+        mismatch), the other is rolled back so the operator never
+        ends up in a half-loaded state where one processor has the
+        new profile and the other has the old one (or none).  The
+        ValueError is re-raised so the UI can surface a Save-failed
+        dialog as before.
+        """
+        # Snapshot prior state for rollback.
+        nr1_prev = self._nr.captured_profile_array()
+        nr2_was_loaded = self._nr2.has_captured_profile()
+        try:
+            self._nr.load_captured_profile(mag)
+        except Exception:
+            # NR1 raised — neither processor was modified.  Re-raise.
+            raise
+        try:
+            self._nr2.load_captured_profile(mag)
+        except Exception:
+            # NR2 raised after NR1 succeeded — roll NR1 back so we
+            # don't leave the operator with a desynced state.
+            try:
+                if nr1_prev is not None:
+                    self._nr.load_captured_profile(nr1_prev)
+                else:
+                    self._nr.clear_captured_profile()
+                if not nr2_was_loaded:
+                    self._nr2.clear_captured_profile()
+            except Exception:
+                # Rollback failed — that's worse than the original
+                # error, but we've already lost; surface the original.
+                pass
+            raise
 
     def clear_captured_profile(self) -> None:
         self._nr.clear_captured_profile()
