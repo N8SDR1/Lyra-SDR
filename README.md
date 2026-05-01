@@ -1,12 +1,18 @@
 # Lyra — Qt6 SDR Transceiver for Hermes Lite 2 / 2+
 
-**Current version: 0.0.5 — "Listening Tools"**
+**Current version: 0.0.6 — "Operator Awareness"**
 
 Modern PySide6 desktop SDR for Steve Haynal's Hermes Lite 2 and HL2+.
 Native Python HPSDR Protocol 1, TCI v1.9 server, glassy UI with
 analog-look meters, a band-plan overlay with landmark click-to-tune,
-GPU-accelerated panadapter + waterfall, and a CW-focused audio
-toolkit (APF audio peaking filter + BIN binaural pseudo-stereo).
+GPU-accelerated panadapter + waterfall, a CW-focused audio toolkit
+(APF audio peaking filter + BIN binaural pseudo-stereo), and a deep
+noise-toolkit drawing on Warren Pratt's WDSP — adaptive line
+enhancer, Martin-statistics MMSE-LSA noise reduction, all-mode
+squelch.  Built-in weather alerts watch the operator's local
+conditions across multiple data sources (Blitzortung, NWS, Ambient,
+Ecowitt) and raise toolbar + toast notifications for lightning and
+high-wind events.
 
 ![Lyra](assets/logo/Lyra-SDR.png)
 
@@ -26,7 +32,63 @@ The version string above is the single source of truth maintained in
 Bumping the version is a one-line edit in `lyra/__init__.py`; every
 display surface follows automatically.
 
-## What's in 0.0.5 — "Listening Tools"
+## What's in 0.0.6 — "Operator Awareness"
+
+The deepest DSP refresh since the 0.0.x series began plus the
+introduction of all-station awareness features.  Five WDSP modules
+ported with proper attribution under Lyra's new GPL v3+ license,
+all-mode squelch, LMS adaptive line enhancer, full Martin-statistics
+upgrade for NR2, and built-in weather alerts (lightning + high wind).
+
+### Noise toolkit upgrades
+
+- **NR1 — continuous strength slider (0–100)** replaces the old
+  Light/Medium/Heavy radio buttons.  Behind the scenes, dead VAD-gated
+  noise tracker replaced with min-statistics (Martin 2001).
+- **NR2 — full WDSP-equivalent stack.**  Martin minimum-statistics
+  noise PSD, AEPF median-smoothing post-filter, speech-presence
+  probability soft mask (witchHat), and a runtime Wiener-vs-MMSE-LSA
+  gain-function picker (right-click the strength slider).  Aggression
+  range expanded to 0–200 — the new machinery makes the upper range
+  listenable without speech distortion.
+- **LMS Line Enhancer (NR3)** — new.  Adaptive predictor that pulls
+  weak CW out of broadband hiss.  Slots ANF → LMS → NR in the chain;
+  works alongside NR2 for best weak-signal results.  Block-LMS
+  optimization keeps CPU around 4% real-time.
+- **All-Mode Squelch** — new.  RMS + auto-tracked noise floor with
+  hysteresis and hang-time.  Mutes between transmissions on every
+  modulation type (SSB / AM / FM / CW).  Per-condition hang time
+  bridges natural speech pauses without chopping consonants.
+
+### Weather Alerts (new)
+
+Three toolbar indicators between the ADC RMS readout and the clocks:
+- ⚡ Lightning — closest strike + distance + bearing, color-coded by
+  proximity (yellow > 25 mi, orange < 25 mi, red < 10 mi)
+- 💨 Wind — sustained / gust speed, three severity tiers
+- ⚠ NWS severe weather warning (red, hidden when no warning active)
+
+Indicators auto-hide on quiet days.  Desktop toasts fire on tier-
+crossing events with 15-minute hysteresis to prevent spam.  Operator-
+selectable sources: Blitzortung, NWS, Ambient Weather PWS, Ecowitt
+PWS.  Disclaimer-gated — alerts are informational only, not a safety
+system.  Settings → Weather (last tab in the dialog).
+
+### Operator / Station globals
+
+Callsign + Maidenhead grid square + manual lat/lon backup live in
+Radio Settings now.  Consumed by TCI spots, weather alerts, and any
+future feature that needs your station location.  Migrates from the
+older TCI-only callsign field on first run.
+
+### License change
+
+Lyra v0.0.6 onward is **GNU General Public License v3 or later**
+(was MIT for v0.0.5 and earlier).  The relicense was made
+specifically to enable WDSP integration — see `NOTICE.md` for the
+full attribution and license history.
+
+## What was in 0.0.5 — "Listening Tools"
 
 A meaningful audio-DSP and panadapter release driven by extended
 field testing on the operator's HL2+. Two new CW DSP tools, full

@@ -56,16 +56,36 @@ clean-room implementation referencing only documentation.
   contributions from / shared work with Thetis are licensing-
   compatible.
 - **WDSP** (Warren Pratt, NR0V — DSP library used by Thetis /
-  PowerSDR) — GPL v2 or later. Future Lyra releases may directly
-  link or incorporate WDSP for advanced DSP features (PureSignal,
-  CESSB). License is compatible with Lyra's GPL v3+.
+  PowerSDR) — GPL v2 or later. License is compatible with Lyra's
+  GPL v3+.  As of v0.0.6, Lyra incorporates the following modules
+  with WDSP-derived algorithm content (per-file attribution in each
+  source file):
+    - `lyra/dsp/lms.py` — Normalized LMS adaptive line enhancer
+      with adaptive leakage.  Port of WDSP `anr.c`
+      (Copyright (C) 2012, 2013 Warren Pratt, NR0V).
+    - `lyra/dsp/nr2.py` — Martin (2001) minimum-statistics noise
+      PSD, AEPF median-smoothing post-filter, speech-presence
+      probability soft mask, MMSE-LSA + Wiener gain LUT.  All
+      derived from WDSP `emnr.c` (Copyright (C) 2015, 2025
+      Warren Pratt, NR0V).
+  Future releases may add: RNNoise neural NR (`rnnr.c`), PureSignal
+  predistortion, CESSB.
 - **ExpertSDR3** — closed-source commercial software from Expert
   Electronics. Referenced for: RX audio chain layout from the
   published v3 user manual (pages 70–95); panadapter visual design;
   meter face / dial concepts. No code involvement.
 - **SDRLogger+** (by the same author as Lyra-SDR, separate project)
   — Referenced for: TCI spot mode-filter CSV idiom; DX-cluster
-  integration patterns. Both projects are the same author's work.
+  integration patterns; weather-alerts disclaimer text.  As of
+  v0.0.6, Lyra also lifts the following weather-source adapters
+  from SDRLogger+ (also Lyra-author, GPL):
+    - Blitzortung lightning network adapter (`lyra/wx/sources/blitzortung.py`)
+    - NWS active-alerts + METAR adapter (`lyra/wx/sources/nws.py`)
+    - Ambient Weather PWS adapter (`lyra/wx/sources/ambient.py`)
+    - Ecowitt v3 PWS adapter (`lyra/wx/sources/ecowitt.py`)
+- **WX-Dashboard** (by the same author as Lyra-SDR, separate project)
+  — GPL.  Original home of the modular weather-source API contracts
+  Lyra now uses for its all-station weather-alerts feature.
 
 ## Standards, specs, and public data referenced
 
@@ -87,4 +107,4 @@ terms; the relicense is forward-only.
 
 ---
 
-Last updated: 2026-04-29
+Last updated: 2026-05-01 (v0.0.6 release — WDSP integration)
