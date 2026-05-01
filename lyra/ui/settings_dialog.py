@@ -3630,13 +3630,29 @@ class NoiseSettingsTab(QWidget):
                 "color: #6acb6a; font-size: 12px;")
         else:
             inst_text = QLabel(
-                "✗  <b>DeepFilterNet not installed.</b><br>"
+                "✗  <b>DeepFilterNet not installed.</b><br><br>"
                 "Open a Command Prompt or Terminal and run:<br>"
                 "<code style='background:#222;padding:3px 6px;"
                 "border-radius:3px;color:#50d0ff;'>"
                 "pip install deepfilternet</code><br>"
-                "Approximately 500 MB download (PyTorch + model "
-                "weights).  Restart Lyra after installing.")
+                "Approximately 500 MB (PyTorch + model weights).<br><br>"
+                "<b>If pip fails with 'Cargo not on PATH'</b> "
+                "(latest DFN ships a Rust source dist), three "
+                "options:<br>"
+                "&nbsp;&nbsp;1. Try an older release with pre-built "
+                "wheels:<br>"
+                "&nbsp;&nbsp;&nbsp;&nbsp;<code style='background:#222;"
+                "padding:2px 4px;border-radius:3px;color:#50d0ff;'>"
+                "pip install deepfilternet==0.5.5</code><br>"
+                "&nbsp;&nbsp;2. Install Rust toolchain from "
+                "<a href='https://rustup.rs/' "
+                "style='color:#50d0ff;'>rustup.rs</a>, open a "
+                "fresh Command Prompt, retry<br>"
+                "&nbsp;&nbsp;3. Use Python 3.11 or 3.12 — newer "
+                "Python releases (3.13+) currently lack pre-built "
+                "wheels for most of the ML ecosystem<br><br>"
+                "Restart Lyra after installing.")
+            inst_text.setOpenExternalLinks(True)
             inst_text.setStyleSheet(
                 "color: #ff8c00; font-size: 12px;")
         inst_text.setWordWrap(True)

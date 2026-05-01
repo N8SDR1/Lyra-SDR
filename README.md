@@ -99,6 +99,21 @@ pip install deepfilternet
 
 (~500 MB, includes PyTorch).  After installing, restart Lyra and:
 
+> **Self-compiling testers — Rust requirement on latest DFN:**
+> The newest DeepFilterNet (0.5.6+) ships its inner Rust extension
+> (`deepfilterlib`) as a source distribution.  If pip tries to
+> compile it and fails with "Cargo not on PATH", you have three
+> options:
+>   1. Pin to an older release: `pip install deepfilternet==0.5.5`
+>      (pre-built wheels for Python 3.10-3.12)
+>   2. Install Rust via https://rustup.rs/, open a new Command
+>      Prompt, and re-run the install
+>   3. Use Python 3.11 or 3.12 — Python 3.13/3.14 is currently
+>      too new for most of the PyTorch / DFN wheel ecosystem
+>
+> The EXE installer bundles its own Python 3.11 so end-users
+> downloading the .exe never see this issue.
+
 1. Settings → Noise → "Neural NR (DeepFilterNet)"
 2. Read the orange-bordered warning panel (latency / CPU implications)
 3. Tick **"I understand the latency / CPU implications and want to test or enable Neural NR"**
