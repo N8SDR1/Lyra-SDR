@@ -4,7 +4,7 @@
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" build\installer.iss
 ;
 ; Output:
-;   dist\installer\Lyra-Setup-0.0.5.exe
+;   dist\installer\Lyra-Setup-0.0.6.exe
 ;
 ; What this installer does:
 ;   - Installs the PyInstaller folder bundle from dist\Lyra\ into
@@ -23,8 +23,8 @@
 ;     launch under HKEY_CURRENT_USER\Software\N8SDR\Lyra
 ;   - Run any service / scheduled task / startup hook
 
-#define LyraVersion       "0.0.5"
-#define LyraVersionName   "Listening Tools"
+#define LyraVersion       "0.0.6"
+#define LyraVersionName   "Operator Awareness"
 #define LyraBuildDate     "2026-04-26"
 #define LyraPublisher     "Rick Langford (N8SDR)"
 #define LyraURL           "https://github.com/N8SDR1/Lyra-SDR"
