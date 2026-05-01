@@ -200,6 +200,16 @@ class Radio(QObject):
     anf_profile_changed = Signal(str)
     anf_mu_changed = Signal(float)
 
+    # Audio Leveler (post-AGC compressor).  Profile = preset name
+    # (off / light / medium / latenight / custom).  See
+    # lyra/dsp/leveler.py.  Custom params (threshold / ratio /
+    # makeup) each get their own change signal so the Settings
+    # tab can refresh granularly.
+    leveler_profile_changed = Signal(str)
+    leveler_threshold_changed = Signal(float)
+    leveler_ratio_changed = Signal(float)
+    leveler_makeup_changed = Signal(float)
+
     # Phase 3.D #1 — Captured-noise-profile signals.
     # noise_capture_done fires when a capture finalizes inside the
     # NR processor; payload is the smart-guard verdict
@@ -796,6 +806,17 @@ class Radio(QObject):
         self._segment_colors: dict[str, str] = {}  # kind → hex override
         self._noise_floor_color: str = ""       # NF line color override
         self._peak_markers_color: str = ""      # peak marker color override
+
+        # ── Audio Leveler (post-AGC compressor) ──────────────────────
+        # Soft-knee feed-forward compressor that sits at the very end
+        # of the audio chain — after AGC, AF gain, Volume, Mute,
+        # before the tanh limiter.  Tames sudden bursts (audio pops,
+        # transient yells in voice) and provides a TV-style "Late
+        # Night" leveling mode.  Owned by Radio (not channel) because
+        # it operates on the post-volume audio output, not the
+        # demodulated audio.
+        from lyra.dsp.leveler import AudioLeveler as _Leveler
+        self._leveler = _Leveler(rate=48000)
 
         # ── Noise Reduction ───────────────────────────────────────────
         # NR processor is owned by self._rx_channel (see lyra/dsp/channel.py).
@@ -2181,6 +2202,132 @@ class Radio(QObject):
                 self.set_anf_profile(profile)
         except Exception as exc:
             print(f"[Radio] could not autoload ANF settings: {exc}")
+
+    # ── Audio Leveler API ─────────────────────────────────────────
+
+    LEVELER_PROFILES = ("off", "light", "medium", "latenight", "custom")
+
+    @property
+    def leveler_enabled(self) -> bool:
+        return bool(self._leveler.enabled)
+
+    @property
+    def leveler_profile(self) -> str:
+        return self._leveler.profile
+
+    @property
+    def leveler_threshold_db(self) -> float:
+        return float(self._leveler._threshold_db)
+
+    @property
+    def leveler_ratio(self) -> float:
+        return float(self._leveler._ratio)
+
+    @property
+    def leveler_makeup_db(self) -> float:
+        return float(self._leveler._makeup_db)
+
+    def set_leveler_profile(self, name: str) -> None:
+        """Apply an audio-leveler preset.
+
+        Names: off / light / medium / latenight / custom.  Custom
+        retains current threshold/ratio/makeup; presets install
+        their own values.  Persists via QSettings.
+        """
+        name = (name or "").strip().lower()
+        if name not in self.LEVELER_PROFILES:
+            name = "off"
+        self._leveler.set_profile(name)
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("audio/leveler_profile", name)
+            s.setValue("audio/leveler_threshold_db",
+                       float(self._leveler._threshold_db))
+            s.setValue("audio/leveler_ratio",
+                       float(self._leveler._ratio))
+            s.setValue("audio/leveler_makeup_db",
+                       float(self._leveler._makeup_db))
+        except Exception as exc:
+            print(f"[Radio] could not persist leveler profile: {exc}")
+        self.leveler_profile_changed.emit(name)
+        self.leveler_threshold_changed.emit(
+            self._leveler._threshold_db)
+        self.leveler_ratio_changed.emit(self._leveler._ratio)
+        self.leveler_makeup_changed.emit(
+            self._leveler._makeup_db)
+
+    def set_leveler_threshold_db(self, db: float) -> None:
+        self._leveler.set_threshold_db(float(db))
+        self._persist_leveler_custom()
+        self.leveler_profile_changed.emit("custom")
+        self.leveler_threshold_changed.emit(
+            self._leveler._threshold_db)
+
+    def set_leveler_ratio(self, ratio: float) -> None:
+        self._leveler.set_ratio(float(ratio))
+        self._persist_leveler_custom()
+        self.leveler_profile_changed.emit("custom")
+        self.leveler_ratio_changed.emit(self._leveler._ratio)
+
+    def set_leveler_makeup_db(self, db: float) -> None:
+        self._leveler.set_makeup_db(float(db))
+        self._persist_leveler_custom()
+        self.leveler_makeup_changed.emit(
+            self._leveler._makeup_db)
+
+    def _persist_leveler_custom(self) -> None:
+        """Centralised QSettings write for the three Custom-mode
+        leveler params.  Called from each setter so all three keys
+        + the profile name stay in sync."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("audio/leveler_profile", "custom")
+            s.setValue("audio/leveler_threshold_db",
+                       float(self._leveler._threshold_db))
+            s.setValue("audio/leveler_ratio",
+                       float(self._leveler._ratio))
+            s.setValue("audio/leveler_makeup_db",
+                       float(self._leveler._makeup_db))
+        except Exception as exc:
+            print(f"[Radio] could not persist leveler custom: {exc}")
+
+    def autoload_leveler_settings(self) -> None:
+        """Restore leveler profile + custom params on Lyra startup."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            profile = str(s.value("audio/leveler_profile", "off",
+                                  type=str) or "off")
+            thr = float(s.value("audio/leveler_threshold_db", -22.0,
+                                type=float))
+            ratio = float(s.value("audio/leveler_ratio", 4.0,
+                                  type=float))
+            makeup = float(s.value("audio/leveler_makeup_db", 6.0,
+                                   type=float))
+        except Exception:
+            return
+        try:
+            if profile == "custom":
+                # Apply custom params atomically — set them all
+                # before the final set_leveler_threshold_db's
+                # signal emission triggers UI refresh.
+                self._leveler.set_threshold_db(thr)
+                self._leveler.set_ratio(ratio)
+                self._leveler.set_makeup_db(makeup)
+                self.set_leveler_threshold_db(thr)  # fires signals
+            else:
+                # Pre-seed Custom-mode params so a later switch to
+                # Custom recalls the operator's last hand-tuned
+                # values.
+                self._leveler.set_threshold_db(thr)
+                self._leveler.set_ratio(ratio)
+                self._leveler.set_makeup_db(makeup)
+                self.set_leveler_profile(profile)
+        except Exception as exc:
+            print(f"[Radio] could not autoload leveler settings: "
+                  f"{exc}")
 
     def _on_nr_capture_done(self) -> None:
         """Called from inside NR.process() when a capture finalizes.
@@ -4098,6 +4245,9 @@ class Radio(QObject):
             # by ~14 dB to get the previous (uncompensated) level.
             AGC_OFF_MAKEUP = 5.0119   # 10 ** (14/20) — +14 dB linear
             out = audio * AGC_OFF_MAKEUP * vol
+            # Audio leveler — soft-knee compressor for taming
+            # transient bursts.  Bypass-fast when profile == off.
+            out = self._leveler.process(out)
             return np.tanh(out).astype(np.float32)
 
         block_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
@@ -4135,9 +4285,14 @@ class Radio(QObject):
             self.agc_action_db.emit(float(action_db))
         except Exception:
             pass
-        # Final: audio-already-AF-scaled × AGC × Volume → tanh
+        # Final: audio-already-AF-scaled × AGC × Volume → leveler → tanh
         # (AF Gain was applied BEFORE the AGC tracker above.)
         audio = audio * agc_gain * vol
+        # Audio leveler — soft-knee compressor for taming transient
+        # bursts.  Sits BEFORE tanh so its smooth gain reduction
+        # can prevent the tanh limiter from clipping; tanh stays
+        # as a safety net when the leveler is off (profile = off).
+        audio = self._leveler.process(audio)
         return np.tanh(audio).astype(np.float32)
 
     # ── AGC profile API ───────────────────────────────────────────────

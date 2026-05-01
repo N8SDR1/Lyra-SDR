@@ -1260,6 +1260,150 @@ class AudioSettingsTab(QWidget):
         gd.addLayout(row)
 
         v.addWidget(grp_dev)
+
+        # ── Audio Leveler (post-AGC compressor) ────────────────────
+        # Soft-knee compressor that sits at the end of the audio
+        # chain — tames sudden bursts (audio pops, transient yells
+        # in voice) and provides a TV-style "Late Night" leveling
+        # mode.  Lives on the Audio tab because it's an audio-output-
+        # shaping feature (same conceptual home as PC device picker
+        # and balance), distinct from noise toolkit.
+        from PySide6.QtWidgets import QRadioButton, QButtonGroup
+        from lyra.dsp.leveler import AudioLeveler as _Lev
+        grp_lev = QGroupBox("Audio Leveler")
+        lvv = QVBoxLayout(grp_lev)
+        lvv.setSpacing(8)
+
+        lev_intro = QLabel(
+            "Soft-knee compressor at the end of the audio chain. "
+            "Tames sudden bursts (audio pops, transient amplitude "
+            "spikes, single-syllable shouts in speech) while keeping "
+            "quieter content audible — TV-style 'Late Night Mode'.\n\n"
+            "Different from AGC: AGC operates on the RF/IF envelope "
+            "(seconds-scale band-noise / strong-signal balancing); "
+            "this leveler operates on the demod audio (~100 ms "
+            "scale within-signal dynamics).  They run in series.")
+        lev_intro.setWordWrap(True)
+        lev_intro.setStyleSheet("color: #8a9aac;")
+        lvv.addWidget(lev_intro)
+
+        # Profile radio-button row.
+        lev_prof_row = QHBoxLayout()
+        lev_prof_row.addWidget(QLabel("Profile:"))
+        self._lev_radio_group = QButtonGroup(self)
+        self._lev_radios: dict[str, QRadioButton] = {}
+        for key, label in (
+                ("off",       "Off"),
+                ("light",     "Light"),
+                ("medium",    "Medium"),
+                ("latenight", "Late Night"),
+                ("custom",    "Custom"),
+        ):
+            rb = QRadioButton(label)
+            self._lev_radio_group.addButton(rb)
+            self._lev_radios[key] = rb
+            lev_prof_row.addWidget(rb)
+            rb.toggled.connect(
+                lambda checked, k=key: self._on_lev_radio_toggled(
+                    checked, k))
+        lev_prof_row.addStretch(1)
+        lvv.addLayout(lev_prof_row)
+        # Block signals during initial setChecked so the toggled
+        # handler doesn't fire against the threshold/ratio/makeup
+        # sliders before they're built.
+        lev_target = self._lev_radios.get(
+            radio.leveler_profile, self._lev_radios["off"])
+        lev_target.blockSignals(True)
+        lev_target.setChecked(True)
+        lev_target.blockSignals(False)
+
+        # Threshold slider — operator-tunable in Custom.
+        thr_row = QHBoxLayout()
+        thr_row.addWidget(QLabel("Threshold:"))
+        self.lev_thr_slider = QSlider(Qt.Horizontal)
+        self.lev_thr_slider.setRange(
+            int(_Lev.THRESHOLD_MIN_DB), int(_Lev.THRESHOLD_MAX_DB))
+        self.lev_thr_slider.setValue(
+            int(round(radio.leveler_threshold_db)))
+        self.lev_thr_slider.setSingleStep(1)
+        self.lev_thr_slider.setPageStep(5)
+        self.lev_thr_label = QLabel(
+            f"{radio.leveler_threshold_db:.0f}  dBFS")
+        self.lev_thr_label.setMinimumWidth(110)
+        self.lev_thr_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700;")
+        self.lev_thr_slider.valueChanged.connect(
+            self._on_lev_thr_slider)
+        thr_row.addWidget(self.lev_thr_slider, 1)
+        thr_row.addWidget(self.lev_thr_label)
+        lvv.addLayout(thr_row)
+
+        # Ratio slider — 1..20, x10 internal scaling for 0.1 step.
+        ratio_row = QHBoxLayout()
+        ratio_row.addWidget(QLabel("Ratio:"))
+        self.lev_ratio_slider = QSlider(Qt.Horizontal)
+        self.lev_ratio_slider.setRange(
+            int(_Lev.RATIO_MIN * 10), int(_Lev.RATIO_MAX * 10))
+        self.lev_ratio_slider.setValue(
+            int(round(radio.leveler_ratio * 10)))
+        self.lev_ratio_slider.setSingleStep(1)
+        self.lev_ratio_slider.setPageStep(10)
+        self.lev_ratio_label = QLabel(
+            f"{radio.leveler_ratio:.1f}:1")
+        self.lev_ratio_label.setMinimumWidth(110)
+        self.lev_ratio_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700;")
+        self.lev_ratio_slider.valueChanged.connect(
+            self._on_lev_ratio_slider)
+        ratio_row.addWidget(self.lev_ratio_slider, 1)
+        ratio_row.addWidget(self.lev_ratio_label)
+        lvv.addLayout(ratio_row)
+
+        # Makeup-gain slider — 0..24 dB.
+        makeup_row = QHBoxLayout()
+        makeup_row.addWidget(QLabel("Makeup gain:"))
+        self.lev_makeup_slider = QSlider(Qt.Horizontal)
+        self.lev_makeup_slider.setRange(
+            int(_Lev.MAKEUP_MIN_DB), int(_Lev.MAKEUP_MAX_DB))
+        self.lev_makeup_slider.setValue(
+            int(round(radio.leveler_makeup_db)))
+        self.lev_makeup_slider.setSingleStep(1)
+        self.lev_makeup_slider.setPageStep(3)
+        self.lev_makeup_label = QLabel(
+            f"+{radio.leveler_makeup_db:.0f}  dB")
+        self.lev_makeup_label.setMinimumWidth(110)
+        self.lev_makeup_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700;")
+        self.lev_makeup_slider.valueChanged.connect(
+            self._on_lev_makeup_slider)
+        makeup_row.addWidget(self.lev_makeup_slider, 1)
+        makeup_row.addWidget(self.lev_makeup_label)
+        lvv.addLayout(makeup_row)
+
+        lev_hint = QLabel(
+            "Sliders are active only on Custom; presets show their "
+            "values but greyed.  Late Night uses heavy compression + "
+            "+10 dB makeup so quiet content rises above ambient room "
+            "noise without strong peaks blasting.")
+        lev_hint.setWordWrap(True)
+        lev_hint.setStyleSheet("color: #7a8a9c;")
+        lvv.addWidget(lev_hint)
+
+        # Two-way sync.
+        radio.leveler_profile_changed.connect(
+            self._on_lev_profile_signal)
+        radio.leveler_threshold_changed.connect(
+            self._on_lev_thr_signal)
+        radio.leveler_ratio_changed.connect(
+            self._on_lev_ratio_signal)
+        radio.leveler_makeup_changed.connect(
+            self._on_lev_makeup_signal)
+        self._update_lev_sliders_enabled(radio.leveler_profile)
+
+        v.addWidget(grp_lev)
         v.addStretch(1)
 
         # Initial population. Done after layout so the combo is sized
@@ -1324,6 +1468,65 @@ class AudioSettingsTab(QWidget):
         device = self._dev_combo.itemData(combo_idx)
         # device is None for "Auto", or an int for a specific index.
         self.radio.set_pc_audio_device_index(device)
+
+    # ── Audio Leveler section slot implementations ──────────────────
+
+    def _on_lev_radio_toggled(self, checked: bool, key: str) -> None:
+        if not checked:
+            return
+        self.radio.set_leveler_profile(key)
+        self._update_lev_sliders_enabled(key)
+
+    def _on_lev_thr_slider(self, val: int) -> None:
+        self.lev_thr_label.setText(f"{val}  dBFS")
+        self.radio.set_leveler_threshold_db(float(val))
+
+    def _on_lev_ratio_slider(self, val_x10: int) -> None:
+        ratio = val_x10 / 10.0
+        self.lev_ratio_label.setText(f"{ratio:.1f}:1")
+        self.radio.set_leveler_ratio(ratio)
+
+    def _on_lev_makeup_slider(self, val: int) -> None:
+        self.lev_makeup_label.setText(f"+{val}  dB")
+        self.radio.set_leveler_makeup_db(float(val))
+
+    def _on_lev_profile_signal(self, name: str) -> None:
+        rb = self._lev_radios.get(name)
+        if rb and not rb.isChecked():
+            rb.blockSignals(True)
+            rb.setChecked(True)
+            rb.blockSignals(False)
+        self._update_lev_sliders_enabled(name)
+
+    def _on_lev_thr_signal(self, db: float) -> None:
+        target = int(round(db))
+        if self.lev_thr_slider.value() != target:
+            self.lev_thr_slider.blockSignals(True)
+            self.lev_thr_slider.setValue(target)
+            self.lev_thr_slider.blockSignals(False)
+        self.lev_thr_label.setText(f"{target}  dBFS")
+
+    def _on_lev_ratio_signal(self, ratio: float) -> None:
+        target = int(round(ratio * 10))
+        if self.lev_ratio_slider.value() != target:
+            self.lev_ratio_slider.blockSignals(True)
+            self.lev_ratio_slider.setValue(target)
+            self.lev_ratio_slider.blockSignals(False)
+        self.lev_ratio_label.setText(f"{ratio:.1f}:1")
+
+    def _on_lev_makeup_signal(self, db: float) -> None:
+        target = int(round(db))
+        if self.lev_makeup_slider.value() != target:
+            self.lev_makeup_slider.blockSignals(True)
+            self.lev_makeup_slider.setValue(target)
+            self.lev_makeup_slider.blockSignals(False)
+        self.lev_makeup_label.setText(f"+{target}  dB")
+
+    def _update_lev_sliders_enabled(self, profile: str) -> None:
+        custom = (profile == "custom")
+        self.lev_thr_slider.setEnabled(custom)
+        self.lev_ratio_slider.setEnabled(custom)
+        self.lev_makeup_slider.setEnabled(custom)
 
 
 class VisualsSettingsTab(QWidget):

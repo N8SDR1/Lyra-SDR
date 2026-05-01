@@ -106,6 +106,11 @@ class MainWindow(QMainWindow):
             self.radio.autoload_anf_settings()
         except Exception as exc:
             print(f"[app] ANF autoload error: {exc}")
+        # Audio leveler — same belt-and-suspenders pattern.
+        try:
+            self.radio.autoload_leveler_settings()
+        except Exception as exc:
+            print(f"[app] leveler autoload error: {exc}")
 
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.
