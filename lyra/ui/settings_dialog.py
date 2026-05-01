@@ -414,6 +414,84 @@ class RadioSettingsTab(QWidget):
         g2.addWidget(self.autostart_chk, 0, 0)
         v.addWidget(grp2)
 
+        # ── Operator / Station ─────────────────────────────────────
+        # Global station identification — callsign + grid square +
+        # manual lat/lon backup.  Consumed by TCI spots, WX-Alerts,
+        # and any future logging features.  Grid takes precedence
+        # over manual lat/lon when valid.
+        grp_op = QGroupBox("Operator / Station")
+        gop = QGridLayout(grp_op)
+        gop.setColumnStretch(1, 1)
+
+        gop.addWidget(QLabel("Callsign"), 0, 0)
+        self.callsign_edit = QLineEdit(radio.callsign)
+        self.callsign_edit.setFixedWidth(140)
+        self.callsign_edit.setPlaceholderText("e.g. N8SDR")
+        self.callsign_edit.setToolTip(
+            "Your amateur radio callsign.  Auto-uppercases.\n"
+            "Used by TCI spots, WX-Alerts, and any feature that\n"
+            "needs to identify your station.")
+        self.callsign_edit.editingFinished.connect(
+            lambda: self.radio.set_callsign(self.callsign_edit.text()))
+        gop.addWidget(self.callsign_edit, 0, 1)
+
+        gop.addWidget(QLabel("Grid Square"), 1, 0)
+        self.grid_edit = QLineEdit(radio.grid_square)
+        self.grid_edit.setFixedWidth(140)
+        self.grid_edit.setPlaceholderText("e.g. EM89 or EM89ux")
+        self.grid_edit.setToolTip(
+            "Maidenhead Grid Locator (4, 6, or 8 chars).\n"
+            "Auto-uppercases.  When valid, the lat/lon below are\n"
+            "computed from the grid and the manual fields are\n"
+            "ignored.  Leave blank to use the manual lat/lon\n"
+            "override instead.")
+        self.grid_edit.editingFinished.connect(
+            self._on_grid_changed)
+        gop.addWidget(self.grid_edit, 1, 1)
+
+        # Live readout of computed lat/lon (read-only) —
+        # immediately reflects whatever's effective right now.
+        self.computed_loc_label = QLabel("")
+        self.computed_loc_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-size: 11px;")
+        gop.addWidget(QLabel("Computed Lat/Lon"), 2, 0)
+        gop.addWidget(self.computed_loc_label, 2, 1)
+
+        # Manual lat/lon backup — used when grid is blank/invalid.
+        gop.addWidget(QLabel("Manual Lat (°)"), 3, 0)
+        self.lat_edit = QLineEdit("")
+        self.lat_edit.setFixedWidth(140)
+        self.lat_edit.setPlaceholderText("e.g. 40.7128 (NYC)")
+        self.lat_edit.setToolTip(
+            "Backup latitude in decimal degrees, -90..+90.\n"
+            "Used only when no valid grid square is set.")
+        self.lat_edit.editingFinished.connect(self._on_manual_loc_changed)
+        if radio.operator_lat_manual is not None:
+            self.lat_edit.setText(f"{radio.operator_lat_manual:.4f}")
+        gop.addWidget(self.lat_edit, 3, 1)
+
+        gop.addWidget(QLabel("Manual Lon (°)"), 4, 0)
+        self.lon_edit = QLineEdit("")
+        self.lon_edit.setFixedWidth(140)
+        self.lon_edit.setPlaceholderText("e.g. -74.0060 (NYC)")
+        self.lon_edit.setToolTip(
+            "Backup longitude in decimal degrees, -180..+180.\n"
+            "Used only when no valid grid square is set.")
+        self.lon_edit.editingFinished.connect(self._on_manual_loc_changed)
+        if radio.operator_lon_manual is not None:
+            self.lon_edit.setText(f"{radio.operator_lon_manual:.4f}")
+        gop.addWidget(self.lon_edit, 4, 1)
+
+        v.addWidget(grp_op)
+        # Initial computed-readout refresh.
+        self._refresh_computed_loc()
+        # React to external changes (e.g., another tab edits these).
+        radio.callsign_changed.connect(self._on_callsign_signal)
+        radio.grid_square_changed.connect(self._on_grid_signal)
+        radio.operator_location_changed.connect(
+            lambda _lat, _lon: self._refresh_computed_loc())
+
         # ── Band plan / Region ──────────────────────────────────
         # Drives the colored sub-band strip + landmark triangles at
         # the top of the panadapter, plus an advisory out-of-band
@@ -513,6 +591,81 @@ class RadioSettingsTab(QWidget):
     def _on_ip_changed(self, ip: str):
         if self.ip_edit.text() != ip:
             self.ip_edit.setText(ip)
+
+    # ── Operator / Station handlers ──────────────────────────────────
+
+    def _on_grid_changed(self) -> None:
+        """Operator typed a new grid square.  Push to Radio (which
+        validates, normalizes, and emits change signals); the
+        readout below will refresh via the signal."""
+        self.radio.set_grid_square(self.grid_edit.text())
+        # If radio rejected the input, reflect the cleared state.
+        if self.grid_edit.text().strip().upper() != self.radio.grid_square:
+            self.grid_edit.setText(self.radio.grid_square)
+
+    def _on_manual_loc_changed(self) -> None:
+        """Operator edited the manual lat/lon override.  Push to
+        Radio.  Empty fields clear the override."""
+        lat_text = self.lat_edit.text().strip()
+        lon_text = self.lon_edit.text().strip()
+        try:
+            lat = float(lat_text) if lat_text else None
+        except ValueError:
+            lat = None
+            self.lat_edit.setText("")
+        try:
+            lon = float(lon_text) if lon_text else None
+        except ValueError:
+            lon = None
+            self.lon_edit.setText("")
+        # Clamp to valid Earth ranges.
+        if lat is not None:
+            lat = max(-90.0, min(90.0, lat))
+        if lon is not None:
+            lon = max(-180.0, min(180.0, lon))
+        self.radio.set_operator_lat_lon(lat, lon)
+        self._refresh_computed_loc()
+
+    def _on_callsign_signal(self, cs: str) -> None:
+        """External callsign change (e.g. from REPL or another tab)
+        — mirror into the line edit without re-firing."""
+        if self.callsign_edit.text() != cs:
+            self.callsign_edit.blockSignals(True)
+            self.callsign_edit.setText(cs)
+            self.callsign_edit.blockSignals(False)
+
+    def _on_grid_signal(self, grid: str) -> None:
+        """External grid change — mirror into the edit + refresh
+        the computed-lat/lon readout."""
+        if self.grid_edit.text() != grid:
+            self.grid_edit.blockSignals(True)
+            self.grid_edit.setText(grid)
+            self.grid_edit.blockSignals(False)
+        self._refresh_computed_loc()
+
+    def _refresh_computed_loc(self) -> None:
+        """Update the read-only computed-lat/lon readout to reflect
+        whatever's effective right now (grid-derived or manual
+        override).  Also signals the operator visually whether
+        their grid is being used vs the manual fallback."""
+        lat = self.radio.operator_lat
+        lon = self.radio.operator_lon
+        if lat is None or lon is None:
+            self.computed_loc_label.setText("(not set)")
+            self.computed_loc_label.setStyleSheet(
+                "color: #8a9aac; font-family: Consolas, monospace; "
+                "font-size: 11px; font-style: italic;")
+            return
+        # Indicate whether the grid is the source.
+        if self.radio.grid_square:
+            src = f"from grid {self.radio.grid_square}"
+        else:
+            src = "manual override"
+        self.computed_loc_label.setText(
+            f"{lat:+.4f}°, {lon:+.4f}°   ({src})")
+        self.computed_loc_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-size: 11px;")
 
     def _on_discover(self):
         self.discover_btn.setEnabled(False)
@@ -2762,9 +2915,28 @@ class NoiseSettingsTab(QWidget):
             QSpinBox, QLineEdit, QGroupBox)
         self._QSettings = QSettings   # used by setter helpers below
 
-        v = QVBoxLayout(self)
-        v.setContentsMargins(16, 16, 16, 16)
-        v.setSpacing(14)
+        # Two-column layout — same pattern as VisualsSettingsTab.
+        # The Noise tab has four large grouped sections (Captured
+        # Profile, NB, ANF, NR2); stacking them in a single column
+        # makes the dialog scroll endlessly even on a tall monitor.
+        # Left column gets the Captured Noise Profile (largest /
+        # most complex section), right column gets NB + ANF + NR2.
+        # Right-column reassignments happen at the end of this
+        # method.
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setSpacing(12)
+        col_left = QVBoxLayout()
+        col_right = QVBoxLayout()
+        col_left.setSpacing(14)
+        col_right.setSpacing(14)
+        outer.addLayout(col_left, 1)
+        outer.addLayout(col_right, 1)
+        # Backwards-compat alias so existing `v.addWidget(grp_xxx)`
+        # calls below land in the LEFT column by default.  Sections
+        # that should go in the right column are reassigned at the
+        # bottom of this method.
+        v = col_left
 
         # ── Captured Noise Profile ──────────────────────────────
         grp_cap = QGroupBox("Captured Noise Profile")
@@ -3109,11 +3281,11 @@ class NoiseSettingsTab(QWidget):
         nr2v.addWidget(nr2_intro)
 
         # Aggression slider (mirror of the panel slider).  Same
-        # 0..150 → 0.0..1.5 mapping.
+        # 0..200 → 0.0..2.0 mapping.
         agg_row = QHBoxLayout()
         agg_row.addWidget(QLabel("Aggression:"))
         self.nr2_agg_slider_settings = QSlider(Qt.Horizontal)
-        self.nr2_agg_slider_settings.setRange(0, 150)
+        self.nr2_agg_slider_settings.setRange(0, 200)
         self.nr2_agg_slider_settings.setValue(
             int(round(radio.nr2_aggression * 100)))
         self.nr2_agg_slider_settings.setSingleStep(5)
@@ -3135,7 +3307,8 @@ class NoiseSettingsTab(QWidget):
 
         agg_hint = QLabel(
             "0 = unity gain (effectively NR off);  100 = full "
-            "MMSE-LSA;  150 = harder cleanup with mild thinning.")
+            "MMSE-LSA;  200 = ceiling — extreme noise / stacking "
+            "with LMS line enhancer.")
         agg_hint.setWordWrap(True)
         agg_hint.setStyleSheet("color: #7a8a9c;")
         nr2v.addWidget(agg_hint)
@@ -3186,7 +3359,25 @@ class NoiseSettingsTab(QWidget):
             self._on_nr2_speech_aware_signal)
 
         v.addWidget(grp_nr2)
-        v.addStretch(1)
+
+        # ── Right-column reassignments ───────────────────────────
+        # The above v.addWidget(grp_xxx) calls landed grp_nb,
+        # grp_anf, and grp_nr2 in the LEFT column via the alias.
+        # Reparent them into the right column to balance the
+        # layout.  Captured Noise Profile (the largest section)
+        # stays alone in the left column.
+        col_left.removeWidget(grp_nb)
+        col_left.removeWidget(grp_anf)
+        col_left.removeWidget(grp_nr2)
+        col_right.addWidget(grp_nb)
+        col_right.addWidget(grp_anf)
+        col_right.addWidget(grp_nr2)
+        # Stretch on both columns so the groups stack from the top
+        # rather than spreading to fill.  Without this, the layout
+        # tries to vertically distribute the groups across the
+        # whole tab height which looks weird.
+        col_left.addStretch(1)
+        col_right.addStretch(1)
 
     # ── Slot implementations ─────────────────────────────────────
 
@@ -3406,6 +3597,484 @@ class NoiseSettingsTab(QWidget):
         return 10.0 ** (log_min + frac * (log_max - log_min))
 
 
+class WxAlertsSettingsTab(QWidget):
+    """Phase 4 — Weather Alerts settings.
+
+    Disclaimer-gated configuration for Lyra's all-source weather
+    monitor (lightning detection + high-wind alerts + NWS severe
+    storm warnings).  Reads operator location from the global
+    Radio settings (callsign + grid square + manual lat/lon) so
+    those fields aren't duplicated here.
+    """
+
+    DISCLAIMER_TEXT = (
+        "Weather alerts (lightning and high wind) are provided as "
+        "<b>informational awareness only</b>. They are approximations "
+        "based on public data sources (NWS/NOAA, Blitzortung, "
+        "Ambient Weather, Ecowitt) and may be delayed, incomplete, or "
+        "inaccurate. Do <b>NOT</b> rely on Lyra-SDR as your primary "
+        "safety system. Always use official weather services and your "
+        "own judgment. By enabling weather alerts you acknowledge "
+        "this limitation and accept responsibility for your own "
+        "station and antenna safety."
+    )
+
+    def __init__(self, radio):
+        super().__init__()
+        self.radio = radio
+
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import (
+            QPushButton, QGroupBox, QLineEdit, QSpinBox, QDoubleSpinBox,
+            QComboBox, QFrame)
+
+        # Two-column layout below the top header (disclaimer + master
+        # enable).  Same pattern as VisualsSettingsTab and the Noise
+        # tab — disclaimer at top spans the full width because it's a
+        # safety-critical acknowledgment, then the per-feature
+        # configuration splits across columns:
+        #   left  = alert-CONFIG (Lightning + Wind)
+        #   right = ops + creds  (Notifications + API Credentials)
+        # Operators rarely need to switch between left and right
+        # mid-task so they stay visually separated; the layout
+        # cuts vertical scrolling roughly in half.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setSpacing(10)
+
+        # Top header — disclaimer + master enable, full-width.
+        v = outer    # full-width section so the existing addWidget
+                     # calls below land here for the disclaimer +
+                     # master-enable groups.
+
+        # ── Disclaimer panel ────────────────────────────────────────
+        disc_box = QGroupBox("⚠  Disclaimer — read before enabling")
+        disc_box.setStyleSheet(
+            "QGroupBox { border: 1px solid #ff8c00; "
+            "background-color: rgba(255,140,0,0.06); "
+            "border-radius: 6px; padding: 8px; margin-top: 6px; } "
+            "QGroupBox::title { color: #ff8c00; font-weight: 700; "
+            "padding: 0 6px; }")
+        dv = QVBoxLayout(disc_box)
+        disc_text = QLabel(self.DISCLAIMER_TEXT)
+        disc_text.setWordWrap(True)
+        disc_text.setStyleSheet("color: #eaf4ff; line-height: 1.6;")
+        disc_text.setTextFormat(Qt.RichText)
+        dv.addWidget(disc_text)
+
+        self.disc_chk = QCheckBox(
+            "I understand — this is a convenience feature, not a "
+            "safety system")
+        self.disc_chk.setChecked(self.radio.wx_disclaimer_accepted)
+        self.disc_chk.setStyleSheet(
+            "color: #eaf4ff; font-weight: 600;")
+        self.disc_chk.toggled.connect(self._on_disclaimer_toggled)
+        dv.addWidget(self.disc_chk)
+        v.addWidget(disc_box)
+
+        # ── Master enable ──────────────────────────────────────────
+        ena_box = QGroupBox("Weather Alerts")
+        ev = QGridLayout(ena_box)
+        ev.setColumnStretch(1, 1)
+
+        self.master_chk = QCheckBox("Enable weather alerts")
+        self.master_chk.setEnabled(self.radio.wx_disclaimer_accepted)
+        self.master_chk.setChecked(self.radio.wx_enabled)
+        self.master_chk.toggled.connect(self.radio.set_wx_enabled)
+        self.radio.wx_enabled_changed.connect(self.master_chk.setChecked)
+        ev.addWidget(self.master_chk, 0, 0, 1, 2)
+
+        # Operator-location summary — points to Radio settings tab.
+        loc_label = QLabel("")
+        loc_label.setWordWrap(True)
+        loc_label.setStyleSheet(
+            "color: #8fafc0; font-size: 11px; font-style: italic;")
+        self._loc_summary = loc_label
+        ev.addWidget(QLabel("Operator location:"), 1, 0)
+        ev.addWidget(loc_label, 1, 1)
+        self._refresh_location_summary()
+        self.radio.callsign_changed.connect(
+            lambda _: self._refresh_location_summary())
+        self.radio.grid_square_changed.connect(
+            lambda _: self._refresh_location_summary())
+        self.radio.operator_location_changed.connect(
+            lambda _lat, _lon: self._refresh_location_summary())
+        v.addWidget(ena_box)
+
+        # ── Switch to two-column layout for the per-feature sections.
+        # Disclaimer + master enable above stay full-width; everything
+        # below gets split into Lightning/Wind on the left and
+        # Notifications/Credentials on the right.
+        col_row = QHBoxLayout()
+        col_row.setSpacing(12)
+        col_left = QVBoxLayout()
+        col_right = QVBoxLayout()
+        col_left.setSpacing(10)
+        col_right.setSpacing(10)
+        col_row.addLayout(col_left, 1)
+        col_row.addLayout(col_right, 1)
+        outer.addLayout(col_row)
+        # Backwards-compat alias so the existing v.addWidget(...)
+        # calls below for grp_lt + grp_wd land in the LEFT column.
+        # Notification / credential groups are explicitly added to
+        # col_right at their own block.
+        v = col_left
+
+        # ── Lightning section ──────────────────────────────────────
+        s = QSettings("N8SDR", "Lyra")
+        lt_box = QGroupBox("Lightning Detection")
+        ltv = QVBoxLayout(lt_box)
+        ltv.setSpacing(8)
+        lt_intro = QLabel(
+            "Toolbar shows closest detected strike with proximity "
+            "color (yellow > 25 mi, orange < 25 mi, red < 10 mi). "
+            "Hidden when no strikes detected within range.")
+        lt_intro.setWordWrap(True)
+        lt_intro.setStyleSheet("color: #8fafc0; font-size: 12px;")
+        ltv.addWidget(lt_intro)
+
+        # Range + units
+        rng_row = QHBoxLayout()
+        rng_row.addWidget(QLabel("Alert range:"))
+        self.range_spin = QSpinBox()
+        self.range_spin.setRange(5, 500)
+        self.range_spin.setSuffix("")
+        self.range_spin.setFixedWidth(80)
+        cur_range_km = float(s.value(
+            "wx/lightning_range_km", 80.0, type=float))
+        self._dist_unit = str(s.value("wx/distance_unit", "mi", type=str))
+        # Display in operator's preferred units.
+        if self._dist_unit == "km":
+            self.range_spin.setValue(int(round(cur_range_km)))
+        else:
+            self.range_spin.setValue(int(round(cur_range_km / 1.60934)))
+        self.range_spin.valueChanged.connect(self._on_range_changed)
+        rng_row.addWidget(self.range_spin)
+        self.unit_combo = QComboBox()
+        self.unit_combo.addItem("Miles", "mi")
+        self.unit_combo.addItem("Kilometres", "km")
+        self.unit_combo.setCurrentIndex(0 if self._dist_unit == "mi" else 1)
+        self.unit_combo.currentIndexChanged.connect(
+            self._on_dist_unit_changed)
+        rng_row.addWidget(self.unit_combo)
+        rng_row.addStretch(1)
+        ltv.addLayout(rng_row)
+
+        # Source checkboxes
+        src_label = QLabel("DATA SOURCES")
+        src_label.setStyleSheet(
+            "color: #50d0ff; font-size: 11px; font-weight: 700; "
+            "letter-spacing: 1px; padding-top: 4px;")
+        ltv.addWidget(src_label)
+        self.src_blitz_chk = QCheckBox(
+            "Blitzortung.org  — global lightning network (free)")
+        self.src_blitz_chk.setChecked(bool(
+            s.value("wx/src_blitzortung", False, type=bool)))
+        self.src_blitz_chk.toggled.connect(
+            lambda on: self.radio.set_wx_config(src_blitzortung=on))
+        ltv.addWidget(self.src_blitz_chk)
+
+        self.src_nws_chk = QCheckBox(
+            "NOAA / NWS  — severe thunderstorm warnings (US, free)")
+        self.src_nws_chk.setChecked(bool(
+            s.value("wx/src_nws", False, type=bool)))
+        self.src_nws_chk.toggled.connect(
+            lambda on: self.radio.set_wx_config(src_nws=on))
+        ltv.addWidget(self.src_nws_chk)
+
+        self.src_amb_chk = QCheckBox(
+            "Ambient Weather  — PWS with WH31L lightning add-on "
+            "(requires API keys below)")
+        self.src_amb_chk.setChecked(bool(
+            s.value("wx/src_ambient", False, type=bool)))
+        self.src_amb_chk.toggled.connect(
+            lambda on: self.radio.set_wx_config(src_ambient=on))
+        ltv.addWidget(self.src_amb_chk)
+
+        self.src_eco_chk = QCheckBox(
+            "Ecowitt  — PWS with WH57 lightning sensor "
+            "(requires app+api+MAC below)")
+        self.src_eco_chk.setChecked(bool(
+            s.value("wx/src_ecowitt", False, type=bool)))
+        self.src_eco_chk.toggled.connect(
+            lambda on: self.radio.set_wx_config(src_ecowitt=on))
+        ltv.addWidget(self.src_eco_chk)
+        v.addWidget(lt_box)
+
+        # ── Wind section ───────────────────────────────────────────
+        wd_box = QGroupBox("High Wind Alerts")
+        wdv = QVBoxLayout(wd_box)
+        wdv.setSpacing(8)
+        wd_intro = QLabel(
+            "Three tiers: yellow at 10 mph below threshold, orange "
+            "at threshold, red on NWS High / Extreme Wind Warning or "
+            "15 mph above threshold.")
+        wd_intro.setWordWrap(True)
+        wd_intro.setStyleSheet("color: #8fafc0; font-size: 12px;")
+        wdv.addWidget(wd_intro)
+
+        # Thresholds
+        thr_grid = QGridLayout()
+        thr_grid.addWidget(QLabel("Sustained threshold (mph):"), 0, 0)
+        self.wind_sust_spin = QSpinBox()
+        self.wind_sust_spin.setRange(5, 100)
+        self.wind_sust_spin.setValue(int(round(float(
+            s.value("wx/wind_sustained_mph", 30.0, type=float)))))
+        self.wind_sust_spin.setFixedWidth(80)
+        self.wind_sust_spin.valueChanged.connect(
+            lambda v: self.radio.set_wx_config(
+                wind_sustained_mph=float(v)))
+        thr_grid.addWidget(self.wind_sust_spin, 0, 1)
+        thr_grid.setColumnStretch(2, 1)
+
+        thr_grid.addWidget(QLabel("Gust threshold (mph):"), 1, 0)
+        self.wind_gust_spin = QSpinBox()
+        self.wind_gust_spin.setRange(10, 150)
+        self.wind_gust_spin.setValue(int(round(float(
+            s.value("wx/wind_gust_mph", 40.0, type=float)))))
+        self.wind_gust_spin.setFixedWidth(80)
+        self.wind_gust_spin.valueChanged.connect(
+            lambda v: self.radio.set_wx_config(wind_gust_mph=float(v)))
+        thr_grid.addWidget(self.wind_gust_spin, 1, 1)
+        wdv.addLayout(thr_grid)
+
+        wd_src_label = QLabel("DATA SOURCES")
+        wd_src_label.setStyleSheet(
+            "color: #50d0ff; font-size: 11px; font-weight: 700; "
+            "letter-spacing: 1px; padding-top: 4px;")
+        wdv.addWidget(wd_src_label)
+        self.wind_nws_chk = QCheckBox(
+            "NWS Wind Alerts  — High Wind / Wind Advisory / Extreme "
+            "Wind (US, free)")
+        self.wind_nws_chk.setChecked(self.src_nws_chk.isChecked())
+        self.wind_nws_chk.setEnabled(False)
+        self.wind_nws_chk.setToolTip(
+            "Driven by the same NOAA/NWS toggle in the Lightning "
+            "section above.")
+        wdv.addWidget(self.wind_nws_chk)
+        # Keep the disabled checkbox in sync with the lightning NWS one.
+        self.src_nws_chk.toggled.connect(self.wind_nws_chk.setChecked)
+
+        self.wind_metar_chk = QCheckBox(
+            "NWS METAR  — live wind from your nearest ICAO station")
+        self.wind_metar_chk.setChecked(bool(
+            s.value("wx/src_nws_metar", False, type=bool)))
+        self.wind_metar_chk.toggled.connect(
+            lambda on: self.radio.set_wx_config(src_nws_metar=on))
+        wdv.addWidget(self.wind_metar_chk)
+
+        metar_row = QHBoxLayout()
+        metar_row.addWidget(QLabel("    METAR station (ICAO):"))
+        self.metar_edit = QLineEdit(str(
+            s.value("wx/nws_metar_station", "", type=str)))
+        self.metar_edit.setFixedWidth(80)
+        self.metar_edit.setPlaceholderText("e.g. KLUK")
+        self.metar_edit.editingFinished.connect(
+            lambda: self.radio.set_wx_config(
+                nws_metar_station=self.metar_edit.text().strip().upper()))
+        metar_row.addWidget(self.metar_edit)
+        metar_row.addStretch(1)
+        wdv.addLayout(metar_row)
+
+        # Ambient + Ecowitt are dual-purpose — the same PWS feed
+        # serves both lightning detection AND wind / gust data.
+        # Surface them in the Wind section as locked mirrors of the
+        # Lightning-section toggles so operators see the full picture
+        # of what's contributing to wind readings.
+        self.wind_amb_chk = QCheckBox(
+            "Ambient Weather  — sustained / gust from your PWS "
+            "anemometer")
+        self.wind_amb_chk.setChecked(self.src_amb_chk.isChecked())
+        self.wind_amb_chk.setEnabled(False)
+        self.wind_amb_chk.setToolTip(
+            "Driven by the Ambient Weather toggle in the Lightning "
+            "section above — same PWS feed serves both lightning and "
+            "wind readings.")
+        wdv.addWidget(self.wind_amb_chk)
+        self.src_amb_chk.toggled.connect(self.wind_amb_chk.setChecked)
+
+        self.wind_eco_chk = QCheckBox(
+            "Ecowitt  — sustained / gust from your PWS anemometer")
+        self.wind_eco_chk.setChecked(self.src_eco_chk.isChecked())
+        self.wind_eco_chk.setEnabled(False)
+        self.wind_eco_chk.setToolTip(
+            "Driven by the Ecowitt toggle in the Lightning section "
+            "above — same PWS feed serves both lightning and wind "
+            "readings.")
+        wdv.addWidget(self.wind_eco_chk)
+        self.src_eco_chk.toggled.connect(self.wind_eco_chk.setChecked)
+
+        v.addWidget(wd_box)
+        # Stretch at the bottom of the left column so groups stack
+        # from the top rather than spreading vertically.
+        v.addStretch(1)
+        # Switch to the right column for Notifications + Credentials.
+        v = col_right
+
+        # ── Notifications ──────────────────────────────────────────
+        nt_box = QGroupBox("Notifications")
+        ntv = QVBoxLayout(nt_box)
+        ntv.setSpacing(6)
+        self.toast_chk = QCheckBox("Show desktop toast notifications")
+        self.toast_chk.setChecked(bool(
+            s.value("wx/desktop_enabled", True, type=bool)))
+        self.toast_chk.toggled.connect(self._on_desktop_toggled)
+        ntv.addWidget(self.toast_chk)
+
+        self.audio_chk = QCheckBox("Play audio cue with toast")
+        self.audio_chk.setChecked(bool(
+            s.value("wx/audio_enabled", True, type=bool)))
+        self.audio_chk.toggled.connect(self._on_audio_toggled)
+        ntv.addWidget(self.audio_chk)
+
+        self.test_btn = QPushButton("Send test toast")
+        self.test_btn.setFixedWidth(140)
+        self.test_btn.clicked.connect(self.radio.fire_wx_test_toast)
+        ntv.addWidget(self.test_btn)
+        v.addWidget(nt_box)
+
+        # ── API credentials ────────────────────────────────────────
+        cred_box = QGroupBox("API Credentials")
+        cv = QGridLayout(cred_box)
+        cv.setColumnStretch(1, 1)
+
+        amb_label = QLabel(
+            "<b>Ambient Weather</b>  "
+            "<a href='https://ambientweather.net/account/keys'>"
+            "ambientweather.net/account/keys</a>")
+        amb_label.setOpenExternalLinks(True)
+        cv.addWidget(amb_label, 0, 0, 1, 2)
+
+        cv.addWidget(QLabel("API Key:"), 1, 0)
+        self.amb_api_edit = QLineEdit(str(
+            s.value("wx/ambient_api_key", "", type=str)))
+        self.amb_api_edit.setEchoMode(QLineEdit.Password)
+        self.amb_api_edit.editingFinished.connect(
+            lambda: self.radio.set_wx_config(
+                ambient_api_key=self.amb_api_edit.text().strip()))
+        cv.addWidget(self.amb_api_edit, 1, 1)
+
+        cv.addWidget(QLabel("Application Key:"), 2, 0)
+        self.amb_app_edit = QLineEdit(str(
+            s.value("wx/ambient_app_key", "", type=str)))
+        self.amb_app_edit.setEchoMode(QLineEdit.Password)
+        self.amb_app_edit.editingFinished.connect(
+            lambda: self.radio.set_wx_config(
+                ambient_app_key=self.amb_app_edit.text().strip()))
+        cv.addWidget(self.amb_app_edit, 2, 1)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: #2a3848;")
+        cv.addWidget(sep, 3, 0, 1, 2)
+
+        eco_label = QLabel(
+            "<b>Ecowitt</b>  "
+            "<a href='https://www.ecowitt.net/'>ecowitt.net</a> → "
+            "API Setting")
+        eco_label.setOpenExternalLinks(True)
+        cv.addWidget(eco_label, 4, 0, 1, 2)
+
+        cv.addWidget(QLabel("Application Key:"), 5, 0)
+        self.eco_app_edit = QLineEdit(str(
+            s.value("wx/ecowitt_app_key", "", type=str)))
+        self.eco_app_edit.setEchoMode(QLineEdit.Password)
+        self.eco_app_edit.editingFinished.connect(
+            lambda: self.radio.set_wx_config(
+                ecowitt_app_key=self.eco_app_edit.text().strip()))
+        cv.addWidget(self.eco_app_edit, 5, 1)
+
+        cv.addWidget(QLabel("API Key:"), 6, 0)
+        self.eco_api_edit = QLineEdit(str(
+            s.value("wx/ecowitt_api_key", "", type=str)))
+        self.eco_api_edit.setEchoMode(QLineEdit.Password)
+        self.eco_api_edit.editingFinished.connect(
+            lambda: self.radio.set_wx_config(
+                ecowitt_api_key=self.eco_api_edit.text().strip()))
+        cv.addWidget(self.eco_api_edit, 6, 1)
+
+        cv.addWidget(QLabel("Gateway MAC:"), 7, 0)
+        self.eco_mac_edit = QLineEdit(str(
+            s.value("wx/ecowitt_mac", "", type=str)))
+        self.eco_mac_edit.setPlaceholderText("e.g. 34:94:54:AB:CD:EF")
+        self.eco_mac_edit.editingFinished.connect(
+            lambda: self.radio.set_wx_config(
+                ecowitt_mac=self.eco_mac_edit.text().strip().upper()))
+        cv.addWidget(self.eco_mac_edit, 7, 1)
+        v.addWidget(cred_box)
+
+        v.addStretch(1)
+
+    # ── Slot implementations ─────────────────────────────────────────
+
+    def _on_disclaimer_toggled(self, on: bool) -> None:
+        self.radio.set_wx_disclaimer_accepted(on)
+        self.master_chk.setEnabled(on)
+        if not on:
+            self.master_chk.setChecked(False)
+
+    def _on_range_changed(self, value: int) -> None:
+        # Convert from operator's display unit to internal km.
+        if self._dist_unit == "km":
+            km = float(value)
+        else:
+            km = float(value) * 1.60934
+        self.radio.set_wx_config(lightning_range_km=km)
+
+    def _on_dist_unit_changed(self, idx: int) -> None:
+        unit = self.unit_combo.itemData(idx) or "mi"
+        self._dist_unit = unit
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue("wx/distance_unit", unit)
+        except Exception:
+            pass
+        # Refresh the indicator's display unit too.
+        try:
+            from PySide6.QtWidgets import QApplication
+            for w in QApplication.instance().topLevelWidgets():
+                wxi = w.findChild(type(w))  # noqa — placeholder
+        except Exception:
+            pass
+
+    def _on_audio_toggled(self, on: bool) -> None:
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue("wx/audio_enabled", on)
+        except Exception:
+            pass
+        if self.radio._wx_worker is not None:
+            self.radio._wx_worker.set_audio_enabled(on)
+
+    def _on_desktop_toggled(self, on: bool) -> None:
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue("wx/desktop_enabled", on)
+        except Exception:
+            pass
+        if self.radio._wx_worker is not None:
+            self.radio._wx_worker.set_desktop_enabled(on)
+
+    def _refresh_location_summary(self) -> None:
+        cs = self.radio.callsign or "(no callsign)"
+        gs = self.radio.grid_square or "(no grid)"
+        lat = self.radio.operator_lat
+        lon = self.radio.operator_lon
+        if lat is None or lon is None:
+            self._loc_summary.setText(
+                f"{cs}  ·  {gs}  ·  <b>location not set</b> — set in "
+                "Radio settings tab")
+            self._loc_summary.setStyleSheet(
+                "color: #ff8c00; font-size: 11px; font-weight: 600;")
+        else:
+            self._loc_summary.setText(
+                f"{cs}  ·  {gs}  ·  {lat:+.3f}°, {lon:+.3f}°  "
+                "(set in Radio settings tab)")
+            self._loc_summary.setStyleSheet(
+                "color: #8fafc0; font-size: 11px; font-style: italic;")
+        self._loc_summary.setTextFormat(Qt.RichText)
+
+
 class SettingsDialog(QDialog):
     """App-wide tabbed settings — accessed from the main toolbar (⚙).
 
@@ -3457,6 +4126,13 @@ class SettingsDialog(QDialog):
             placeholder.setAlignment(Qt.AlignCenter)
             placeholder.setStyleSheet("color: #5a7080; padding: 40px;")
             self.tabs.addTab(placeholder, name)
+
+        # Phase 4 — Weather Alerts.  Lives last in the tab order
+        # because it's an opt-in convenience feature (gated by an
+        # explicit safety disclaimer) rather than a core radio
+        # function.
+        self.tab_wx = WxAlertsSettingsTab(radio)
+        self.tabs.addTab(self.tab_wx, "Weather")
 
         v.addWidget(self.tabs)
 

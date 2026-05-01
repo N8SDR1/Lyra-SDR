@@ -219,11 +219,26 @@ class Radio(QObject):
     nr2_aggression_changed = Signal(float)
     nr2_musical_noise_smoothing_changed = Signal(bool)
     nr2_speech_aware_changed = Signal(bool)
+    # Gain-method selector (MMSE-LSA vs Wiener) — added with the
+    # WDSP-port stack.  Persists to QSettings under noise/nr2_gain_method.
+    nr2_gain_method_changed = Signal(str)
 
     # NR1 — continuous strength slider (0.0..1.0).  Replaces the
     # discrete light/medium/heavy profile picker as of 2026-05-01;
     # parallel UX to NR2's aggression slider.
     nr1_strength_changed = Signal(float)
+
+    # LMS (NR3-style line enhancer) — independent stage in the
+    # audio chain (slots between ANF and NR).  Has its own enable
+    # toggle and strength slider, both with dedicated change signals
+    # so the DSP panel button + Settings tab can bind cleanly.
+    lms_enabled_changed = Signal(bool)
+    lms_strength_changed = Signal(float)
+
+    # All-mode voice-presence squelch (SSQL — direct port from WDSP).
+    # Final stage in the audio chain; works on every modulation type.
+    squelch_enabled_changed = Signal(bool)
+    squelch_threshold_changed = Signal(float)
 
     # Phase 3.D #1 — Captured-noise-profile signals.
     # noise_capture_done fires when a capture finalizes inside the
@@ -274,6 +289,23 @@ class Radio(QObject):
     # spectrum, rolling-averaged. Emitted at ~6 Hz (not every FFT tick)
     # so the widget's horizontal reference line doesn't twitch.
     noise_floor_changed = Signal(float)   # dBFS
+
+    # Operator / Station identification — global settings consumed
+    # by multiple features (TCI spots, WX-Alerts, future logging
+    # integration).  Persisted under operator/* in QSettings.
+    callsign_changed = Signal(str)
+    grid_square_changed = Signal(str)
+    # Emitted when the effective operator location changes — either
+    # from a new grid square or from manual lat/lon override.  Args:
+    # (lat, lon).  WX-Alerts subscribes to this to re-query sources
+    # when the operator moves their station.
+    operator_location_changed = Signal(float, float)
+
+    # Weather Alerts — emitted by the WxWorker after each poll cycle.
+    # The header indicator + any future map view subscribe.
+    wx_snapshot_changed = Signal(object)        # WxSnapshot
+    wx_enabled_changed = Signal(bool)
+    wx_error = Signal(str)                       # non-fatal source errors
 
     # Band plan / region — drives the panadapter sub-band strip +
     # landmark markers + out-of-band warnings. "NONE" disables the
@@ -796,6 +828,27 @@ class Radio(QObject):
         self._band_plan_show_segments = True
         self._band_plan_show_landmarks = True
         self._band_plan_edge_warn = True
+
+        # Operator / Station identification.  Global settings used
+        # by multiple features (TCI spots, WX-Alerts, future
+        # logging integration).  Loaded from QSettings on first
+        # access of autoload_operator_settings(); empty until then.
+        # Lat/lon are computed from the grid square when valid; the
+        # manual-override fields are stored separately so they
+        # survive a grid edit.
+        self._callsign: str = ""
+        self._grid_square: str = ""
+        self._operator_lat_manual: Optional[float] = None
+        self._operator_lon_manual: Optional[float] = None
+
+        # Weather Alerts — disabled by default, behind the operator's
+        # disclaimer acceptance.  WxWorker is constructed lazily on
+        # first call to set_wx_enabled(True) so we don't import any
+        # network code unless the operator actually opted in.
+        self._wx_worker = None
+        self._wx_enabled: bool = False
+        self._wx_disclaimer_accepted: bool = False
+        self._wx_last_snapshot = None
         # Remember the last in-band state so we only toast on edge
         # transitions, not every frequency-change tick.
         self._last_in_band: bool = True
@@ -1487,6 +1540,411 @@ class Radio(QObject):
         # negative magic value the widget treats as "off".
         payload = self._noise_floor_db if on else -999.0
         self.noise_floor_changed.emit(float(payload) if payload is not None else -999.0)
+
+    # ── Operator / Station API ───────────────────────────────────────
+
+    @property
+    def callsign(self) -> str:
+        """Operator's callsign — uppercase, no whitespace.  Empty
+        string when not yet configured."""
+        return self._callsign
+
+    @property
+    def grid_square(self) -> str:
+        """Operator's Maidenhead grid square (4, 6, or 8 chars).
+        Empty string when not yet configured.  Always uppercase."""
+        return self._grid_square
+
+    @property
+    def operator_lat(self) -> Optional[float]:
+        """Effective operator latitude.  Returns the grid-derived
+        value if a valid grid is set, else the manual override, else
+        None.  Consumers should treat None as 'no location'."""
+        from lyra.ham.grid import grid_to_latlon
+        if self._grid_square:
+            ll = grid_to_latlon(self._grid_square)
+            if ll is not None:
+                return ll[0]
+        return self._operator_lat_manual
+
+    @property
+    def operator_lon(self) -> Optional[float]:
+        """Effective operator longitude — see operator_lat for the
+        grid-vs-override resolution."""
+        from lyra.ham.grid import grid_to_latlon
+        if self._grid_square:
+            ll = grid_to_latlon(self._grid_square)
+            if ll is not None:
+                return ll[1]
+        return self._operator_lon_manual
+
+    @property
+    def operator_lat_manual(self) -> Optional[float]:
+        """Raw manual-override latitude (None if unset).  Only used
+        when grid_square is blank or invalid.  UI exposes this as a
+        backup field."""
+        return self._operator_lat_manual
+
+    @property
+    def operator_lon_manual(self) -> Optional[float]:
+        """Raw manual-override longitude (None if unset)."""
+        return self._operator_lon_manual
+
+    def set_callsign(self, value: str) -> None:
+        """Update the operator callsign.  Auto-strips whitespace and
+        upper-cases.  Persists to QSettings and emits change signal.
+        """
+        cs = (value or "").strip().upper()
+        if cs == self._callsign:
+            return
+        self._callsign = cs
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("operator/callsign", cs)
+        except Exception as exc:
+            print(f"[Radio] could not persist callsign: {exc}")
+        self.callsign_changed.emit(cs)
+
+    def set_grid_square(self, value: str) -> None:
+        """Update the operator's Maidenhead grid.  Validates format;
+        empty string clears.  Emits change signal AND
+        operator_location_changed if the grid produces a valid
+        lat/lon."""
+        from lyra.ham.grid import is_valid_grid, normalize_grid
+        old_lat = self.operator_lat
+        old_lon = self.operator_lon
+        gs = normalize_grid(value or "")
+        if not gs and value and value.strip():
+            # Caller passed a non-empty string that isn't valid —
+            # clear the field so we don't store garbage.
+            gs = ""
+        if gs == self._grid_square:
+            return
+        self._grid_square = gs
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("operator/grid", gs)
+        except Exception as exc:
+            print(f"[Radio] could not persist grid_square: {exc}")
+        self.grid_square_changed.emit(gs)
+        # Re-emit location signal if the effective lat/lon changed.
+        new_lat = self.operator_lat
+        new_lon = self.operator_lon
+        if (new_lat != old_lat or new_lon != old_lon) and (
+                new_lat is not None and new_lon is not None):
+            self.operator_location_changed.emit(
+                float(new_lat), float(new_lon))
+
+    def set_operator_lat_lon(self, lat: Optional[float],
+                              lon: Optional[float]) -> None:
+        """Update the manual-override lat/lon (used as backup when
+        no valid grid is set).  Pass (None, None) to clear.
+        Persists and emits operator_location_changed when the
+        effective location changes."""
+        old_lat = self.operator_lat
+        old_lon = self.operator_lon
+        self._operator_lat_manual = (
+            float(lat) if lat is not None else None)
+        self._operator_lon_manual = (
+            float(lon) if lon is not None else None)
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            if self._operator_lat_manual is None:
+                s.remove("operator/lat_manual")
+            else:
+                s.setValue("operator/lat_manual",
+                           self._operator_lat_manual)
+            if self._operator_lon_manual is None:
+                s.remove("operator/lon_manual")
+            else:
+                s.setValue("operator/lon_manual",
+                           self._operator_lon_manual)
+        except Exception as exc:
+            print(f"[Radio] could not persist operator lat/lon: {exc}")
+        new_lat = self.operator_lat
+        new_lon = self.operator_lon
+        if (new_lat != old_lat or new_lon != old_lon) and (
+                new_lat is not None and new_lon is not None):
+            self.operator_location_changed.emit(
+                float(new_lat), float(new_lon))
+
+    # ── Weather Alerts API ───────────────────────────────────────
+
+    @property
+    def wx_enabled(self) -> bool:
+        return self._wx_enabled
+
+    @property
+    def wx_disclaimer_accepted(self) -> bool:
+        return self._wx_disclaimer_accepted
+
+    @property
+    def wx_last_snapshot(self):
+        """Most-recent WxSnapshot, or None if the worker hasn't
+        completed a poll cycle yet."""
+        return self._wx_last_snapshot
+
+    def set_wx_disclaimer_accepted(self, accepted: bool) -> None:
+        """Operator acknowledges the safety disclaimer.  Required
+        before set_wx_enabled(True) will succeed.  Persists.
+        """
+        self._wx_disclaimer_accepted = bool(accepted)
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("wx/disclaimer_accepted",
+                       self._wx_disclaimer_accepted)
+        except Exception as exc:
+            print(f"[Radio] could not persist wx_disclaimer: {exc}")
+        # If the operator just rejected the disclaimer while alerts
+        # were active, force-disable.
+        if not self._wx_disclaimer_accepted and self._wx_enabled:
+            self.set_wx_enabled(False)
+
+    def set_wx_enabled(self, on: bool) -> None:
+        """Master toggle for the weather-alerts feature.  Refuses
+        to enable when the disclaimer hasn't been accepted (silent
+        no-op so the UI can fail closed cleanly).  Spawns the
+        WxWorker thread on first enable."""
+        on = bool(on)
+        if on and not self._wx_disclaimer_accepted:
+            return
+        if on == self._wx_enabled:
+            return
+        if on and self._wx_worker is None:
+            from lyra.wx.worker import WxWorker
+            self._wx_worker = WxWorker(self)
+            self._wx_worker.snapshot_ready.connect(
+                self._on_wx_snapshot_ready)
+            self._wx_worker.error_occurred.connect(self.wx_error.emit)
+            # Apply current config before starting.
+            self._wx_worker.set_config(self._build_wx_config())
+            self._wx_worker.start()
+        self._wx_enabled = on
+        if self._wx_worker is not None:
+            self._wx_worker.set_enabled(on)
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("wx/enabled", on)
+        except Exception as exc:
+            print(f"[Radio] could not persist wx_enabled: {exc}")
+        self.wx_enabled_changed.emit(on)
+
+    def set_wx_config(self, **fields) -> None:
+        """Update one or more WxConfig fields and push to the worker.
+        Accepts any subset of WxConfig field names; unknown fields
+        are silently ignored.  Persists each field under wx/* in
+        QSettings.
+        """
+        from PySide6.QtCore import QSettings
+        from lyra.wx.aggregator import WxConfig
+        valid_fields = {f.name for f in WxConfig.__dataclass_fields__.values()}
+        s = QSettings("N8SDR", "Lyra")
+        for k, v in fields.items():
+            if k not in valid_fields:
+                continue
+            try:
+                s.setValue(f"wx/{k}", v)
+            except Exception as exc:
+                print(f"[Radio] could not persist wx/{k}: {exc}")
+        if self._wx_worker is not None:
+            self._wx_worker.set_config(self._build_wx_config())
+
+    def fire_wx_test_toast(self) -> None:
+        """Operator clicked 'Send test toast' — fires a toast that
+        bypasses hysteresis AND blinks all three header indicators
+        for ~6 seconds so the operator can preview both the audio /
+        desktop notification AND the visual cue.  After the preview
+        window expires, the previous snapshot is restored (or a
+        clean 'none' state if there was no prior snapshot).
+        """
+        # Need an active worker to fire; if one doesn't exist yet,
+        # construct it without enabling the poll loop.
+        if self._wx_worker is None:
+            from lyra.wx.worker import WxWorker
+            self._wx_worker = WxWorker(self)
+            self._wx_worker.snapshot_ready.connect(
+                self._on_wx_snapshot_ready)
+            self._wx_worker.error_occurred.connect(self.wx_error.emit)
+        self._wx_worker.fire_test_toast()
+
+        # Build a synthetic "all alerts firing" snapshot so the
+        # operator can see what the header indicators look like in
+        # the wild.  Mid-tier values picked so all three icons are
+        # visibly distinct and the tooltips have realistic content.
+        from lyra.wx.aggregator import (
+            WxSnapshot, LightningState, WindState, SevereState,
+            LIGHTNING_CLOSE, WIND_EXTREME, SEVERE_ACTIVE)
+        test_snap = WxSnapshot(
+            lightning=LightningState(
+                tier=LIGHTNING_CLOSE,
+                closest_km=12.0,         # ~7.5 mi — red tier
+                closest_bearing_deg=225.0,  # SW
+                strikes_recent=14,
+                sources_with_data=["test"]),
+            wind=WindState(
+                tier=WIND_EXTREME,
+                sustained_mph=48.0,
+                gust_mph=63.0,
+                direction_deg=270.0,
+                nws_alert_headline="Test — High Wind Warning",
+                sources_with_data=["test"]),
+            severe=SevereState(
+                tier=SEVERE_ACTIVE,
+                headline="Test — Severe Thunderstorm Warning"))
+
+        # Stash the prior snapshot so we can restore it when the
+        # preview window expires.  Operators with live alerts active
+        # don't lose their real readings.
+        self._wx_test_prior_snapshot = self._wx_last_snapshot
+
+        # Emit the test snapshot — header indicator subscribes to
+        # this signal and lights up.
+        self._wx_last_snapshot = test_snap
+        self.wx_snapshot_changed.emit(test_snap)
+
+        # Schedule restoration after 6 seconds — long enough for the
+        # operator to look at the toolbar, short enough not to hide
+        # real conditions if any are active.
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(6000, self._restore_after_wx_test)
+
+    def _restore_after_wx_test(self) -> None:
+        """One-shot callback for fire_wx_test_toast — restore the
+        prior snapshot (or emit a clean 'none' snapshot if none
+        was active before the test)."""
+        prior = getattr(self, "_wx_test_prior_snapshot", None)
+        if prior is not None:
+            self._wx_last_snapshot = prior
+            self.wx_snapshot_changed.emit(prior)
+        else:
+            # No prior snapshot — emit a fresh "none" snapshot so
+            # all indicators clear back to hidden.
+            from lyra.wx.aggregator import WxSnapshot
+            blank = WxSnapshot()
+            self._wx_last_snapshot = blank
+            self.wx_snapshot_changed.emit(blank)
+        self._wx_test_prior_snapshot = None
+
+    def _on_wx_snapshot_ready(self, snap) -> None:
+        """Slot for WxWorker.snapshot_ready — store + re-emit."""
+        self._wx_last_snapshot = snap
+        self.wx_snapshot_changed.emit(snap)
+
+    def _build_wx_config(self):
+        """Build a fresh WxConfig from the persisted operator
+        settings + wx/* QSettings.  Called whenever any wx setting
+        changes."""
+        from PySide6.QtCore import QSettings
+        from lyra.wx.aggregator import WxConfig
+        s = QSettings("N8SDR", "Lyra")
+        cfg = WxConfig()
+        cfg.lightning_range_km = float(
+            s.value("wx/lightning_range_km", cfg.lightning_range_km,
+                    type=float))
+        cfg.lightning_mid_km = float(
+            s.value("wx/lightning_mid_km", cfg.lightning_mid_km,
+                    type=float))
+        cfg.lightning_close_km = float(
+            s.value("wx/lightning_close_km", cfg.lightning_close_km,
+                    type=float))
+        cfg.wind_sustained_mph = float(
+            s.value("wx/wind_sustained_mph", cfg.wind_sustained_mph,
+                    type=float))
+        cfg.wind_gust_mph = float(
+            s.value("wx/wind_gust_mph", cfg.wind_gust_mph,
+                    type=float))
+        cfg.src_blitzortung = bool(
+            s.value("wx/src_blitzortung", False, type=bool))
+        cfg.src_nws = bool(s.value("wx/src_nws", False, type=bool))
+        cfg.src_nws_metar = bool(
+            s.value("wx/src_nws_metar", False, type=bool))
+        cfg.src_ambient = bool(
+            s.value("wx/src_ambient", False, type=bool))
+        cfg.src_ecowitt = bool(
+            s.value("wx/src_ecowitt", False, type=bool))
+        cfg.ambient_api_key = str(
+            s.value("wx/ambient_api_key", "", type=str))
+        cfg.ambient_app_key = str(
+            s.value("wx/ambient_app_key", "", type=str))
+        cfg.ecowitt_app_key = str(
+            s.value("wx/ecowitt_app_key", "", type=str))
+        cfg.ecowitt_api_key = str(
+            s.value("wx/ecowitt_api_key", "", type=str))
+        cfg.ecowitt_mac = str(
+            s.value("wx/ecowitt_mac", "", type=str))
+        cfg.nws_metar_station = str(
+            s.value("wx/nws_metar_station", "", type=str))
+        return cfg
+
+    def autoload_wx_settings(self) -> None:
+        """Restore disclaimer + master enable + audio toggle from
+        QSettings.  Source enables, thresholds, and credentials are
+        loaded lazily by _build_wx_config() when the worker starts."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            disc = bool(s.value(
+                "wx/disclaimer_accepted", False, type=bool))
+            enabled = bool(s.value("wx/enabled", False, type=bool))
+            audio = bool(s.value("wx/audio_enabled", True, type=bool))
+            desktop = bool(s.value("wx/desktop_enabled", True, type=bool))
+        except Exception:
+            return
+        self._wx_disclaimer_accepted = disc
+        # Even if the operator had wx_enabled=true persisted, only
+        # re-enable if the disclaimer is still accepted (safety
+        # belt-and-suspenders — disclaimer is the master gate).
+        if disc and enabled:
+            self.set_wx_enabled(True)
+        # Audio + desktop toggles apply to the worker's toast
+        # dispatcher; create a worker if needed (without enabling
+        # poll) so the toggles persist.
+        if self._wx_worker is None:
+            from lyra.wx.worker import WxWorker
+            self._wx_worker = WxWorker(self)
+            self._wx_worker.snapshot_ready.connect(
+                self._on_wx_snapshot_ready)
+            self._wx_worker.error_occurred.connect(self.wx_error.emit)
+        self._wx_worker.set_audio_enabled(audio)
+        self._wx_worker.set_desktop_enabled(desktop)
+
+    def autoload_operator_settings(self) -> None:
+        """Restore callsign + grid + manual lat/lon from QSettings.
+        Called once at app startup.  Pre-populates callsign from the
+        TCI server's saved own_callsign on first run if our key is
+        empty (graceful migration for users upgrading from a Lyra
+        version that only had the TCI callsign field)."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            cs = str(s.value("operator/callsign", "", type=str))
+            if not cs:
+                # Migrate from TCI-only callsign field if present.
+                cs = str(s.value("tci/own_callsign", "", type=str))
+            grid = str(s.value("operator/grid", "", type=str))
+            lat_m = s.value("operator/lat_manual", None)
+            lon_m = s.value("operator/lon_manual", None)
+            try:
+                lat_m = float(lat_m) if lat_m is not None else None
+            except (TypeError, ValueError):
+                lat_m = None
+            try:
+                lon_m = float(lon_m) if lon_m is not None else None
+            except (TypeError, ValueError):
+                lon_m = None
+        except Exception:
+            return
+        try:
+            self.set_callsign(cs)
+            self.set_grid_square(grid)
+            self.set_operator_lat_lon(lat_m, lon_m)
+        except Exception as exc:
+            print(f"[Radio] could not autoload operator settings: {exc}")
 
     # ── Band plan API ────────────────────────────────────────────────
     @property
@@ -2469,7 +2927,7 @@ class Radio(QObject):
         self.nr2_speech_aware_changed.emit(bool(on))
 
     def autoload_nr2_settings(self) -> None:
-        """Restore NR2's three operator knobs from QSettings."""
+        """Restore NR2's operator knobs from QSettings."""
         try:
             from PySide6.QtCore import QSettings
             s = QSettings("N8SDR", "Lyra")
@@ -2479,14 +2937,155 @@ class Radio(QObject):
                                   True, type=bool))
             speech = bool(s.value("noise/nr2_speech_aware", False,
                                   type=bool))
+            method = str(s.value("noise/nr2_gain_method", "mmse_lsa",
+                                  type=str))
         except Exception:
             return
         try:
             self.set_nr2_aggression(agg)
             self.set_nr2_musical_noise_smoothing(smooth)
             self.set_nr2_speech_aware(speech)
+            self.set_nr2_gain_method(method)
         except Exception as exc:
             print(f"[Radio] could not autoload NR2 settings: {exc}")
+
+    @property
+    def nr2_gain_method(self) -> str:
+        """Current NR2 gain function name: 'mmse_lsa' or 'wiener'."""
+        try:
+            return str(self._rx_channel._nr2.gain_method)
+        except Exception:
+            return "mmse_lsa"
+
+    def set_nr2_gain_method(self, method: str) -> None:
+        """Pick the NR2 gain function — 'mmse_lsa' (default) or
+        'wiener'.  Persists to QSettings and emits
+        ``nr2_gain_method_changed``."""
+        m = (method or "").strip().lower()
+        if m not in ("mmse_lsa", "wiener"):
+            m = "mmse_lsa"
+        try:
+            self._rx_channel._nr2.set_gain_method(m)
+        except Exception as exc:
+            print(f"[Radio] could not set NR2 gain method: {exc}")
+            return
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/nr2_gain_method", m)
+        except Exception as exc:
+            print(f"[Radio] could not persist nr2 gain method: {exc}")
+        self.nr2_gain_method_changed.emit(m)
+
+    # ── LMS (NR3 line enhancer) API ───────────────────────────────────
+
+    @property
+    def lms_enabled(self) -> bool:
+        return self._rx_channel.lms_enabled
+
+    @property
+    def lms_strength(self) -> float:
+        return self._rx_channel.lms_strength
+
+    def set_lms_enabled(self, on: bool) -> None:
+        """Master toggle for the LMS adaptive line enhancer.  Persists
+        to QSettings and emits ``lms_enabled_changed``."""
+        on = bool(on)
+        self._rx_channel.set_lms_enabled(on)
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/lms_enabled", on)
+        except Exception as exc:
+            print(f"[Radio] could not persist lms_enabled: {exc}")
+        self.lms_enabled_changed.emit(on)
+
+    def set_lms_strength(self, value: float) -> None:
+        """LMS strength slider (0.0..1.0).  Persists to QSettings
+        and emits ``lms_strength_changed``."""
+        v = max(0.0, min(1.0, float(value)))
+        self._rx_channel.set_lms_strength(v)
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/lms_strength", v)
+        except Exception as exc:
+            print(f"[Radio] could not persist lms_strength: {exc}")
+        self.lms_strength_changed.emit(v)
+
+    def autoload_lms_settings(self) -> None:
+        """Restore LMS toggle + strength from QSettings."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            on = bool(s.value("noise/lms_enabled", False, type=bool))
+            strength = float(s.value("noise/lms_strength", 0.5,
+                                      type=float))
+        except Exception:
+            return
+        try:
+            self.set_lms_strength(strength)
+            self.set_lms_enabled(on)
+        except Exception as exc:
+            print(f"[Radio] could not autoload LMS settings: {exc}")
+
+    # ── All-mode squelch API ───────────────────────────────────────────
+
+    @property
+    def squelch_enabled(self) -> bool:
+        return self._rx_channel.squelch_enabled
+
+    @property
+    def squelch_threshold(self) -> float:
+        return self._rx_channel.squelch_threshold
+
+    @property
+    def squelch_passing(self) -> bool:
+        """True when audio is currently passing the squelch — UI
+        binds this for the activity-indicator dot."""
+        return self._rx_channel.squelch_passing
+
+    def set_squelch_enabled(self, on: bool) -> None:
+        """Master toggle for the all-mode voice-presence squelch."""
+        on = bool(on)
+        self._rx_channel.set_squelch_enabled(on)
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("audio/squelch_enabled", on)
+        except Exception as exc:
+            print(f"[Radio] could not persist squelch_enabled: {exc}")
+        self.squelch_enabled_changed.emit(on)
+
+    def set_squelch_threshold(self, value: float) -> None:
+        """Squelch threshold, 0.0..1.0.  Higher = more aggressive
+        muting.  Persists to QSettings and emits change signal."""
+        v = max(0.0, min(1.0, float(value)))
+        self._rx_channel.set_squelch_threshold(v)
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("audio/squelch_threshold", v)
+        except Exception as exc:
+            print(f"[Radio] could not persist squelch_threshold: {exc}")
+        self.squelch_threshold_changed.emit(v)
+
+    def autoload_squelch_settings(self) -> None:
+        """Restore squelch toggle + threshold from QSettings."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            on = bool(s.value("audio/squelch_enabled", False,
+                              type=bool))
+            threshold = float(s.value("audio/squelch_threshold",
+                                       0.16, type=float))
+        except Exception:
+            return
+        try:
+            self.set_squelch_threshold(threshold)
+            self.set_squelch_enabled(on)
+        except Exception as exc:
+            print(f"[Radio] could not autoload squelch settings: {exc}")
 
     # ── NR1 strength API (continuous slider) ───────────────────────
 
@@ -4058,6 +4657,13 @@ class Radio(QObject):
             self.shutdown_dsp_worker()
         except Exception as exc:
             print(f"[Radio.close] shutdown_dsp_worker raised: {exc}")
+        # Step 2.5 — Weather worker.  Same idempotent pattern.
+        try:
+            if self._wx_worker is not None:
+                self._wx_worker.request_stop()
+                self._wx_worker.wait(2000)   # 2-second grace window
+        except Exception as exc:
+            print(f"[Radio.close] wx_worker shutdown raised: {exc}")
         # Step 3 — flush QSettings so the operator's most recent
         # changes (volume tweak, freq change in the last 100 ms,
         # captured-profile autoload bookkeeping) actually persist.

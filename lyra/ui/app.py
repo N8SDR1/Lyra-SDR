@@ -107,6 +107,21 @@ class MainWindow(QMainWindow):
             # Belt-and-suspenders — autoload is opt-in convenience,
             # never block app startup if something goes sideways.
             print(f"[app] noise-profile autoload error: {exc}")
+        # Operator / Station — callsign + grid square + manual lat/lon.
+        # Global settings consumed by TCI spots, WX-Alerts, and any
+        # future logging integration.  Migrates from the older
+        # TCI-only callsign field on first run.
+        try:
+            self.radio.autoload_operator_settings()
+        except Exception as exc:
+            print(f"[app] operator settings autoload error: {exc}")
+        # Weather Alerts — disclaimer + master enable + toast prefs.
+        # Worker thread spins up only if disclaimer is accepted AND
+        # the operator had alerts enabled when they last quit.
+        try:
+            self.radio.autoload_wx_settings()
+        except Exception as exc:
+            print(f"[app] wx settings autoload error: {exc}")
         # Phase 3.D #2 — restore NB profile + threshold across Lyra
         # restarts so the operator's last NB setting is in effect
         # from frame zero.  Same belt-and-suspenders pattern.
@@ -139,6 +154,19 @@ class MainWindow(QMainWindow):
             self.radio.autoload_nr1_settings()
         except Exception as exc:
             print(f"[app] NR1 autoload error: {exc}")
+        # LMS (NR3 line enhancer) — independent stage in the chain.
+        # Has its own enable flag and strength slider, persisted
+        # under noise/lms_*.
+        try:
+            self.radio.autoload_lms_settings()
+        except Exception as exc:
+            print(f"[app] LMS autoload error: {exc}")
+        # All-mode squelch (SSQL) — final stage in the audio chain.
+        # Persisted under audio/squelch_*.
+        try:
+            self.radio.autoload_squelch_settings()
+        except Exception as exc:
+            print(f"[app] squelch autoload error: {exc}")
 
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.
@@ -684,6 +712,29 @@ class MainWindow(QMainWindow):
         spacer2 = QWidget()
         spacer2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer2)
+
+        # ── 7.5. Weather Alerts indicator ─────────────────────────
+        # Three badges (⚡ / 💨 / ⚠), each individually hidden when
+        # its tier is "none".  Subscribes to radio.wx_snapshot_changed
+        # for live updates from the WxWorker thread.  Sits between
+        # ADC RMS and the clocks per operator placement preference.
+        from lyra.ui.wx_indicator import WxIndicator
+        # Pull display-unit prefs from QSettings so unit choice
+        # follows the operator across launches.  Default mi/mph.
+        from PySide6.QtCore import QSettings
+        _sset = QSettings("N8SDR", "Lyra")
+        _dist_unit = str(_sset.value("wx/distance_unit", "mi", type=str))
+        _wind_unit = str(_sset.value("wx/wind_unit", "mph", type=str))
+        self.wx_indicator = WxIndicator(
+            self.radio, distance_unit=_dist_unit, wind_unit=_wind_unit)
+        tb.addWidget(self.wx_indicator)
+        # Fixed gap between weather indicator and the clocks — without
+        # this, when alerts are active the boxes hug right against the
+        # local-time clock and visually crowd it.  Width chosen so the
+        # gap is noticeable without pushing the clocks off-center.
+        wx_gap = QWidget()
+        wx_gap.setFixedWidth(20)
+        tb.addWidget(wx_gap)
 
         # ── 8. Clocks (local + UTC) ────────────────────────────────
         # Sized ~2.4× the surrounding toolbar text so the operator can
