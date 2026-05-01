@@ -131,6 +131,14 @@ class MainWindow(QMainWindow):
             self.radio.autoload_nr2_settings()
         except Exception as exc:
             print(f"[app] NR2 autoload error: {exc}")
+        # NR1 — continuous strength slider, replaces the discrete
+        # light/medium/heavy profile picker.  Migrates from the old
+        # noise/nr_profile QSettings value if no nr1_strength is
+        # saved yet.
+        try:
+            self.radio.autoload_nr1_settings()
+        except Exception as exc:
+            print(f"[app] NR1 autoload error: {exc}")
 
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.

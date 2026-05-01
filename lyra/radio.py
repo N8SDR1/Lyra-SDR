@@ -220,6 +220,11 @@ class Radio(QObject):
     nr2_musical_noise_smoothing_changed = Signal(bool)
     nr2_speech_aware_changed = Signal(bool)
 
+    # NR1 — continuous strength slider (0.0..1.0).  Replaces the
+    # discrete light/medium/heavy profile picker as of 2026-05-01;
+    # parallel UX to NR2's aggression slider.
+    nr1_strength_changed = Signal(float)
+
     # Phase 3.D #1 — Captured-noise-profile signals.
     # noise_capture_done fires when a capture finalizes inside the
     # NR processor; payload is the smart-guard verdict
@@ -1722,11 +1727,19 @@ class Radio(QObject):
     # the operator the full 3 × 2 combinations for NR1.  For NR2 the
     # source toggle still applies (NR2 + Captured = best classical
     # NR).
-    # NR1 strength tiers + NR2 + neural slot.  "aggressive" is the
-    # legacy name for "heavy"; set_nr_profile() canonicalizes it
-    # below so old QSettings still load.
-    NR_PROFILES = ("light", "medium", "heavy", "nr2", "neural")
-    _NR_PROFILE_ALIASES = {"aggressive": "heavy"}
+    # NR backend selector: nr1 / nr2 / neural.  Legacy strength-tier
+    # names (light/medium/heavy/aggressive) are canonicalized to "nr1"
+    # via _NR_PROFILE_ALIASES + their strength is applied through the
+    # nr1_strength path so saved QSettings still load.  "captured"
+    # was a legacy bundled-state name (medium + source-toggle on);
+    # set_nr_profile handles it explicitly.
+    NR_PROFILES = ("nr1", "nr2", "neural")
+    _NR_PROFILE_ALIASES = {
+        "light":      "nr1",
+        "medium":     "nr1",
+        "heavy":      "nr1",
+        "aggressive": "nr1",
+    }
 
     @staticmethod
     def neural_nr_available() -> bool:
@@ -1760,39 +1773,51 @@ class Radio(QObject):
         return self._nr_profile
 
     def set_nr_profile(self, name: str):
-        name = (name or "").strip().lower()
-        # Migration: an earlier build of Phase 3.D #1 had "captured"
-        # as a profile name (entangled source + aggression).  If we
-        # see that value coming from QSettings or operator config
-        # written under the old design, treat it as Medium aggression
-        # plus source-toggle ON so the operator's prior intent is
-        # preserved.
-        if name == "captured":
+        """Pick the NR backend: ``nr1`` / ``nr2`` / ``neural``.
+
+        Legacy migration paths handled here:
+          - ``captured`` (old bundled name = Medium + source-on)
+            → set_nr_use_captured_profile(True), backend = nr1,
+            strength left wherever the operator had it (or migrated
+            via autoload_nr1_settings if it was saved as a legacy
+            tier name).
+          - ``light`` / ``medium`` / ``heavy`` / ``aggressive``
+            (old discrete strength tiers) → backend = nr1, strength
+            updated to the equivalent slider value via the legacy
+            alias map in SpectralSubtractionNR.
+
+        Strength is no longer set here — operators use set_nr1_strength
+        (continuous slider) for NR1 and set_nr2_aggression for NR2.
+        """
+        from lyra.dsp.nr import SpectralSubtractionNR
+        raw = (name or "").strip().lower()
+        # Legacy "captured" — strength stays where it is, just flip
+        # the source toggle.
+        if raw == "captured":
             self.set_nr_use_captured_profile(True)
-            name = "medium"
-        # Canonicalize legacy strength-tier names so saved QSettings
-        # from prior Lyra versions still resolve.
-        name = self._NR_PROFILE_ALIASES.get(name, name)
-        if name not in self.NR_PROFILES:
-            name = "medium"
-        self._nr_profile = name
-        if name == "neural":
-            # Reserved UI slot — no classical backend change. When a
-            # neural package gets wired in (probably via a different
-            # DspChannel subclass), this branch will swap the channel.
-            # For now fall back to medium so audio still flows.
-            self._rx_channel.set_nr_profile("medium")
-        elif name == "nr2":
-            # Phase 3.D #4 — channel routes audio through NR2
-            # (Ephraim-Malah MMSE-LSA) instead of NR1.  NR2's
-            # operator knobs (aggression, musical-noise smoothing,
-            # speech-aware) are independently controlled via the
-            # set_nr2_* methods.  Captured-source toggle still
-            # applies orthogonally (NR2 + Captured combo).
-            self._rx_channel.set_nr_profile("nr2")
+            raw = "nr1"
+        # Legacy strength-tier names: route to NR1 backend AND
+        # apply the equivalent strength so the operator's previous
+        # tier preference carries over.
+        if raw in SpectralSubtractionNR._LEGACY_PROFILE_TO_STRENGTH:
+            self.set_nr1_strength(
+                SpectralSubtractionNR._LEGACY_PROFILE_TO_STRENGTH[raw])
+            raw = "nr1"
+        # Final canonicalization (also handles None/empty → default).
+        backend = self._NR_PROFILE_ALIASES.get(raw, raw)
+        if backend not in self.NR_PROFILES:
+            backend = "nr1"
+        self._nr_profile = backend
+        if backend == "neural":
+            # Reserved UI slot — no classical backend change yet.
+            # Falls through to NR1 so audio still flows.  When a
+            # neural package gets wired in this branch will swap
+            # the channel.
+            self._rx_channel.set_nr_profile("nr1")
         else:
-            self._rx_channel.set_nr_profile(name)
-        self.nr_profile_changed.emit(name)
+            # nr1 or nr2 — channel routes accordingly.
+            self._rx_channel.set_nr_profile(backend)
+        self.nr_profile_changed.emit(backend)
 
     # ── Noise SOURCE toggle (Phase 3.D #1, orthogonal to profile) ────
 
@@ -2462,6 +2487,77 @@ class Radio(QObject):
             self.set_nr2_speech_aware(speech)
         except Exception as exc:
             print(f"[Radio] could not autoload NR2 settings: {exc}")
+
+    # ── NR1 strength API (continuous slider) ───────────────────────
+
+    @property
+    def nr1_strength(self) -> float:
+        """Current NR1 strength (0.0..1.0).  Replaced the discrete
+        light/medium/heavy profile picker as of 2026-05-01."""
+        return self._rx_channel.nr1_strength
+
+    def set_nr1_strength(self, value: float) -> None:
+        """Set NR1's continuous suppression strength.
+
+        0.0 = barely-on (subtle, generous spectral floor)
+        1.0 = aggressive deep subtraction
+        0.5 = balanced (≈ the old "Medium" preset)
+
+        Clamped to [0.0, 1.0] inside SpectralSubtractionNR.
+        Persists to QSettings.  Mirrors set_nr2_aggression's
+        contract for UX consistency.
+        """
+        v = max(0.0, min(1.0, float(value)))
+        self._rx_channel.set_nr1_strength(v)
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/nr1_strength",
+                       float(self._rx_channel.nr1_strength))
+        except Exception as exc:
+            print(f"[Radio] could not persist nr1 strength: {exc}")
+        self.nr1_strength_changed.emit(self._rx_channel.nr1_strength)
+
+    def autoload_nr1_settings(self) -> None:
+        """Restore NR1's strength from QSettings.
+
+        Migration path: if no ``noise/nr1_strength`` is saved but
+        the historical ``nr/profile`` key holds a legacy discrete
+        name (light/medium/heavy/aggressive), we map the name to
+        the equivalent strength so operators upgrading from the
+        old UI don't lose their preference.  The legacy
+        nr/profile entry is left untouched — set_nr_profile()
+        handles its own canonicalization on next operator action.
+
+        Note on key prefixes: ``nr/profile`` is the historical key
+        used by app.py's _load_settings() since v0.0.x.  My recent
+        audit cleanup work uses ``noise/`` for new keys; we check
+        both for forward-compat with anyone who shipped a build
+        where the prefix differed.
+        """
+        try:
+            from PySide6.QtCore import QSettings
+            from lyra.dsp.nr import SpectralSubtractionNR
+            s = QSettings("N8SDR", "Lyra")
+            if s.contains("noise/nr1_strength"):
+                strength = float(s.value("noise/nr1_strength",
+                                         0.5, type=float))
+            else:
+                # Legacy migration — check both possible legacy keys.
+                legacy = ""
+                for legacy_key in ("nr/profile", "noise/nr_profile"):
+                    val = str(s.value(legacy_key, "") or "").strip().lower()
+                    if val:
+                        legacy = val
+                        break
+                strength = SpectralSubtractionNR.\
+                    _LEGACY_PROFILE_TO_STRENGTH.get(legacy, 0.5)
+        except Exception:
+            return
+        try:
+            self.set_nr1_strength(strength)
+        except Exception as exc:
+            print(f"[Radio] could not autoload NR1 strength: {exc}")
 
     def _on_nr_capture_done(self) -> None:
         """Called from inside NR.process() when a capture finalizes.

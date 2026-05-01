@@ -321,28 +321,42 @@ class PythonRxChannel(DspChannel):
             self._nr2.reset()
 
     def set_nr_profile(self, profile: str) -> None:
-        """Apply an NR profile selection.
+        """Apply an NR backend selection.
 
-        - "light" / "medium" / "heavy" → NR1 with that
-          subtraction strength preset
-        - "nr2"                              → NR2 (MMSE-LSA);
-          NR2's own knobs (aggression, smoothing, speech-aware)
-          live separately
-        - "neural" / "captured" → forwarded to NR1's set_profile
-          for backwards-compat; legacy "captured" was migrated
-          to (medium + source-toggle ON) in Radio.set_nr_profile.
+        - ``"nr1"``     → NR1 (classical spectral subtraction).
+                          Strength is controlled via set_nr1_strength.
+        - ``"nr2"``     → NR2 (Ephraim-Malah MMSE-LSA).
+                          Strength is via set_nr2_aggression.
+        - ``"neural"``  → reserved slot; falls through to NR1 for now.
+        - Legacy names (light/medium/heavy/aggressive/captured) are
+          accepted for QSettings backwards compat and routed to NR1
+          with the appropriate strength via NR1's legacy alias map.
 
         Both NR1 and NR2 stay alive; the active one is selected
         by ``_active_nr`` and consumed in ``process()``.
         """
         if profile == "nr2":
             self._active_nr = "nr2"
-            # Don't change NR1's profile — leave operator's last
+            # Don't change NR1's strength — leave operator's last
             # NR1 setting intact so flipping back to NR1 picks up
             # right where they left off.
         else:
             self._active_nr = "nr1"
-            self._nr.set_profile(profile)
+            # Legacy profile names (light/medium/heavy/aggressive)
+            # still set NR1 strength via the alias map; "nr1" /
+            # "neural" leave the strength alone.
+            if profile in ("light", "medium", "heavy", "aggressive"):
+                self._nr.set_profile(profile)
+
+    def set_nr1_strength(self, value: float) -> None:
+        """Set NR1's continuous strength (0.0..1.0).  Mirrors the
+        NR2 aggression slider's API for UX consistency."""
+        self._nr.set_strength(float(value))
+
+    @property
+    def nr1_strength(self) -> float:
+        """Current NR1 strength (0.0..1.0)."""
+        return float(self._nr.strength)
 
     # ── Captured noise profile API (Phase 3.D #1) ─────────────────────
     # Thin proxies onto the embedded SpectralSubtractionNR.  Channel is

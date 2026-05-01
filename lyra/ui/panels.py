@@ -1671,6 +1671,43 @@ class DspPanel(GlassPanel):
         # rather than stretching to fill, and the source badge gets
         # a maximum width so it doesn't span the entire panel.
 
+        # Build NR1 strength widgets — added to the row dynamically
+        # below.  Visible when active NR backend is NR1 (the
+        # classical spectral-subtraction path).  Maps slider 0..100
+        # to NR1 strength 0.0..1.0 (parallel to NR2's 0..150 → 0..1.5).
+        self._nr1_label_widget = QLabel("NR strength:")
+        self._nr1_label_widget.setStyleSheet(
+            "color: #cdd9e5; font-family: 'Segoe UI', sans-serif; "
+            "font-size: 11px;")
+        self.nr1_strength_slider = QSlider(Qt.Horizontal)
+        self.nr1_strength_slider.setRange(0, 100)
+        self.nr1_strength_slider.setValue(
+            int(round(radio.nr1_strength * 100)))
+        self.nr1_strength_slider.setSingleStep(5)
+        self.nr1_strength_slider.setPageStep(25)
+        self.nr1_strength_slider.setTickPosition(QSlider.TicksBelow)
+        self.nr1_strength_slider.setTickInterval(25)
+        self.nr1_strength_slider.setFixedWidth(160)
+        self.nr1_strength_slider.setToolTip(
+            "NR (classical) suppression strength.\n"
+            "  0   = barely-on, subtle hiss reduction\n"
+            "  50  = balanced (= old 'Medium' preset)\n"
+            "  100 = aggressive deep subtraction\n"
+            "\n"
+            "Tick marks at 25 / 50 / 75 / 100 are convenient anchor "
+            "points (= old Light / Medium / Heavy / Heavy presets).\n"
+            "\n"
+            "Right-click the NR button to switch between NR (classical) "
+            "and NR2 (high-quality MMSE-LSA).")
+        self.nr1_strength_slider.valueChanged.connect(
+            self._on_nr1_strength_slider)
+        self.nr1_strength_label = QLabel(
+            f"{int(round(radio.nr1_strength * 100))} %")
+        self.nr1_strength_label.setFixedWidth(40)
+        self.nr1_strength_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700; font-size: 11px;")
+
         # Build NR2 strength widgets — added to the row dynamically
         # below depending on whether NR2 is active.
         self._nr2_label_widget = QLabel("NR2 strength:")
@@ -1722,7 +1759,13 @@ class DspPanel(GlassPanel):
         nr_status_row = QHBoxLayout()
         nr_status_row.setContentsMargins(0, 0, 0, 0)
         nr_status_row.setSpacing(6)
-        # Add NR2 widgets first (visible only when NR2 is active).
+        # Both NR1 and NR2 strength widgets occupy the same slot —
+        # only one set is visible at a time depending on which
+        # backend is active.  NR1 widgets first, then NR2; visibility
+        # is set below + maintained on nr_profile_changed.
+        nr_status_row.addWidget(self._nr1_label_widget)
+        nr_status_row.addWidget(self.nr1_strength_slider)
+        nr_status_row.addWidget(self.nr1_strength_label)
         nr_status_row.addWidget(self._nr2_label_widget)
         nr_status_row.addWidget(self.nr2_agg_slider)
         nr_status_row.addWidget(self.nr2_agg_label)
@@ -1733,15 +1776,20 @@ class DspPanel(GlassPanel):
         # don't try to fill horizontal space.
         nr_status_row.addStretch(1)
         self.content_layout().addLayout(nr_status_row)
-        # Apply initial visibility based on current NR profile.
+        # Apply initial visibility based on current NR backend.
         is_nr2 = (radio.nr_profile == "nr2")
+        self._nr1_label_widget.setVisible(not is_nr2)
+        self.nr1_strength_slider.setVisible(not is_nr2)
+        self.nr1_strength_label.setVisible(not is_nr2)
         self._nr2_label_widget.setVisible(is_nr2)
         self.nr2_agg_slider.setVisible(is_nr2)
         self.nr2_agg_label.setVisible(is_nr2)
-        # Two-way sync so the slider mirrors Radio's state.
+        # Two-way sync so each slider mirrors Radio's state.
+        radio.nr1_strength_changed.connect(
+            self._on_nr1_strength_signal)
         radio.nr2_aggression_changed.connect(
             self._on_nr2_agg_signal)
-        # Show/hide NR2 widgets when active NR profile changes.
+        # Show/hide NR1/NR2 widgets when active NR backend changes.
         radio.nr_profile_changed.connect(
             self._refresh_nr2_panel_visibility)
         # Refresh on any of the events that affect what the badge
@@ -1985,58 +2033,53 @@ class DspPanel(GlassPanel):
             self.lna_auto_event_lbl.setToolTip("")
 
     # ── NR (Noise Reduction) ────────────────────────────────────
+    # Right-click menu now picks the BACKEND (NR1 / NR2 / Neural),
+    # not a strength tier — strength is set via the inline panel
+    # slider for whichever backend is active.  Mirrors NR2's
+    # already-existing slider-only UX.
     _NR_PROFILE_LABELS = {
-        "light":      "Light",
-        "medium":     "Medium",
-        "heavy":      "Heavy",
-        # "nr2" is the Phase 3.D #4 Ephraim-Malah MMSE-LSA processor.
-        # Independent algorithm from Light/Medium/Heavy (which are
-        # NR1 spectral-subtraction tunings).
+        "nr1":        "Classical NR",
         "nr2":        "High Quality (NR2)",
-        # "captured" is inserted dynamically in _show_nr_menu so its
-        # enabled state can reflect whether a profile is loaded.
         "neural":     "Neural (RNNoise / DeepFilterNet)",
     }
 
     def _show_nr_menu(self, pos):
-        """Right-click on the NR button pops a profile picker.
-        Mirrors the AGC right-click idiom — radio buttons with the
-        current profile checked.  The Neural entry is greyed out if
-        no neural-NR package is importable on this system; the
-        Captured entry is greyed when no operator-recorded profile
-        is loaded."""
+        """Right-click on the NR button — backend picker.
+
+        Pre-2026-05-01 this also offered Light/Medium/Heavy strength
+        tiers, but those were replaced by a continuous slider so the
+        menu is now backend-only (parallel UX to NR2's slider-only
+        knob).  Operator picks the algorithm here, dials in strength
+        on the inline slider.
+        """
         btn = self.dsp_btns["NR"]
         menu = QMenu(self)
         current = self.radio.nr_profile
+        # Operators upgrading from the old build may have a legacy
+        # name (light/medium/heavy) saved as nr_profile until they
+        # touch the slider once — treat any of those as nr1 for the
+        # checkmark display.
+        if current in ("light", "medium", "heavy", "aggressive",
+                       "captured"):
+            current = "nr1"
         neural_ok = Radio.neural_nr_available()
 
-        # NR right-click menu is now SINGLE-PURPOSE: profile picker
-        # (subtraction strength only).  The noise SOURCE toggle
-        # (Live ⇄ Captured) lives on the inline status badge below
-        # the DSP button row — see NoiseSourceBadge.  Keeping the
-        # menu single-purpose matches the standard Qt menu UX
-        # convention ("pick one thing") rather than asking the
-        # operator to navigate two parallel exclusive groups.
-        for key in ("light", "medium", "heavy"):
-            label = self._NR_PROFILE_LABELS[key]
-            act = QAction(label, menu)
-            act.setCheckable(True)
-            act.setChecked(key == current)
-            act.triggered.connect(
-                lambda _=False, k=key: self.radio.set_nr_profile(k))
-            menu.addAction(act)
-        # NR2 — Ephraim-Malah MMSE-LSA processor (Phase 3.D #4).
-        # Different algorithm from Light/Medium/Heavy; sits in
-        # the same menu as a peer choice.  Knobs (aggression,
-        # smoothing, speech-aware) live on the panel slider + the
-        # Settings → Noise tab.
-        nr2_label = self._NR_PROFILE_LABELS["nr2"]
-        nr2_act = QAction(nr2_label, menu)
+        # Classical NR1 (spectral subtraction).
+        nr1_act = QAction(self._NR_PROFILE_LABELS["nr1"], menu)
+        nr1_act.setCheckable(True)
+        nr1_act.setChecked(current == "nr1")
+        nr1_act.triggered.connect(
+            lambda _=False: self.radio.set_nr_profile("nr1"))
+        menu.addAction(nr1_act)
+
+        # NR2 — Ephraim-Malah MMSE-LSA (Phase 3.D #4).
+        nr2_act = QAction(self._NR_PROFILE_LABELS["nr2"], menu)
         nr2_act.setCheckable(True)
         nr2_act.setChecked(current == "nr2")
         nr2_act.triggered.connect(
             lambda _=False: self.radio.set_nr_profile("nr2"))
         menu.addAction(nr2_act)
+
         # Neural placeholder.
         neural_label = self._NR_PROFILE_LABELS["neural"]
         neu_act = QAction(neural_label, menu)
@@ -2284,15 +2327,44 @@ class DspPanel(GlassPanel):
             self.nr2_agg_slider.blockSignals(False)
         self.nr2_agg_label.setText(f"{target} %")
 
+    # ── NR1 strength-slider handlers ─────────────────────────────────
+
+    def _on_nr1_strength_slider(self, slider_int: int) -> None:
+        """Operator dragged the NR1 strength slider."""
+        s = slider_int / 100.0
+        self.nr1_strength_label.setText(f"{slider_int} %")
+        self.radio.set_nr1_strength(s)
+
+    def _on_nr1_strength_signal(self, strength: float) -> None:
+        """Mirror an external NR1 strength change (Settings tab,
+        QSettings autoload, etc.) into the panel slider."""
+        target = int(round(strength * 100))
+        if self.nr1_strength_slider.value() != target:
+            self.nr1_strength_slider.blockSignals(True)
+            self.nr1_strength_slider.setValue(target)
+            self.nr1_strength_slider.blockSignals(False)
+        self.nr1_strength_label.setText(f"{target} %")
+
     def _refresh_nr2_panel_visibility(self, profile: str | None = None) -> None:
-        """Show the NR2 strength slider only when NR2 is the active
-        profile. Called on construction and on every nr_profile_changed.
+        """Show the NR1 OR NR2 strength slider depending on which
+        backend is active (mutually exclusive — same row, different
+        widgets).  Called on construction and on every
+        nr_profile_changed signal.
+
+        Method is named for legacy reasons (pre-existed when only
+        NR2 had a slider) — now it manages both.
         """
         try:
             name = profile if profile is not None else self.radio.nr_profile
         except Exception:
-            name = "medium"
+            name = "nr1"
         is_nr2 = (name == "nr2")
+        # NR1 widgets visible when NR2 isn't active.  This covers
+        # backend = "nr1", "neural" (placeholder), and any legacy
+        # profile name that hasn't been migrated yet.
+        self._nr1_label_widget.setVisible(not is_nr2)
+        self.nr1_strength_slider.setVisible(not is_nr2)
+        self.nr1_strength_label.setVisible(not is_nr2)
         self._nr2_label_widget.setVisible(is_nr2)
         self.nr2_agg_slider.setVisible(is_nr2)
         self.nr2_agg_label.setVisible(is_nr2)
@@ -2662,30 +2734,40 @@ class DspPanel(GlassPanel):
 
     def _on_nr_profile_changed(self, name: str):
         """Update the NR button's text + tooltip to reflect the
-        active profile + noise source.
+        active backend + noise source.
 
         Button text:
-        - "NR"   when NR1 is active (Light / Medium / Heavy /
-                 Neural placeholder)
+        - "NR"   when NR1 (classical spectral subtraction) or the
+                 neural placeholder is active
         - "NR2"  when the Ephraim-Malah MMSE-LSA processor is
                  active — operators see at a glance which
                  algorithm is running.
+
+        Strength is shown via the inline slider next to the button,
+        so the tooltip just names the backend now.
         """
-        label = self._NR_PROFILE_LABELS.get(name, name)
-        if self.radio.nr_use_captured_profile and self.radio.has_captured_profile():
+        # Map legacy strength-tier names to "nr1" for display.
+        display_name = name
+        if display_name in ("light", "medium", "heavy", "aggressive",
+                            "captured"):
+            display_name = "nr1"
+        label = self._NR_PROFILE_LABELS.get(display_name, display_name)
+        if (self.radio.nr_use_captured_profile
+                and self.radio.has_captured_profile()):
             source = (f"Captured: "
                       f"{self.radio.active_captured_profile_name}")
         else:
             source = "Live (VAD)"
         nr_btn = self.dsp_btns["NR"]
-        nr_btn.setText("NR2" if name == "nr2" else "NR")
+        nr_btn.setText("NR2" if display_name == "nr2" else "NR")
         nr_btn.setToolTip(
             f"Noise Reduction\n"
-            f"  Profile: {label}\n"
+            f"  Backend: {label}\n"
             f"  Source:  {source}\n"
             f"\n"
             f"Left-click: toggle on/off.\n"
-            f"Right-click: change profile or noise source.")
+            f"Right-click: switch backend (NR / NR2 / Neural).\n"
+            f"Drag the strength slider to set suppression depth.")
 
     # ── APF button handlers ────────────────────────────────────────
     def _show_apf_menu(self, pos):

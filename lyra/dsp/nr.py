@@ -93,34 +93,51 @@ class SpectralSubtractionNR:
     # used in the gain math is the live VAD-tracked estimate or the
     # operator's captured profile is independent — see
     # ``set_use_captured_profile`` below.
-    # Profile naming canonical across the noise-rejection modules
-    # (NB / ANF / NR1) is "light" / "medium" / "heavy" — operator
-    # mental model: "how hard does this thing work."  Leveler is
-    # different: it uses "latenight" for its strongest tier because
-    # that name describes the actual late-night-listening use case
-    # the profile was tuned for, not just an intensity level.
-    # Legacy QSettings values ("aggressive") are accepted via
-    # _CANONICAL_ALIASES so old saves still load.
-    # Profile parameter tuning (operator-validated original values,
-    # restored 2026-05-01 after a brief retune attempt that the
-    # operator field-tested as making Light and Medium sound worse
-    # while Heavy was already correct as-is):
+    # NR1's only operator-facing knob is now a continuous strength
+    # value in [0.0, 1.0].  0.0 = barely-on (subtle subtraction with
+    # generous spectral floor), 1.0 = aggressive (deep subtraction
+    # with tight floor).  All four DSP parameters are linearly
+    # interpolated between the anchor values below — these are the
+    # operator-validated tunings from the previous discrete-profile
+    # design (Light / Medium / Heavy).  Anchor points map to:
     #
-    # alpha — over-subtraction factor.  Higher = more noise removed
-    #          per bin.  Larger alpha means bins near the noise
-    #          floor get pushed harder toward zero.
-    # beta  — spectral floor.  Caps how low gain can drop.  Operator
-    #          tested these specific values and prefers them; do
-    #          not adjust without a fresh listening test.
-    PROFILES: dict[str, dict[str, float]] = {
-        "light":      {"alpha": 1.0, "beta": 0.20, "noise_track": 0.03,  "vad_gate": 3.0},
-        "medium":     {"alpha": 1.8, "beta": 0.12, "noise_track": 0.015, "vad_gate": 3.0},
-        "heavy":      {"alpha": 2.8, "beta": 0.06, "noise_track": 0.008, "vad_gate": 4.0},
+    #   strength=0.0 → old "Light"  (alpha=1.0, beta=0.20)
+    #   strength=0.5 → old "Medium" (alpha=1.8, beta=0.12)
+    #   strength=1.0 → old "Heavy"  (alpha=2.8, beta=0.06)
+    #
+    # Operators who liked "Heavy" can drag to 1.0; "Medium" sits at
+    # 0.5; "Light" at 0.0; anything in between is now reachable
+    # without picking from a fixed list.  Mirrors NR2's continuous
+    # aggression slider for UX consistency.
+    #
+    # Legacy ``set_profile()`` API + DEFAULT_PROFILE are kept as a
+    # backwards-compat shim so saved QSettings with values like
+    # "light" / "medium" / "heavy" / "aggressive" still load.
+    STRENGTH_MIN_PARAMS = {
+        "alpha":       1.0,
+        "beta":        0.20,
+        "noise_track": 0.03,
+        "vad_gate":    3.0,
     }
-    _CANONICAL_ALIASES: dict[str, str] = {
-        "aggressive": "heavy",
+    STRENGTH_MAX_PARAMS = {
+        "alpha":       2.8,
+        "beta":        0.06,
+        "noise_track": 0.008,
+        "vad_gate":    4.0,
     }
-    DEFAULT_PROFILE = "medium"
+    DEFAULT_STRENGTH: float = 0.5
+
+    # Legacy profile-name → strength map.  Used by set_profile() and
+    # by Radio's QSettings migration path so saved values with the
+    # old discrete names map cleanly to the new slider.
+    _LEGACY_PROFILE_TO_STRENGTH: dict[str, float] = {
+        "light":      0.0,
+        "medium":     0.5,
+        "heavy":      1.0,
+        "aggressive": 1.0,   # legacy synonym for "heavy"
+    }
+    DEFAULT_PROFILE = "medium"   # kept for any callers that still
+                                  # ask for it; maps to strength=0.5
 
     # Smart-guard threshold — coefficient of variation (std/mean) of
     # per-frame power during capture above which we flag "suspect".
@@ -172,8 +189,13 @@ class SpectralSubtractionNR:
         self._out_carry = np.zeros(self._hop, dtype=np.float32)
 
         self.enabled = False
-        self.profile = self.DEFAULT_PROFILE
-        self._apply_profile()
+        # Strength is the new operator-facing knob.  profile remains
+        # tracked for the legacy set_profile() API; it always reflects
+        # whichever name's strength is currently active (or "custom"
+        # if the strength was set directly to a non-anchor value).
+        self.strength: float = self.DEFAULT_STRENGTH
+        self.profile: str = self.DEFAULT_PROFILE
+        self._apply_strength(self.DEFAULT_STRENGTH)
 
         # ── Phase 3.D #1: captured-noise-profile state ────────────
         # ``_captured_noise_mag`` holds the locked per-bin magnitude
@@ -219,14 +241,48 @@ class SpectralSubtractionNR:
         self._capture_done_callback: Optional[Callable[[], None]] = None
 
     # ── public API ────────────────────────────────────────────────
-    def set_profile(self, name: str):
-        # Canonicalize legacy names ("aggressive") so saved QSettings
-        # from prior Lyra versions still resolve.  Unknown names are
-        # ignored (silent no-op preserves existing behavior).
-        canonical = self._CANONICAL_ALIASES.get(name, name)
-        if canonical in self.PROFILES:
-            self.profile = canonical
-            self._apply_profile()
+    def set_strength(self, value: float) -> None:
+        """Set the NR1 strength (new continuous-knob API).
+
+        ``value`` is clamped to [0.0, 1.0].  0.0 = barely-on subtle
+        subtraction; 1.0 = aggressive deep subtraction.  Each of
+        alpha / beta / noise_track / vad_gate is linearly
+        interpolated between the STRENGTH_MIN_PARAMS and
+        STRENGTH_MAX_PARAMS anchor dicts.
+
+        Side-effect: updates ``self.profile`` to the legacy name
+        whose strength the new value matches (light/medium/heavy)
+        if the value lands on an anchor, else "custom".  The legacy
+        ``profile`` field is kept around so external code that
+        still inspects it (e.g. the existing nr_profile_changed
+        signal piggy-backing) keeps working — but the new code
+        path should treat ``self.strength`` as the source of truth.
+        """
+        s = max(0.0, min(1.0, float(value)))
+        self.strength = s
+        self._apply_strength(s)
+        # Update the legacy profile-name field so old read sites
+        # still report something meaningful.  Anchor matches are
+        # exact (operator clicked a preset shortcut); anything else
+        # is reported as "custom".
+        if s == 0.0:
+            self.profile = "light"
+        elif abs(s - 0.5) < 1e-6:
+            self.profile = "medium"
+        elif s == 1.0:
+            self.profile = "heavy"
+        else:
+            self.profile = "custom"
+
+    def set_profile(self, name: str) -> None:
+        """Legacy API — accepts old discrete profile names and maps
+        them to the appropriate strength via _LEGACY_PROFILE_TO_STRENGTH.
+
+        Kept so that QSettings from older Lyra versions still load
+        cleanly.  New code should call set_strength() directly.
+        """
+        if name in self._LEGACY_PROFILE_TO_STRENGTH:
+            self.set_strength(self._LEGACY_PROFILE_TO_STRENGTH[name])
 
     def reset(self):
         """Drop all streaming state — call on mode / rate / stream
@@ -616,12 +672,21 @@ class SpectralSubtractionNR:
         return output
 
     # ── internals ─────────────────────────────────────────────────
-    def _apply_profile(self):
-        p = self.PROFILES[self.profile]
-        self._alpha = p["alpha"]
-        self._beta = p["beta"]
-        self._noise_track = p["noise_track"]
-        self._vad_gate = p["vad_gate"]
+    def _apply_strength(self, s: float) -> None:
+        """Recompute alpha / beta / noise_track / vad_gate from the
+        slider value.  Linear interpolation between
+        STRENGTH_MIN_PARAMS (s=0.0) and STRENGTH_MAX_PARAMS (s=1.0).
+        Called from set_strength() and from __init__.
+        """
+        s = max(0.0, min(1.0, float(s)))
+        lo = self.STRENGTH_MIN_PARAMS
+        hi = self.STRENGTH_MAX_PARAMS
+        def lerp(key: str) -> float:
+            return float(lo[key] + (hi[key] - lo[key]) * s)
+        self._alpha = lerp("alpha")
+        self._beta = lerp("beta")
+        self._noise_track = lerp("noise_track")
+        self._vad_gate = lerp("vad_gate")
 
     def _accumulate_capture_frame(self, mag: np.ndarray) -> None:
         """Add one frame's magnitude spectrum + total power into the
