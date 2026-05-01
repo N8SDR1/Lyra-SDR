@@ -52,6 +52,8 @@ up changes.
 - **S-Meter** — analog vs LED styles
 - **External Hardware** — N2ADR filter board, USB-BCD for linear amps
 - **TCI Server** — integration with log4OM, N1MM+, JS8Call, etc.
+- **Audio Leveler** — soft-knee compressor for taming bursts,
+  presets (Off / Light / Medium / Late Night / Custom)
 - **Audio Routing** — HL2 vs HL2+ paths, AK4951, sounddevice
 - **Keyboard Shortcuts** — all the hotkeys
 - **Troubleshooting** — common issues and their fixes

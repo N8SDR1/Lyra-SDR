@@ -105,6 +105,28 @@ and/or threaded demod.
   turn on Notch first — right-click is gated on NF state so the
   gesture stays free for other spectrum features when NF is off.
 
+## Audio sounds "squashed" or "pumping"
+
+The audio leveler is too aggressive. Audible pumping means each
+syllable triggers the compressor and you're hearing the gain
+move up and down in time with speech.
+
+**Fix:** Settings → Audio → Audio Leveler.
+
+1. Try **Light** profile (gentle, 2.5:1 ratio) — gives most of
+   the burst-control benefit without the pumping feel.
+2. Or **Off** — the tanh safety limiter still catches hard
+   clips; you just lose the sub-clip-level dynamics control.
+3. If you want to keep some leveling but smoother, pick
+   **Custom** and dial the ratio down (try 2:1 or 3:1) and
+   raise the threshold (closer to 0 dBFS — less content gets
+   compressed in the first place).
+
+Late Night profile is intentionally aggressive (8:1 ratio, lots
+of makeup); pumping is part of how it achieves the "loud peaks
+won't wake the family" effect. If it's too much for normal
+operating, drop to Medium or Light.
+
 ## ANF is killing my CW signal
 
 CW dits are tones too — ANF's LMS predictor can lock onto them
