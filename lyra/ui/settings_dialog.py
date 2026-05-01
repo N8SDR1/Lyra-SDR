@@ -1616,14 +1616,65 @@ class AudioSettingsTab(QWidget):
         """Enumerate PortAudio output devices via sounddevice. Lists
         all hostapis (MME, DirectSound, WASAPI, WDM-KS) so the
         operator can pick a specific backend if they want to override
-        Lyra's WASAPI-default preference."""
+        Lyra's WASAPI-default preference.
+
+        Error handling distinguishes between three failure modes so
+        operators (especially testers running from source rather
+        than the .exe) can self-diagnose:
+
+        1. ``ModuleNotFoundError: sounddevice`` — package isn't
+           installed.  Suggest the pip command.
+        2. ``OSError`` / ``ImportError`` from the sounddevice
+           module — usually means PortAudio DLLs are missing or
+           the binary wheel got installed for the wrong Python /
+           architecture.
+        3. ``query_devices()`` raises something else — host audio
+           system in a bad state (driver glitch, sound service
+           stopped).  Show the raw exception for diagnostic purposes.
+        """
         self._dev_combo.blockSignals(True)
         self._dev_combo.clear()
         # First entry is always "Auto (WASAPI default)" — the safe
         # default. userData=None signals "let SoundDeviceSink pick".
         self._dev_combo.addItem("Auto  (WASAPI default — recommended)", None)
+
+        # Step 1 — try to import sounddevice itself.  Most common
+        # failure mode for self-compiling testers.
         try:
             import sounddevice as sd
+        except ModuleNotFoundError:
+            self._dev_status.setText(
+                "✗  sounddevice package not installed.\n"
+                "    Open Command Prompt and run:\n"
+                "        pip install sounddevice\n"
+                "    Then restart Lyra.")
+            self._dev_status.setStyleSheet(
+                "color: #ff8c00; font-weight: 700; "
+                "font-family: Consolas, monospace; "
+                "white-space: pre-wrap;")
+            self._sync_to_radio(self.radio.pc_audio_device_index)
+            self._dev_combo.blockSignals(False)
+            return
+        except (ImportError, OSError) as e:
+            self._dev_status.setText(
+                f"✗  sounddevice module failed to load:\n"
+                f"        {e}\n"
+                f"    Likely the PortAudio binary that ships in\n"
+                f"    the sounddevice wheel didn't unpack for your\n"
+                f"    Python install.  Try:\n"
+                f"        pip install --force-reinstall sounddevice")
+            self._dev_status.setStyleSheet(
+                "color: #ff4444; font-weight: 700; "
+                "font-family: Consolas, monospace; "
+                "white-space: pre-wrap;")
+            self._sync_to_radio(self.radio.pc_audio_device_index)
+            self._dev_combo.blockSignals(False)
+            return
+
+        # Step 2 — enumerate.  query_devices() / query_hostapis()
+        # can raise PortAudioError or generic Exception if the host
+        # audio system is wedged.
+        try:
             devices = sd.query_devices()
             for idx, dev in enumerate(devices):
                 if dev.get("max_output_channels", 0) <= 0:
@@ -1634,11 +1685,27 @@ class AudioSettingsTab(QWidget):
                 label = (f"[{idx:>3}] {dev['name']}   "
                          f"({ha_name}, {ch}ch, {rate} Hz)")
                 self._dev_combo.addItem(label, idx)
-            self._dev_status.setText(
-                f"{self._dev_combo.count() - 1} output device(s) detected"
-            )
+            count = self._dev_combo.count() - 1
+            if count == 0:
+                self._dev_status.setText(
+                    "⚠  sounddevice loaded but reports zero output "
+                    "devices.  Check Windows Sound Control Panel — "
+                    "ensure at least one Playback device is enabled.")
+                self._dev_status.setStyleSheet(
+                    "color: #ff8c00; font-weight: 700;")
+            else:
+                self._dev_status.setText(
+                    f"✓  {count} output device(s) detected")
+                self._dev_status.setStyleSheet(
+                    "color: #6acb6a; font-weight: 700;")
         except Exception as e:
-            self._dev_status.setText(f"Device enumeration failed: {e}")
+            self._dev_status.setText(
+                f"✗  Device enumeration failed:\n        {e}")
+            self._dev_status.setStyleSheet(
+                "color: #ff4444; font-weight: 700; "
+                "font-family: Consolas, monospace; "
+                "white-space: pre-wrap;")
+
         self._sync_to_radio(self.radio.pc_audio_device_index)
         self._dev_combo.blockSignals(False)
         # Connect AFTER initial population so the sync above doesn't
