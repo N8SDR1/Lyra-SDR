@@ -364,26 +364,36 @@ class PythonRxChannel(DspChannel):
 
     def load_captured_profile(self, mag) -> None:
         """Install a captured-profile magnitudes array (loaded from
-        the JSON store).  Raises ValueError on size mismatch."""
+        the JSON store) into BOTH NR1 and NR2 — they share the same
+        operator-facing source-toggle, so both must be primed with
+        the profile or switching processors mid-session would lose
+        the noise reference.  Raises ValueError on size mismatch."""
         self._nr.load_captured_profile(mag)
+        self._nr2.load_captured_profile(mag)
 
     def clear_captured_profile(self) -> None:
         self._nr.clear_captured_profile()
+        self._nr2.clear_captured_profile()
 
     def set_use_captured_profile(self, on: bool) -> None:
-        """Toggle the NR noise SOURCE.
+        """Toggle the NR noise SOURCE on whichever processor is active.
 
-        When True (and a profile is loaded), NR uses the captured
-        per-bin magnitudes as the subtraction reference.  When False,
-        always uses the live VAD-tracked estimate.  Independent of
-        which profile (Light/Medium/Aggressive) is active.
+        Both NR1 and NR2 honor the captured-source toggle: when True
+        and a profile is loaded, the captured magnitudes (NR1) /
+        magnitudes-squared (NR2 = noise PSD) drive the gain math.
+        Operator-facing API doesn't care which is active — same
+        toggle, same outcome.  Live tracker keeps warming up in the
+        background so flipping off the toggle is glitch-free.
         """
         self._nr.set_use_captured_profile(bool(on))
+        self._nr2.set_use_captured_profile(bool(on))
 
     def is_using_captured_source(self) -> bool:
         """True if the source toggle is on AND a profile is loaded
         (i.e. captured magnitudes are actively driving the gain
-        math).  False otherwise."""
+        math).  Reports for whichever processor is the active one."""
+        if self._active_nr == "nr2":
+            return self._nr2.is_using_captured_source()
         return self._nr.is_using_captured_source()
 
     # ── Noise blanker proxies (Phase 3.D #2) ──────────────────────────

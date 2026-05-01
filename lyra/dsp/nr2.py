@@ -249,6 +249,22 @@ class EphraimMalahNR:
         # during speech).
         self._vad_suppression_relax: float = 0.4
 
+        # ── Captured-profile noise reference ────────────────────────
+        # When the operator captures a noise profile (📷 Cap), NR1
+        # owns the FFT-magnitude collector and stores the result as
+        # per-bin |D[k]| magnitudes.  NR2's algorithm uses POWER
+        # (λ_d, the noise PSD), so we store the captured magnitudes
+        # squared up front, in the same n_bins resolution NR2's STFT
+        # uses (FFT_SIZE = 256, hop = 128 → 129 bins, matching NR1's
+        # default).  When _use_captured_profile is True AND a
+        # profile is loaded, process() uses _captured_lambda_d in
+        # place of the live tracker; otherwise falls back to the
+        # asymmetric exponential _lambda_d.  The live tracker keeps
+        # running in the background regardless, so toggling source
+        # off mid-stream gives a warm noise estimate with no glitch.
+        self._captured_lambda_d: Optional[np.ndarray] = None
+        self._use_captured_profile: bool = False
+
     # ── Public API ───────────────────────────────────────────────
 
     def reset(self) -> None:
@@ -281,6 +297,53 @@ class EphraimMalahNR:
         default — operator opts in if they want it."""
         self.speech_aware = bool(on)
 
+    # ── Captured-profile API (mirror of NR1's surface) ──────────────
+    # Channel calls these in lockstep with NR1 so the captured-source
+    # toggle works identically regardless of which NR is the active
+    # processor.
+
+    def load_captured_profile(self, mag: np.ndarray) -> None:
+        """Install a captured-noise magnitudes array as NR2's noise
+        reference.  Stored as POWER (mag²) since MMSE-LSA operates
+        on PSD, not magnitude.
+
+        Raises ValueError on size mismatch — the captured profile
+        must match NR2's bin count (FFT_SIZE//2 + 1).
+        """
+        n_bins = self._fft // 2 + 1
+        arr = np.asarray(mag, dtype=np.float64).ravel()
+        if arr.size != n_bins:
+            raise ValueError(
+                f"NR2 captured-profile size {arr.size} doesn't match "
+                f"NR2 FFT bin count {n_bins}; resample or recapture")
+        # Floor at 1e-12 (same protection NR1 uses) and square to
+        # convert magnitude → power.
+        self._captured_lambda_d = np.maximum(arr, 1e-6) ** 2
+
+    def clear_captured_profile(self) -> None:
+        """Drop the loaded captured-profile noise reference.  After
+        this call, process() falls back to the live noise tracker
+        even if _use_captured_profile is still True."""
+        self._captured_lambda_d = None
+
+    def set_use_captured_profile(self, on: bool) -> None:
+        """Toggle whether process() uses the captured-profile noise
+        PSD as its λ_d reference.  When False (or no profile loaded),
+        the live asymmetric tracker drives the gain math — same as
+        NR2 has always done."""
+        self._use_captured_profile = bool(on)
+
+    def has_captured_profile(self) -> bool:
+        """True iff a captured-profile reference is loaded."""
+        return self._captured_lambda_d is not None
+
+    def is_using_captured_source(self) -> bool:
+        """True iff the source toggle is on AND a profile is loaded
+        (i.e. captured magnitudes are actively driving the gain
+        math)."""
+        return (self._use_captured_profile
+                and self._captured_lambda_d is not None)
+
     def process(self, audio: np.ndarray) -> np.ndarray:
         """Process one audio block.  Returns same length, float32.
 
@@ -304,6 +367,10 @@ class EphraimMalahNR:
                       + spec.imag * spec.imag).astype(np.float64)
 
             # Noise-tracker update (per-bin asymmetric smoothing).
+            # Always runs — even when the captured-source path is
+            # active — so the live estimate stays warm as a fallback
+            # the moment the operator clears or toggles off the
+            # captured profile.  Same pattern NR1 uses.
             below = mag_sq < self._lambda_d
             self._lambda_d = np.where(
                 below,
@@ -316,8 +383,17 @@ class EphraimMalahNR:
             # zero, which would explode γ.
             np.maximum(self._lambda_d, 1e-12, out=self._lambda_d)
 
+            # Pick the noise-PSD reference the gain math will use.
+            # Captured wins when the toggle is on AND a profile is
+            # loaded; otherwise the live tracker drives the math.
+            if (self._use_captured_profile
+                    and self._captured_lambda_d is not None):
+                lambda_ref = self._captured_lambda_d
+            else:
+                lambda_ref = self._lambda_d
+
             # γ — a-posteriori SNR (current frame).
-            gamma = mag_sq / self._lambda_d
+            gamma = mag_sq / lambda_ref
 
             # ξ — a-priori SNR via decision-directed smoothing.
             alpha = (self.XI_SMOOTHING_ON
@@ -325,7 +401,7 @@ class EphraimMalahNR:
                      else self.XI_SMOOTHING_OFF)
             # |G[n-1] · Y[n-1]|² / λ_d[n] — using stored prev clean
             # estimate squared (which IS |G[n-1]·Y[n-1]|² already).
-            ml_estimate = self._prev_clean_pow / self._lambda_d
+            ml_estimate = self._prev_clean_pow / lambda_ref
             # Maximum-likelihood term: max(γ - 1, 0).
             ml_term = np.maximum(gamma - 1.0, 0.0)
             xi = alpha * ml_estimate + (1.0 - alpha) * ml_term
