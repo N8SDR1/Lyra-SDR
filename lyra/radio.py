@@ -1209,6 +1209,15 @@ class Radio(QObject):
         self._agc_peak = 1e-4
         self._agc_hang_counter = 0
         self._smeter_avg_lin = 0.0
+        # Leveler envelope follower (_env_db) — without this reset,
+        # switching from a loud LSB signal to a weak CW one leaves
+        # the leveler "holding down" for ~100-200 ms while its
+        # release time-constant decays, making the first CW syllable
+        # come out unnaturally quiet.  Note that set_mode does NOT
+        # call _request_dsp_reset_full — it does its own targeted
+        # resets — so the leveler reset has to live here too,
+        # parallel to the AGC peak reset above.
+        self._leveler.reset()
         # No reassert needed — round-robin C&C keepalive in
         # HL2Stream._rx_loop keeps every register fresh.
         if not self._suppress_band_save:
@@ -3897,6 +3906,48 @@ class Radio(QObject):
         self._lna_rms = []
         self.stream_state_changed.emit(False)
 
+    def close(self) -> None:
+        """Tear everything down before app exit.
+
+        Wired to ``QApplication.aboutToQuit`` so it always runs on a
+        clean shutdown — operator hits the X, picks Quit, or the
+        process gets a graceful SIGTERM.  Idempotent: safe to call
+        twice.
+
+        Order matters:
+          1. Stop the HL2 stream + audio sink (via stop()).  Without
+             this, the radio keeps streaming UDP frames at our last
+             known TX state until C&C times out, and the AK4951 can
+             be left in a buzzy half-state for ~1 sec on next launch.
+          2. Shut down the DSP worker thread cleanly so its event
+             loop drains and the QThread joins.
+          3. Flush QSettings so band memory, last frequency, and
+             panel layout writes from the last few seconds before
+             quit actually hit disk.
+        """
+        # Step 1 — stream + audio.  stop() handles the worker-mode
+        # vs single-thread-mode sink-close ordering correctly.
+        # is_streaming is a @property (line 1054), so no parens.
+        try:
+            if self.is_streaming:
+                self.stop()
+        except Exception as exc:
+            print(f"[Radio.close] stop() raised: {exc}")
+        # Step 2 — DSP worker.  shutdown_dsp_worker is idempotent
+        # (no-op if no worker was ever started).
+        try:
+            self.shutdown_dsp_worker()
+        except Exception as exc:
+            print(f"[Radio.close] shutdown_dsp_worker raised: {exc}")
+        # Step 3 — flush QSettings so the operator's most recent
+        # changes (volume tweak, freq change in the last 100 ms,
+        # captured-profile autoload bookkeeping) actually persist.
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").sync()
+        except Exception as exc:
+            print(f"[Radio.close] QSettings sync raised: {exc}")
+
     def discover(self):
         """Auto-discover an HL2 on any local network interface.
         On failure, suggest the diagnostic probe so the operator can
@@ -4079,6 +4130,13 @@ class Radio(QObject):
         self._agc_hang_counter = 0
         self._smeter_avg_lin = 0.0
         self._binaural.reset()
+        # Leveler envelope follower (_env_db) — without this reset,
+        # switching from a loud LSB signal to a weak CW one would
+        # leave the leveler "holding down" for ~100-200 ms while the
+        # release time-constant decayed, making the CW first syllable
+        # come out unnaturally quiet.  Same motivation as the AGC
+        # peak reset two lines up.
+        self._leveler.reset()
 
     def _request_dsp_reset_channel_only(self) -> None:
         """Reset just the rx_channel — drops the in-flight audio
@@ -4100,6 +4158,11 @@ class Radio(QObject):
             self._dsp_worker.request_reset()
             return
         self._rx_channel.reset()
+        # Sink swap is an audible discontinuity for the leveler too —
+        # the new sink may have different gain coupling (e.g.,
+        # AK4951 vs PC soundcard), so flush the envelope state.
+        # Cheap reset; preserves the operator's profile + thresholds.
+        self._leveler.reset()
 
     def _on_worker_lna_peak(self, peak: float, rms: float) -> None:
         """Slot for ``DspWorker.lna_peak_update`` (B.6).

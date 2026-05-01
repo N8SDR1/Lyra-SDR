@@ -83,6 +83,19 @@ class MainWindow(QMainWindow):
         self._settings = QSettings("N8SDR", "Lyra")
         self._migrate_legacy_settings()
         self.radio = Radio()
+        # Wire Radio.close() to QApplication.aboutToQuit so the HL2
+        # stream gets stopped + audio sink closed + QSettings flushed
+        # on every clean shutdown.  Without this, force-quitting (or
+        # even a normal quit on some Windows configs) leaves the
+        # AK4951 in a buzzy half-state for ~1 sec on next launch and
+        # can drop a few seconds of band-memory/frequency writes
+        # that hadn't yet been flushed to disk.
+        try:
+            qapp = QApplication.instance()
+            if qapp is not None:
+                qapp.aboutToQuit.connect(self.radio.close)
+        except Exception as exc:
+            print(f"[app] failed to wire aboutToQuit: {exc}")
         # Phase 3.D #1 — auto-restore the captured noise profile that
         # was last active before Lyra closed (if any).  Silently no-ops
         # if the saved file is gone or incompatible.  Runs after Radio
@@ -390,6 +403,22 @@ class MainWindow(QMainWindow):
             "Uncheck to rearrange panels.")
         self.lock_panels_action.toggled.connect(self._on_lock_panels_toggled)
         view_menu.addAction(self.lock_panels_action)
+
+        view_menu.addSeparator()
+        # Recovery path for a hidden HL2 telemetry readout.  HL2's
+        # right-click menu hides itself, but once hidden the label
+        # has zero size and no longer accepts mouse events — without
+        # this menu entry the operator would have to edit QSettings
+        # to bring it back.  CPU has its own Settings checkbox so we
+        # don't include it here (deliberately leaving the Settings
+        # tickbox as the canonical CPU toggle).
+        show_readouts = QAction("Show toolbar readouts (HL2)", self)
+        show_readouts.setToolTip(
+            "Re-show the HL2 telemetry readout if it was previously "
+            "hidden via the right-click menu on the toolbar.")
+        show_readouts.triggered.connect(
+            lambda: self._set_readout_visible("hl2", True))
+        view_menu.addAction(show_readouts)
 
         view_menu.addSeparator()
         save_layout = QAction("Save current layout as my default", self)
@@ -1074,21 +1103,20 @@ class MainWindow(QMainWindow):
     }
 
     def _show_readout_menu(self, label_widget, key: str, pos):
-        """Right-click on a toolbar readout → hide / unhide menu."""
+        """Right-click on a toolbar readout → simple hide menu.
+
+        Only HL2 telemetry has the right-click affordance now —
+        CPU's show/hide lives in Settings → Radio.  Since hidden
+        labels are zero-width and don't receive mouse events,
+        we don't bother showing a re-enable entry here; the
+        recovery path is in View → Show toolbar readouts (HL2).
+        """
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
         nice = self._READOUT_LABELS.get(key, key)
         hide_act = menu.addAction(f"Hide {nice} readout")
-        hide_act.triggered.connect(lambda: self._set_readout_visible(key, False))
-        # If any readouts are currently hidden, offer a "show all" entry.
-        any_hidden = any(
-            self._settings.value(f"toolbar/readout_hidden_{k}", False, type=bool)
-            for k in self._READOUT_LABELS
-        )
-        if any_hidden:
-            menu.addSeparator()
-            show_all = menu.addAction("Show all hidden readouts")
-            show_all.triggered.connect(self._show_all_readouts)
+        hide_act.triggered.connect(
+            lambda: self._set_readout_visible(key, False))
         menu.exec(label_widget.mapToGlobal(pos))
 
     def _set_readout_visible(self, key: str, visible: bool):
@@ -1114,16 +1142,15 @@ class MainWindow(QMainWindow):
         # signal emit nobody reads).
         self._settings.setValue(f"toolbar/readout_hidden_{key}", not visible)
         self._settings.sync()
+        # Tailor the recovery hint to which readout this is — CPU has
+        # a Settings checkbox; HL2 is reachable from the View menu.
+        recovery = ("Settings → Radio → Show CPU%" if key == "cpu"
+                    else "View → Show toolbar readouts (HL2)")
         self.statusBar().showMessage(
-            f"{self._READOUT_LABELS[key]} {'hidden' if not visible else 'shown'}"
-            "  —  right-click another readout to toggle, or use 'Show all'.",
+            f"{self._READOUT_LABELS[key]} "
+            f"{'hidden' if not visible else 'shown'}  —  "
+            f"{recovery} to bring it back.",
             3000)
-
-    def _show_all_readouts(self):
-        """Restore visibility of all toolbar readouts (useful after
-        an A/B test or just to recover from accidentally hiding one)."""
-        for key in self._READOUT_LABELS:
-            self._set_readout_visible(key, True)
 
     def _apply_readout_visibility_from_settings(self):
         """Read persisted hidden-state and apply on launch — called
@@ -1850,10 +1877,10 @@ class MainWindow(QMainWindow):
         if s.contains("audio_output"):  r.set_audio_output(str(s.value("audio_output")))
         if s.contains("spectrum_auto_scale"):
             r.set_spectrum_auto_scale(
-                s.value("spectrum_auto_scale") in (True, "true", "True", 1, "1"))
+                s.value("spectrum_auto_scale", False, type=bool))
         if s.contains("waterfall_auto_scale"):
             r.set_waterfall_auto_scale(
-                s.value("waterfall_auto_scale") in (True, "true", "True", 1, "1"))
+                s.value("waterfall_auto_scale", False, type=bool))
         if s.contains("pc_audio_device"):
             v = s.value("pc_audio_device")
             try:
@@ -1866,15 +1893,15 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError):
                 pass
         if s.contains("bw_locked"):
-            r.set_bw_lock(s.value("bw_locked") in (True, "true", "True", 1, "1"))
+            r.set_bw_lock(s.value("bw_locked", False, type=bool))
         if s.contains("filter_board"):
             r.set_filter_board_enabled(
-                s.value("filter_board") in (True, "true", "True", 1, "1"))
+                s.value("filter_board", False, type=bool))
         if s.contains("usb_bcd/serial"):
             r.set_usb_bcd_serial(str(s.value("usb_bcd/serial")))
         if s.contains("usb_bcd/60m_as_40m"):
             r.set_bcd_60m_as_40m(
-                s.value("usb_bcd/60m_as_40m") in (True, "true", "True", 1, "1"))
+                s.value("usb_bcd/60m_as_40m", False, type=bool))
         # Per-band memory (last freq/mode/gain per band)
         if s.contains("band_memory"):
             import json
@@ -2026,18 +2053,17 @@ class MainWindow(QMainWindow):
             pass
         # Levels automation
         if s.contains("levels/muted"):
-            r.set_muted(s.value("levels/muted") in (True, "true", "True", 1, "1"))
+            r.set_muted(s.value("levels/muted", False, type=bool))
         if s.contains("levels/lna_auto"):
-            r.set_lna_auto(s.value("levels/lna_auto") in (True, "true", "True", 1, "1"))
+            r.set_lna_auto(s.value("levels/lna_auto", False, type=bool))
         if s.contains("levels/lna_auto_pullup"):
             r.set_lna_auto_pullup(
-                s.value("levels/lna_auto_pullup")
-                in (True, "true", "True", 1, "1"))
+                s.value("levels/lna_auto_pullup", False, type=bool))
         # Noise Reduction
         if s.contains("nr/profile"):
             r.set_nr_profile(str(s.value("nr/profile")))
         if s.contains("nr/enabled"):
-            r.set_nr_enabled(s.value("nr/enabled") in (True, "true", "True", 1, "1"))
+            r.set_nr_enabled(s.value("nr/enabled", False, type=bool))
         # APF (Audio Peaking Filter, CW only)
         if s.contains("apf/bw_hz"):
             try:
@@ -2051,7 +2077,7 @@ class MainWindow(QMainWindow):
                 pass
         if s.contains("apf/enabled"):
             r.set_apf_enabled(
-                s.value("apf/enabled") in (True, "true", "True", 1, "1"))
+                s.value("apf/enabled", False, type=bool))
         # BIN (Binaural pseudo-stereo)
         if s.contains("bin/depth"):
             try:
@@ -2060,7 +2086,7 @@ class MainWindow(QMainWindow):
                 pass
         if s.contains("bin/enabled"):
             r.set_bin_enabled(
-                s.value("bin/enabled") in (True, "true", "True", 1, "1"))
+                s.value("bin/enabled", False, type=bool))
         # DSP threading mode (Phase 3.B+, restart-required to apply).
         # Loaded BEFORE Radio's own startup-mode capture so that the
         # restored preference becomes both the current selection AND
@@ -2074,28 +2100,23 @@ class MainWindow(QMainWindow):
         # Noise-floor marker on the spectrum (default on)
         if s.contains("visuals/noise_floor_marker"):
             r.set_noise_floor_enabled(
-                s.value("visuals/noise_floor_marker")
-                in (True, "true", "True", 1, "1"))
+                s.value("visuals/noise_floor_marker", False, type=bool))
         # Band plan
         if s.contains("band_plan/region"):
             r.set_band_plan_region(str(s.value("band_plan/region")))
         if s.contains("band_plan/show_segments"):
             r.set_band_plan_show_segments(
-                s.value("band_plan/show_segments")
-                in (True, "true", "True", 1, "1"))
+                s.value("band_plan/show_segments", False, type=bool))
         if s.contains("band_plan/show_landmarks"):
             r.set_band_plan_show_landmarks(
-                s.value("band_plan/show_landmarks")
-                in (True, "true", "True", 1, "1"))
+                s.value("band_plan/show_landmarks", False, type=bool))
         if s.contains("band_plan/edge_warn"):
             r.set_band_plan_edge_warn(
-                s.value("band_plan/edge_warn")
-                in (True, "true", "True", 1, "1"))
+                s.value("band_plan/edge_warn", False, type=bool))
         # Peak markers
         if s.contains("visuals/peak_markers"):
             r.set_peak_markers_enabled(
-                s.value("visuals/peak_markers")
-                in (True, "true", "True", 1, "1"))
+                s.value("visuals/peak_markers", False, type=bool))
         if s.contains("visuals/peak_decay_dbps"):
             try:
                 r.set_peak_markers_decay_dbps(
@@ -2118,13 +2139,11 @@ class MainWindow(QMainWindow):
             r.set_peak_markers_style(str(s.value("visuals/peak_style")))
         if s.contains("visuals/peak_show_db"):
             r.set_peak_markers_show_db(
-                s.value("visuals/peak_show_db")
-                in (True, "true", "True", 1, "1"))
+                s.value("visuals/peak_show_db", False, type=bool))
         # Spectrum smoothing (display-only EWMA on the trace)
         if s.contains("visuals/spectrum_smoothing"):
             r.set_spectrum_smoothing_enabled(
-                s.value("visuals/spectrum_smoothing")
-                in (True, "true", "True", 1, "1"))
+                s.value("visuals/spectrum_smoothing", False, type=bool))
         if s.contains("visuals/spectrum_smoothing_strength"):
             try:
                 r.set_spectrum_smoothing_strength(
@@ -2162,11 +2181,11 @@ class MainWindow(QMainWindow):
             try: tci.rate_limit_hz = int(s.value("tci/rate_hz"))
             except (TypeError, ValueError): pass
         if s.contains("tci/send_initial"):
-            tci.send_initial_state_on_connect = s.value("tci/send_initial") in (True, "true", "True", 1, "1")
+            tci.send_initial_state_on_connect = s.value("tci/send_initial", False, type=bool)
         if s.contains("tci/callsign"):    tci.own_callsign = str(s.value("tci/callsign"))
         if s.contains("tci/log"):
-            tci.log_traffic = s.value("tci/log") in (True, "true", "True", 1, "1")
-        if s.contains("tci/running") and s.value("tci/running") in (True, "true", "True", 1, "1"):
+            tci.log_traffic = s.value("tci/log", False, type=bool)
+        if s.contains("tci/running") and s.value("tci/running", False, type=bool):
             self.pnl_tci.enable_btn.setChecked(True)
         self.pnl_tci._update_status()
         # Apply persisted toolbar-readout visibility (was a previously
