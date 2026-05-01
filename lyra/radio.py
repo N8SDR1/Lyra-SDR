@@ -2201,14 +2201,16 @@ class Radio(QObject):
 
     @staticmethod
     def neural_nr_available() -> bool:
-        """Probe whether the DeepFilterNet neural-NR backend is
-        importable.  Safe to call anywhere — if the probe fails we
-        return False rather than raising.
+        """Probe whether the onnxruntime-based neural NR backend is
+        usable — both the runtime AND the model file must be
+        present.  Safe to call anywhere; returns False on any
+        failure rather than raising.
 
-        DeepFilterNet's import root is ``df`` (pip install
-        ``deepfilternet``).  RNNoise integration was considered
-        and dropped — DFN is 48 kHz native (matches Lyra's audio
-        chain) and trained on broader noise corpora.
+        Implementation lives in ``lyra.dsp.nr_neural``.  Switched
+        from PyTorch + DeepFilterNet to onnxruntime in the
+        post-v0.0.6 cleanup pass: same operator-facing semantics
+        ('is Neural NR available'), much friendlier dependency
+        story (no Rust, no PyTorch, wheels for Python 3.10..3.14).
         """
         try:
             from lyra.dsp.nr_neural import is_available
@@ -2355,9 +2357,9 @@ class Radio(QObject):
         # processor the operator hasn't consented to enable.
         if backend == "neural":
             if not self.neural_nr_available():
-                print("[Radio] Neural NR requested but "
-                      "deepfilternet not installed — falling back "
-                      "to NR1.  Install with: pip install deepfilternet")
+                print("[Radio] Neural NR unavailable (onnxruntime "
+                      "or model file missing) — falling back to "
+                      "NR1.  Install with: pip install onnxruntime")
                 backend = "nr1"
             elif not self.neural_acknowledged:
                 print("[Radio] Neural NR requested but operator "

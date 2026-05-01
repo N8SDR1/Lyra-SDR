@@ -378,18 +378,22 @@ class PythonRxChannel(DspChannel):
         if profile == "nr2":
             self._active_nr = "nr2"
         elif profile == "neural":
-            # Verify the package is importable before flipping the
-            # routing — otherwise we'd silently route audio through
-            # a stub that returns input unchanged.
-            from lyra.dsp.nr_neural import is_available
+            # Verify onnxruntime + model file are both available
+            # before flipping the routing — otherwise we'd silently
+            # route audio through a stub that returns input
+            # unchanged.
+            from lyra.dsp.nr_neural import (
+                is_available, import_error_message)
             if is_available():
                 self._active_nr = "neural"
             else:
                 # Soft-fall to NR1 with a log line.  The Settings
-                # UI will surface the install instructions and the
-                # right-click menu will show the option as disabled.
-                print("[Channel] Neural NR requested but "
-                      "deepfilternet not installed — routing to NR1")
+                # UI surfaces the install instructions; here we
+                # just log the actual import-error message so
+                # operators running from a console can diagnose.
+                err = import_error_message() or "unknown reason"
+                print(f"[Channel] Neural NR unavailable ({err}) — "
+                      f"routing to NR1")
                 self._active_nr = "nr1"
         else:
             self._active_nr = "nr1"

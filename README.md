@@ -90,50 +90,48 @@ full attribution and license history.
 
 ### Neural noise reduction (opt-in, post-v0.0.6)
 
-DeepFilterNet integration is wired but the package is **not bundled**
-with the installer.  Operators who want it run:
+Neural NR is wired via **onnxruntime** + a public ONNX noise-
+suppression model (default: Microsoft NSNet2, MIT-licensed).
+Neither the ONNX runtime nor the model are bundled — operators
+who want Neural NR install separately:
 
 ```
-pip install deepfilternet
+pip install onnxruntime
 ```
 
-(~500 MB, includes PyTorch).  After installing, restart Lyra and:
+(~150 MB).  Then download the NSNet2 model (~3 MB) from
+https://github.com/microsoft/DNS-Challenge releases, save as
+`nsnet2-20ms-baseline.onnx` in Lyra's `assets/models/` folder.
 
-> **Self-compiling testers — Rust requirement on latest DFN:**
-> The newest DeepFilterNet (0.5.6+) ships its inner Rust extension
-> (`deepfilterlib`) as a source distribution.  If pip tries to
-> compile it and fails with "Cargo not on PATH", you have three
-> options:
->   1. Pin to an older release: `pip install deepfilternet==0.5.5`
->      (pre-built wheels for Python 3.10-3.12)
->   2. Install Rust via https://rustup.rs/, open a new Command
->      Prompt, and re-run the install
->   3. Use Python 3.11 or 3.12 — Python 3.13/3.14 is currently
->      too new for most of the PyTorch / DFN wheel ecosystem
->
-> The EXE installer bundles its own Python 3.11 so end-users
-> downloading the .exe never see this issue.
+After both steps:
 
-1. Settings → Noise → "Neural NR (DeepFilterNet)"
-2. Read the orange-bordered warning panel (latency / CPU implications)
-3. Tick **"I understand the latency / CPU implications and want to test or enable Neural NR"**
+1. Settings → Noise → "Neural NR"
+2. Read the orange-bordered warning panel (latency / CPU)
+3. Tick **"I understand…"**
 4. Click **"🔬 Test on your system (5 sec)"**
-5. Read the color-coded verdict (green / yellow / orange / red)
-6. If your hardware can handle it, right-click the NR button on the
-   DSP+Audio panel and pick "Neural" as the backend
+5. If green/yellow verdict, right-click the NR button on the
+   DSP+Audio panel and pick "Neural"
 
 Notes:
 
-- Native 48 kHz, no resampling (matches Lyra's audio chain)
-- ~30-50 ms additional latency vs NR1/NR2
-- 5-15 % CPU on a modern desktop in CPU mode; < 1 % CPU + ~100 MB VRAM
-  with a CUDA GPU
-- Soft-fails to NR1 if `deepfilternet` isn't installed or if
-  the operator hasn't acknowledged the warning
-- Works best on SSB voice in heavy noise.  CW / digital modes don't
-  benefit (model trained on speech corpora).
-- A small `🧠 12.3 ms` badge appears on the toolbar header when
-  Neural NR is active, showing real-time per-frame inference cost
+- 16 kHz native (Lyra resamples 48k↔16k via scipy.signal.resample_poly)
+- ~20-40 ms additional latency vs NR1/NR2
+- 2-8 % CPU on a modern desktop; <1 % with DirectML or CUDA GPU
+- DirectML support means AMD + Intel GPUs work, not just NVIDIA
+- Soft-fails to NR1 if `onnxruntime` or the model file is missing
+- Works best on SSB voice in heavy noise.  CW / digital modes
+  don't benefit (model trained on speech)
+- A `🧠 12.3 ms` badge appears on the toolbar header when active
+
+**Why onnxruntime, not PyTorch / DeepFilterNet?**  PyTorch wheels
+lag new Python releases by 6-12 months — testers on bleeding-edge
+Python (3.13+) couldn't install at all.  DeepFilterNet's Rust
+extension also requires a Cargo toolchain on systems without
+pre-built wheels.  Switching to onnxruntime sidesteps both: pre-
+built wheels exist for Python 3.10..3.14, no Rust needed, no
+PyTorch needed, smaller install, broader GPU vendor support.
+Future Lyra releases may add DeepFilterNet or other models as
+additional onnxruntime-loaded options.
 
 ### Minimum Windows version
 

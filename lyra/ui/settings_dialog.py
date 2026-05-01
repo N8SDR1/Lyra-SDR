@@ -3596,20 +3596,24 @@ class NoiseSettingsTab(QWidget):
             "padding: 0 6px; }")
         wpv = QVBoxLayout(warn_panel)
         warn_text = QLabel(
-            "Neural NR (DeepFilterNet) is a <b>heavy DSP stage</b>. "
-            "Compared to NR1/NR2/LMS, it adds:"
+            "Neural NR is a <b>heavier DSP stage</b> than NR1/NR2/"
+            "LMS.  Compared to those, it adds:"
             "<ul>"
-            "<li><b>Latency:</b> ~30-50 ms per audio block "
+            "<li><b>Latency:</b> ~20-40 ms per audio block "
             "(vs ~6 ms for the rest of the chain combined)</li>"
-            "<li><b>CPU cost:</b> 5-15 % of one core in CPU mode "
+            "<li><b>CPU cost:</b> 2-8 % of one core in CPU mode "
             "on a modern desktop; can saturate weaker systems if "
             "stacked with NR2 + LMS</li>"
-            "<li><b>RAM:</b> ~100 MB for the model</li>"
-            "<li><b>GPU:</b> CUDA / DirectML auto-used when "
-            "available; CPU fallback is automatic</li>"
+            "<li><b>RAM:</b> ~30-100 MB depending on the model</li>"
+            "<li><b>GPU:</b> DirectML (AMD/Intel/NVIDIA on Windows) "
+            "or CUDA (NVIDIA) auto-used when available; CPU "
+            "fallback is automatic</li>"
             "</ul>"
-            "On a Raspberry Pi / Atom-class CPU, expect audio "
-            "dropouts.  Run the benchmark below before deciding.<br>"
+            "Default model is Microsoft NSNet2 (MIT-licensed, "
+            "16 kHz native — Lyra resamples 48k↔16k internally).  "
+            "On a Raspberry Pi / Atom-class CPU, expect occasional "
+            "audio dropouts.  Run the benchmark below before "
+            "enabling on weak hardware.<br>"
             "Best for SSB voice in heavy noise.  CW and digital "
             "modes don't benefit (model trained on speech).")
         warn_text.setWordWrap(True)
@@ -3623,35 +3627,43 @@ class NoiseSettingsTab(QWidget):
         dfn_available = is_available()
         if dfn_available:
             inst_text = QLabel(
-                "✓  <b>DeepFilterNet is installed</b> and ready to "
-                "use.  Pick it from the NR backend right-click "
-                "menu on the DSP+Audio panel.")
+                "✓  <b>Neural NR is installed</b> and the model "
+                "file was found.  Pick it from the NR backend "
+                "right-click menu on the DSP+Audio panel.")
             inst_text.setStyleSheet(
                 "color: #6acb6a; font-size: 12px;")
         else:
-            inst_text = QLabel(
-                "✗  <b>DeepFilterNet not installed.</b><br><br>"
-                "Open a Command Prompt or Terminal and run:<br>"
-                "<code style='background:#222;padding:3px 6px;"
-                "border-radius:3px;color:#50d0ff;'>"
-                "pip install deepfilternet</code><br>"
-                "Approximately 500 MB (PyTorch + model weights).<br><br>"
-                "<b>If pip fails with 'Cargo not on PATH'</b> "
-                "(latest DFN ships a Rust source dist), three "
-                "options:<br>"
-                "&nbsp;&nbsp;1. Try an older release with pre-built "
-                "wheels:<br>"
-                "&nbsp;&nbsp;&nbsp;&nbsp;<code style='background:#222;"
-                "padding:2px 4px;border-radius:3px;color:#50d0ff;'>"
-                "pip install deepfilternet==0.5.5</code><br>"
-                "&nbsp;&nbsp;2. Install Rust toolchain from "
-                "<a href='https://rustup.rs/' "
-                "style='color:#50d0ff;'>rustup.rs</a>, open a "
-                "fresh Command Prompt, retry<br>"
-                "&nbsp;&nbsp;3. Use Python 3.11 or 3.12 — newer "
-                "Python releases (3.13+) currently lack pre-built "
-                "wheels for most of the ML ecosystem<br><br>"
-                "Restart Lyra after installing.")
+            from lyra.dsp.nr_neural import (
+                import_error_message, _model_path,
+                DEFAULT_MODEL_FILENAME)
+            err = import_error_message()
+            # Two distinct failure modes — guide differently for each.
+            if "onnxruntime" in err.lower():
+                inst_text = QLabel(
+                    "✗  <b>onnxruntime not installed.</b><br><br>"
+                    "Open a Command Prompt or Terminal and run:<br>"
+                    "<code style='background:#222;padding:3px 6px;"
+                    "border-radius:3px;color:#50d0ff;'>"
+                    "pip install onnxruntime</code><br>"
+                    "(~150 MB, no Rust toolchain or PyTorch needed; "
+                    "wheels available for Python 3.10..3.14).<br><br>"
+                    "Restart Lyra after installing.")
+            else:
+                inst_text = QLabel(
+                    "⚠  <b>onnxruntime is installed but the "
+                    "neural-NR model file is missing.</b><br><br>"
+                    f"Lyra expects the model at:<br>"
+                    f"<code style='background:#222;padding:3px 6px;"
+                    f"border-radius:3px;color:#50d0ff;font-size:11px;'>"
+                    f"{_model_path()}</code><br><br>"
+                    "<b>Default model:</b> Microsoft NSNet2 "
+                    "(MIT-licensed, ~3 MB).  Download from "
+                    "<a href='https://github.com/microsoft/"
+                    "DNS-Challenge' style='color:#50d0ff;'>"
+                    "DNS-Challenge releases</a>, save as "
+                    f"<code>{DEFAULT_MODEL_FILENAME}</code> in the "
+                    "directory above.<br><br>"
+                    "Restart Lyra after placing the model.")
             inst_text.setOpenExternalLinks(True)
             inst_text.setStyleSheet(
                 "color: #ff8c00; font-size: 12px;")
