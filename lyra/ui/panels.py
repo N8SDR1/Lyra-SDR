@@ -1292,6 +1292,18 @@ class DspPanel(GlassPanel):
         self.mute_btn.toggled.connect(self.radio.set_muted)
         levels.addWidget(self.mute_btn)
 
+        # DSP Settings shortcut — moved here from the DSP buttons
+        # row below per operator UX request (more reachable spot
+        # next to the levels controls; the DSP row stays focused
+        # on actual DSP toggles).
+        levels.addSpacing(8)
+        self.dsp_settings_btn = QPushButton("DSP Settings…")
+        self.dsp_settings_btn.setFixedWidth(140)
+        self.dsp_settings_btn.setToolTip(
+            "Open DSP settings (AGC profile + threshold, NB/NR/EQ)")
+        self.dsp_settings_btn.clicked.connect(self._open_dsp_settings)
+        levels.addWidget(self.dsp_settings_btn)
+
         levels.addStretch(1)
         self.content_layout().addLayout(levels)
 
@@ -1562,14 +1574,11 @@ class DspPanel(GlassPanel):
 
         dsp_row.addStretch(1)
 
-        # Shortcut to Settings → DSP tab. Wider so "DSP Settings…" fits
-        # comfortably with the default button padding.
-        self.dsp_settings_btn = QPushButton("DSP Settings…")
-        self.dsp_settings_btn.setFixedWidth(140)
-        self.dsp_settings_btn.setToolTip(
-            "Open DSP settings (AGC profile + threshold, NB/NR/EQ)")
-        self.dsp_settings_btn.clicked.connect(self._open_dsp_settings)
-        dsp_row.addWidget(self.dsp_settings_btn)
+        # NOTE: the DSP Settings shortcut button used to live here at
+        # the right end of the DSP buttons row — it moved up to the
+        # levels row (next to MUTE) per operator UX feedback.  This
+        # row now ends with a stretch so the buttons + counters +
+        # AGC indicator stay left-aligned.
 
         self.content_layout().addLayout(dsp_row)
 
@@ -1605,34 +1614,27 @@ class DspPanel(GlassPanel):
             "}")
         self.nr_source_badge.clicked.connect(
             self._on_nr_source_badge_clicked)
-        nr_status_row = QHBoxLayout()
-        nr_status_row.setContentsMargins(0, 0, 0, 0)
-        nr_status_row.setSpacing(4)
-        # Capture button leads the row (was originally on the DSP
-        # buttons row above; moved here so all noise-profile
-        # controls cluster together).  Then the source badge fills
-        # the remaining horizontal space so the row balances even
-        # when the badge text is short.
-        nr_status_row.addWidget(self.nr_cap_btn)
-        nr_status_row.addWidget(self.nr_source_badge, 1)
-        self.content_layout().addLayout(nr_status_row)
 
-        # ── NR2 aggression slider (Phase 3.D #4) ─────────────────
-        # Sits on its own sub-row below the noise-controls row.
-        # Visible only when the active NR profile is "nr2" — when
-        # operator picks Light/Medium/Aggressive/Neural, this row
-        # hides to keep the panel uncluttered.  Slider is the
-        # primary tunable; smoothing + speech-aware checkboxes
-        # live in Settings → Noise tab (less-frequently-touched).
-        self.nr2_row_widget = QWidget()
-        nr2_row = QHBoxLayout(self.nr2_row_widget)
-        nr2_row.setContentsMargins(0, 2, 0, 0)
-        nr2_row.setSpacing(6)
-        nr2_label = QLabel("NR2 strength:")
-        nr2_label.setStyleSheet(
+        # ── Noise-controls sub-row (Phase 3.D #4 layout pass) ────
+        # Single horizontal row that hosts all noise-toolkit panel
+        # controls.  Per operator UX feedback the row is now:
+        #
+        #   [NR2 strength: ───── 7%]   [📷 Cap]   [Source: ...   ⇄]
+        #
+        # NR2 strength widgets are constructed first but only added
+        # to the row layout when nr_profile == "nr2"; otherwise the
+        # cap button is left-aligned and the source badge takes the
+        # available width.  Width-constrained: NR2 slider gets a
+        # fixed sensible width (similar to AF/Vol slider width)
+        # rather than stretching to fill, and the source badge gets
+        # a maximum width so it doesn't span the entire panel.
+
+        # Build NR2 strength widgets — added to the row dynamically
+        # below depending on whether NR2 is active.
+        self._nr2_label_widget = QLabel("NR2 strength:")
+        self._nr2_label_widget.setStyleSheet(
             "color: #cdd9e5; font-family: 'Segoe UI', sans-serif; "
             "font-size: 11px;")
-        nr2_row.addWidget(nr2_label)
         # Slider maps integer 0..150 → aggression 0.0..1.5 (×100
         # internal scaling for 0.01-step precision).
         self.nr2_agg_slider = QSlider(Qt.Horizontal)
@@ -1643,6 +1645,10 @@ class DspPanel(GlassPanel):
         self.nr2_agg_slider.setPageStep(25)
         self.nr2_agg_slider.setTickPosition(QSlider.TicksBelow)
         self.nr2_agg_slider.setTickInterval(50)
+        # Constrain width — similar to AF/Vol/Bal sliders, doesn't
+        # stretch to fill.  Operator can still drag through full
+        # 0..150 range; the precision is fine at this width.
+        self.nr2_agg_slider.setFixedWidth(160)
         self.nr2_agg_slider.setToolTip(
             "NR2 suppression strength.\n"
             "  0   = unity gain (effectively NR off)\n"
@@ -1653,24 +1659,46 @@ class DspPanel(GlassPanel):
             "(Light/Medium/Aggressive) and NR2.")
         self.nr2_agg_slider.valueChanged.connect(
             self._on_nr2_agg_slider)
-        nr2_row.addWidget(self.nr2_agg_slider, 1)
         self.nr2_agg_label = QLabel(
             f"{int(round(radio.nr2_aggression * 100))} %")
-        self.nr2_agg_label.setMinimumWidth(50)
+        self.nr2_agg_label.setFixedWidth(40)
         self.nr2_agg_label.setStyleSheet(
             "color: #50d0ff; font-family: Consolas, monospace; "
             "font-weight: 700; font-size: 11px;")
-        nr2_row.addWidget(self.nr2_agg_label)
-        self.content_layout().addWidget(self.nr2_row_widget)
-        # Hide by default; show only when nr_profile == "nr2".
-        self.nr2_row_widget.setVisible(radio.nr_profile == "nr2")
-        # Two-way sync so the slider mirrors Radio's state when the
-        # operator changes it via Settings or QSettings autoload.
+
+        # Source badge gets a max width so it doesn't span the
+        # whole panel — looks visually balanced with the cap
+        # button + nr2 strider.  ~360 px fits the typical
+        # "Captured: <name>  ·  3h old  ·  80m LSB  ⇄" string with
+        # margin to spare; longer profile names truncate
+        # gracefully via Qt's text-eliding.
+        self.nr_source_badge.setMaximumWidth(360)
+
+        nr_status_row = QHBoxLayout()
+        nr_status_row.setContentsMargins(0, 0, 0, 0)
+        nr_status_row.setSpacing(6)
+        # Add NR2 widgets first (visible only when NR2 is active).
+        nr_status_row.addWidget(self._nr2_label_widget)
+        nr_status_row.addWidget(self.nr2_agg_slider)
+        nr_status_row.addWidget(self.nr2_agg_label)
+        nr_status_row.addSpacing(8)
+        nr_status_row.addWidget(self.nr_cap_btn)
+        nr_status_row.addWidget(self.nr_source_badge)
+        # Stretch at the end so all widgets stay left-aligned and
+        # don't try to fill horizontal space.
+        nr_status_row.addStretch(1)
+        self.content_layout().addLayout(nr_status_row)
+        # Apply initial visibility based on current NR profile.
+        is_nr2 = (radio.nr_profile == "nr2")
+        self._nr2_label_widget.setVisible(is_nr2)
+        self.nr2_agg_slider.setVisible(is_nr2)
+        self.nr2_agg_label.setVisible(is_nr2)
+        # Two-way sync so the slider mirrors Radio's state.
         radio.nr2_aggression_changed.connect(
             self._on_nr2_agg_signal)
-        # Show/hide the row when the active NR profile changes.
+        # Show/hide NR2 widgets when active NR profile changes.
         radio.nr_profile_changed.connect(
-            lambda name: self.nr2_row_widget.setVisible(name == "nr2"))
+            self._refresh_nr2_panel_visibility)
         # Refresh on any of the events that affect what the badge
         # should display.
         radio.nr_use_captured_profile_changed.connect(
@@ -2211,6 +2239,19 @@ class DspPanel(GlassPanel):
             self.nr2_agg_slider.setValue(target)
             self.nr2_agg_slider.blockSignals(False)
         self.nr2_agg_label.setText(f"{target} %")
+
+    def _refresh_nr2_panel_visibility(self, profile: str | None = None) -> None:
+        """Show the NR2 strength slider only when NR2 is the active
+        profile. Called on construction and on every nr_profile_changed.
+        """
+        try:
+            name = profile if profile is not None else self.radio.nr_profile
+        except Exception:
+            name = "medium"
+        is_nr2 = (name == "nr2")
+        self._nr2_label_widget.setVisible(is_nr2)
+        self.nr2_agg_slider.setVisible(is_nr2)
+        self.nr2_agg_label.setVisible(is_nr2)
 
     # ── NB (Noise Blanker) handlers — Phase 3.D #2 ───────────────────
 
