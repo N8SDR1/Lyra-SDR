@@ -3511,6 +3511,128 @@ class NoiseSettingsTab(QWidget):
         sqv.addWidget(sq_hint)
         v.addWidget(grp_sq)
 
+        # ── Neural NR (DeepFilterNet) ─────────────────────────────
+        # This is a heavy DSP stage — operators need to read the
+        # warnings panel BEFORE enabling.  The whole group is
+        # disabled until the operator ticks "I understand".
+        grp_neural = QGroupBox("Neural NR (DeepFilterNet)")
+        nv = QVBoxLayout(grp_neural)
+        nv.setSpacing(8)
+
+        # Highlighted warning panel — orange-bordered, very visible.
+        warn_panel = QGroupBox("⚠  Read before enabling")
+        warn_panel.setStyleSheet(
+            "QGroupBox { border: 1px solid #ff8c00; "
+            "background-color: rgba(255,140,0,0.06); "
+            "border-radius: 6px; padding: 8px; margin-top: 6px; } "
+            "QGroupBox::title { color: #ff8c00; font-weight: 700; "
+            "padding: 0 6px; }")
+        wpv = QVBoxLayout(warn_panel)
+        warn_text = QLabel(
+            "Neural NR (DeepFilterNet) is a <b>heavy DSP stage</b>. "
+            "Compared to NR1/NR2/LMS, it adds:"
+            "<ul>"
+            "<li><b>Latency:</b> ~30-50 ms per audio block "
+            "(vs ~6 ms for the rest of the chain combined)</li>"
+            "<li><b>CPU cost:</b> 5-15 % of one core in CPU mode "
+            "on a modern desktop; can saturate weaker systems if "
+            "stacked with NR2 + LMS</li>"
+            "<li><b>RAM:</b> ~100 MB for the model</li>"
+            "<li><b>GPU:</b> CUDA / DirectML auto-used when "
+            "available; CPU fallback is automatic</li>"
+            "</ul>"
+            "On a Raspberry Pi / Atom-class CPU, expect audio "
+            "dropouts.  Run the benchmark below before deciding.<br>"
+            "Best for SSB voice in heavy noise.  CW and digital "
+            "modes don't benefit (model trained on speech).")
+        warn_text.setWordWrap(True)
+        warn_text.setStyleSheet("color: #eaf4ff; line-height: 1.6;")
+        warn_text.setTextFormat(Qt.RichText)
+        wpv.addWidget(warn_text)
+        nv.addWidget(warn_panel)
+
+        # Install instructions panel.
+        from lyra.dsp.nr_neural import is_available, import_error_message
+        dfn_available = is_available()
+        if dfn_available:
+            inst_text = QLabel(
+                "✓  <b>DeepFilterNet is installed</b> and ready to "
+                "use.  Pick it from the NR backend right-click "
+                "menu on the DSP+Audio panel.")
+            inst_text.setStyleSheet(
+                "color: #6acb6a; font-size: 12px;")
+        else:
+            inst_text = QLabel(
+                "✗  <b>DeepFilterNet not installed.</b><br>"
+                "Open a Command Prompt or Terminal and run:<br>"
+                "<code style='background:#222;padding:3px 6px;"
+                "border-radius:3px;color:#50d0ff;'>"
+                "pip install deepfilternet</code><br>"
+                "Approximately 500 MB download (PyTorch + model "
+                "weights).  Restart Lyra after installing.")
+            inst_text.setStyleSheet(
+                "color: #ff8c00; font-size: 12px;")
+        inst_text.setWordWrap(True)
+        inst_text.setTextFormat(Qt.RichText)
+        nv.addWidget(inst_text)
+
+        # Acknowledgment checkbox — gates the benchmark + enable.
+        s_neural = QSettings("N8SDR", "Lyra")
+        self.neural_ack_chk = QCheckBox(
+            "I understand the latency / CPU implications and "
+            "want to test or enable Neural NR")
+        self.neural_ack_chk.setChecked(bool(
+            s_neural.value("noise/neural_acknowledged", False,
+                           type=bool)))
+        self.neural_ack_chk.setStyleSheet("font-weight: 600;")
+        self.neural_ack_chk.toggled.connect(self._on_neural_ack)
+        nv.addWidget(self.neural_ack_chk)
+
+        # Device picker (auto / CPU / GPU).
+        dev_row = QHBoxLayout()
+        dev_row.addWidget(QLabel("Device:"))
+        self.neural_dev_combo = QComboBox()
+        self.neural_dev_combo.addItem("Auto (prefer GPU)", "auto")
+        self.neural_dev_combo.addItem("CPU only", "cpu")
+        self.neural_dev_combo.addItem("GPU only (CUDA)", "cuda")
+        cur_dev = str(s_neural.value(
+            "noise/neural_device", "auto", type=str))
+        for i in range(self.neural_dev_combo.count()):
+            if self.neural_dev_combo.itemData(i) == cur_dev:
+                self.neural_dev_combo.setCurrentIndex(i)
+                break
+        self.neural_dev_combo.currentIndexChanged.connect(
+            self._on_neural_device_changed)
+        dev_row.addWidget(self.neural_dev_combo)
+        dev_row.addStretch(1)
+        nv.addLayout(dev_row)
+
+        # Benchmark row — button + result label.
+        bench_row = QHBoxLayout()
+        self.neural_bench_btn = QPushButton(
+            "🔬  Test on your system (5 sec)")
+        self.neural_bench_btn.setMinimumWidth(220)
+        self.neural_bench_btn.clicked.connect(
+            self._on_neural_benchmark)
+        bench_row.addWidget(self.neural_bench_btn)
+        bench_row.addStretch(1)
+        nv.addLayout(bench_row)
+
+        self.neural_bench_label = QLabel(
+            "Click the test button to measure actual cost on "
+            "your hardware.")
+        self.neural_bench_label.setWordWrap(True)
+        self.neural_bench_label.setStyleSheet(
+            "color: #8a9aac; font-size: 12px; "
+            "font-style: italic; padding: 4px;")
+        nv.addWidget(self.neural_bench_label)
+
+        # Initial enabled-state — benchmark + device picker only
+        # active when the operator has acknowledged the warning AND
+        # the package is installed.
+        self._refresh_neural_controls_enabled()
+        v.addWidget(grp_neural)
+
         # ── Right-column reassignments ───────────────────────────
         # The above v.addWidget(grp_xxx) calls landed grp_nb,
         # grp_anf, grp_nr2, method_box, grp_lms, and grp_sq in the
@@ -3524,12 +3646,14 @@ class NoiseSettingsTab(QWidget):
         col_left.removeWidget(method_box)
         col_left.removeWidget(grp_lms)
         col_left.removeWidget(grp_sq)
+        col_left.removeWidget(grp_neural)
         col_right.addWidget(grp_nb)
         col_right.addWidget(grp_anf)
         col_right.addWidget(grp_nr2)
         col_right.addWidget(method_box)
         col_right.addWidget(grp_lms)
         col_right.addWidget(grp_sq)
+        col_right.addWidget(grp_neural)
         # Stretch on both columns so the groups stack from the top
         # rather than spreading to fill.  Without this, the layout
         # tries to vertically distribute the groups across the
@@ -3782,6 +3906,100 @@ class NoiseSettingsTab(QWidget):
             self.sq_thr_slider.setValue(target)
             self.sq_thr_slider.blockSignals(False)
         self.sq_thr_label.setText(f"{target}")
+
+    # ── Neural NR section handlers ───────────────────────────────
+
+    def _on_neural_ack(self, on: bool) -> None:
+        """Operator (un)acknowledges the latency / CPU warning."""
+        s = self._QSettings("N8SDR", "Lyra")
+        s.setValue("noise/neural_acknowledged", bool(on))
+        self._refresh_neural_controls_enabled()
+
+    def _on_neural_device_changed(self, idx: int) -> None:
+        dev = self.neural_dev_combo.itemData(idx) or "auto"
+        s = self._QSettings("N8SDR", "Lyra")
+        s.setValue("noise/neural_device", dev)
+
+    def _refresh_neural_controls_enabled(self) -> None:
+        """Benchmark + device picker only active when the operator
+        has acknowledged the warning AND the package is installed."""
+        from lyra.dsp.nr_neural import is_available
+        ok = self.neural_ack_chk.isChecked() and is_available()
+        self.neural_bench_btn.setEnabled(ok)
+        self.neural_dev_combo.setEnabled(ok)
+
+    def _on_neural_benchmark(self) -> None:
+        """Run the DFN benchmark on the operator's hardware.  This
+        spins for ~5 seconds processing synthetic audio, then
+        reports actual measured latency + CPU cost."""
+        from PySide6.QtWidgets import QApplication
+        from lyra.dsp.nr_neural import benchmark
+        # Lock the button so impatient operators don't double-click.
+        self.neural_bench_btn.setEnabled(False)
+        self.neural_bench_btn.setText("🔬  Running benchmark...")
+        self.neural_bench_label.setText(
+            "Loading model + generating test audio... please wait.")
+        QApplication.processEvents()
+        device = self.neural_dev_combo.currentData() or "auto"
+        try:
+            result = benchmark(duration_sec=5.0, device=device)
+        except Exception as exc:
+            self.neural_bench_label.setText(
+                f"Benchmark crashed: {exc}")
+            self.neural_bench_label.setStyleSheet(
+                "color: #ff4444; font-size: 12px; padding: 4px;")
+            self.neural_bench_btn.setText(
+                "🔬  Test on your system (5 sec)")
+            self.neural_bench_btn.setEnabled(True)
+            return
+        # Pretty-print the result.
+        if not result["available"] or result["error"]:
+            txt = (f"<b>✗ Benchmark failed:</b> "
+                   f"{result.get('error') or 'unknown error'}")
+            color = "#ff4444"
+        else:
+            cpu = result["cpu_pct_estimate"]
+            ms = result["avg_frame_ms"]
+            dev_act = result["device_actual"]
+            load_s = result["load_time_sec"]
+            # Verdict — color-coded guidance.
+            if cpu < 30:
+                verdict_color = "#6acb6a"
+                verdict = (
+                    "<b>✓ Plenty of headroom</b> — Neural NR can run "
+                    "alongside NR2 + LMS without dropouts.")
+            elif cpu < 60:
+                verdict_color = "#ffd700"
+                verdict = (
+                    "<b>⚠ Moderate cost</b> — Neural NR will work "
+                    "but stacking it with NR2 + LMS may stress the "
+                    "audio thread.  Consider running it solo.")
+            elif cpu < 90:
+                verdict_color = "#ff8c00"
+                verdict = (
+                    "<b>⚠ Heavy cost</b> — Neural NR is borderline "
+                    "real-time on this system.  Audio dropouts "
+                    "likely if you stack it with other DSP.")
+            else:
+                verdict_color = "#ff4444"
+                verdict = (
+                    "<b>✗ Not recommended</b> — Neural NR can't keep "
+                    "up with audio rate on this system.  Use NR2 "
+                    "instead, or upgrade to a system with a GPU.")
+            txt = (
+                f"<b>Device:</b> {dev_act}  ·  "
+                f"<b>Load:</b> {load_s:.1f}s  ·  "
+                f"<b>Per frame:</b> {ms:.1f} ms  ·  "
+                f"<b>CPU:</b> ~{cpu:.0f}% real-time<br>"
+                f"<span style='color:{verdict_color}'>{verdict}</span>")
+            color = "#eaf4ff"
+        self.neural_bench_label.setText(txt)
+        self.neural_bench_label.setStyleSheet(
+            f"color: {color}; font-size: 12px; padding: 4px;")
+        self.neural_bench_label.setTextFormat(Qt.RichText)
+        self.neural_bench_btn.setText(
+            "🔬  Test on your system (5 sec)")
+        self.neural_bench_btn.setEnabled(True)
 
 
 class WxAlertsSettingsTab(QWidget):

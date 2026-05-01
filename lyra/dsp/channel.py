@@ -251,10 +251,18 @@ class PythonRxChannel(DspChannel):
         # menu.
         from lyra.dsp.nr2 import EphraimMalahNR
         self._nr2 = EphraimMalahNR(rate=self.audio_rate)
+        # Neural NR — DeepFilterNet wrapper.  Constructed
+        # unconditionally; the underlying torch model loads lazily
+        # only on first process() call when the operator actually
+        # selects "neural" as the active NR, so creating the
+        # object is a near-zero-cost stub until then.
+        from lyra.dsp.nr_neural import DeepFilterNetNR
+        self._nr_neural = DeepFilterNetNR(rate=self.audio_rate)
         # Tracks which NR processor process() should route through.
         # Mirror of operator's active NR profile string:
-        #   "light"|"medium"|"heavy"|"neural" → use _nr (NR1)
-        #   "nr2"                             → use _nr2
+        #   "nr1" → use _nr (spectral subtraction)
+        #   "nr2" → use _nr2 (Ephraim-Malah MMSE-LSA / Wiener)
+        #   "neural" → use _nr_neural (DeepFilterNet)
         # The "off" / NR-disabled state is independent of this flag
         # — it's controlled by the active NR's .enabled attribute.
         self._active_nr: str = "nr1"
@@ -307,6 +315,7 @@ class PythonRxChannel(DspChannel):
         # blend in stale spectral state from the previous mode.
         self._nr.reset()
         self._nr2.reset()
+        self._nr_neural.reset()
         # LMS weights/delay line are similarly mode-dependent — a
         # converged CW lock would mispredict on switching to SSB.
         self._lms.reset()
@@ -342,31 +351,46 @@ class PythonRxChannel(DspChannel):
         on = bool(enabled)
         self._nr.enabled = on
         self._nr2.enabled = on
+        self._nr_neural.enabled = on
         if not on:
             # Reset whichever was active so resuming starts clean.
             self._nr.reset()
             self._nr2.reset()
+            self._nr_neural.reset()
 
     def set_nr_profile(self, profile: str) -> None:
         """Apply an NR backend selection.
 
         - ``"nr1"``     → NR1 (classical spectral subtraction).
                           Strength is controlled via set_nr1_strength.
-        - ``"nr2"``     → NR2 (Ephraim-Malah MMSE-LSA).
+        - ``"nr2"``     → NR2 (Ephraim-Malah MMSE-LSA / Wiener).
                           Strength is via set_nr2_aggression.
-        - ``"neural"``  → reserved slot; falls through to NR1 for now.
+        - ``"neural"``  → DeepFilterNet (NR4).  Requires the
+                          deepfilternet pip package; soft-fails to
+                          NR1 if the package isn't installed.
         - Legacy names (light/medium/heavy/aggressive/captured) are
           accepted for QSettings backwards compat and routed to NR1
           with the appropriate strength via NR1's legacy alias map.
 
-        Both NR1 and NR2 stay alive; the active one is selected
+        All three processors stay alive; the active one is selected
         by ``_active_nr`` and consumed in ``process()``.
         """
         if profile == "nr2":
             self._active_nr = "nr2"
-            # Don't change NR1's strength — leave operator's last
-            # NR1 setting intact so flipping back to NR1 picks up
-            # right where they left off.
+        elif profile == "neural":
+            # Verify the package is importable before flipping the
+            # routing — otherwise we'd silently route audio through
+            # a stub that returns input unchanged.
+            from lyra.dsp.nr_neural import is_available
+            if is_available():
+                self._active_nr = "neural"
+            else:
+                # Soft-fall to NR1 with a log line.  The Settings
+                # UI will surface the install instructions and the
+                # right-click menu will show the option as disabled.
+                print("[Channel] Neural NR requested but "
+                      "deepfilternet not installed — routing to NR1")
+                self._active_nr = "nr1"
         else:
             self._active_nr = "nr1"
             # Legacy profile names (light/medium/heavy/aggressive)
@@ -681,6 +705,9 @@ class PythonRxChannel(DspChannel):
         # NR2 state — noise estimate per bin, prev-frame gain,
         # decision-directed memory.  Discontinuity = clean start.
         self._nr2.reset()
+        # Neural NR streaming buffers — drop them so the new band
+        # doesn't get the previous band's tail audio.
+        self._nr_neural.reset()
         # LMS state — adaptive weights + delay line ring.  Same
         # rationale as ANF: a stale converged state for a different
         # signal would mispredict on the new band/mode.
@@ -842,6 +869,16 @@ class PythonRxChannel(DspChannel):
                     # idle (single state-check + early return).
                     self._nr.feed_capture(audio)
                     audio = self._nr2.process(audio)
+                elif self._active_nr == "neural":
+                    # Same Cap-side-channel pattern as NR2.
+                    self._nr.feed_capture(audio)
+                    # Neural NR is a heavy DSP stage — operator was
+                    # warned about latency / CPU cost in Settings
+                    # before they got here.  Inference happens in
+                    # 10 ms (480-sample) frames inside the wrapper;
+                    # streaming buffer absorbs Lyra's variable block
+                    # size without forcing an audible interruption.
+                    audio = self._nr_neural.process(audio)
                 else:
                     audio = self._nr.process(audio)
                 # APF — only useful in CW. The operator's enable

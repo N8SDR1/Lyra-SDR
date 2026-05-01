@@ -2201,17 +2201,20 @@ class Radio(QObject):
 
     @staticmethod
     def neural_nr_available() -> bool:
-        """Probe whether a neural-NR backend (RNNoise or DeepFilterNet)
-        is importable. Used to enable/disable the 'Neural' profile in
-        the front-panel right-click menu. Safe to call anywhere — if
-        probing fails we return False rather than raising."""
-        for name in ("rnnoise_wrapper", "deepfilternet"):
-            try:
-                __import__(name)
-                return True
-            except ImportError:
-                continue
-        return False
+        """Probe whether the DeepFilterNet neural-NR backend is
+        importable.  Safe to call anywhere — if the probe fails we
+        return False rather than raising.
+
+        DeepFilterNet's import root is ``df`` (pip install
+        ``deepfilternet``).  RNNoise integration was considered
+        and dropped — DFN is 48 kHz native (matches Lyra's audio
+        chain) and trained on broader noise corpora.
+        """
+        try:
+            from lyra.dsp.nr_neural import is_available
+            return is_available()
+        except Exception:
+            return False
 
     @property
     def nr_enabled(self) -> bool:

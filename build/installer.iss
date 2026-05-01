@@ -59,6 +59,14 @@ PrivilegesRequiredOverridesAllowed=dialog commandline
 ; Architecture: only build x64
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
+; Minimum supported Windows: 10 version 1809 (build 17763, Oct 2018).
+; This is the official baseline for:
+;   - PyTorch 2.x (required for DeepFilterNet neural NR)
+;   - winrt (modern toast notifications used by weather alerts)
+;   - PySide6 6.5+ runtime
+; Older Windows installs (7, 8, early 10) hit the rejection page
+; with a clear "Lyra requires Windows 10 (1809) or later" message.
+MinVersion=10.0.17763
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
