@@ -219,6 +219,28 @@ class PythonRxChannel(DspChannel):
         from lyra.dsp.anf import AutoNotchFilter
         self._anf = AutoNotchFilter(rate=self.audio_rate)
 
+        # LMS adaptive line enhancer (NR3-style) — predictive NR
+        # complementary to NR1/NR2's subtractive approach.  Slots
+        # AFTER ANF and BEFORE NR in the chain so that:
+        #   - ANF kills any known stable carriers/whistles first
+        #   - LMS lifts the periodic signal (CW tones, voice
+        #     formants) above the broadband residual
+        #   - NR cleans up whatever broadband hiss remains
+        # Disabled by default; operator opts in via DSP-row LMS
+        # button.  Most useful in CW mode for weak-signal work, but
+        # also helps SSB clarity on noisy bands.
+        from lyra.dsp.lms import LineEnhancerLMS
+        self._lms = LineEnhancerLMS(rate=self.audio_rate)
+
+        # All-mode voice-presence squelch — slots LAST in the chain
+        # (after APF) so the detector sees the cleanest possible
+        # audio.  Direct port from WDSP ssql.c.  Mutes the output
+        # entirely when no voice is detected; opens with a smooth
+        # cosine ramp when voice arrives.  Works on every mode —
+        # SSB, AM, FM, CW.  Disabled by default.
+        from lyra.dsp.squelch import AllModeSquelch
+        self._squelch = AllModeSquelch(rate=self.audio_rate)
+
         # NR2 (Phase 3.D #4) — Ephraim-Malah MMSE-LSA noise reducer.
         # Lives alongside NR1 (self._nr).  Channel routes audio
         # through whichever is active based on the operator's NR
@@ -285,6 +307,11 @@ class PythonRxChannel(DspChannel):
         # blend in stale spectral state from the previous mode.
         self._nr.reset()
         self._nr2.reset()
+        # LMS weights/delay line are similarly mode-dependent — a
+        # converged CW lock would mispredict on switching to SSB.
+        self._lms.reset()
+        # Squelch detector retrains for the new mode's noise floor.
+        self._squelch.reset()
 
     def set_rx_bw(self, mode: str, bw_hz: int) -> None:
         self._rx_bw_by_mode[mode] = int(bw_hz)
@@ -527,6 +554,71 @@ class PythonRxChannel(DspChannel):
     def nr2_speech_aware(self) -> bool:
         return bool(self._nr2.speech_aware)
 
+    # ── LMS proxies (NR3-style line enhancer) ─────────────────────────
+
+    def set_lms_enabled(self, on: bool) -> None:
+        """Master toggle for the LMS adaptive line enhancer.  When
+        on, the LMS predictor lifts periodic signal components above
+        broadband noise — most effective on weak CW, also useful for
+        SSB on noisy bands.  Disabled state is a single-attribute-
+        check bypass; no CPU cost when off."""
+        prev = self._lms.enabled
+        self._lms.enabled = bool(on)
+        # Fresh weights / delay line on every enable transition so a
+        # stale converged state from a different signal doesn't bleed
+        # in for the first ~half-second of audio.
+        if not prev and self._lms.enabled:
+            self._lms.reset()
+
+    def set_lms_strength(self, value: float) -> None:
+        """Strength slider, 0.0..1.0.  Mirrors NR1 / NR2 UX.  At 0.5
+        the algorithm parameters land on Pratt's WDSP defaults (the
+        operator-validated 'classic ANR' tuning)."""
+        self._lms.set_strength(float(value))
+
+    @property
+    def lms_enabled(self) -> bool:
+        return bool(self._lms.enabled)
+
+    @property
+    def lms_strength(self) -> float:
+        return float(self._lms.strength)
+
+    # ── All-mode squelch proxies ──────────────────────────────────────
+
+    def set_squelch_enabled(self, on: bool) -> None:
+        """Master toggle for the all-mode voice-presence squelch.
+        When enabled, audio output is muted whenever the SSQL
+        detector reports no voice / signal present.  Disabled is
+        a single-attribute-check bypass."""
+        prev = self._squelch.enabled
+        self._squelch.enabled = bool(on)
+        # Fresh detector state on every enable transition — old
+        # window-detector averages from the previous band would
+        # bias the threshold for a long time otherwise.
+        if not prev and self._squelch.enabled:
+            self._squelch.reset()
+
+    def set_squelch_threshold(self, value: float) -> None:
+        """Squelch threshold, 0.0..1.0.  See AllModeSquelch
+        docstring for the operator-meaningful zones (default 0.16,
+        loose ~0.10, tight ~0.30)."""
+        self._squelch.set_threshold(float(value))
+
+    @property
+    def squelch_enabled(self) -> bool:
+        return bool(self._squelch.enabled)
+
+    @property
+    def squelch_threshold(self) -> float:
+        return float(self._squelch.threshold)
+
+    @property
+    def squelch_passing(self) -> bool:
+        """True when the squelch is currently passing audio (UI
+        binds this for the green/grey activity indicator)."""
+        return self._squelch.is_passing()
+
     @property
     def active_nr(self) -> str:
         """Which NR processor is currently active.  'nr1' for the
@@ -589,6 +681,14 @@ class PythonRxChannel(DspChannel):
         # NR2 state — noise estimate per bin, prev-frame gain,
         # decision-directed memory.  Discontinuity = clean start.
         self._nr2.reset()
+        # LMS state — adaptive weights + delay line ring.  Same
+        # rationale as ANF: a stale converged state for a different
+        # signal would mispredict on the new band/mode.
+        self._lms.reset()
+        # Squelch state — window-detector average and trigger
+        # voltage.  A new band has a different noise floor, so the
+        # SSQL detector needs to re-track.
+        self._squelch.reset()
         # APF state — safe to clear here because reset() is only
         # called on freq/mode changes, where an audio discontinuity
         # is already expected.
@@ -710,6 +810,22 @@ class PythonRxChannel(DspChannel):
                 # whatever broadband residual is left.
                 # Bypass-fast when ANF is disabled.
                 audio = self._anf.process(audio)
+                # All-mode squelch — slotted BEFORE the NR stages
+                # so the voice-presence detector sees audio with
+                # its full noise variance.  Putting it AFTER NR
+                # (where Pratt's WDSP chain has it) leaves the
+                # detector looking at heavily-smoothed audio where
+                # voice and noise are indistinguishable; the
+                # detector then mis-classifies real signals as
+                # noise and over-mutes.  When the squelch is
+                # closed, downstream LMS/NR see silence and
+                # consume essentially zero CPU.
+                audio = self._squelch.process(audio)
+                # LMS adaptive line enhancer — sits between ANF and
+                # NR.  Predictive: lifts periodic content (CW,
+                # voice formants) above broadband noise.  Bypass-
+                # fast when disabled (single attribute check).
+                audio = self._lms.process(audio)
                 # Route NR through whichever processor the operator
                 # selected.  Both have identical STFT framing and
                 # length-preserving contracts, so switching is

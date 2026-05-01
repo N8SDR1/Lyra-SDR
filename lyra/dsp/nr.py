@@ -74,9 +74,120 @@ returns "suspect" so the UI can warn the operator before they save.
 """
 from __future__ import annotations
 
+import os
 from typing import Callable, Optional
 
 import numpy as np
+
+
+class _MinStatsTracker:
+    """Minimum-statistics noise tracker (Martin 2001).
+
+    Maintains a sliding ring buffer of the most recent ``n_frames``
+    magnitude spectra and reports the per-bin minimum across the
+    window as the noise-floor estimate.  Rationale: even active
+    speech / music has gaps on a per-bin basis — over a 1-2 second
+    window, every bin spends some time near the actual noise floor.
+    The minimum naturally locks onto that floor while ignoring the
+    transient peaks that signal energy adds.
+
+    Two characteristics matter for our use case:
+
+    1.  Self-bootstrapping.  No VAD gate, no chicken-and-egg
+        initialization problem.  Even a tracker that's never seen a
+        truly quiet moment will return SOME estimate (the lowest mag
+        observed so far), which converges toward truth as more frames
+        arrive.  This is the fix for the dead-on-arrival live tracker
+        bug documented in ``SpectralSubtractionNR.__init__``.
+
+    2.  Bias correction.  The minimum of ``N`` samples drawn from a
+        noise distribution is biased low (lower than the mean noise
+        level by a factor that depends on ``N`` and the underlying
+        statistics).  Multiplying by ``BIAS_CORRECTION`` (≈1.5x for
+        our window size) approximates the mean noise level.  The
+        exact value Martin derived depends on overlap and window
+        details; 1.5 is the empirical rule-of-thumb for ~1.5 sec
+        windows with 50% overlap that we use here.
+
+    Memory: ``n_frames × n_bins`` float32.  Default sizing at 48 kHz
+    / 128-hop / 256-FFT is ~562 × 129 ≈ 290 KB; at 12 kHz it's ~140 ×
+    129 ≈ 72 KB.  Update cost: one ``np.min(buf, axis=0)`` per frame,
+    which is ~72k float comparisons at 12 kHz → microseconds.
+
+    Trade-off vs the legacy VAD-gated tracker: a slight added latency
+    in adapting to changing noise (the ring takes ``n_frames`` worth
+    of audio to fully refresh), but no dead-zone bug and far better
+    behavior under continuous signal (where the legacy gate never
+    fires at all).  See ``docs/AUDIT-2026-05-01.md`` for the full
+    discussion.
+    """
+
+    # Bias correction factor (multiplies per-bin minimum to approximate
+    # the true noise floor).  Martin's paper derives this as a
+    # function of window size and overlap; literature values for
+    # ~1-2 sec windows with 50% overlap range from 1.5 to 2.5.  The
+    # subtle-vs-aggressive trade-off:
+    #   - Lower bias  → noise estimate is too low → undersubtraction
+    #     → noise leaks through, mild perceived NR
+    #   - Higher bias → noise estimate exceeds the actual floor →
+    #     over-subtraction → speech distortion / "watery" artifacts
+    # Set as a class attribute so it can be tweaked per-deployment
+    # without touching other code.
+    #
+    # CURRENT TUNING: 2.5 — operator-validated 2026-05-01 against
+    # min-stats NR1 strength sweep.  Light/Medium/Heavy now feel
+    # like a meaningful Light → Heavy progression.  TUNING MAY NEED
+    # FURTHER ADJUSTMENT based on field-test feedback across a
+    # variety of bands / noise environments.  Drop toward 1.5 if
+    # over-subtraction surfaces; raise toward 3.0 if undersubtraction.
+    BIAS_CORRECTION: float = 2.5
+
+    # Floor for the initial buffer fill — small enough that real
+    # noise quickly dominates as the buffer warms up, but non-zero
+    # so we never produce an exact-zero noise estimate.
+    INIT_FLOOR: float = 1e-3
+
+    def __init__(self, n_bins: int, n_frames: int,
+                 bias: Optional[float] = None):
+        """``bias`` overrides BIAS_CORRECTION for this instance.  Per
+        Martin (2001) the appropriate bias depends on whether the
+        input is raw periodogram bins or pre-smoothed magnitudes —
+        consumers that pre-smooth (e.g. NR2) should pass a smaller
+        bias so the resulting minimum doesn't over-shoot.  None
+        defaults to the class attribute (raw-input calibration)."""
+        self._n_bins = int(n_bins)
+        self._n_frames = max(8, int(n_frames))
+        self._bias = float(bias) if bias is not None else self.BIAS_CORRECTION
+        # Pre-fill with INIT_FLOOR so the per-bin minimum during the
+        # first ``n_frames`` of audio (the warmup window) is bounded
+        # at INIT_FLOOR.  This gives near-bypass behavior during
+        # warmup (small noise estimate → tiny subtraction) instead of
+        # whatever artifact a zero-init would produce.  Real audio
+        # frames overwrite the buffer one slot at a time as they
+        # arrive, so by ``n_frames`` worth of input the tracker has
+        # entirely measured-data to work with.
+        self._buf = np.full(
+            (self._n_frames, self._n_bins),
+            self.INIT_FLOOR,
+            dtype=np.float32,
+        )
+        self._write_idx = 0
+
+    def update(self, mag: np.ndarray) -> np.ndarray:
+        """Push one frame's magnitude spectrum, return the bias-
+        corrected per-bin minimum across the current window."""
+        self._buf[self._write_idx] = mag
+        self._write_idx = (self._write_idx + 1) % self._n_frames
+        return np.min(self._buf, axis=0) * self._bias
+
+    def reset(self) -> None:
+        """Reset the ring buffer to the initial floor.  Called from
+        :meth:`SpectralSubtractionNR.reset` so that band/mode/stream
+        transitions don't leak stale noise estimates into a fresh
+        audio context (different band == different noise floor).
+        """
+        self._buf.fill(self.INIT_FLOOR)
+        self._write_idx = 0
 
 
 class SpectralSubtractionNR:
@@ -113,6 +224,14 @@ class SpectralSubtractionNR:
     # Legacy ``set_profile()`` API + DEFAULT_PROFILE are kept as a
     # backwards-compat shim so saved QSettings with values like
     # "light" / "medium" / "heavy" / "aggressive" still load.
+    # LEGACY VAD-gated-tracker anchors.  Unchanged from v1.  These are
+    # what the slider uses when the min-stats tracker is OFF — i.e.,
+    # when LYRA_NR1_TRACKER is not "minstats" and set_minstats_tracker()
+    # has not been called.  Because the legacy tracker is dead-on-arrival
+    # (see KNOWN LIMITATION below), the audible difference between
+    # Light/Medium/Heavy with these anchors is small — most of the
+    # subtraction math is multiplied by a 1e-3 noise estimate that
+    # never grows.  Kept for backwards compat / A-B testing.
     STRENGTH_MIN_PARAMS = {
         "alpha":       1.0,
         "beta":        0.20,
@@ -122,6 +241,38 @@ class SpectralSubtractionNR:
     STRENGTH_MAX_PARAMS = {
         "alpha":       2.8,
         "beta":        0.06,
+        "noise_track": 0.008,
+        "vad_gate":    4.0,
+    }
+    # MIN-STATS tracker anchors (Option B, actively working).
+    #
+    # ``beta`` dominates the perceived noise-floor residue: with a real
+    # noise estimate, gain on noise-only bins clips to beta, so the
+    # operator hears noise attenuated by ``-20*log10(beta)``.  The
+    # legacy anchors were calibrated against a dead noise estimate
+    # where subtraction barely fired, so slider movement was almost
+    # cosmetic — the operator wouldn't hear a step change between
+    # Light and Heavy.  The min-stats anchors stretch beta from 0.40
+    # (-8 dB residue, audibly subtle) to 0.05 (-26 dB, deep silence)
+    # so that strength 0.0 / 0.5 / 1.0 each have a distinct sound:
+    #
+    #   strength=0.0 → beta=0.40 → -8 dB  residue (subtle / Light)
+    #   strength=0.5 → beta=0.22 → -13 dB residue (default / Medium)
+    #   strength=1.0 → beta=0.05 → -26 dB residue (aggressive / Heavy)
+    #
+    # ``alpha`` (over-subtraction factor) is unchanged at the high end
+    # because once it exceeds 1.0 the gain on pure-noise bins clips to
+    # beta anyway — alpha mainly affects how aggressively we attack
+    # marginal-SNR bins (signals close to the noise floor).
+    STRENGTH_MIN_PARAMS_MINSTATS = {
+        "alpha":       1.0,
+        "beta":        0.40,
+        "noise_track": 0.03,
+        "vad_gate":    3.0,
+    }
+    STRENGTH_MAX_PARAMS_MINSTATS = {
+        "alpha":       3.0,
+        "beta":        0.03,
         "noise_track": 0.008,
         "vad_gate":    4.0,
     }
@@ -182,6 +333,29 @@ class SpectralSubtractionNR:
         # minimum-statistics + spectral smoothing) is queued as
         # backlog work.
         self._noise_mag = np.full(n_bins, 1e-3, dtype=np.float32)
+
+        # Minimum-statistics noise tracker (Martin 2001).  Replaces
+        # the dead VAD-gated estimator above as the source of the
+        # live noise reference.  ENABLED BY DEFAULT — operators get
+        # working live-source NR1 out of the box without setting
+        # any env vars.  Override behavior:
+        #
+        #     LYRA_NR_TRACKER=legacy     → opt OUT (both NR1 + NR2)
+        #     LYRA_NR1_TRACKER=legacy    → opt OUT for NR1 only
+        #     LYRA_NR_TRACKER=minstats   → explicit opt-in (no-op now)
+        #     unset                      → DEFAULT (min-stats enabled)
+        #
+        # The env var only controls the *startup* default —
+        # set_minstats_tracker() can flip it at runtime for A/B
+        # testing without restarting.  See _MinStatsTracker docstring
+        # for the algorithm details.
+        self._minstats: Optional[_MinStatsTracker] = None
+        env = (os.environ.get("LYRA_NR_TRACKER", "")
+               or os.environ.get("LYRA_NR1_TRACKER", "")
+               ).strip().lower()
+        # Default ON; env var opts out.
+        if env != "legacy":
+            self._enable_minstats()
 
         # Streaming state
         self._in_buf = np.zeros(0, dtype=np.float32)
@@ -292,13 +466,57 @@ class SpectralSubtractionNR:
         that triggered reset is exactly the kind of thing that
         would corrupt a noise profile).  The captured profile
         itself — operator-locked — is preserved across reset.
+
+        The min-stats tracker (when enabled) also gets reset so a
+        new band with a different noise floor doesn't inherit the
+        previous band's per-bin minima.
         """
         self._in_buf = np.zeros(0, dtype=np.float32)
         self._out_carry = np.zeros(self._hop, dtype=np.float32)
         n_bins = self._fft // 2 + 1
         self._noise_mag = np.full(n_bins, 1e-3, dtype=np.float32)
+        if self._minstats is not None:
+            self._minstats.reset()
         if self._capture_state == "capturing":
             self.cancel_noise_capture()
+
+    # ── Live noise tracker selection (legacy VAD vs min-stats) ─────
+
+    def _enable_minstats(self) -> None:
+        """Construct the min-stats tracker sized for the current
+        rate / FFT / hop.  ~1.5 sec sliding window."""
+        n_bins = self._fft // 2 + 1
+        win_sec = 1.5
+        n_frames = max(8, int(round(win_sec * self.rate / self._hop)))
+        self._minstats = _MinStatsTracker(n_bins, n_frames)
+
+    def set_minstats_tracker(self, on: bool) -> None:
+        """Enable / disable the minimum-statistics noise tracker at
+        runtime.  Default state at construction is governed by the
+        ``LYRA_NR1_TRACKER`` env var.
+
+        Captured-profile mode is unaffected — when a captured profile
+        is loaded and selected as source, it always wins regardless
+        of which live tracker is active in the background.
+
+        Re-applies the current strength after the toggle so the
+        tracker-specific anchor set (legacy vs min-stats) takes
+        effect immediately.  Without this, toggling at runtime would
+        swap trackers but leave the gain coefficients calibrated for
+        the previous tracker.
+        """
+        if bool(on):
+            if self._minstats is None:
+                self._enable_minstats()
+        else:
+            self._minstats = None
+        self._apply_strength(self.strength)
+
+    def is_minstats_enabled(self) -> bool:
+        """True if the min-stats tracker is the active live noise
+        estimator.  Used by the audit driver and by any future UI
+        diagnostics that want to surface the choice."""
+        return self._minstats is not None
 
     # ── Captured noise profile API (Phase 3.D #1) ─────────────────
 
@@ -609,33 +827,43 @@ class SpectralSubtractionNR:
                 # to "ready" via _finalize_capture().
                 capturing = (self._capture_state == "capturing")
 
-            # Noise-floor tracking — simple VAD: update only when the
-            # frame is quieter than vad_gate × the current estimate.
-            # Always runs even when the captured source is active,
-            # so the live estimate stays warm as a fallback if the
-            # operator clears or re-toggles the captured profile.
+            # Live noise-floor tracking.  Two implementations:
             #
-            # NOTE: with the initial _noise_mag of 1e-3 this gate
-            # rarely fires on real audio (see KNOWN LIMITATION in
-            # __init__).  Live-source NR1 is therefore not the
-            # recommended path for noise reduction; operators should
-            # use captured profiles or NR2 instead.
-            frame_pow = float(np.mean(mag * mag))
-            noise_pow = float(np.mean(self._noise_mag * self._noise_mag))
-            if frame_pow <= noise_pow * self._vad_gate:
-                a = self._noise_track
-                self._noise_mag = (1.0 - a) * self._noise_mag + a * mag
+            #   1. Legacy VAD-gated (default): update _noise_mag only
+            #      when the frame is quieter than vad_gate × current
+            #      estimate.  Has the dead-on-arrival bug noted in
+            #      __init__ — gate rarely fires on real audio so the
+            #      estimate stays frozen at 1e-3.
+            #
+            #   2. Minimum-statistics (LYRA_NR1_TRACKER=minstats):
+            #      sliding-window per-bin minimum.  Self-bootstraps,
+            #      no gate, no dead zone.
+            #
+            # Whichever live tracker is active runs in the background
+            # even when the captured source is selected, so the live
+            # estimate stays warm as a fallback if the operator
+            # clears or re-toggles the captured profile.
+            if self._minstats is not None:
+                live_noise_ref = self._minstats.update(mag)
+            else:
+                frame_pow = float(np.mean(mag * mag))
+                noise_pow = float(
+                    np.mean(self._noise_mag * self._noise_mag))
+                if frame_pow <= noise_pow * self._vad_gate:
+                    a = self._noise_track
+                    self._noise_mag = (
+                        (1.0 - a) * self._noise_mag + a * mag)
+                live_noise_ref = self._noise_mag
 
             # Choose the noise reference based on the source toggle.
             # Captured source wins when the toggle is on AND a
-            # profile is loaded; otherwise fall back to the live
-            # VAD-tracked estimate (both for "source = Live" and
-            # for "source = Captured but no profile loaded yet").
+            # profile is loaded; otherwise fall back to the active
+            # live estimator (legacy or min-stats).
             if (self._use_captured_profile
                     and self._captured_noise_mag is not None):
                 noise_ref = self._captured_noise_mag
             else:
-                noise_ref = self._noise_mag
+                noise_ref = live_noise_ref
 
             # Magnitude-domain subtraction with spectral floor.
             denom = np.maximum(mag, 1e-10)
@@ -674,13 +902,26 @@ class SpectralSubtractionNR:
     # ── internals ─────────────────────────────────────────────────
     def _apply_strength(self, s: float) -> None:
         """Recompute alpha / beta / noise_track / vad_gate from the
-        slider value.  Linear interpolation between
-        STRENGTH_MIN_PARAMS (s=0.0) and STRENGTH_MAX_PARAMS (s=1.0).
-        Called from set_strength() and from __init__.
+        slider value via linear interpolation between two anchor dicts.
+
+        Anchor selection depends on which live tracker is active:
+        - min-stats tracker enabled → STRENGTH_*_PARAMS_MINSTATS
+          (wider beta range so the slider produces audibly distinct
+          Light / Medium / Heavy)
+        - legacy VAD tracker        → STRENGTH_*_PARAMS
+          (v1 anchors; preserved for backwards compat)
+
+        Called from set_strength(), from __init__, and from
+        set_minstats_tracker() so the curve switches in real time
+        when the operator toggles the tracker.
         """
         s = max(0.0, min(1.0, float(s)))
-        lo = self.STRENGTH_MIN_PARAMS
-        hi = self.STRENGTH_MAX_PARAMS
+        if self._minstats is not None:
+            lo = self.STRENGTH_MIN_PARAMS_MINSTATS
+            hi = self.STRENGTH_MAX_PARAMS_MINSTATS
+        else:
+            lo = self.STRENGTH_MIN_PARAMS
+            hi = self.STRENGTH_MAX_PARAMS
         def lerp(key: str) -> float:
             return float(lo[key] + (hi[key] - lo[key]) * s)
         self._alpha = lerp("alpha")

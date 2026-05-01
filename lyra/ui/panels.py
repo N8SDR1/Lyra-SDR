@@ -1394,6 +1394,8 @@ class DspPanel(GlassPanel):
             ("BIN", "Binaural — pseudo-stereo SSB spread"),
             ("NR",  "Noise Reduction — adaptive denoiser"),
             ("ANF", "Auto Notch — hunts and removes carriers"),
+            ("LMS", "LMS Line Enhancer — lifts CW / tones above broadband noise"),
+            ("SQ",  "All-Mode Squelch — voice-presence detector, mutes between transmissions"),
             ("APF", "Audio Peak Filter — narrow CW peaking"),
             ("NF",  "Notch Filter — manual notches (this panel)"),
         ):
@@ -1555,6 +1557,50 @@ class DspPanel(GlassPanel):
         # Initial tooltip reflects current params + active mode.
         self._refresh_apf_tooltip()
 
+        # ── LMS (NR3 line enhancer) ───────────────────────────────
+        # Left-click  = toggle enable/disable
+        # Right-click = quick strength preset menu
+        # Independent of NR — slots ANF → LMS → NR in the chain so
+        # both can run simultaneously (LMS lifts the periodic part,
+        # NR cleans up broadband residual).
+        lms_btn = self.dsp_btns["LMS"]
+        lms_btn.setChecked(radio.lms_enabled)
+        lms_btn.toggled.connect(self.radio.set_lms_enabled)
+        lms_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        lms_btn.customContextMenuRequested.connect(self._show_lms_menu)
+        lms_btn.setToolTip(
+            "LMS Line Enhancer (NR3-style adaptive predictor)\n"
+            "  Lifts periodic content (CW tones, voice formants)\n"
+            "  above broadband noise.  Different from NR1/NR2:\n"
+            "  this is predictive, they're subtractive — both can\n"
+            "  run together for best weak-signal results.\n"
+            "\n"
+            "  Most useful in CW for weak DX in band hiss.\n"
+            "  Right-click for strength presets.")
+        radio.lms_enabled_changed.connect(lms_btn.setChecked)
+
+        # ── SQ (All-Mode Squelch — SSQL) ──────────────────────────
+        # Left-click  = toggle enable/disable
+        # Right-click = quick threshold presets + open Settings
+        # Threshold slider sits on the same row as the NR strength
+        # sliders; only visible when SQ is enabled.
+        sq_btn = self.dsp_btns["SQ"]
+        sq_btn.setChecked(radio.squelch_enabled)
+        sq_btn.toggled.connect(self.radio.set_squelch_enabled)
+        sq_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        sq_btn.customContextMenuRequested.connect(self._show_sq_menu)
+        sq_btn.setToolTip(
+            "All-Mode Voice-Presence Squelch (SSQL)\n"
+            "  Mutes audio output between transmissions on every\n"
+            "  modulation type (SSB, AM, FM, CW).  Detects voice\n"
+            "  via zero-crossing-rate analysis — works regardless\n"
+            "  of how the signal was modulated.\n"
+            "\n"
+            "  Right-click for threshold presets.\n"
+            "  Adjust threshold via the slider that appears when\n"
+            "  this is enabled.")
+        radio.squelch_enabled_changed.connect(sq_btn.setChecked)
+
         # ── BIN (Binaural pseudo-stereo) ──────────────────────────
         # Left-click  = toggle enable/disable
         # Right-click = depth presets (25 / 50 / 70 / 100 %)
@@ -1714,30 +1760,44 @@ class DspPanel(GlassPanel):
         self._nr2_label_widget.setStyleSheet(
             "color: #cdd9e5; font-family: 'Segoe UI', sans-serif; "
             "font-size: 11px;")
-        # Slider maps integer 0..150 → aggression 0.0..1.5 (×100
-        # internal scaling for 0.01-step precision).
+        # Slider maps integer 0..200 → aggression 0.0..2.0 (×100
+        # internal scaling for 0.01-step precision).  Range was
+        # bumped from 0..150 to 0..200 after the WDSP-port machinery
+        # (Martin + SPP + AEPF) made the higher aggression range
+        # listenable — SPP guards speech bins from over-attenuation,
+        # AEPF smooths deep-suppression masks.  Operators on very
+        # noisy bands can usefully push past 100% now.
         self.nr2_agg_slider = QSlider(Qt.Horizontal)
-        self.nr2_agg_slider.setRange(0, 150)
+        self.nr2_agg_slider.setRange(0, 200)
         self.nr2_agg_slider.setValue(
             int(round(radio.nr2_aggression * 100)))
         self.nr2_agg_slider.setSingleStep(5)
         self.nr2_agg_slider.setPageStep(25)
         self.nr2_agg_slider.setTickPosition(QSlider.TicksBelow)
         self.nr2_agg_slider.setTickInterval(50)
-        # Constrain width — similar to AF/Vol/Bal sliders, doesn't
-        # stretch to fill.  Operator can still drag through full
-        # 0..150 range; the precision is fine at this width.
-        self.nr2_agg_slider.setFixedWidth(160)
+        # Slightly wider than NR1's slider (160) to accommodate the
+        # 0..250 range with comparable per-tick resolution.
+        self.nr2_agg_slider.setFixedWidth(200)
         self.nr2_agg_slider.setToolTip(
             "NR2 suppression strength.\n"
             "  0   = unity gain (effectively NR off)\n"
-            "  100 = full Ephraim-Malah MMSE-LSA (default)\n"
-            "  150 = harder cleanup at cost of some thinning\n"
+            "  100 = full Ephraim-Malah / Wiener (default)\n"
+            "  150 = harder cleanup\n"
+            "  200 = ceiling — extreme noise / stacking with LMS\n"
             "\n"
-            "Right-click the NR button to switch between NR1 "
-            "(Light/Medium/Heavy) and NR2.")
+            "Right-click the NR button to switch between NR1, NR2,\n"
+            "and Neural backends.  Right-click this slider to pick\n"
+            "MMSE-LSA vs Wiener gain function.")
         self.nr2_agg_slider.valueChanged.connect(
             self._on_nr2_agg_slider)
+        # Right-click on the NR2 slider opens the gain-method picker
+        # (MMSE-LSA vs Wiener).  Both are MMSE-derived; MMSE-LSA is
+        # the WDSP case-1 path with sharper noise attack and
+        # classical sound, Wiener is the WDSP case-0 path with
+        # smoother per-bin transitions and "fuller" residual.
+        self.nr2_agg_slider.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.nr2_agg_slider.customContextMenuRequested.connect(
+            self._show_nr2_method_menu)
         self.nr2_agg_label = QLabel(
             f"{int(round(radio.nr2_aggression * 100))} %")
         self.nr2_agg_label.setFixedWidth(40)
@@ -1756,6 +1816,96 @@ class DspPanel(GlassPanel):
         # mid-length names.
         self.nr_source_badge.setMaximumWidth(460)
 
+        # LMS strength slider — slot in the NR-status row;
+        # visibility tied to LMS enable so it doesn't crowd the
+        # row when LMS is off.  Same UX pattern as the SQ slider.
+        self._lms_label_widget = QLabel("LMS:")
+        self._lms_label_widget.setStyleSheet(
+            "color: #cdd9e5; font-family: 'Segoe UI', sans-serif; "
+            "font-size: 11px;")
+        # Slider 0..100 → strength 0.0..1.0.  At 50 the algorithm
+        # parameters land on Pratt's WDSP defaults (the operator-
+        # validated 'classic ANR' tuning).
+        self.lms_strength_slider = QSlider(Qt.Horizontal)
+        self.lms_strength_slider.setRange(0, 100)
+        self.lms_strength_slider.setValue(
+            int(round(radio.lms_strength * 100)))
+        self.lms_strength_slider.setSingleStep(5)
+        self.lms_strength_slider.setPageStep(25)
+        self.lms_strength_slider.setTickPosition(QSlider.TicksBelow)
+        self.lms_strength_slider.setTickInterval(25)
+        self.lms_strength_slider.setFixedWidth(160)
+        self.lms_strength_slider.setToolTip(
+            "LMS line-enhancer strength.\n"
+            "  0   = light effect (slow adapt, gentle)\n"
+            "  50  = WDSP default (Pratt's classic-ANR tuning)\n"
+            "  100 = aggressive (fast adapt, stronger)\n"
+            "\n"
+            "Right-click the LMS button for preset shortcuts.")
+        self.lms_strength_slider.valueChanged.connect(
+            self._on_lms_strength_slider)
+        self.lms_strength_label = QLabel(
+            f"{int(round(radio.lms_strength * 100))} %")
+        self.lms_strength_label.setFixedWidth(40)
+        self.lms_strength_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700; font-size: 11px;")
+
+        # Squelch threshold slider — slot in the same row as the
+        # NR strength sliders; visibility tied to squelch enable.
+        self._sq_label_widget = QLabel("Squelch:")
+        self._sq_label_widget.setStyleSheet(
+            "color: #cdd9e5; font-family: 'Segoe UI', sans-serif; "
+            "font-size: 11px;")
+        self.sq_threshold_slider = QSlider(Qt.Horizontal)
+        # Slider 0..100 → threshold 0.0..1.0.  Most useful range
+        # is 0..50 (default 16); above 50 the squelch becomes hard
+        # to keep open.  Operator can drag the full 0..100 range
+        # but the typical sweet spot is 10..30.
+        self.sq_threshold_slider.setRange(0, 100)
+        self.sq_threshold_slider.setValue(
+            int(round(radio.squelch_threshold * 100)))
+        self.sq_threshold_slider.setSingleStep(2)
+        self.sq_threshold_slider.setPageStep(10)
+        self.sq_threshold_slider.setTickPosition(QSlider.TicksBelow)
+        self.sq_threshold_slider.setTickInterval(20)
+        self.sq_threshold_slider.setFixedWidth(160)
+        self.sq_threshold_slider.setToolTip(
+            "Squelch threshold.\n"
+            "  0   = effectively off (everything passes)\n"
+            "  10  = barely-on, opens on faintest signal\n"
+            "  20  = default — voice-friendly\n"
+            "  40  = medium — mutes on quiet bands\n"
+            "  60  = tight — strong signals only\n"
+            "  80+ = very tight (only loud stations unmute)\n"
+            "\n"
+            "Right-click the SQ button for preset shortcuts.")
+        self.sq_threshold_slider.valueChanged.connect(
+            self._on_sq_threshold_slider)
+        self.sq_threshold_label = QLabel(
+            f"{int(round(radio.squelch_threshold * 100))}")
+        self.sq_threshold_label.setFixedWidth(28)
+        self.sq_threshold_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700; font-size: 11px;")
+        # Activity indicator — small dot, green when audio is
+        # passing through the squelch, dark grey when muted.
+        # Hidden when squelch is disabled.
+        self.sq_activity_dot = QLabel("●")
+        self.sq_activity_dot.setFixedWidth(14)
+        self.sq_activity_dot.setStyleSheet(
+            "color: #303030; font-size: 14px;")
+        self.sq_activity_dot.setToolTip(
+            "Squelch activity:\n"
+            "  green = passing audio\n"
+            "  grey  = muted")
+        # Polling timer — refresh the activity dot at 10 Hz so it
+        # tracks the squelch state without flooding the event loop.
+        self._sq_activity_timer = QTimer(self)
+        self._sq_activity_timer.setInterval(100)
+        self._sq_activity_timer.timeout.connect(
+            self._refresh_sq_activity_dot)
+
         nr_status_row = QHBoxLayout()
         nr_status_row.setContentsMargins(0, 0, 0, 0)
         nr_status_row.setSpacing(6)
@@ -1772,6 +1922,22 @@ class DspPanel(GlassPanel):
         nr_status_row.addSpacing(8)
         nr_status_row.addWidget(self.nr_cap_btn)
         nr_status_row.addWidget(self.nr_source_badge)
+        nr_status_row.addSpacing(12)
+        # LMS widgets — always added, visibility controlled by
+        # the LMS enable state.  LMS is independent of NR1/NR2
+        # (runs as its own stage in the chain) so it has its own
+        # always-visible-when-enabled slider.
+        nr_status_row.addWidget(self._lms_label_widget)
+        nr_status_row.addWidget(self.lms_strength_slider)
+        nr_status_row.addWidget(self.lms_strength_label)
+        nr_status_row.addSpacing(12)
+        # Squelch widgets — always added, visibility controlled
+        # by the SQ enable state.  Activity dot first (small),
+        # then label, slider, threshold readout.
+        nr_status_row.addWidget(self.sq_activity_dot)
+        nr_status_row.addWidget(self._sq_label_widget)
+        nr_status_row.addWidget(self.sq_threshold_slider)
+        nr_status_row.addWidget(self.sq_threshold_label)
         # Stretch at the end so all widgets stay left-aligned and
         # don't try to fill horizontal space.
         nr_status_row.addStretch(1)
@@ -1784,11 +1950,32 @@ class DspPanel(GlassPanel):
         self._nr2_label_widget.setVisible(is_nr2)
         self.nr2_agg_slider.setVisible(is_nr2)
         self.nr2_agg_label.setVisible(is_nr2)
+        # LMS slider visibility tied to LMS enable state.
+        lms_visible = bool(radio.lms_enabled)
+        self._lms_label_widget.setVisible(lms_visible)
+        self.lms_strength_slider.setVisible(lms_visible)
+        self.lms_strength_label.setVisible(lms_visible)
+        # Squelch slider visibility tied to enable state.
+        sq_visible = bool(radio.squelch_enabled)
+        self._sq_label_widget.setVisible(sq_visible)
+        self.sq_threshold_slider.setVisible(sq_visible)
+        self.sq_threshold_label.setVisible(sq_visible)
+        self.sq_activity_dot.setVisible(sq_visible)
+        if sq_visible:
+            self._sq_activity_timer.start()
         # Two-way sync so each slider mirrors Radio's state.
         radio.nr1_strength_changed.connect(
             self._on_nr1_strength_signal)
         radio.nr2_aggression_changed.connect(
             self._on_nr2_agg_signal)
+        radio.squelch_threshold_changed.connect(
+            self._on_sq_threshold_signal)
+        radio.squelch_enabled_changed.connect(
+            self._on_sq_enabled_changed)
+        radio.lms_strength_changed.connect(
+            self._on_lms_strength_signal)
+        radio.lms_enabled_changed.connect(
+            self._on_lms_enabled_changed)
         # Show/hide NR1/NR2 widgets when active NR backend changes.
         radio.nr_profile_changed.connect(
             self._refresh_nr2_panel_visibility)
@@ -2327,6 +2514,127 @@ class DspPanel(GlassPanel):
             self.nr2_agg_slider.blockSignals(False)
         self.nr2_agg_label.setText(f"{target} %")
 
+    # ── LMS handlers ──────────────────────────────────────────────
+
+    def _on_lms_strength_slider(self, slider_int: int) -> None:
+        """Operator dragged the LMS strength slider."""
+        v = slider_int / 100.0
+        self.lms_strength_label.setText(f"{slider_int} %")
+        self.radio.set_lms_strength(v)
+
+    def _on_lms_strength_signal(self, value: float) -> None:
+        """Mirror an external LMS strength change into the slider."""
+        target = int(round(value * 100))
+        if self.lms_strength_slider.value() != target:
+            self.lms_strength_slider.blockSignals(True)
+            self.lms_strength_slider.setValue(target)
+            self.lms_strength_slider.blockSignals(False)
+        self.lms_strength_label.setText(f"{target} %")
+
+    def _on_lms_enabled_changed(self, on: bool) -> None:
+        """Show/hide the LMS strength slider when LMS toggles."""
+        self._lms_label_widget.setVisible(on)
+        self.lms_strength_slider.setVisible(on)
+        self.lms_strength_label.setVisible(on)
+
+    # ── Squelch handlers ──────────────────────────────────────────
+
+    def _on_sq_threshold_slider(self, slider_int: int) -> None:
+        """Operator dragged the squelch threshold slider."""
+        v = slider_int / 100.0
+        self.sq_threshold_label.setText(f"{slider_int}")
+        self.radio.set_squelch_threshold(v)
+
+    def _on_sq_threshold_signal(self, value: float) -> None:
+        """Mirror an external threshold change into the slider."""
+        target = int(round(value * 100))
+        if self.sq_threshold_slider.value() != target:
+            self.sq_threshold_slider.blockSignals(True)
+            self.sq_threshold_slider.setValue(target)
+            self.sq_threshold_slider.blockSignals(False)
+        self.sq_threshold_label.setText(f"{target}")
+
+    def _on_sq_enabled_changed(self, on: bool) -> None:
+        """Show/hide the squelch slider + activity dot when the
+        operator toggles SQ on/off, and start/stop the activity
+        polling timer."""
+        self._sq_label_widget.setVisible(on)
+        self.sq_threshold_slider.setVisible(on)
+        self.sq_threshold_label.setVisible(on)
+        self.sq_activity_dot.setVisible(on)
+        if on:
+            self._sq_activity_timer.start()
+        else:
+            self._sq_activity_timer.stop()
+            # Reset dot to neutral grey when squelch disabled.
+            self.sq_activity_dot.setStyleSheet(
+                "color: #303030; font-size: 14px;")
+
+    def _refresh_sq_activity_dot(self) -> None:
+        """Update the activity dot color based on whether the
+        squelch is currently passing audio.  Called by the
+        polling timer at 10 Hz."""
+        passing = bool(self.radio.squelch_passing)
+        # Green when passing, dark grey when muted.
+        color = "#3aa64a" if passing else "#404040"
+        self.sq_activity_dot.setStyleSheet(
+            f"color: {color}; font-size: 14px;")
+
+    def _show_sq_menu(self, pos):
+        """Right-click on the SQ button — threshold preset shortcuts.
+
+        Direct operator UX — no need to drag the slider when one of
+        the standard zones is what you want.  Threshold values
+        match the AllModeSquelch.set_threshold docstring.
+        """
+        btn = self.dsp_btns["SQ"]
+        menu = QMenu(self)
+        current = self.radio.squelch_threshold
+        for label, value in (
+                ("Off    (0)   — squelch always open", 0.0),
+                ("Loose  (10)  — barely-on, opens on faintest signal", 0.10),
+                ("Default (20) — voice-friendly default", 0.20),
+                ("Medium (40)  — mutes on quiet bands", 0.40),
+                ("Tight  (60)  — strong signals only", 0.60),
+        ):
+            act = QAction(label, menu)
+            act.setCheckable(True)
+            act.setChecked(abs(current - value) < 1e-3)
+            act.triggered.connect(
+                lambda _=False, v=value:
+                    self.radio.set_squelch_threshold(v))
+            menu.addAction(act)
+        menu.addSeparator()
+        toggle_label = ("Disable Squelch" if self.radio.squelch_enabled
+                        else "Enable Squelch")
+        toggle_act = QAction(toggle_label, menu)
+        toggle_act.triggered.connect(
+            lambda: self.radio.set_squelch_enabled(
+                not self.radio.squelch_enabled))
+        menu.addAction(toggle_act)
+        menu.exec(btn.mapToGlobal(pos))
+
+    def _show_nr2_method_menu(self, pos):
+        """Right-click on the NR2 strength slider — gain function
+        picker.  Both gain methods come from WDSP emnr.c with
+        Pratt attribution.  See nr2.py docstring for the math.
+        """
+        menu = QMenu(self)
+        current = self.radio.nr2_gain_method
+        for key, label in (
+                ("mmse_lsa",
+                 "MMSE-LSA  (default — classical, sharper attack)"),
+                ("wiener",
+                 "Wiener     (smoother transitions, fuller residue)"),
+        ):
+            act = QAction(label, menu)
+            act.setCheckable(True)
+            act.setChecked(key == current)
+            act.triggered.connect(
+                lambda _=False, k=key: self.radio.set_nr2_gain_method(k))
+            menu.addAction(act)
+        menu.exec(self.nr2_agg_slider.mapToGlobal(pos))
+
     # ── NR1 strength-slider handlers ─────────────────────────────────
 
     def _on_nr1_strength_slider(self, slider_int: int) -> None:
@@ -2470,6 +2778,39 @@ class DspPanel(GlassPanel):
             self.radio.set_anf_profile(target)
         else:
             self.radio.set_anf_profile("off")
+
+    def _show_lms_menu(self, pos):
+        """Right-click on the LMS button — strength presets.
+
+        Mirrors the NR1 strength UX: Light / Medium / Heavy as
+        slider-position shortcuts, plus a settings link.  No
+        per-profile DSP-parameter table here — the strength slider
+        smoothly interpolates 2μ and γ between Pratt's empirically-
+        tuned bounds.
+        """
+        btn = self.dsp_btns["LMS"]
+        menu = QMenu(self)
+        current = self.radio.lms_strength
+        for label, value in (
+                ("Light  (slider 0.0)", 0.0),
+                ("Medium (slider 0.5)  — Pratt default", 0.5),
+                ("Heavy  (slider 1.0)", 1.0),
+        ):
+            act = QAction(label, menu)
+            act.setCheckable(True)
+            act.setChecked(abs(current - value) < 1e-3)
+            act.triggered.connect(
+                lambda _=False, v=value: self.radio.set_lms_strength(v))
+            menu.addAction(act)
+        menu.addSeparator()
+        toggle_label = ("Disable LMS" if self.radio.lms_enabled
+                        else "Enable LMS")
+        toggle_act = QAction(toggle_label, menu)
+        toggle_act.triggered.connect(
+            lambda: self.radio.set_lms_enabled(
+                not self.radio.lms_enabled))
+        menu.addAction(toggle_act)
+        menu.exec(btn.mapToGlobal(pos))
 
     def _show_anf_menu(self, pos):
         """Right-click on the ANF button — profile picker."""
