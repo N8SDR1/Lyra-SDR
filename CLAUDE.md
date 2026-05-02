@@ -481,6 +481,69 @@ From the NR audit (`docs/architecture/nr_audit.md`) §9 open questions:
       decision — keeps the "no auto-comparison code" principle
       enforced at the file-system level.
 
+## 9.6. Audio-pops quiet-pass v0.0.7.1 (shipped 2026-05-02)
+
+Operator-reported "consistent random pops, some many dB above
+audio level."  Senior-engineering audit produced
+`docs/architecture/audio_pops_audit.md`; three P0 fixes shipped on
+`feature/v0.0.7.1-quiet-pass`:
+
+- **P0.1** AGC per-sample envelope tracker (eb437ae) — replaces
+  block-scalar AGC.  Eliminated the loud multi-dB pops.  See
+  `_apply_agc_and_volume` + `_refresh_agc_per_sample_constants`
+  in `lyra/radio.py`.  Bench: 1 kHz step-amplitude sine, boundary
+  step dropped from 0.029 -> 0.0041 (= natural sine slope).
+  CPU: ~0.11 ms/block (0.5% of 21 ms budget).
+- **P0.2** Preserve decimator state across `channel.reset()`
+  (3d0ba70) — was rebuilding the FIR from zeros on every
+  freq/mode change, producing a click on every tune.  Bench:
+  boundary step 0.100 -> 0.013, recovery 1.35 ms -> 0 ms.
+- **P0.3** AK4951 sink-swap 5 ms fade-out (244a8b2) — added
+  `HL2Stream.fade_and_replace_tx_audio()` and updated
+  `AK4951Sink.close()` to fade gracefully instead of flipping
+  `inject_audio_tx = False` instantly.
+
+**Operator flight-test result (2026-05-02):** "noticeably better,
+loud spikes gone, but occasional pops/clicks slightly louder than
+the rest of audio still happen."
+
+### Residual clicks — PARKED for future investigation
+
+Diagnosis state at park time:
+- Reproducible with **all DSP off** (NB / NR / ANF / LMS / SQ /
+  APF) at 192 kHz LSB / 2.4 kHz filter.
+- **Reproducible into a 50-ohm dummy load** (no antenna), so it's
+  not atmospheric / RF / lightning / static.
+- Network ruled out: dedicated direct-wired NIC to HL2, lowest
+  Windows route metric, no WiFi.
+- Most likely remaining sources (in priority order):
+  * **HL2 hardware/gateware glitches** — ADC sample dropouts,
+    DDC numerical edges, USB-to-ethernet bridge buffer hiccups.
+    Specific to N8SDR's HL2+ unit; may differ on other boards.
+  * **Python GIL / GC pauses** starving the audio thread, causing
+    EP2 underrun and audible step at the underrun-recovery
+    boundary.  Plausible but unverified.
+  * **Per-sample AGC + Rayleigh noise tail** — the new instant-
+    attack tracker can briefly clamp gain on random thermal-
+    noise envelope excursions; subsequent samples then show a
+    drop in output.  Step is small (~0.02 amplitude) but maybe
+    audible on a quiet listening session.
+
+Diagnostic instrumentation already in place
+(`set LYRA_AUDIO_DEBUG=1` env var, commit e535db7):
+`Radio._diagnose_audio_step` prints one rate-limited log line per
+audio block whenever the post-AGC output has a sample-to-sample
+step exceeding 0.05 amplitude.  Includes index, prev/curr output,
+input mag, peak, gain, and peak ratio at the offending sample.
+Use this when picking the investigation back up — operator runs
+with the env var, we correlate timestamps with audible clicks,
+then implement the targeted fix (e.g., look-ahead AGC, GIL hold-
+off, gateware-version triage).
+
+When circling back: read this section, then
+`docs/architecture/audio_pops_audit.md` §3 (P1 / P2 suspects we
+explicitly didn't ship in v0.0.7.1 but may revisit here).
+
 ## 10. Open empirical questions (need HL2+ bench testing)
 
 These weren't answered by code-reading; we'll find out on N8SDR's
