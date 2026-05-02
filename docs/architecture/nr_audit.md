@@ -553,6 +553,51 @@ differentiator.**
   (need to capture for 1+ second to average AC phase).  Profile size
   grows ~16×.  Backwards-compat schema bump needed.
 
+**STATUS: NOT PURSUING (2026-05-02)**
+
+Reviewed and scrapped after the P1.3 auto-select deferral, same
+operator-grounded reasoning applied:
+
+> "We are not going to touch the P2 because that got us into some
+> hopes that won't pan out in real-world operator mode."
+
+Reality-check on the math vs the actual operating environment:
+
+- **AC mains drift**: 60 Hz isn't stable; under normal grid load
+  it varies 60.00 ± 0.05 Hz, which over a multi-second capture
+  produces several cycles of phase slip in any synthesized
+  reference.  At 48 kHz audio there's no direct AC line phase to
+  grab from — we'd be tracking drift blind.
+- **Powerline noise isn't purely periodic at 60/120/180 Hz** —
+  it's a chorus of arcing contacts, motor commutators, dimmer
+  SCRs firing, each with its own phase relationship.  The
+  cyclostationary model assumes phase coherence the underlying
+  noise mostly doesn't have.
+- **Operators tune around** — each frequency change shifts the
+  apparent phase relationship between the local-noise sources
+  and the receiver's IF.  The phase-locked profile would have to
+  recompute on every QSY, defeating the locked-profile concept.
+- **Practical gain over Wiener-from-profile**: probably 3-5 dB
+  on stable powerline noise rather than the 10-20 dB the audit
+  optimistically estimated.  Not enough to justify the
+  complexity + schema-bump + profile-invalidation risk.
+
+The current Wiener-from-profile path (shipped v0.0.7.x) already
+captures the AVERAGE powerline harmonic comb in the magnitude
+domain.  Operators with strong powerline noise capture a profile
+that includes the comb, and Wiener subtraction handles it as
+well as can reasonably be expected without phase coherence.
+
+**Out of scope going forward** (do NOT revive without operator
+request):
+- Cyclostationary phase-locked subtraction
+- Per-AC-phase complex-domain profiles
+- Schema bumps to add phase-bucket dimensions to profile JSON
+
+The 60/50 Hz AC mains config note in CLAUDE.md is now a dead
+reference — kept for historical context but not for any planned
+implementation.
+
 **d) Time-frequency masking (2D profile).**
 
 - DSP: sound but expensive.  Profile becomes `mag[bin, time_envelope_
