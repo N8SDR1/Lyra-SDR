@@ -1325,6 +1325,15 @@ class MainWindow(QMainWindow):
             features = (QDockWidget.DockWidgetMovable
                         | QDockWidget.DockWidgetFloatable
                         | QDockWidget.DockWidgetClosable)
+        # Only touch min/max size constraints if we've actually
+        # applied a lock pin at some point.  Calling setMinimumSize
+        # / setMaximumSize on a dock that's never been pinned
+        # changes the dock's "user-set minimum" flag in Qt and can
+        # subtly affect QMainWindow's row-height calculation —
+        # operator feedback v0.0.6.x reported the smallest top-row
+        # dock (Tuning) became height-locked after the polish
+        # release, even though no lock had ever been applied.
+        had_lock_pins = bool(getattr(self, "_docks_have_lock_pins", False))
         for dock in self.docks.values():
             dock.setFeatures(features)
             if locked:
@@ -1338,12 +1347,16 @@ class MainWindow(QMainWindow):
                 # other apps with locked panels behave).
                 sz = dock.size()
                 dock.setFixedSize(sz.width(), sz.height())
-            else:
+            elif had_lock_pins:
                 # Lift the pins.  Use Qt's max-int-equivalent sizes
                 # for unconstrained — same defaults a fresh
                 # QDockWidget has.
                 dock.setMinimumSize(0, 0)
                 dock.setMaximumSize(16777215, 16777215)
+        # Track pin state so the next unlock only fires the lift
+        # if it has something to lift.  Avoids the no-op
+        # setMinimumSize call on every fresh launch.
+        self._docks_have_lock_pins = bool(locked)
         # QMainWindow internally builds QSplitters between docked
         # widgets. Disabling each handle blocks drag-to-resize while
         # keeping the visual separator visible (operator can still

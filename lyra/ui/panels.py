@@ -397,6 +397,15 @@ class TuningPanel(GlassPanel):
         h.addStretch(1)
 
         outer.addLayout(h)
+        # Final vertical stretch — without this, the panel's outer
+        # layout has a fixed sizeHint (logo + freq row + MHz row +
+        # spacing) and Qt's QMainWindow dock-area layout treats the
+        # row as effectively pinned at that height.  Operator
+        # feedback v0.0.6.x: "I can widen Tuning but can't change
+        # its height while the others resize fine."  The stretch
+        # gives the dock somewhere to put extra vertical space so
+        # the top-area / center separator can be dragged up or down.
+        outer.addStretch(1)
         self.content_layout().addLayout(outer)
 
         radio.freq_changed.connect(self._on_radio_freq_changed)
