@@ -44,23 +44,45 @@ class Notch:
 
     Width-based model (the SDR-client convention operators expect):
     operators think in absolute "kill this 100 Hz wide chunk", not
-    in dimensionless Q values. Internal filter design converts
-    width_hz to whatever the underlying scipy call needs.
+    in dimensionless Q values.  Internal filter design uses
+    Q = freq / width.
 
-    Flags:
-    - `active`: bypass the notch in DSP without removing the
-      placement. Lets you A/B whether the notch is helping. Inactive
-      notches render in grey on the spectrum.
-    - `deep`: cascade the IIR filter (apply twice in series), roughly
-      doubling the dB attenuation at every offset. For stubborn
-      carriers where a single notch leaks audibly at the edges of
-      the kill region. Costs 2× CPU and 2× settling time.
+    v0.0.7.1 notch v2: replaced ``deep: bool`` with explicit
+    ``depth_db: float`` and ``cascade: int`` parameters.  Operator
+    can now specify the exact attenuation depth they want
+    (independent of width) and the cascade depth (1-4 stages,
+    sharper transition shoulders for higher values).  See
+    ``docs/architecture/notch_v2_design.md`` for the full design.
+
+    Backward compat: ``n.deep`` is still readable as a derived
+    attribute (== ``cascade > 1``) so legacy callers keep working.
+
+    Fields:
+    - ``abs_freq_hz``: absolute sky frequency of notch center.
+    - ``width_hz``: operator-set -3-dB-from-peak bandwidth in Hz.
+    - ``active``: individually enableable; False = DSP bypass but
+      placement is preserved.  Inactive notches render in grey.
+    - ``depth_db``: notch attenuation at center, in dB (negative).
+      Default -50 (Normal preset).  Slider range -20 to -80.
+    - ``cascade``: number of biquad stages (1-4).  Each stage gets
+      ``depth_db / cascade``.  Default 2.  More stages = sharper
+      transition shoulders at the cost of CPU.
+    - ``filter``: the actual DSP object.
     """
     abs_freq_hz: float          # absolute sky frequency of notch center
-    width_hz: float             # -3 dB bandwidth in Hz
+    width_hz: float             # -3 dB-from-peak bandwidth in Hz
     active: bool                # individually enableable; False = bypass
-    deep: bool                  # cascade for ~2× dB attenuation
+    depth_db: float             # notch attenuation at center (dB, negative)
+    cascade: int                # number of biquad stages (1-4)
     filter: NotchFilter         # the actual DSP object
+
+    @property
+    def deep(self) -> bool:
+        """Legacy compat: True if cascade > 1.  Existing code that
+        reads ``n.deep`` continues working.  Writes go through the
+        new setters (``set_notch_depth_db_at`` /
+        ``set_notch_cascade_at``)."""
+        return self.cascade > 1
 
 
 class Radio(QObject):
@@ -383,6 +405,21 @@ class Radio(QObject):
         "auto":   {"release": 0.158, "hang_blocks":  0},   # med + track
     }
     AGC_AUTO_INTERVAL_MS = 3000   # re-track threshold every 3 s in auto mode
+
+    # ── Notch v2 presets (operator-facing right-click choices) ──────
+    # Each preset maps to (depth_db, cascade).  See notch_v2_design.md
+    # §4.2 for the bench-validated behaviour of each profile.
+    NOTCH_PRESETS: dict[str, dict] = {
+        "normal":   {"depth_db": -50.0, "cascade": 2},
+        "deep":     {"depth_db": -70.0, "cascade": 2},
+        "surgical": {"depth_db": -50.0, "cascade": 4},
+    }
+    NOTCH_DEFAULT_PRESET: str = "normal"
+    # Operator-tunable depth slider range.
+    NOTCH_DEPTH_MIN_DB: float = -80.0
+    NOTCH_DEPTH_MAX_DB: float = -20.0
+    NOTCH_CASCADE_MIN: int = 1
+    NOTCH_CASCADE_MAX: int = 4
 
     # Block size assumed by the AGC_PRESETS release / hang values.
     # The presets above are stated in "per block" units historically
@@ -718,22 +755,28 @@ class Radio(QObject):
 
         # Notch bank — list of Notch dataclasses (see top of file).
         # Operators add/remove via right-click on spectrum/waterfall;
-        # each notch carries its own width and active flag. Default
-        # width 80 Hz comfortably covers FT8 (47 Hz spread) on first
-        # placement; operator can adjust per-notch via wheel/drag.
+        # each notch carries its own width, depth, cascade, and active
+        # flag.  v0.0.7.1 notch v2: replaced the old iirnotch +
+        # deep=bool design with a parametric peaking-EQ biquad +
+        # cascade integer.  See ``docs/architecture/notch_v2_design.md``.
         self._notches: list[Notch] = []
         self._notch_enabled = False
-        # Notch defaults — tuned for a "kills the carrier" feel rather
-        # than the previous 80 Hz / single-biquad which left audible
-        # leak at the edges of the kill region.
-        # 40 Hz width: at typical heterodyne center frequencies (1-3 kHz)
-        # this gives Q ~ 25-75 — narrow enough to surgically remove a
-        # whistle without taking out adjacent voice content.
-        # Deep cascade: doubles dB attenuation at every offset (~30-40 dB
-        # → 60-80 dB at center). Operator can untoggle deep per-notch
-        # via right-click → "Deep" if they want a softer kill.
+        # Per-notch defaults applied to newly-placed notches.  Operator
+        # can change via Settings → Notches → "Default for new notches"
+        # or by right-clicking and picking a preset before placing.
+        # 40 Hz width: at typical heterodyne center frequencies
+        # (1-3 kHz) this gives Q ~ 25-75 — narrow enough to surgically
+        # remove a whistle without taking out adjacent voice content.
+        # -50 dB depth + 2-stage cascade matches the "Normal" preset:
+        # delivers operator-promised attenuation across the kill
+        # region, sharp shoulders, predictable transition.
         self._notch_default_width_hz = 40.0
-        self._notch_default_deep = True
+        self._notch_default_depth_db = -50.0
+        self._notch_default_cascade = 2
+        # Legacy compat — still read by the right-click default-deep
+        # toggle on older code paths.  Tracks (cascade > 1).  Setter
+        # below keeps the integer cascade in sync.
+        self._notch_default_deep = self._notch_default_cascade > 1
 
         # TCI spots — keyed by callsign, capped size, oldest-first eviction.
         self._spots: dict[str, dict] = {}   # call -> {call, mode, freq_hz, color, ts}
@@ -1137,14 +1180,21 @@ class Radio(QObject):
         """Just the absolute centre frequencies, for legacy callers."""
         return [n.abs_freq_hz for n in self._notches]
     @property
-    def notch_details(self) -> list[tuple[float, float, bool, bool]]:
-        """(freq_hz, width_hz, active, deep) tuples — emitted on
-        notches_changed. Stable shape so UI/TCI subscribers don't
-        depend on the Notch dataclass internals. The `deep` flag
-        lets the visualization show cascaded notches with a thicker
-        outline."""
+    def notch_details(self) -> list[tuple]:
+        """``(freq_hz, width_hz, active, deep, depth_db, cascade)``
+        tuples — emitted on ``notches_changed``.  Stable shape so
+        UI / TCI subscribers don't depend on the Notch dataclass
+        internals.
+
+        v0.0.7.1 notch v2: extended the tuple from 4 to 6 fields
+        adding ``depth_db`` and ``cascade``.  Old subscribers that
+        unpack 4-tuples are tolerated everywhere we control (the
+        spectrum widget falls back to the legacy shape via per-
+        item adaptive unpacking).  ``deep`` is kept in position 3
+        for backward compat (== ``cascade > 1``)."""
         return [
-            (n.abs_freq_hz, n.width_hz, n.active, n.deep)
+            (n.abs_freq_hz, n.width_hz, n.active, n.deep,
+             n.depth_db, n.cascade)
             for n in self._notches
         ]
     @property
@@ -1275,18 +1325,36 @@ class Radio(QObject):
     def _rebuild_notches(self):
         """Re-design every notch's underlying filter — needed when
         sample rate or VFO frequency changes (since both affect the
-        baseband offset that the filter is centered on). Preserves
-        each notch's width, active flag, and deep flag."""
-        rebuilt = []
+        baseband offset that the filter is centered on).  Preserves
+        each notch's width, depth, cascade, and active flag.
+
+        Quiet-pass v0.0.7.1: even though the FILTER COEFFICIENTS have
+        to be rebuilt (different baseband offset → different biquad),
+        we use ``update_coeffs`` on the existing filter instance
+        rather than constructing a fresh NotchFilter.  This way the
+        two-filter crossfade kicks in automatically and the freq
+        change is click-free.
+        """
         for n in self._notches:
-            nf = self._make_notch_filter(
-                n.abs_freq_hz, n.width_hz, deep=n.deep)
-            if nf:
-                rebuilt.append(Notch(
-                    abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
-                    active=n.active, deep=n.deep, filter=nf,
-                ))
-        self._notches = rebuilt
+            try:
+                # Recompute the absolute baseband offset for this
+                # notch under the new VFO freq.
+                NOTCH_RATE = 48000
+                offset = n.abs_freq_hz - self._freq_hz
+                max_off = NOTCH_RATE / 2 - 100
+                offset = max(-max_off, min(max_off, offset))
+                eff_freq = abs(offset)
+                # update_coeffs preserves filter state and crossfades
+                # to the new coefficients over 5 ms — no click on
+                # freq change.
+                n.filter.update_coeffs(
+                    freq_hz=eff_freq,
+                    width_hz=n.width_hz,
+                    depth_db=n.depth_db,
+                    cascade=n.cascade,
+                )
+            except Exception as e:
+                self.status_message.emit(f"Notch error: {e}", 3000)
         if self._notch_enabled:
             self.notches_changed.emit(self.notch_details)
 
@@ -4040,26 +4108,49 @@ class Radio(QObject):
     def add_notch(self, abs_freq_hz: float,
                   width_hz: float | None = None,
                   active: bool = True,
-                  deep: bool | None = None):
-        """Place a new notch. Width defaults to the current
-        notch_default_width_hz; deep defaults to the current
-        notch_default_deep (True out of the box, for genuine
-        "kill the carrier" attenuation). Auto-enables the notch
-        bank if it's currently off, on the assumption that an
-        operator placing a notch wants to hear the result.
+                  deep: bool | None = None,
+                  depth_db: float | None = None,
+                  cascade: int | None = None):
+        """Place a new notch.
 
-        Pass `deep=True` or `deep=False` explicitly to override
-        the default — useful for TCI restore + tests that need
-        deterministic state."""
+        Defaults:
+          - ``width_hz``  → ``_notch_default_width_hz`` (40 Hz).
+          - ``depth_db``  → ``_notch_default_depth_db`` (-50 dB).
+          - ``cascade``   → ``_notch_default_cascade`` (2).
+
+        Backward-compat ``deep`` kwarg: when passed explicitly,
+        translates to (cascade=2 if True else 1) and depth_db keeps
+        the operator default.  New callers should use
+        ``depth_db`` / ``cascade`` directly.
+
+        Auto-enables the notch bank if it's currently off — operator
+        placing a notch wants to hear the result.
+        """
         w = width_hz if width_hz is not None else self._notch_default_width_hz
-        w = max(self.NOTCH_WIDTH_MIN_HZ, min(self.NOTCH_WIDTH_MAX_HZ, float(w)))
-        d = self._notch_default_deep if deep is None else bool(deep)
-        nf = self._make_notch_filter(abs_freq_hz, w, deep=d)
+        w = max(self.NOTCH_WIDTH_MIN_HZ,
+                min(self.NOTCH_WIDTH_MAX_HZ, float(w)))
+        # Resolve depth + cascade.  Explicit `deep` arg overrides the
+        # cascade default for legacy callers.
+        if depth_db is None:
+            depth_db = self._notch_default_depth_db
+        if cascade is None:
+            if deep is not None:
+                cascade = 2 if deep else 1
+            else:
+                cascade = self._notch_default_cascade
+        depth_db = max(self.NOTCH_DEPTH_MIN_DB,
+                       min(self.NOTCH_DEPTH_MAX_DB, float(depth_db)))
+        cascade = max(self.NOTCH_CASCADE_MIN,
+                      min(self.NOTCH_CASCADE_MAX, int(cascade)))
+        nf = self._make_notch_filter(
+            abs_freq_hz, w, depth_db=depth_db, cascade=cascade)
         if nf is None:
             return
         self._notches.append(Notch(
             abs_freq_hz=float(abs_freq_hz), width_hz=w,
-            active=bool(active), deep=d, filter=nf,
+            active=bool(active),
+            depth_db=depth_db, cascade=cascade,
+            filter=nf,
         ))
         if not self._notch_enabled:
             self.set_notch_enabled(True)
@@ -4074,15 +4165,21 @@ class Radio(QObject):
 
     def set_notch_width_at(self, abs_freq_hz: float, new_width_hz: float,
                            tolerance_hz: float | None = None) -> bool:
-        """Find the notch nearest abs_freq_hz and rebuild it with a
-        new width. Used by mouse-wheel and drag gestures over an
-        existing notch. Returns True if a notch was matched + updated.
+        """Find the notch nearest abs_freq_hz and update it with a
+        new width.  Used by mouse-wheel and drag gestures over an
+        existing notch.  Returns True if a notch was matched + updated.
 
-        Rebuild-throttle: drag gestures fire many events per second.
-        Each filter rebuild zeroes the IIR state — repeated rebuilds
-        during a fast drag would prevent the filter from settling
-        and audibly leak the notched signal. Skip rebuilds where the
-        width changes by less than 4%."""
+        Quiet-pass v0.0.7.1: routes through ``filter.update_coeffs``
+        instead of constructing a fresh NotchFilter, which means the
+        filter STATE is preserved across the width change and the
+        two-filter crossfade kicks in to mask any IIR transient at
+        the swap boundary.  Drag-tick clicks gone.
+
+        Width-change throttle: drag gestures fire many events per
+        second.  We skip updates where the width changed by less than
+        4% — at the operator's drag cadence, sub-4% changes would
+        compound into a continuous coefficient-storm with no
+        perceptible benefit."""
         idx = self._find_nearest_notch_idx(abs_freq_hz, tolerance_hz)
         if idx is None:
             return False
@@ -4091,12 +4188,17 @@ class Radio(QObject):
                 min(self.NOTCH_WIDTH_MAX_HZ, float(new_width_hz)))
         if n.width_hz > 0 and abs(w - n.width_hz) / n.width_hz < 0.04:
             return False
-        nf = self._make_notch_filter(n.abs_freq_hz, w, deep=n.deep)
-        if nf is None:
+        try:
+            n.filter.update_coeffs(width_hz=w)
+        except Exception as e:
+            self.status_message.emit(f"Notch error: {e}", 3000)
             return False
+        # Replace the dataclass entry with updated width (immutable
+        # for clean signal emission).
         self._notches[idx] = Notch(
             abs_freq_hz=n.abs_freq_hz, width_hz=w,
-            active=n.active, deep=n.deep, filter=nf,
+            active=n.active, depth_db=n.depth_db, cascade=n.cascade,
+            filter=n.filter,
         )
         self.notches_changed.emit(self.notch_details)
         return True
@@ -4115,7 +4217,9 @@ class Radio(QObject):
             return True
         self._notches[idx] = Notch(
             abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
-            active=bool(active), deep=n.deep, filter=n.filter,
+            active=bool(active),
+            depth_db=n.depth_db, cascade=n.cascade,
+            filter=n.filter,
         )
         self.notches_changed.emit(self.notch_details)
         return True
@@ -4131,27 +4235,13 @@ class Radio(QObject):
 
     def set_notch_deep_at(self, abs_freq_hz: float, deep: bool,
                           tolerance_hz: float | None = None) -> bool:
-        """Toggle one notch's cascade-depth mode. Rebuilds the
-        underlying filter (since the cascade allocates a second
-        biquad-state pair internally). Spectrum overlay renders deep
-        notches with a thicker outline so the operator can see at a
-        glance which notches are running cascaded."""
-        idx = self._find_nearest_notch_idx(abs_freq_hz, tolerance_hz)
-        if idx is None:
-            return False
-        n = self._notches[idx]
-        if n.deep == bool(deep):
-            return True
-        nf = self._make_notch_filter(
-            n.abs_freq_hz, n.width_hz, deep=bool(deep))
-        if nf is None:
-            return False
-        self._notches[idx] = Notch(
-            abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
-            active=n.active, deep=bool(deep), filter=nf,
-        )
-        self.notches_changed.emit(self.notch_details)
-        return True
+        """Legacy compat wrapper.  In v0.0.7.1 notch v2, "deep" is a
+        derived attribute (cascade > 1).  This setter translates a
+        bool toggle to ``cascade=2`` (deep) or ``cascade=1`` (shallow)
+        without touching depth_db.  New code should call
+        ``set_notch_cascade_at`` directly."""
+        return self.set_notch_cascade_at(
+            abs_freq_hz, 2 if bool(deep) else 1, tolerance_hz)
 
     def toggle_notch_deep_at(self, abs_freq_hz: float,
                              tolerance_hz: float | None = None) -> bool:
@@ -4161,6 +4251,125 @@ class Radio(QObject):
         n = self._notches[idx]
         return self.set_notch_deep_at(
             n.abs_freq_hz, not n.deep, tolerance_hz)
+
+    # ── New v0.0.7.1 notch v2 setters (depth_db, cascade, presets) ──
+
+    def set_notch_depth_db_at(self, abs_freq_hz: float, depth_db: float,
+                              tolerance_hz: float | None = None) -> bool:
+        """Set the notch attenuation depth (dB, negative) on the
+        notch nearest ``abs_freq_hz``.  Routed through
+        ``filter.update_coeffs`` so the swap is click-free.
+
+        ``depth_db`` is clamped to [NOTCH_DEPTH_MIN_DB,
+        NOTCH_DEPTH_MAX_DB]."""
+        idx = self._find_nearest_notch_idx(abs_freq_hz, tolerance_hz)
+        if idx is None:
+            return False
+        n = self._notches[idx]
+        d = max(self.NOTCH_DEPTH_MIN_DB,
+                min(self.NOTCH_DEPTH_MAX_DB, float(depth_db)))
+        if abs(d - n.depth_db) < 0.5:
+            # Sub-half-dB change is sub-perceptible; skip.
+            return True
+        try:
+            n.filter.update_coeffs(depth_db=d)
+        except Exception as e:
+            self.status_message.emit(f"Notch error: {e}", 3000)
+            return False
+        self._notches[idx] = Notch(
+            abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
+            active=n.active, depth_db=d, cascade=n.cascade,
+            filter=n.filter,
+        )
+        self.notches_changed.emit(self.notch_details)
+        return True
+
+    def set_notch_cascade_at(self, abs_freq_hz: float, cascade: int,
+                             tolerance_hz: float | None = None) -> bool:
+        """Set the notch cascade depth (1-4 stages) on the notch
+        nearest ``abs_freq_hz``.  Routed through
+        ``filter.update_coeffs`` so the swap is click-free."""
+        idx = self._find_nearest_notch_idx(abs_freq_hz, tolerance_hz)
+        if idx is None:
+            return False
+        n = self._notches[idx]
+        c = max(self.NOTCH_CASCADE_MIN,
+                min(self.NOTCH_CASCADE_MAX, int(cascade)))
+        if c == n.cascade:
+            return True
+        try:
+            n.filter.update_coeffs(cascade=c)
+        except Exception as e:
+            self.status_message.emit(f"Notch error: {e}", 3000)
+            return False
+        self._notches[idx] = Notch(
+            abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
+            active=n.active, depth_db=n.depth_db, cascade=c,
+            filter=n.filter,
+        )
+        self.notches_changed.emit(self.notch_details)
+        return True
+
+    def set_notch_preset_at(self, abs_freq_hz: float, preset: str,
+                            tolerance_hz: float | None = None) -> bool:
+        """Apply a Normal / Deep / Surgical preset to the notch
+        nearest ``abs_freq_hz``.  Updates both ``depth_db`` and
+        ``cascade`` in one click-free swap.
+
+        Unknown preset names are silently ignored (return False).
+        Right-click menu wires "Normal" / "Deep" / "Surgical"
+        entries to this setter."""
+        params = self.NOTCH_PRESETS.get(preset)
+        if params is None:
+            return False
+        idx = self._find_nearest_notch_idx(abs_freq_hz, tolerance_hz)
+        if idx is None:
+            return False
+        n = self._notches[idx]
+        try:
+            n.filter.update_coeffs(
+                depth_db=params["depth_db"],
+                cascade=params["cascade"],
+            )
+        except Exception as e:
+            self.status_message.emit(f"Notch error: {e}", 3000)
+            return False
+        self._notches[idx] = Notch(
+            abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
+            active=n.active,
+            depth_db=params["depth_db"],
+            cascade=params["cascade"],
+            filter=n.filter,
+        )
+        self.notches_changed.emit(self.notch_details)
+        return True
+
+    def set_notch_default_depth_db(self, depth_db: float) -> None:
+        """Default depth applied to newly placed notches."""
+        self._notch_default_depth_db = max(
+            self.NOTCH_DEPTH_MIN_DB,
+            min(self.NOTCH_DEPTH_MAX_DB, float(depth_db)),
+        )
+
+    def set_notch_default_cascade(self, cascade: int) -> None:
+        """Default cascade applied to newly placed notches."""
+        self._notch_default_cascade = max(
+            self.NOTCH_CASCADE_MIN,
+            min(self.NOTCH_CASCADE_MAX, int(cascade)),
+        )
+        # Keep the legacy bool default in sync.
+        self._notch_default_deep = self._notch_default_cascade > 1
+
+    def set_notch_default_preset(self, preset: str) -> None:
+        """Apply Normal / Deep / Surgical to BOTH default depth AND
+        default cascade — convenience for "operator wants every new
+        notch to be Surgical-style"."""
+        params = self.NOTCH_PRESETS.get(preset)
+        if params is None:
+            return
+        self._notch_default_depth_db = float(params["depth_db"])
+        self._notch_default_cascade = int(params["cascade"])
+        self._notch_default_deep = self._notch_default_cascade > 1
 
     def clear_notches(self):
         self._notches.clear()
@@ -5602,24 +5811,26 @@ class Radio(QObject):
 
     def _make_notch_filter(self, abs_freq_hz: float,
                            width_hz: float,
-                           deep: bool = False) -> NotchFilter | None:
+                           depth_db: float = -50.0,
+                           cascade: int = 2,
+                           deep: bool | None = None
+                           ) -> NotchFilter | None:
         """Design one notch filter at the given sky frequency with the
-        given -3 dB bandwidth. The DSP pipeline runs at a fixed
+        given -3 dB bandwidth.  The DSP pipeline runs at a fixed
         48 kHz (decimation happens before notching) — coefficients
         always designed for 48 kHz regardless of the RX sample rate.
 
-        Two regimes:
-        - **Near-DC** (offset < width/2 + 10 Hz): use the high-pass
-          DC-blocker mode of NotchFilter. iirnotch can't catch DC
-          because its center frequency must be > 0 — its bandwidth
-          collapses to zero as freq → 0. The high-pass kills the
-          carrier and matches the visible "kill region" of width Hz.
-        - **Off-DC**: standard iirnotch centered at the offset, with
-          bandwidth = width Hz. Right tool for FT8 tones, RTTY pairs,
-          heterodynes, etc.
+        v0.0.7.1 notch v2 (notch_v2_design.md):
+          - Off-DC: parametric peaking-EQ biquad with operator-set
+            ``depth_db`` (default -50) and ``cascade`` integer
+            (default 2).  Replaces ``scipy.signal.iirnotch`` which
+            had only -3 dB at the visible width edges.
+          - Near-DC: 4th-order Butterworth high-pass (unchanged).
 
-        `deep=True` cascades the resulting filter twice for ~2× dB
-        attenuation on stubborn carriers.
+        Backward-compat: the legacy ``deep`` keyword is accepted and
+        translates to (cascade=2 if True else 1) so older callers
+        still work.  When ``deep`` is passed explicitly it overrides
+        ``cascade``.
         """
         NOTCH_RATE = 48000
         offset = abs_freq_hz - self._freq_hz
@@ -5627,15 +5838,20 @@ class Radio(QObject):
         offset = max(-max_off, min(max_off, offset))
         eff_freq = abs(offset)
         # If the visible notch extent (freq ± width/2) crosses DC,
-        # iirnotch can't model it accurately. Switch to the
-        # DC-blocker path so the actual filter shape matches the
-        # rectangle the operator sees on the spectrum.
+        # the peaking-EQ math degenerates (sin(w0) → 0).  Switch to
+        # the high-pass DC-blocker path so the actual filter shape
+        # matches the rectangle the operator sees on the spectrum.
         try:
             if eff_freq < (width_hz * 0.5 + 10.0):
-                return NotchFilter(NOTCH_RATE, eff_freq, width_hz,
-                                   dc_blocker=True, deep=deep)
-            return NotchFilter(NOTCH_RATE, eff_freq, width_hz,
-                               deep=deep)
+                return NotchFilter(
+                    NOTCH_RATE, eff_freq, width_hz,
+                    dc_blocker=True,
+                    depth_db=depth_db, cascade=cascade, deep=deep,
+                )
+            return NotchFilter(
+                NOTCH_RATE, eff_freq, width_hz,
+                depth_db=depth_db, cascade=cascade, deep=deep,
+            )
         except Exception as e:
             self.status_message.emit(f"Notch error: {e}", 3000)
             return None

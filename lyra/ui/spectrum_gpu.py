@@ -726,10 +726,25 @@ class SpectrumGpuWidget(QOpenGLWidget):
 
     def set_notches(self, notches: list) -> None:
         """Set the notch list for overlay drawing (Phase B.13).
-        notches: list of (abs_freq_hz, width_hz, active, deep)
-        tuples — same shape as Radio.notch_details. Connected to
-        radio.notches_changed."""
-        self._notches = list(notches) if notches else []
+
+        notches: list of tuples from Radio.notch_details.
+
+        v0.0.7.1 notch v2: Radio now emits 6-tuples
+        ``(freq, width, active, deep, depth_db, cascade)``.
+        We normalize to 4-tuples ``(freq, width, active, deep)``
+        here so the existing rendering code keeps working unchanged
+        (it only uses the first four fields)."""
+        if not notches:
+            self._notches = []
+        else:
+            norm = []
+            for it in notches:
+                if len(it) >= 4:
+                    norm.append((it[0], it[1], it[2], it[3]))
+                elif len(it) == 3:
+                    f, w, a = it
+                    norm.append((f, w, a, False))
+            self._notches = norm
         self.update()
 
     # ── Landmark hit-test (band-plan click-to-tune) ────────────────
@@ -2068,9 +2083,20 @@ class WaterfallGpuWidget(QOpenGLWidget):
 
     def set_notches(self, notches: list) -> None:
         """Set the notch list for waterfall overlay drawing.
-        Identical contract to SpectrumGpuWidget.set_notches —
-        connected to radio.notches_changed."""
-        self._notches = list(notches) if notches else []
+        Same normalization as SpectrumGpuWidget.set_notches: accepts
+        4- or 6-tuples from Radio.notch_details, stores 4-tuples
+        internally so existing render code is unchanged."""
+        if not notches:
+            self._notches = []
+        else:
+            norm = []
+            for it in notches:
+                if len(it) >= 4:
+                    norm.append((it[0], it[1], it[2], it[3]))
+                elif len(it) == 3:
+                    f, w, a = it
+                    norm.append((f, w, a, False))
+            self._notches = norm
         self.update()
 
     # Notch click-halo / minimum-visible-width — matches the

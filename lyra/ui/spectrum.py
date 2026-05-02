@@ -486,17 +486,23 @@ class SpectrumWidget(_PaintedWidget):
 
     def set_notches(self, items):
         """Receive the notch list from Radio. Items are
-        (abs_freq_hz, width_hz, active, deep) tuples — same shape
-        that Radio.notch_details emits. Tolerates 3-tuples (no deep
-        flag) for backwards compat with any callers that haven't
-        been updated yet."""
+        (abs_freq_hz, width_hz, active, deep[, depth_db, cascade])
+        tuples — same shape that Radio.notch_details emits.
+
+        Tolerates 3-tuples (legacy: no deep flag), 4-tuples (legacy:
+        no depth/cascade), and 6-tuples (notch v2).  The internal
+        ``self._notches`` list keeps the 4-tuple shape used by
+        existing rendering code; the extra fields are stored
+        separately if rendering wants them later."""
         norm = []
         for it in items:
-            if len(it) == 4:
-                f, w, a, d = it
-            else:
+            if len(it) >= 4:
+                f, w, a, d = it[0], it[1], it[2], it[3]
+            elif len(it) == 3:
                 f, w, a = it
                 d = False
+            else:
+                continue
             norm.append((float(f), float(w), bool(a), bool(d)))
         self._notches = norm
         self.update()
@@ -1461,16 +1467,19 @@ class WaterfallWidget(_PaintedWidget):
         self._span_hz = span_hz
 
     def set_notches(self, items):
-        """Receive notches from Radio. Items are
-        (abs_freq_hz, width_hz, active, deep) tuples. Tolerates
-        legacy 3-tuples for backwards compat."""
+        """Receive notches from Radio.  Items are
+        ``(abs_freq_hz, width_hz, active, deep[, depth_db, cascade])``
+        tuples.  Tolerates legacy 3-, 4-, and 6-tuple shapes for
+        backwards compat."""
         norm = []
         for it in items:
-            if len(it) == 4:
-                f, w, a, d = it
-            else:
+            if len(it) >= 4:
+                f, w, a, d = it[0], it[1], it[2], it[3]
+            elif len(it) == 3:
                 f, w, a = it
                 d = False
+            else:
+                continue
             norm.append((float(f), float(w), bool(a), bool(d)))
         self._notches = norm
         self.update()

@@ -346,8 +346,48 @@ state. Mathematically correct but not tunable per-stage.
 
 In v2, all stages use the same coefficients (depth distributed
 equally per stage as `total_depth_db / cascade`). Independent state
-per stage. This produces the cascade-vs-single equivalence math
-above.
+per stage.
+
+### 4.2 Cascade behavior — bench-validated (not what the audit claimed)
+
+The first audit's table was hand-waved.  Actual measured behaviour
+from `scratch/bench_notch_v2.py` at f0=1 kHz, width=100 Hz, total
+depth=-50 dB:
+
+| Cascade | -depth at center | At ±width/4 | At ±width/2 | At ±2×width |
+|---|---|---|---|---|
+| 1 | -50.00 dB | -31.0 dB | -25.2 dB | -13.9 dB |
+| 2 | -49.97 dB | -35.5 dB | -25.3 dB | -7.2 dB |
+| 4 | -49.15 dB | -38.6 dB | -25.4 dB | -4.4 dB |
+
+Two empirical findings I missed in the first pass:
+
+1. **All cascades give -depth/2 at the BW edge** — that's a
+   property of how the peaking-EQ biquad parameterizes its width.
+   The "-3 dB-from-peak" points (where attenuation = depth/2) are
+   exactly at the operator's set width boundary regardless of
+   cascade.  Cascade changes shape WITHIN the kill region and
+   OUTSIDE it, but not AT the width boundary itself.
+
+2. **Cascade trades inside-sharpness vs outside-transparency.**
+   Higher cascade gives sharper attenuation INSIDE ±width/2 (good:
+   flatter floor across the kill region) AND faster fall-off
+   OUTSIDE ±width/2 (good: less passband disturbance).  The ±2×width
+   numbers above show cascade=1 has -14 dB residual leakage at
+   ±200 Hz vs cascade=4's -4.4 dB.
+
+This makes the "Surgical" preset (cascade=4 + depth=-50) genuinely
+surgical: deep within the operator's kill zone, near-transparent
+just outside.
+
+### 4.3 Cumulative-error caveat
+
+At cascade=4 the measured center depth is -49.15 dB vs the -50 dB
+target (0.85 dB error).  Cause: per-stage coefficient roundoff
+accumulates across stages, with each stage's actual gain slightly
+off from the theoretical depth/N value.  The error stays under
+1 dB at cascade ≤ 4 — sub-perceptual.  At higher cascades it would
+grow further; this is one reason we cap cascade at 4.
 
 ---
 
@@ -608,34 +648,33 @@ in `spectrum.py`. We extend the same tolerance pattern to handle
 
 ---
 
-## 10. Open design decisions for operator review
+## 10. Operator-locked design decisions (2026-05-02)
 
-Before implementation, please confirm:
+Operator review concluded.  Final calls:
 
-1. **Default depth**: -50 dB is my proposal. Is that right, or do
-   you prefer -40 dB (gentler, less likely to ever sound "wrong")
-   or -60 dB (more aggressive default)?
+1. **Default depth**: **-50 dB**.
+2. **Default cascade**: **2 stages**.
+3. **Notch profile submenu**: 3 presets.  **Normal** (cascade=2,
+   depth=-50), **Deep** (cascade=2, depth=-70), **Surgical**
+   (cascade=4, depth=-50, sharper shoulders).  Plus **Custom...**
+   that opens Settings → Notches at the per-notch detail panel.
+   (4-preset variant scrapped as over-engineering.)
+4. **Crossfade**: **true two-filter crossfade** — old filter and
+   new filter both run during the 5 ms transition; outputs are
+   linearly mixed.  Mathematically purer than the dry/wet ramp;
+   no carrier leakage during drag.
+5. **Depth slider range**: **-20 to -80 dB**.
+6. **Cascade range**: **1 to 4**.
+7. **WDSP-architecture port** deferred to v0.1.
+8. **Per-stage depth tuning** out of scope.
+9. **Notch presets / band-specific profiles** — IN scope at
+   operator request.  Scope (Scope A / B / C) being clarified
+   separately.
+10. **Help-doc style**: detailed but not overdone.  Match `nr.md`
+    operator-facing depth without going into the algorithm-
+    internals section.
 
-2. **Default cascade**: 2 stages (matches today's `deep=True`
-   default). Confirm OK, or prefer cascade=1 default with operator
-   opt-in for sharper.
-
-3. **"Notch profile" submenu names**: Gentle / Standard / Strong /
-   Surgical. Or different naming?
-
-4. **Crossfade approach**: dry-wet ramp after rebuild (simpler,
-   what I propose) vs true two-filter crossfade (purer
-   mathematically but more code). I'd ship the simpler one.
-
-5. **Settings tab depth slider range**: -20 to -80 dB. OK?
-
-6. **Cascade range**: 1 to 4. Or wider?
-
-7. **Help-doc-style strategy**: detailed for operators (similar to
-   nr.md) or terse?
-
-Once you approve / amend, I'll execute the implementation plan in
-§8 in order, with bench tests at each step.
+Implementation begins with §8 step 1 immediately.
 
 ---
 
