@@ -682,16 +682,36 @@ class PythonRxChannel(DspChannel):
         self._apf.set_gain_db(float(gain_db))
 
     def reset(self) -> None:
-        """Drop in-flight buffers + transient state.
+        """Drop in-flight buffers + band-specific transient state.
 
-        Also force a decimator rebuild — observed in field test that
-        big freq/mode jumps (e.g. AM 10 MHz WWV → DIGU 7.074 MHz FT8)
-        could leave audio stuck silent until the operator cycled the
-        sample rate, which is the only path that previously rebuilt
-        the decimator. Rebuilding here too closes that gap; the
-        per-call cost is negligible (one np.zeros(taps - 1)) and the
-        first IQ block after reset transparently rebuilds the
-        _Decimator instance via _decimate_to_48k."""
+        Called on freq change, mode change, and stream restart — all
+        operator-driven discontinuities where stale band-specific
+        state (NR noise floor, ANF / LMS adaptive weights, squelch
+        floor) is no longer correct for the new band.
+
+        Quiet-pass v0.0.7.1: this method NO LONGER drops the
+        decimator state.  The previous behaviour (force-rebuild
+        ``self._decimator = None``) was a defensive measure against a
+        historical "audio stuck silent" bug observed on big freq /
+        mode jumps (AM 10 MHz WWV → DIGU 7.074 MHz FT8).  But that
+        rebuild had a real cost: the new decimator's FIR state starts
+        at all zeros, producing a ~1 ms ramp-up transient on the
+        first IQ block after every reset — i.e., a click on every
+        tune.  Operators reported this as "consistent audio pops on
+        tune."  See ``docs/architecture/audio_pops_audit.md`` §3 P0.2.
+
+        The decimator's anti-alias FIR coefficients depend on
+        ``in_rate`` only — not on freq, mode, or anything we touch in
+        ``reset()``.  As long as the rate hasn't changed (which it
+        hasn't, by construction — ``set_in_rate`` handles its own
+        decimator rebuild on actual rate changes), the existing FIR
+        state is still mathematically valid for the next IQ block.
+        Carrying it over removes the click.
+
+        The ``_audio_buf.clear()`` below remains.  That covers the
+        original "stuck silent" symptom too (any backlogged audio
+        from the old band gets dropped, so the channel doesn't try
+        to drain stale samples through new-band demods)."""
         self._audio_buf.clear()
         self._nr.reset()
         # NB state — bg tracker, last-clean memory, blank-run counter.
@@ -719,11 +739,8 @@ class PythonRxChannel(DspChannel):
         # called on freq/mode changes, where an audio discontinuity
         # is already expected.
         self._apf.reset()
-        # Force decimator rebuild on next block. Cheap (one filter-
-        # state allocation) and matches what set_in_rate does, which
-        # is the only path the operator had previously to recover
-        # from the stuck state.
-        self._decimator = None
+        # NOTE: self._decimator is intentionally NOT reset here.
+        # See the docstring above for the full reasoning.
 
     # ── Misc accessors for Radio (read-only views into channel state) ─
 
