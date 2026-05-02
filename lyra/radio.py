@@ -384,6 +384,18 @@ class Radio(QObject):
     }
     AGC_AUTO_INTERVAL_MS = 3000   # re-track threshold every 3 s in auto mode
 
+    # Block size assumed by the AGC_PRESETS release / hang values.
+    # The presets above are stated in "per block" units historically
+    # tuned for a 1024-sample channel block at 48 kHz audio rate.  The
+    # per-sample envelope tracker in _apply_agc_and_volume translates
+    # these to per-sample alpha / hang counts via
+    # _refresh_agc_per_sample_constants() so the perceived time
+    # constants stay identical to what operators are used to.
+    # Quiet-pass v0.0.7.1: introduced when AGC moved from block-scalar
+    # to true per-sample envelope tracking — see
+    # docs/architecture/audio_pops_audit.md §3 P0.1.
+    _AGC_LEGACY_BLOCK_N: int = 1024
+
     # ── External filter board (N2ADR etc.) ─────────────────────────────
     oc_bits_changed      = Signal(int, str)     # raw_bits, human-readable
     filter_board_changed = Signal(bool)         # enabled/disabled
@@ -638,7 +650,16 @@ class Radio(QObject):
         self._agc_profile = "med"        # off / fast / med / slow / custom
         self._agc_release = 0.003
         self._agc_hang_blocks = 23
-        self._agc_hang_counter = 0
+        # Per-sample envelope tracker state.  _agc_peak (above) is the
+        # PER-SAMPLE peak carried across audio blocks.  _agc_hang_counter
+        # is in samples (not blocks) — counts down inside the per-sample
+        # state machine.  Cached per-sample translations of release /
+        # hang are filled by _refresh_agc_per_sample_constants() any
+        # time the operator changes profile or sliders.
+        # See _apply_agc_and_volume for the full envelope tracker.
+        self._agc_hang_counter: int = 0
+        self._agc_one_minus_alpha_per_sample: float = 1.0
+        self._agc_hang_samples: int = 0
         # Rolling noise-floor estimate — lowest block peak over the
         # recent window. Used by "Auto Threshold" to calibrate the
         # AGC target above ambient noise (like the right-click →
@@ -5162,12 +5183,48 @@ class Radio(QObject):
         #      only way to bring weak signals up to audible.
         #
         # Net effect: switching AGC on ↔ off produces only a slight
-        # loudness delta (the expected SDR-client behaviour). Vol slider has a
-        # useful full range in both AGC-on and AGC-off modes.
+        # loudness delta (the expected SDR-client behaviour). Vol slider
+        # has a useful full range in both AGC-on and AGC-off modes.
         #
         # Mute multiplies final gain by 0 — keeps everything else
         # (AGC state, noise-floor tracking, meter feeds) running so
         # unmuting doesn't cause a glitch.
+        #
+        # AGC engine — quiet-pass v0.0.7.1 rewrite:
+        #
+        # Pre-v0.0.7.1, AGC was a BLOCK-SCALAR tracker — one peak,
+        # one gain, applied to the whole audio block.  Between blocks,
+        # the gain could change abruptly (instant attack on block_peak,
+        # exponential release otherwise), which created an audible
+        # sample-domain step at every block boundary on signal arrival
+        # and during release recovery.  Operators heard this as random
+        # loud pops, sometimes many dB above standard playback level.
+        # See docs/architecture/audio_pops_audit.md §3 P0.1 for the
+        # full diagnosis + bench numbers.
+        #
+        # The fix: track the peak envelope SAMPLE-BY-SAMPLE.  For
+        # each input sample,
+        #
+        #   if mag[n] > peak[n-1]:    peak[n] = mag[n]    (instant attack)
+        #                             hang_remaining = hang_samples
+        #   elif hang_remaining > 0:  peak[n] = peak[n-1] (hang)
+        #                             hang_remaining -= 1
+        #   else:                     peak[n] *= (1 − α)  (exp release)
+        #
+        # gain[n] = target / peak[n], clamped at AGC_MAX_GAIN.
+        # output[n] = audio[n] × gain[n] × vol.
+        #
+        # Per-sample tracking eliminates the boundary discontinuity by
+        # construction — the gain crosses the boundary continuously
+        # because the same per-sample state machine drives both sides.
+        # Time constants are translated from the legacy per-block
+        # release / hang at __init__ + every profile change so the
+        # perceived behaviour matches the v0.0.7 baseline (see
+        # _refresh_agc_per_sample_constants).
+        #
+        # Cost: one Python loop over the block.  At 1024 samples and
+        # ~46 blocks/sec on 48 kHz audio, ~100-150 µs per block on a
+        # modern CPU — well under the 21 ms block budget.
         vol = 0.0 if self._muted else self._volume
         af = self.af_gain_linear
         # Apply AF Gain first — same for both AGC paths.
@@ -5197,23 +5254,51 @@ class Radio(QObject):
             out = self._leveler.process(out)
             return np.tanh(out).astype(np.float32)
 
-        block_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
-        # Track a rolling noise-floor baseline: the minimum block peak
-        # we've seen in the last ~3 seconds. Used by auto-threshold.
-        self._noise_history.append(block_peak)
+        n = audio.size
+        if n == 0:
+            return audio.astype(np.float32, copy=False)
+
+        # ── Per-sample envelope tracker ──────────────────────────────
+        # Inner loop is sequential (instant-attack / hang / release
+        # transitions are state-dependent) but the per-iteration work
+        # is trivial.  Pure-Python at 1024 iters / block ≈ 100 µs.
+        # Numba / Cython could shave that to ~5 µs, but at <1% of the
+        # block budget it isn't worth the build-time complexity yet.
+        mag = np.abs(audio).astype(np.float64)
+        peak_arr = np.empty(n, dtype=np.float64)
+        p = float(self._agc_peak)
+        h = int(self._agc_hang_counter)
+        one_minus_alpha = float(self._agc_one_minus_alpha_per_sample)
+        hang_init = int(self._agc_hang_samples)
+        PEAK_FLOOR = 1e-4
+        for i in range(n):
+            m = mag[i]
+            if m > p:
+                p = m                    # instant attack
+                h = hang_init            # rearm hang
+            elif h > 0:
+                h -= 1                   # hold during hang
+            else:
+                p = p * one_minus_alpha  # exp release
+            if p < PEAK_FLOOR:
+                p = PEAK_FLOOR
+            peak_arr[i] = p
+        # Persist envelope state across blocks.  The next call picks up
+        # where this one left off — no block-boundary discontinuity.
+        self._agc_peak = p
+        self._agc_hang_counter = h
+
+        # Rolling noise-floor baseline.  Use the per-sample MIN of the
+        # tracked peak envelope as the block's "quietest level seen"
+        # — same use as the v0.0.7 block_peak baseline (the auto-
+        # threshold helper consumes this).  Min over peak_arr is a
+        # cheap NumPy reduction.
+        block_min = float(np.min(peak_arr))
+        self._noise_history.append(block_min)
         if len(self._noise_history) > self._noise_history_max:
             self._noise_history.pop(0)
         if self._noise_history:
             self._noise_baseline = min(self._noise_history)
-
-        if block_peak > self._agc_peak:
-            self._agc_peak = block_peak   # instant attack
-            self._agc_hang_counter = self._agc_hang_blocks
-        elif self._agc_hang_counter > 0:
-            self._agc_hang_counter -= 1
-        else:
-            self._agc_peak *= (1.0 - self._agc_release)
-        self._agc_peak = max(self._agc_peak, 1e-4)
 
         # AGC max gain cap. Was previously 10× (20 dB), which was far
         # too conservative — any signal below ~-30 dBFS couldn't be
@@ -5225,16 +5310,22 @@ class Radio(QObject):
         # the speaker. Strong signals aren't affected — they hit
         # target well before the cap matters.
         AGC_MAX_GAIN = 1000.0   # 60 dB maximum AGC gain
-        agc_gain = min(self._agc_target / self._agc_peak, AGC_MAX_GAIN)
-        # Report the current AGC action to meters / diagnostics
+        gain_arr = np.minimum(
+            self._agc_target / peak_arr, AGC_MAX_GAIN)
+
+        # Report the END-OF-BLOCK gain to meters / diagnostics —
+        # same cadence as v0.0.7 (one emit per block).  Within-block
+        # gain variation is sub-perceptible at the meter's ~6 Hz
+        # update rate.
         try:
-            action_db = 20.0 * np.log10(max(agc_gain, 1e-6))
+            action_db = 20.0 * np.log10(max(float(gain_arr[-1]), 1e-6))
             self.agc_action_db.emit(float(action_db))
         except Exception:
             pass
-        # Final: audio-already-AF-scaled × AGC × Volume → leveler → tanh
-        # (AF Gain was applied BEFORE the AGC tracker above.)
-        audio = audio * agc_gain * vol
+
+        # Per-sample gain × volume.  Cast to audio's dtype so the
+        # multiply stays in float32 (no allocation churn).
+        audio = audio * gain_arr.astype(audio.dtype) * vol
         # Audio leveler — soft-knee compressor for taming transient
         # bursts.  Sits BEFORE tanh so its smooth gain reduction
         # can prevent the tanh limiter from clipping; tanh stays
@@ -5279,6 +5370,7 @@ class Radio(QObject):
         """Set AGC params and switch profile to 'custom'."""
         self._agc_release = max(0.0, min(0.1, float(release)))
         self._agc_hang_blocks = max(0, min(200, int(hang_blocks)))
+        self._refresh_agc_per_sample_constants()
         self._agc_profile = "custom"
         self.agc_profile_changed.emit("custom")
 
@@ -5288,6 +5380,42 @@ class Radio(QObject):
             return
         self._agc_release = params["release"]
         self._agc_hang_blocks = params["hang_blocks"]
+        self._refresh_agc_per_sample_constants()
+
+    def _refresh_agc_per_sample_constants(self) -> None:
+        """Translate per-block AGC release / hang into per-sample form.
+
+        The operator-facing AGC presets are stated as "release per
+        block" (a fraction by which the peak decays each audio block)
+        and "hang_blocks" (block count to hold the peak after attack).
+        The per-sample envelope tracker in _apply_agc_and_volume
+        consumes these as a per-sample decay factor and a hang sample
+        count instead.
+
+        Math:
+            d_block (per-block decay factor) = 1 - release_per_block
+            d_sample (per-sample decay)      = d_block^(1/block_n)
+            hang_samples                     = hang_blocks × block_n
+
+        The conversion preserves the perceived time constant exactly
+        — N blocks of decay at the per-block rate equals N×block_n
+        samples of decay at the per-sample rate.
+
+        Cached because the power isn't free; called from __init__
+        (via _apply_agc_preset), profile changes, and custom-slider
+        commits.
+        """
+        BLOCK_N = self._AGC_LEGACY_BLOCK_N
+        one_minus_release = max(
+            0.0, min(1.0, 1.0 - float(self._agc_release)))
+        if one_minus_release <= 0.0:
+            # Pathological release == 1.0: peak collapses to floor
+            # immediately every sample.  Useful only as a diagnostic.
+            d_sample = 0.0
+        else:
+            d_sample = one_minus_release ** (1.0 / BLOCK_N)
+        self._agc_one_minus_alpha_per_sample = float(d_sample)
+        self._agc_hang_samples = int(self._agc_hang_blocks) * BLOCK_N
 
     # ── CW pitch ─────────────────────────────────────────────────────
     @property
