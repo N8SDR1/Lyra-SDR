@@ -758,11 +758,56 @@ class MainWindow(QMainWindow):
         self._clock_timer.start()
         self._tick_clocks()
 
-        # ── Spacer #3 — equal stretch with spacer2 so the clocks
-        #     land at the visual midpoint between ADC and HL2/CPU.
-        spacer3 = QWidget()
-        spacer3.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        tb.addWidget(spacer3)
+        # ── Spacers #3a + #3b — split the post-clocks stretch into
+        # two equal halves so an update-available indicator (added
+        # between them, see below) lands centered between the
+        # clocks and the HL2 telemetry block.  When the indicator
+        # is hidden (the common case — no update available) the
+        # two spacers collapse together and behave exactly like the
+        # original single Expanding spacer.
+        spacer3a = QWidget()
+        spacer3a.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer3a)
+
+        # ── 8.5 Update-available indicator ─────────────────────────
+        # Visible only when the silent update checker has found a
+        # newer release.  Click to open the Check for Updates dialog.
+        # Sits centered between the clocks and the HL2 telemetry
+        # block so it's discoverable without crowding either side.
+        #
+        # Implementation note: QToolBar.addWidget() wraps the widget
+        # in a QWidgetAction.  The ACTION's visibility — not the
+        # widget's — is what QToolBar honors when deciding whether
+        # to render the slot.  So we keep a reference to the action
+        # and toggle THAT in _on_startup_update_*.
+        from PySide6.QtWidgets import QPushButton as _QPushButton
+        self.update_indicator = _QPushButton("")
+        self.update_indicator.setCursor(Qt.PointingHandCursor)
+        self.update_indicator.setToolTip(
+            "A newer Lyra release is available.\n"
+            "Click to open Help → Check for Updates and view\n"
+            "the release notes + download link.")
+        self.update_indicator.setStyleSheet(
+            "QPushButton { "
+            "color: #ff8c1a; "
+            "font-family: Consolas, monospace; "
+            "font-weight: 700; font-size: 13px; "
+            "padding: 4px 12px; "
+            "border: 1px solid #ff8c1a; border-radius: 10px; "
+            "background: rgba(255, 140, 26, 0.10); "
+            "} "
+            "QPushButton:hover { "
+            "background: rgba(255, 140, 26, 0.22); "
+            "border-color: #ffaa44; "
+            "color: #ffaa44; "
+            "}")
+        self.update_indicator.clicked.connect(self._on_check_for_updates)
+        self._update_indicator_action = tb.addWidget(self.update_indicator)
+        self._update_indicator_action.setVisible(False)
+
+        spacer3b = QWidget()
+        spacer3b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer3b)
 
         # ── 9. HL2 hardware telemetry (temperature + supply V) ────
         self.hl2_telem_label = QLabel("HL2  T --°C   V --.- V")
@@ -1550,6 +1595,13 @@ class MainWindow(QMainWindow):
         # Help menu badge — rename the action so operators can't miss it.
         self._set_update_menu_badge(tag, has_update=True)
 
+        # Toolbar indicator — visible until the operator clicks it
+        # (which opens the Check for Updates dialog) or upgrades.
+        # Centered between the clocks and HL2 telem block.
+        if hasattr(self, "_update_indicator_action"):
+            self.update_indicator.setText(f"🆕  {tag} available")
+            self._update_indicator_action.setVisible(True)
+
         if tag in skipped:
             return
 
@@ -1568,6 +1620,8 @@ class MainWindow(QMainWindow):
         # Make sure any previous "Update available" badge clears
         # (operator just upgraded to the latest).
         self._set_update_menu_badge("", has_update=False)
+        if hasattr(self, "_update_indicator_action"):
+            self._update_indicator_action.setVisible(False)
 
     def _on_startup_update_failed(self, msg: str):
         # Silent — networks blip, firewalls block, GitHub rate-limits.

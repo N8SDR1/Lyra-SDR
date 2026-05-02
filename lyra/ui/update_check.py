@@ -38,8 +38,15 @@ import lyra
 
 REPO_OWNER = "N8SDR1"
 REPO_NAME  = "Lyra-SDR"
+# Note: NOT /releases/latest — that endpoint hides pre-releases by
+# design.  We query /releases (all-releases list) and pick the
+# highest version ourselves.  Lets testers on a pre-release still
+# get notified of newer pre-releases AND any subsequent full
+# release, plus full-release users still see new full releases as
+# expected.  Same auth-free public endpoint, no rate-limit concern
+# at our volume.
 RELEASES_API_URL = (
-    f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest")
+    f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases")
 RELEASES_PAGE_URL = (
     f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases")
 
@@ -105,14 +112,54 @@ class _ReleaseFetchWorker(QObject):
         except Exception as e:
             self.finished_error.emit(f"Update check failed: {e}")
             return
-        tag = str(payload.get("tag_name", "") or "")
-        url = str(payload.get("html_url", "") or RELEASES_PAGE_URL)
-        body = str(payload.get("body", "") or "")
-        if not tag:
+
+        # /releases returns a JSON array of release objects, newest
+        # first by created_at.  We iterate all of them, skip drafts,
+        # parse the tag_name, and pick the HIGHEST version (not the
+        # most-recent — important if e.g. a pre-release was tagged
+        # AFTER a full release was made for the same version).
+        # Including pre-releases in the comparison lets testers on
+        # one pre-release see newer pre-releases AND lets full-
+        # release users still see full releases (since semver
+        # comparison is symmetric).
+        if not isinstance(payload, list):
             self.finished_error.emit(
-                "GitHub response had no tag_name; can't compare versions.")
+                "GitHub returned an unexpected payload shape "
+                "(expected an array of releases).")
             return
-        self.finished_ok.emit(tag, url, body)
+        if not payload:
+            self.finished_error.emit(
+                "No releases published yet on the GitHub repo.")
+            return
+
+        best_tag = ""
+        best_url = RELEASES_PAGE_URL
+        best_body = ""
+        best_ver = None
+        for rel in payload:
+            if not isinstance(rel, dict):
+                continue
+            if rel.get("draft", False):
+                continue
+            tag = str(rel.get("tag_name", "") or "")
+            if not tag:
+                continue
+            ver = _parse_version(tag)
+            if ver is None:
+                continue
+            if best_ver is None or ver > best_ver:
+                best_ver = ver
+                best_tag = tag
+                best_url = str(
+                    rel.get("html_url", "") or RELEASES_PAGE_URL)
+                best_body = str(rel.get("body", "") or "")
+
+        if not best_tag:
+            self.finished_error.emit(
+                "GitHub returned releases but none had parseable "
+                "version tags (expected vX.Y.Z form).")
+            return
+        self.finished_ok.emit(best_tag, best_url, best_body)
 
 
 # ── User-facing dialog ─────────────────────────────────────────────────
