@@ -643,6 +643,28 @@ class PythonRxChannel(DspChannel):
         Radio uses this to emit a Qt signal so the UI can react."""
         self._nr.set_capture_done_callback(fn)
 
+    def set_nr_staleness_callback(self, fn) -> None:
+        """Register the function NR fires when the loaded captured
+        profile drifts beyond the staleness threshold.  Argument is
+        the smoothed drift in dB.  Radio uses this to emit a Qt
+        signal so the UI can show a "recapture recommended" toast.
+
+        See SpectralSubtractionNR.set_staleness_callback() for the
+        full state-machine semantics — at most one fire per stale
+        event with hysteresis-based rearm."""
+        self._nr.set_staleness_callback(fn)
+
+    def set_nr_staleness_check_enabled(self, on: bool) -> None:
+        """Master toggle for the staleness check.  Default ON.
+        Operator can disable via Settings -> Noise."""
+        self._nr.set_staleness_check_enabled(bool(on))
+
+    def nr_staleness_drift_db(self) -> float:
+        """Most recent smoothed drift between live noise and the
+        loaded captured profile, in dB.  0.0 if no profile is loaded
+        or no checks have run yet."""
+        return self._nr.staleness_drift_db()
+
     @property
     def nr_fft_size(self) -> int:
         """FFT size used by the embedded NR processor.  Profiles

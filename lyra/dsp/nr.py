@@ -344,6 +344,63 @@ class SpectralSubtractionNR:
     CAPTURE_MIN_SEC: float = 0.5
     CAPTURE_MAX_SEC: float = 30.0
 
+    # ── Captured-profile staleness detection (P1.2) ──────────────
+    # Periodically compare the live min-stats noise estimate against
+    # the loaded captured profile.  When the live noise floor has
+    # drifted beyond a threshold from the profile, fire a one-shot
+    # callback so the UI can toast "your profile may be stale —
+    # consider recapturing."
+    #
+    # The check is only meaningful when (a) a captured profile is
+    # loaded AND (b) the operator is using captured-source mode.
+    # It runs continuously regardless of the source toggle so the
+    # operator can be notified even before they engage captured
+    # source.
+    #
+    # Hysteresis state machine prevents toast spam:
+    #   normal       → drift_db climbs above THRESHOLD → fire toast
+    #                                                    (state=fired)
+    #   fired        → drift_db falls below REARM for REARM_CHECKS
+    #                  consecutive checks → re-arm (state=normal)
+    #   on profile load / clear → reset state to normal + warmup
+    #
+    # Warmup period after profile load: skip K initial checks so
+    # the live tracker has time to converge to current band
+    # conditions before we compare.  Without this, the tracker's
+    # warm-up drift would always trigger a false toast right after
+    # profile load.
+    # Threshold tuning notes:
+    #   The zero-mean log-spectrum distance has an inherent noise
+    #   floor around 5-7 dB even on truly-matching audio, because
+    #   the live tracker (min-of-Rayleigh) and captured profile
+    #   (mean-of-Rayleigh) have different per-bin statistical
+    #   character — even when sampling the same noise.  Threshold
+    #   must sit comfortably above this floor.
+    #
+    #   10 dB threshold catches:
+    #     - Powerline comb appearing or disappearing (~15-25 dB)
+    #     - Atmospheric vs local QRM transitions (~12-20 dB)
+    #     - Major bandwidth changes (e.g. CW filter -> SSB filter
+    #       reshapes the noise spectrum entirely, ~30+ dB)
+    #   And ignores:
+    #     - Same shape, different amplitude (drift stays at floor)
+    #     - Brief transients (smoothed out by 5-sec time constant)
+    STALENESS_DB_THRESHOLD: float = 10.0   # fire above this
+    STALENESS_DB_REARM: float = 7.0        # below this rearms
+    STALENESS_CHECK_INTERVAL_FRAMES: int = 50   # ~133 ms @ hop=128
+    # 5-sec exponential smoothing time constant at the 50-frame
+    # check interval: α = exp(-50·128 / 48000 / 5) ≈ 0.974
+    STALENESS_SMOOTH_ALPHA: float = 0.974
+    # Warmup checks before any toast can fire (10 sec @ 50-frame
+    # interval = 75 checks).
+    STALENESS_WARMUP_CHECKS: int = 75
+    # Below-rearm-threshold consecutive checks needed to rearm
+    # (10 sec @ 50-frame interval = 75 checks).  This is on top of
+    # however long the smoothing takes to actually drop the drift
+    # below the rearm threshold (~5 sec time constant), so total
+    # rearm latency after band conditions stabilize is ~15 sec.
+    STALENESS_REARM_CHECKS: int = 75
+
     def __init__(self, rate: int = 48000):
         self.rate = rate
         self._fft = self.FFT_SIZE
@@ -463,6 +520,25 @@ class SpectralSubtractionNR:
         # is responsible for any cross-thread dispatch (Qt signals
         # with QueuedConnection handle this for free).
         self._capture_done_callback: Optional[Callable[[], None]] = None
+
+        # ── Staleness detection state (P1.2) ─────────────────────
+        # Periodically check loaded captured profile against the
+        # live min-stats noise floor; fire a one-shot callback when
+        # drift exceeds the threshold so the UI can prompt for
+        # recapture.  See class-constants section for the math /
+        # state machine.
+        self._staleness_callback: Optional[
+            Callable[[float], None]] = None
+        self._staleness_check_enabled: bool = True
+        self._staleness_check_counter: int = 0
+        self._staleness_smoothed_db: float = 0.0
+        self._staleness_fired: bool = False
+        self._staleness_below_count: int = 0
+        self._staleness_warmup_remaining: int = 0
+        # Last-computed drift (in dB) — exposed via property so the
+        # UI can show a live readout in the profile manager / source
+        # badge tooltip.  Updated every STALENESS_CHECK_INTERVAL_FRAMES.
+        self._staleness_last_drift_db: float = 0.0
 
     # ── public API ────────────────────────────────────────────────
     def set_strength(self, value: float) -> None:
@@ -715,6 +791,11 @@ class SpectralSubtractionNR:
         # real noise, well above zero).
         arr = np.maximum(arr, 1e-6).astype(np.float32, copy=False)
         self._captured_noise_mag = arr.copy()
+        # Reset staleness state — new profile = fresh slate.  The
+        # warmup period prevents the live tracker's transient
+        # drift (which is large for the first few seconds after
+        # any capture / load) from triggering a spurious toast.
+        self._reset_staleness_state()
 
     def clear_captured_profile(self) -> None:
         """Drop the active captured profile.
@@ -726,6 +807,153 @@ class SpectralSubtractionNR:
         mode in this case)."""
         self.cancel_noise_capture()
         self._captured_noise_mag = None
+        # Profile gone → no staleness check is meaningful; reset.
+        self._reset_staleness_state()
+
+    # ── Staleness detection API (P1.2) ───────────────────────────
+
+    def set_staleness_callback(
+            self,
+            fn: Optional[Callable[[float], None]]) -> None:
+        """Register a one-shot callback fired when the loaded
+        captured profile drifts beyond ``STALENESS_DB_THRESHOLD``
+        from the live noise floor.  Argument is the smoothed drift
+        in dB.
+
+        Called from inside ``process()`` on whatever thread is
+        running NR.  Caller is responsible for any cross-thread
+        dispatch (typical Lyra pattern: emit a Qt signal with
+        QueuedConnection so the UI slot runs on main).
+
+        Pass None to clear.
+
+        The callback fires AT MOST once per "stale event": after it
+        fires, the state machine arms and won't fire again until
+        the smoothed drift drops below ``STALENESS_DB_REARM`` for
+        ``STALENESS_REARM_CHECKS`` consecutive checks (~30 sec) AND
+        then climbs back above the threshold.  Profile reload /
+        clear also resets the state.
+        """
+        self._staleness_callback = fn
+
+    def set_staleness_check_enabled(self, on: bool) -> None:
+        """Master toggle for the staleness check.  Default ON.
+
+        When OFF, no drift computation happens (the periodic
+        counter is still incremented to keep timing consistent on
+        re-enable, but no callbacks fire and no smoothed-state
+        updates).  Operator can disable from Settings → Noise if
+        they find the toasts noisy."""
+        self._staleness_check_enabled = bool(on)
+        if not on:
+            # Clear the warmup so re-enable doesn't have to wait.
+            self._staleness_warmup_remaining = 0
+
+    def staleness_drift_db(self) -> float:
+        """Most recent smoothed drift in dB.  0.0 when no profile
+        is loaded or before the first check.  Useful for live
+        diagnostic readouts in the profile manager."""
+        return float(self._staleness_smoothed_db)
+
+    def _reset_staleness_state(self) -> None:
+        """Reset the staleness state machine — called on profile
+        load / clear / explicit operator reset.  Re-arms warmup so
+        the next post-reset checks don't fire spuriously."""
+        self._staleness_smoothed_db = 0.0
+        self._staleness_fired = False
+        self._staleness_below_count = 0
+        self._staleness_check_counter = 0
+        self._staleness_warmup_remaining = self.STALENESS_WARMUP_CHECKS
+        self._staleness_last_drift_db = 0.0
+
+    def _update_staleness(self, live_mag: np.ndarray) -> None:
+        """Compute drift between live min-stats noise floor and the
+        loaded captured profile; update the smoothed estimate; fire
+        the operator callback if the threshold has been crossed.
+
+        Cheap: per-bin log10 + L2.  Called every
+        ``STALENESS_CHECK_INTERVAL_FRAMES`` frames (= ~133 ms).
+
+        Metric: zero-mean log-spectrum RMS distance ("spectral
+        shape distance").  Computes
+            log_live  = 20·log10(live)   — mean(log_live)
+            log_prof  = 20·log10(profile) — mean(log_prof)
+            drift_db  = sqrt( mean( (log_live - log_prof)² ) )
+
+        This is SCALE-INVARIANT (subtracting per-array mean removes
+        any absolute-level calibration mismatch between the
+        min-stats output and the capture-time average — these
+        intrinsically differ by ~20 dB because one is min-of-Rayleigh
+        and the other is mean-of-Rayleigh).  Drift then measures
+        only the SHAPE difference: when the band's noise spectrum
+        SHAPE diverges from the profile (e.g., powerline comb
+        appears or disappears, atmospheric noise replaces local
+        QRM), drift increases.  When the same noise just gets
+        louder or quieter overall, drift stays low — which is what
+        operators want, since AGC handles overall level changes.
+
+        Threshold of 3 dB drift means "per-bin spectral shape
+        differs by RMS 3 dB" — a meaningful and audible mismatch.
+        """
+        profile = self._captured_noise_mag
+        if profile is None or profile.shape != live_mag.shape:
+            return
+        # Per-bin log magnitudes — floor at 1e-10 to avoid log(0).
+        log_live = 20.0 * np.log10(
+            np.maximum(live_mag, 1e-10)).astype(np.float64)
+        log_prof = 20.0 * np.log10(
+            np.maximum(profile, 1e-10)).astype(np.float64)
+        # Zero-mean each spectrum before comparing — removes the
+        # absolute-level offset and focuses on shape.
+        log_live = log_live - log_live.mean()
+        log_prof = log_prof - log_prof.mean()
+        # RMS per-bin shape difference (in dB).
+        diff = log_live - log_prof
+        drift_db = float(np.sqrt(np.mean(diff * diff)))
+        # Initialize the smoothed value on first check after
+        # reset to avoid the 0 → drift_db ramp dominating early
+        # samples.
+        if (self._staleness_warmup_remaining
+                == self.STALENESS_WARMUP_CHECKS):
+            self._staleness_smoothed_db = drift_db
+        else:
+            a = self.STALENESS_SMOOTH_ALPHA
+            self._staleness_smoothed_db = (
+                a * self._staleness_smoothed_db
+                + (1.0 - a) * drift_db)
+        self._staleness_last_drift_db = drift_db
+
+        # Warmup gate — don't fire toasts during initial settle.
+        if self._staleness_warmup_remaining > 0:
+            self._staleness_warmup_remaining -= 1
+            return
+
+        # State machine.
+        if not self._staleness_fired:
+            if (self._staleness_smoothed_db
+                    > self.STALENESS_DB_THRESHOLD):
+                self._staleness_fired = True
+                self._staleness_below_count = 0
+                cb = self._staleness_callback
+                if cb is not None:
+                    try:
+                        cb(self._staleness_smoothed_db)
+                    except Exception as exc:
+                        # Never let callback errors break process().
+                        print(f"[NR1] staleness callback raised: {exc}")
+        else:
+            # Already fired; wait for sustained below-rearm
+            # before re-arming.
+            if (self._staleness_smoothed_db
+                    < self.STALENESS_DB_REARM):
+                self._staleness_below_count += 1
+                if (self._staleness_below_count
+                        >= self.STALENESS_REARM_CHECKS):
+                    self._staleness_fired = False
+                    self._staleness_below_count = 0
+            else:
+                # Still above rearm — reset counter.
+                self._staleness_below_count = 0
 
     def capture_progress(self) -> tuple[str, float]:
         """Return ``(state, fraction_complete)`` for UI progress
@@ -1014,6 +1242,17 @@ class SpectralSubtractionNR:
                     self._noise_mag = (
                         (1.0 - a) * self._noise_mag + a * mag)
                 live_noise_ref = self._noise_mag
+
+            # Staleness check — periodic, cheap.  Only meaningful
+            # when a captured profile is loaded.  See class
+            # constants for the state machine + thresholds.
+            if (self._captured_noise_mag is not None
+                    and self._staleness_check_enabled):
+                self._staleness_check_counter += 1
+                if (self._staleness_check_counter
+                        >= self.STALENESS_CHECK_INTERVAL_FRAMES):
+                    self._staleness_check_counter = 0
+                    self._update_staleness(live_noise_ref)
 
             # Choose the noise reference based on the source toggle.
             # Captured source wins when the toggle is on AND a

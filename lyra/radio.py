@@ -256,6 +256,13 @@ class Radio(QObject):
     # NR source toggle — fires when set_nr_use_captured_profile flips.
     # UI binds to this to update menu check-states + status badges.
     nr_use_captured_profile_changed = Signal(bool)
+    # P1.2 — fires once when the loaded captured profile drifts
+    # beyond the staleness threshold (default 10 dB).  Payload is
+    # the smoothed drift in dB.  UI shows a toast suggesting
+    # recapture.  At most one fire per "stale event"; rearms after
+    # ~15 sec of stable conditions.  See SpectralSubtractionNR for
+    # the full state-machine semantics.
+    noise_profile_stale = Signal(float)
 
     # APF (Audio Peaking Filter) — CW-only narrow peaking biquad
     # centered on cw_pitch_hz. Boosts the CW tone without the ringing
@@ -591,6 +598,12 @@ class Radio(QObject):
         # thread via auto/queued connection.
         self._rx_channel.set_nr_capture_done_callback(
             self._on_nr_capture_done)
+        # P1.2 — staleness callback.  NR fires this on the audio
+        # thread when the loaded captured profile drifts; we emit a
+        # Qt signal here, which Qt routes to the UI thread via auto/
+        # queued connection for the toast notification.
+        self._rx_channel.set_nr_staleness_callback(
+            self._on_nr_profile_stale)
         # Track the active captured profile name so the UI can show
         # which profile is currently loaded (and so we can persist
         # the selection across Lyra restarts).  "" = no profile.
@@ -3023,6 +3036,23 @@ class Radio(QObject):
         except Exception as exc:
             print(f"[Radio] could not autoload LMS settings: {exc}")
 
+    def autoload_staleness_settings(self) -> None:
+        """Restore captured-profile staleness-check toggle from
+        QSettings.  Default ON.  Called once at startup."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            on = bool(s.value("noise/staleness_check_enabled",
+                              True, type=bool))
+        except Exception:
+            on = True
+        try:
+            # Channel-level direct call so we don't redundantly
+            # re-persist the value on autoload.
+            self._rx_channel.set_nr_staleness_check_enabled(on)
+        except Exception as exc:
+            print(f"[Radio] could not autoload staleness setting: {exc}")
+
     # ── All-mode squelch API ───────────────────────────────────────────
 
     @property
@@ -3166,6 +3196,39 @@ class Radio(QObject):
         except Exception:
             verdict = "n/a"
         self.noise_capture_done.emit(str(verdict))
+
+    def _on_nr_profile_stale(self, drift_db: float) -> None:
+        """Called from inside NR.process() when staleness threshold
+        is crossed.  Same threading discipline as _on_nr_capture_done
+        — runs on the audio thread, just emits a Qt signal that lands
+        on the UI thread via queued connection."""
+        self.noise_profile_stale.emit(float(drift_db))
+
+    def set_nr_staleness_check_enabled(self, on: bool) -> None:
+        """Master toggle for the captured-profile staleness check
+        (Settings -> Noise -> "Profile staleness notifications").
+        Default ON.  Persists to QSettings so the choice carries
+        across launches."""
+        try:
+            self._rx_channel.set_nr_staleness_check_enabled(bool(on))
+        except Exception as exc:
+            print(f"[Radio] could not set staleness check: {exc}")
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/staleness_check_enabled", bool(on))
+        except Exception:
+            pass
+
+    def nr_staleness_drift_db(self) -> float:
+        """Live-read the smoothed drift (dB) between the loaded
+        captured profile and current band noise.  0.0 if no profile
+        is loaded.  Useful for diagnostic readouts in the profile
+        manager dialog."""
+        try:
+            return float(self._rx_channel.nr_staleness_drift_db())
+        except Exception:
+            return 0.0
 
     def _save_active_profile_name_setting(self, name: str) -> None:
         """Persist the active-profile name to QSettings so the next

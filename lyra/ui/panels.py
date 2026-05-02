@@ -1576,6 +1576,11 @@ class DspPanel(GlassPanel):
         radio.noise_capture_done.connect(self._on_noise_capture_done)
         radio.noise_active_profile_changed.connect(
             self._on_noise_active_profile_changed)
+        # P1.2 — staleness signal: toast when loaded captured profile
+        # drifts beyond threshold.  Single-fire per stale event with
+        # rearm; see Radio.noise_profile_stale docstring.
+        radio.noise_profile_stale.connect(
+            self._on_noise_profile_stale)
         # Source-toggle changes also update tooltips/labels via the
         # active-profile-changed slot (it re-paints the Cap button +
         # NR button tooltip with current state).
@@ -2465,6 +2470,29 @@ class DspPanel(GlassPanel):
         Capture button tooltip + the NR button tooltip so hover
         text reflects the new state."""
         self._refresh_nr_capture_button()
+
+    def _on_noise_profile_stale(self, drift_db: float) -> None:
+        """Slot for ``Radio.noise_profile_stale`` — fires once per
+        stale event when the loaded captured profile no longer
+        matches the live noise floor.
+
+        Shows a status-bar toast with the drift value plus a hint
+        that the operator may want to recapture.  At-most-one fire
+        per stale event with hysteresis-based rearm (see Radio
+        signal docstring).
+        """
+        try:
+            from PySide6.QtWidgets import QMainWindow
+            mw = self.window()
+            if mw is None:
+                return
+            # 12-second toast — long enough to read but not annoying.
+            mw.statusBar().showMessage(
+                f"⚠  Noise profile drifted {drift_db:.1f} dB from "
+                f"current band conditions — consider recapturing.",
+                12000)
+        except Exception as exc:
+            print(f"[panels] could not show staleness toast: {exc}")
         # Also refresh the NR button tooltip via the existing path.
         self._on_nr_profile_changed(self.radio.nr_profile)
 

@@ -167,6 +167,13 @@ class MainWindow(QMainWindow):
             self.radio.autoload_squelch_settings()
         except Exception as exc:
             print(f"[app] squelch autoload error: {exc}")
+        # Captured-profile staleness check — persisted under
+        # noise/staleness_check_enabled.  Default ON (operator
+        # opt-out via Settings → Noise).
+        try:
+            self.radio.autoload_staleness_settings()
+        except Exception as exc:
+            print(f"[app] staleness autoload error: {exc}")
 
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.
