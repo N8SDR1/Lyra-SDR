@@ -541,6 +541,14 @@ class SpectrumWidget(_PaintedWidget):
         return self._center_hz + (
             (float(bin_idx) / max(1, n - 1)) - 0.5) * self._span_hz
 
+    # Pixel-based search radius for click-to-tune snap (v0.0.7.2).
+    # At wide zoom (192 kHz span / 1500 px = 128 Hz/px) a 200 Hz
+    # Hz-based range is only ~3 px wide, smaller than typical
+    # operator click precision.  Effective range is
+    # max(snap_tune_range_hz, SNAP_PIXEL_RADIUS * hz_per_px) so the
+    # snap-near-cursor behaviour stays sensible at every zoom level.
+    SNAP_PIXEL_RADIUS = 80
+
     def _find_snap_target(self, x_pixel: float) -> float | None:
         """Find the strongest spectrum bin within +/- snap_range_hz of
         the cursor frequency.  Return the parabolically-interpolated
@@ -555,10 +563,15 @@ class SpectrumWidget(_PaintedWidget):
             return None
         f_cursor = self._freq_at_x(x_pixel)
         n = len(self._spec_db)
-        # Convert freq range to bin range.
+        # Convert freq range to bin range.  Effective search range
+        # = max of operator-set Hz range and pixel radius in Hz.
         bins_per_hz = (n - 1) / max(1.0, self._span_hz)
+        widget_w = max(1, self.width())
+        hz_per_px = self._span_hz / widget_w
+        pixel_range_hz = self.SNAP_PIXEL_RADIUS * hz_per_px
+        eff_range_hz = max(self._snap_tune_range_hz, pixel_range_hz)
         half_bins = max(1, int(round(
-            self._snap_tune_range_hz * bins_per_hz)))
+            eff_range_hz * bins_per_hz)))
         # Cursor bin index (clamped) — the search window centers here.
         cursor_bin = int(round(
             ((f_cursor - self._center_hz) / self._span_hz + 0.5)
@@ -734,6 +747,14 @@ class SpectrumWidget(_PaintedWidget):
         # so center freq DECREASES (lower freqs come into view from
         # the left). The "drag the spectrum like a Google Maps view"
         # interaction model is the common SDR-client convention.
+        #
+        # v0.0.7.2: rate-limit drag emits so the freq doesn't fire
+        # at mouseMoveEvent's native ~120 Hz.  Each freq change
+        # cascades into HL2 C&C frame writes + notch rebuilds +
+        # spectrum pipeline updates; firing those at 120 Hz makes
+        # the panadapter lag while the freq readout scrolls freely.
+        # 33 ms / 1 Hz gating keeps the operator-perceived pan
+        # smooth at ~30 fps with no backend overload.
         if self._drag_tune is not None:
             start_x, start_center, in_drag = self._drag_tune
             dx = int(event.position().x()) - start_x
@@ -743,13 +764,22 @@ class SpectrumWidget(_PaintedWidget):
                 in_drag = True
                 self._drag_tune = (start_x, start_center, True)
                 self.setCursor(Qt.ClosedHandCursor)
+                self._drag_last_emit_ms = 0.0
+                self._drag_last_emit_hz = float(start_center)
             if self._span_hz <= 0 or self.width() <= 0:
                 return
             hz_per_px = self._span_hz / self.width()
             new_center = start_center - dx * hz_per_px
-            # Reuse the existing tune signal — handler is just
-            # set_freq_hz(int(...)) so frequent updates are cheap and
-            # the radio dedupes same-value writes downstream.
+            import time as _t
+            now_ms = _t.monotonic() * 1000.0
+            if (now_ms - getattr(self, "_drag_last_emit_ms", 0.0)
+                    < 33.0):
+                return
+            if abs(new_center - getattr(self, "_drag_last_emit_hz",
+                                        new_center)) < 1.0:
+                return
+            self._drag_last_emit_ms = now_ms
+            self._drag_last_emit_hz = float(new_center)
             self.clicked_freq.emit(float(new_center))
             return
         # Hover cursor hint — only update when not already dragging so

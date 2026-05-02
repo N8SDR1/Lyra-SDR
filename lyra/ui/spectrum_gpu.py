@@ -259,6 +259,13 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # Per-widget format (vs setting the global default) keeps the
         # GL context choice local to this widget tree.
         self.setFormat(lyra_gl_format())
+        # v0.0.7.2: enable hover-tracking so mouseMoveEvent fires
+        # even when no button is held.  Required for the click-to-tune
+        # snap-target hover reticle (Shift-held cursor preview).
+        # Without this, the hover never registers and the reticle
+        # never appears, AND the cursor never updates to the
+        # appropriate hint shape.
+        self.setMouseTracking(True)
 
         # GL function table — bound to the active context in
         # initializeGL once the context is current. Native 4.3 core
@@ -894,6 +901,14 @@ class SpectrumGpuWidget(QOpenGLWidget):
         return self._center_hz + (
             (float(bin_idx) / max(1, n - 1)) - 0.5) * self._span_hz
 
+    # Pixel-based search radius for click-to-tune snap.  At wide
+    # zoom (192 kHz span), the 200 Hz Hz-based range is only ~3 px
+    # wide -- way smaller than typical operator click precision.
+    # The actual snap window is max(snap_tune_range_hz,
+    # SNAP_PIXEL_RADIUS * hz_per_px) so the click-near-cursor
+    # behaviour stays consistent at every zoom level.
+    SNAP_PIXEL_RADIUS = 80
+
     def _find_snap_target_gpu(self, x_pixel: float) -> Optional[float]:
         """Click-to-tune snap (GPU widget).  Mirrors the QPainter
         widget's ``_find_snap_target`` -- finds the strongest
@@ -908,8 +923,16 @@ class SpectrumGpuWidget(QOpenGLWidget):
         f_cursor = self._freq_at_pixel(int(x_pixel))
         n = len(self._smoothed_db)
         bins_per_hz = (n - 1) / max(1.0, self._span_hz)
+        # Effective search range = max of operator-set Hz range and
+        # the pixel radius converted to Hz.  Keeps the snap "feels
+        # consistent across zoom levels" instead of "useless at
+        # wide zoom".
+        widget_w = max(1, self.width())
+        hz_per_px = self._span_hz / widget_w
+        pixel_range_hz = self.SNAP_PIXEL_RADIUS * hz_per_px
+        eff_range_hz = max(self._snap_tune_range_hz, pixel_range_hz)
         half_bins = max(1, int(round(
-            self._snap_tune_range_hz * bins_per_hz)))
+            eff_range_hz * bins_per_hz)))
         cursor_bin = int(round(
             ((f_cursor - self._center_hz) / self._span_hz + 0.5)
             * (n - 1)))
@@ -1044,6 +1067,18 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # right "following the finger" -> center freq DECREASES.
         # Same gesture model as SpectrumWidget (CPU backend) and as
         # the typical SDR-client convention.
+        #
+        # v0.0.7.2 fix: rate-limit the clicked_freq emits during a
+        # drag.  Pre-fix, mouseMoveEvent fires up to ~120 Hz and we
+        # were emitting one freq change per move event.  Each freq
+        # change cascaded into HL2 C&C frame writes + notch rebuilds
+        # + DSP resets + spectrum / waterfall pipeline updates -- all
+        # 120 times/second.  The result: the freq readout scrolled
+        # freely while the spectrum + waterfall lagged hopelessly
+        # behind.  Rate-limit to ~30 emits/sec (33 ms minimum gap)
+        # AND require the new center to differ from the last emitted
+        # one by at least 1 Hz at the current zoom level (otherwise
+        # tiny cursor jitter spams pointless updates).
         if self._drag_tune is not None:
             start_x, start_center, in_drag = self._drag_tune
             dx = int(event.position().x()) - start_x
@@ -1053,13 +1088,26 @@ class SpectrumGpuWidget(QOpenGLWidget):
                 in_drag = True
                 self._drag_tune = (start_x, start_center, True)
                 self.setCursor(Qt.ClosedHandCursor)
+                self._drag_last_emit_ms = 0.0
+                self._drag_last_emit_hz = float(start_center)
             if self._span_hz <= 0 or self.width() <= 0:
                 return
             hz_per_px = self._span_hz / self.width()
             new_center = start_center - dx * hz_per_px
-            # Reuse the existing tune signal — the panel handler is
-            # set_freq_hz(int(...)) so frequent updates are cheap and
-            # Radio dedupes same-value writes downstream.
+            # Throttle: ~30 Hz max emit rate (33 ms minimum gap)
+            # AND minimum 1 Hz freq delta to avoid noise spam.
+            import time as _t
+            now_ms = _t.monotonic() * 1000.0
+            min_gap_ms = 33.0
+            min_delta_hz = 1.0
+            if (now_ms - getattr(self, "_drag_last_emit_ms", 0.0)
+                    < min_gap_ms):
+                return
+            if abs(new_center - getattr(self, "_drag_last_emit_hz",
+                                        new_center)) < min_delta_hz:
+                return
+            self._drag_last_emit_ms = now_ms
+            self._drag_last_emit_hz = float(new_center)
             self.clicked_freq.emit(float(new_center))
             return
 

@@ -13,6 +13,35 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.7.3] — 2026-05-02
+
+### Fixed
+
+- **GPU panadapter: hover-Shift snap reticle now appears.**  v0.0.7.2
+  added the snap algorithm + reticle drawing but the GPU widget
+  never called `setMouseTracking(True)`, which meant `mouseMoveEvent`
+  only fired while a mouse button was held.  Hover-with-Shift never
+  triggered the reticle (and the cursor never updated to its
+  hover-hint shape either).  Fixed by enabling mouse tracking in
+  `SpectrumGpuWidget.__init__`.
+- **Drag-to-pan no longer hangs the spectrum / waterfall.**  v0.0.7.2
+  rewired drag-to-pan but emitted `clicked_freq` on EVERY
+  mouseMoveEvent — up to ~120 Hz on modern systems.  Each emit
+  cascaded into HL2 C&C frame writes + notch coefficient rebuilds +
+  spectrum / waterfall pipeline updates, all 120 times/sec.  The
+  freq readout scrolled freely while the panadapter trace + waterfall
+  fell hopelessly behind.  Fix: rate-limit drag emits to ~30 Hz max
+  (33 ms minimum gap) AND require a 1 Hz minimum freq delta.  Same
+  rate-limit applied to the QPainter (CPU) backend for consistency.
+- **Snap range now scales with zoom.**  Pre-fix, the snap window was
+  a fixed 200 Hz regardless of zoom level.  At a typical 192 kHz IQ
+  span / 1500 px panadapter that's only ~3 pixels — far smaller than
+  operator click precision.  Effective range is now
+  `max(200 Hz, 80 px × hz_per_px)` so clicking within ~80 pixels of
+  a peak snaps to it at any zoom level.
+
+---
+
 ## [0.0.7.2] — 2026-05-02
 
 ### Fixed
