@@ -544,6 +544,77 @@ When circling back: read this section, then
 `docs/architecture/audio_pops_audit.md` §3 (P1 / P2 suspects we
 explicitly didn't ship in v0.0.7.1 but may revisit here).
 
+## 9.7. Click-to-tune v1 — partially shipped, needs refinement
+
+Shipped across v0.0.7.1 → v0.0.7.4:
+- Plain click → literal tune (always worked, unchanged from v0.0.7).
+- Click+drag → drag-to-pan (rate-limited to ~30 Hz emit cadence
+  to avoid backend-pipeline overload).  Working OK per operator
+  flight test.
+- Shift+click → snap to nearest spectrum peak.  Reticle preview
+  on hover.  **Operator verdict (2026-05-02): "a little better —
+  needs work."**
+
+What got fixed across the four patch tags:
+- `v0.0.7.2` 7b1c79c... `v0.0.7.4`: GPU widget had no drag state
+  machine (committed click on press), no `setMouseTracking(True)`
+  (hover never fired), and the snap range was a fixed 200 Hz
+  (only ~3 px wide at typical wide zoom).  Plus snap target was
+  recomputed on RELEASE checking `event.modifiers()` -- if the
+  operator released Shift before the mouse the click fell through
+  to literal-tune.
+- v0.0.7.4 final fix: latch snap target at PRESS time so the
+  commit is atomic w.r.t. Shift state.
+
+Known refinement candidates (parked for next session):
+1. **"Click misses" residual.**  After the press-time-latch fix,
+   operator still reports "a little better, needs work."  Specific
+   symptom not yet collected -- possibilities:
+   - Parabolic peak interpolation might be off by a few Hz at
+     wide zoom (FFT bin width ~47 Hz at 192 kHz / 4096 bins).
+     The interpolation gives sub-bin precision but bins are
+     finite-width to begin with.
+   - Reticle might be drawn at a slightly different position
+     from where the snap commits.  The reticle position uses
+     the CURRENT span/center (live as you hover) but the snap
+     target is a frequency captured at press time -- if span
+     changes between hover and press, the visual position can
+     drift.
+   - Snap might find sidelobes or artifacts instead of true
+     peak center.  The argmax inside the search window is the
+     local maximum but doesn't validate it's a "real" signal
+     vs a noise blip or filter ringing.
+2. **Snap range could be smarter.**  Current effective range is
+   `max(snap_tune_range_hz=200, SNAP_PIXEL_RADIUS=80 * hz_per_px)`.
+   At 192 kHz / 1500 px that's 10240 Hz -- might be too wide
+   (snaps to a stronger nearby signal instead of the one
+   operator pointed at).  Could cap the pixel radius at e.g.
+   3000 Hz to keep snap "closest peak you pointed at" rather
+   than "anything strong nearby."
+3. **Snap might benefit from a stronger SNR test.**  Current
+   threshold is `peak_db - noise_floor_db >= 6 dB`.  Noise floor
+   is the 20th percentile of the spectrum, so 6 dB above that is
+   a low bar -- weak ambient peaks can pass.  Could raise to
+   10 dB or use median + N*MAD instead.
+4. **Reticle could drag-track better.**  Currently updates every
+   mouseMoveEvent that has Shift held -- which works, but at
+   wide zoom tiny cursor jitter can flicker the reticle between
+   adjacent peaks.  Could add a small position-stability hold
+   so the reticle doesn't twitch.
+5. **Settings → Spectrum tab.**  No operator-facing controls for
+   snap range / SNR threshold / modifier choice / reticle
+   visibility.  Defaults are baked in.  Once the algorithm feels
+   right, expose the knobs.
+
+Operator-facing UX is documented in `docs/help/spectrum.md`
+("Click-to-tune" section) and `docs/architecture/click_to_tune_plan.md`
+(design proposal).
+
+When circling back: ask operator what specifically still feels
+wrong (which test case fails -- weak signal? wide zoom? CW
+sidelobe pickup?) before tweaking the algorithm.  Each candidate
+above has a different fix.
+
 ## 10. Open empirical questions (need HL2+ bench testing)
 
 These weren't answered by code-reading; we'll find out on N8SDR's
