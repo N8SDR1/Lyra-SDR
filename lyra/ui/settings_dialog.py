@@ -2996,12 +2996,18 @@ class NoiseSettingsTab(QWidget):
         # heights.  Three columns give each section room without
         # introducing scroll.
         #
-        # Distribution:
-        #   col_left   = Captured Noise Profile (largest section)
-        #   col_middle = NB + ANF + LMS + Squelch (the NB-family +
-        #                independent stages)
-        #   col_right  = NR2 + NR2 method picker (the spectral-NR
-        #                family — keeps related things together)
+        # Distribution (rebalanced v0.0.6.x — operator feedback:
+        # "middle column has much more than left or right"; the
+        # original 4/1/2 split made the middle column drive page
+        # height and pushed the bottom groups off-screen):
+        #   col_left   = Captured Noise Profile + Squelch
+        #                (Cap dominates; SQ is independent so it
+        #                 can sit under Cap to balance the column)
+        #   col_middle = NB + ANF (NB-family pair — balanced)
+        #   col_right  = NR2 + NR2 method picker + LMS
+        #                (all three are spectral / adaptive NR
+        #                 algorithms — LMS as NR3 belongs with
+        #                 NR2 conceptually anyway)
         outer = QHBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(12)
@@ -3600,20 +3606,25 @@ class NoiseSettingsTab(QWidget):
         # Captured Noise Profile (the largest section) stays alone
         # in the left column.
         # Three-column reassignment.  All groups landed in
-        # col_left via the alias; route NB+ANF+LMS+SQ to middle
-        # and NR2+method-picker to right so the columns balance.
+        # col_left via the alias; rebalance so each column has
+        # roughly equal vertical weight (operator feedback v0.0.6.x:
+        # original middle column had 4 groups vs 1 left / 2 right
+        # and was pushing the bottom of the tab off-screen).
+        # New distribution:
+        #   left   = Cap (already there) + SQ
+        #   middle = NB + ANF
+        #   right  = NR2 + method picker + LMS
         col_left.removeWidget(grp_nb)
         col_left.removeWidget(grp_anf)
         col_left.removeWidget(grp_nr2)
         col_left.removeWidget(method_box)
         col_left.removeWidget(grp_lms)
-        col_left.removeWidget(grp_sq)
+        # grp_sq stays in col_left under grp_cap (no remove needed).
         col_middle.addWidget(grp_nb)
         col_middle.addWidget(grp_anf)
-        col_middle.addWidget(grp_lms)
-        col_middle.addWidget(grp_sq)
         col_right.addWidget(grp_nr2)
         col_right.addWidget(method_box)
+        col_right.addWidget(grp_lms)
         # Stretch on all three columns so groups stack from the
         # top rather than spreading to fill the tab height.
         col_left.addStretch(1)
