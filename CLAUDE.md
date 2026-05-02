@@ -615,6 +615,77 @@ wrong (which test case fails -- weak signal? wide zoom? CW
 sidelobe pickup?) before tweaking the algorithm.  Each candidate
 above has a different fix.
 
+## 9.8. Speaker-selective audio attenuator — parked as niche feature
+
+**Operator-suggested 2026-05-02:** in a roundtable QSO, attenuate
+ONE specific operator's voice while keeping the others audible.
+Use case: leave the radio on while away from the desk, want
+to hear the conversation but skip the operator you don't enjoy.
+
+**Captured-noise-profile feature WILL NOT do this.**  Spectral
+subtraction works for stationary noise; voices are non-stationary
+and share broad spectral characteristics across speakers.
+Subtracting "Bob's voice profile" produces a generic voice-band
+EQ cut applied to ALL voices, not Bob-specific suppression.
+This is a math constraint, not a tuning issue.
+
+**The right architecture (if we build it):**
+
+- VAD-gated **per-turn classification** — detect voice onset, run
+  classifier once 750 ms into the turn, latch decision for the
+  rest of the turn (resets on detected silence).
+- **Probabilistic attenuator** -- output is
+  ``attenuation = score × max_atten_db`` smooth-ramped.  Operator
+  hears unwanted voice fading from full level to ~-15 dB; doesn't
+  go to silence.  False positives produce mild ducking instead of
+  catastrophic Alice-was-muted-during-her-turn outcomes -- crucial
+  for the "operator walks away" use case.
+- **Multi-profile** -- match against a list of "skip these voices"
+  (roundtables often have 2-3 operators to skip).
+- **"Tag this voice" hotkey** -- operator hears Bob, presses key,
+  current 5-10 sec captured as profile, auto-engaged.  No prep
+  required.
+
+**Two scorer options:**
+
+1. Pure NumPy multi-feature (LTAS + F0 stats + spectral tilt +
+   formants + speaking rate).  ~1 week dev.  70-85% accuracy on
+   same-gender / similar-mic speakers.  Borderline for
+   "leave-the-radio-on" reliability.
+2. Pretrained ONNX speaker embedding (ECAPA-TDNN-class).  ~2-3
+   weeks dev including license / bundling.  90-98% accuracy.
+   Adds onnxruntime dep + ~10 MB ONNX model in assets/.
+   Recommended for unattended-listening use case.
+
+**Why we're NOT building this now:**
+
+- Not a v0.0.x quiet-pass tweak; substantial new feature surface
+  (capture UX, profile management, scoring engine, attenuator
+  gate).
+- Right after RX2 (v0.0.8) and TX (v0.0.9) is the natural slot
+  -- earlier and we're spreading bandwidth too thin.
+- Unattended-listening reliability bar is high enough that
+  Approach 2 (ML) is the right target, which means the licensing
+  + ONNX dep work is a hard prerequisite.
+- Operator categorized this as "niche, might be interesting"
+  rather than blocking pain.
+
+**Status:** parked.  No design doc written yet.  When circling
+back, write `docs/architecture/speaker_filter_design.md` first
+(the probabilistic-attenuator math, ECAPA-TDNN evaluation
+checklist, license review for permissive ONNX models, capture +
+profile UX flows).  THEN implement on a feature branch alongside
+v0.1 work or as a v0.1.x post-PureSignal feature.
+
+Pre-park reasoning lives in this conversation thread (operator
+asked, I gave the senior-engineering analysis, operator parked).
+If reading this in a future session, the analysis was: spectral
+subtraction is the wrong tool, per-turn classification with
+probabilistic attenuation is the right tool, ECAPA-TDNN-class
+embeddings are the right scorer, ham radio's stable-mic property
+makes accuracy slightly better than general-voice benchmarks
+suggest.
+
 ## 10. Open empirical questions (need HL2+ bench testing)
 
 These weren't answered by code-reading; we'll find out on N8SDR's
