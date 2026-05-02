@@ -2,7 +2,7 @@
 
 Reference notes from a deep-read of the openHPSDR Thetis 2.10.3.13 source
 tree at `D:/sdrprojects/OpenHPSDR-Thetis-2.10.3.13/`.  These inform Lyra's
-v0.0.8 RX2 work plus forward-looking notes for SPLIT TX and PureSignal.
+v0.0.9 RX2 work plus forward-looking notes for SPLIT TX and PureSignal.
 
 **No code copied** — this is a description of patterns, file paths, and
 protocol behavior in our own words.
@@ -294,7 +294,7 @@ What that does **not** tell us:
 The MI0BOT HL2 Thetis fork ReleaseNotes do **not** mention PureSignal as
 a working feature.  Honest read: **PureSignal on HL2 is plausibly
 supported by Thetis but only with non-stock gateware and possibly a
-hardware mod, and is not a baseline expectation.**  Lyra v0.0.8 should
+hardware mod, and is not a baseline expectation.**  Lyra v0.0.9 should
 not block on it.
 
 ### 3.3 Full-duplex vs the duplex bit
@@ -371,7 +371,7 @@ HL2-specific patches (read-loop, write-loop, I/O board).
 
 - Single `Radio` with one `Channel` becomes `Radio` with a list of
   channels.  Mirror Thetis's `dsp_rx[transceiver][subrx]` shape — even
-  for v0.0.8 (main + RX2), leaving room for sub-receivers (multi-RX
+  for v0.0.9 (main + RX2), leaving room for sub-receivers (multi-RX
   inside one DDC) is forward-compatible for SPLIT-without-RX2.
 - DSP chain duplication: NR1 / NR2 / LMS / ANF / NB / AGC / Squelch
   each become per-channel.  Channel class is already isolated; just
@@ -422,7 +422,7 @@ clean abstraction worth porting in spirit.
   panadapter-bottom = RX2, with a TX-frequency cursor drawn on
   whichever VFO TX will use.
 
-### PureSignal posture for v0.0.8: **defer**
+### PureSignal posture for v0.0.9: **defer**
 
 Lyra's TX path should be designed without assuming PureSignal
 capability: linear PA, IQ-balance only, no predistortion.  Make the RX2
@@ -436,7 +436,7 @@ abstract it as "this DDC's frequency source = {VFOA, VFOB, TX, custom}"
 so the PS path is just an extra source.
 
 Full-duplex monitoring (RX-during-TX without PureSignal) worth keeping
-on v0.1 roadmap; much simpler than full PS, helps CW operators monitor
+on v0.2 roadmap; much simpler than full PS, helps CW operators monitor
 their keying without sidetone-only.
 
 ---

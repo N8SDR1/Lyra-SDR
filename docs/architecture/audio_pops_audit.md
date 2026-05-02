@@ -496,7 +496,7 @@ For each fix:
 ## 7. Out of scope for this audit
 
 - **NR algorithm tweaks** — separate scope, see `nr_audit.md`.
-- **TX path pops** — there is no TX path yet (v0.0.9 work).
+- **TX path pops** — there is no TX path yet (v0.1 work).
 - **Mic / sidetone audio** — ditto.
 
 ---

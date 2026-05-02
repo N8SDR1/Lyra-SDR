@@ -3,10 +3,10 @@
 Narrow-band IIR notches for killing carriers, birdies, heterodynes,
 and local interference without touching the receive bandwidth.
 
-> v0.0.7.1 quiet+polish: notches were rebuilt around a parametric
+> v0.0.8 quiet+polish: notches were rebuilt around a parametric
 > peaking-EQ biquad with operator-controllable depth, an integer
 > cascade for sharper shoulders, and a click-free coefficient-swap
-> crossfade.  See "What changed in v0.0.7.1" at the bottom for the
+> crossfade.  See "What changed in v0.0.8" at the bottom for the
 > short version.
 
 ## Enable the Notch Filter
@@ -91,7 +91,7 @@ keep their individual widths.
 | **300 Hz** | Broadband heterodyne, splatter from a strong adjacent SSB |
 | **600 Hz** | Blanket of QRM, AM-broadcast bleed within passband |
 
-Default is **40 Hz** in v0.0.7.1 (was 80 Hz pre-v0.0.7.1).  At
+Default is **40 Hz** in v0.0.8 (was 80 Hz pre-v0.0.8).  At
 typical heterodyne center frequencies (1-3 kHz) this gives Q ≈ 25-75
 — narrow enough to surgically remove a whistle without taking out
 adjacent voice content.
@@ -254,7 +254,7 @@ drop in level when the notch is added or enabled.
 - **Saved banks** persist across restarts via QSettings.  Save your
   setup as a bank if you want it back next session.
 
-## What changed in v0.0.7.1
+## What changed in v0.0.8
 
 In short: **notches finally kill carriers as well as the
 visualization suggests.**
@@ -278,7 +278,7 @@ visualization suggests.**
 For the design rationale and bench numbers see
 `docs/architecture/notch_v2_design.md`.
 
-## What's NOT in v0.0.7.1
+## What's NOT in v0.0.8
 
 - **Per-stage depth tuning** (asymmetric notches with different
   depths per cascade stage).  Out of scope.

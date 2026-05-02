@@ -82,7 +82,7 @@ For Lyra to match WDSP's design, we'd have to either:
 - (c) Live with cascaded IIR biquads (current architecture, just
   designed properly).
 
-(a) is the right long-term answer, but it's a v0.1+ project: it
+(a) is the right long-term answer, but it's a v0.2+ project: it
 couples the notch system to the demod, requires changes to every
 demod class, and complicates RX2 plans where each receiver has its
 own notch list. Not a quiet-pass-scope change.
@@ -91,7 +91,7 @@ own notch list. Not a quiet-pass-scope change.
 
 (c) is what we should ship now. Properly-designed parametric
 biquads with operator-controllable depth give us 80% of the WDSP
-quality at zero latency, and don't block the v0.1 architectural
+quality at zero latency, and don't block the v0.2 architectural
 move.
 
 **Conclusion:** stay with per-notch IIR biquads. Just design them
@@ -632,7 +632,7 @@ in `spectrum.py`. We extend the same tolerance pattern to handle
 ## 9. What's explicitly NOT in scope for v0.0.7.1 notch v2
 
 - **WDSP-style FIR-integrated notches** — see §2.2; this is a
-  v0.1+ architectural change (couples notch system to demod, RX2
+  v0.2+ architectural change (couples notch system to demod, RX2
   implications). Tracked as future work but out of scope now.
 - **Per-stage depth tuning** — each cascade stage gets identical
   coefficients today. Per-stage tunability would let an operator
@@ -641,7 +641,7 @@ in `spectrum.py`. We extend the same tolerance pattern to handle
 - **Linear-phase notches** — IIR has phase distortion across the
   notch. Audibility is sub-perceptual at notch widths the operator
   uses (10-200 Hz). If we ever need linear-phase, the FIR-integrated
-  approach in v0.1 covers it for free.
+  approach in v0.2 covers it for free.
 - **Notch presets / band-specific profiles** — "auto-load notches
   for 7.250 MHz to handle the AM broadcast harmonic" is a
   legitimate feature but separate scope.
@@ -665,7 +665,7 @@ Operator review concluded.  Final calls:
    no carrier leakage during drag.
 5. **Depth slider range**: **-20 to -80 dB**.
 6. **Cascade range**: **1 to 4**.
-7. **WDSP-architecture port** deferred to v0.1.
+7. **WDSP-architecture port** deferred to v0.2.
 8. **Per-stage depth tuning** out of scope.
 9. **Notch presets / band-specific profiles** — IN scope at
    operator request.  Scope (Scope A / B / C) being clarified

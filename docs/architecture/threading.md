@@ -860,7 +860,7 @@ automatically once an operator switches.
   consideration, not required for B.
 - **When do we promote worker → default?** After how many release
   cycles of clean field testing? Suggest minimum 2 releases (so
-  v0.0.8 or v0.0.9 if we ship Phase 3 in v0.0.6).
+  v0.0.9 or v0.1 if we ship Phase 3 in v0.0.6).
 - **Should we expose a "DSP thread CPU usage" metric on the
   toolbar?** Nice-to-have for diagnosing performance issues; not
   blocking.

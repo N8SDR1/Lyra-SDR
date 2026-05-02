@@ -508,7 +508,7 @@ release — they're both small, both target specific known noise
 sources operators recognize, both drop in cleanly. Together they
 fill the biggest functional gaps in Lyra's noise toolkit.
 
-**#4 (NR2)** is the headline feature for v0.0.8 or v0.0.9 — it's
+**#4 (NR2)** is the headline feature for v0.0.9 or v0.1 — it's
 a meaningful new DSP module that genuinely changes the listening
 experience on a noisy band. Worth taking the time to do well.
 

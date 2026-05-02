@@ -5,7 +5,7 @@ Read-only senior DSP / SDR audio engineer pass.  Source under
 `D:/sdrprojects/OpenHPSDR-Thetis-2.10.3.13/Project Files/Source/wdsp/`.
 
 This is an analysis pass; no code written.  Findings inform the next
-NR-related work (likely overlapping or following v0.0.8 RX2).
+NR-related work (likely overlapping or following v0.0.9 RX2).
 
 ---
 
@@ -107,7 +107,7 @@ loop (`nr.py:797-808`) correctly piggybacks capture on the FFT framing.
 - **Edge case: `process()` returns `np.zeros_like(audio)` if the
   very first block is shorter than FFT_SIZE (`nr.py:885-890`).**  The
   comment claims this never happens with Radio's 2048-sample blocks,
-  but RX2 v0.0.8 may eventually pass smaller blocks — explicit guard
+  but RX2 v0.0.9 may eventually pass smaller blocks — explicit guard
   or unit test recommended.
 
 **UX.**  Right-click menu is functional; the Cap button is well-
@@ -661,7 +661,7 @@ implementation.
 
 - DSP: capture on RX2 while RX1 has known clean signal; compute SNR
   estimate from RX1's known-good vs RX2's captured.
-- Effort: 1 week, depends on v0.0.8 RX2.
+- Effort: 1 week, depends on v0.0.9 RX2.
 - Value: medium.  Useful for operators who have a known-quiet
   companion radio.
 - Risk: low.
@@ -777,7 +777,7 @@ memory bump: ~3 MB.  Negligible.
 
 ## 7. Prioritized Recommendations
 
-**P0 — Do now (alongside or after v0.0.8 RX2):**
+**P0 — Do now (alongside or after v0.0.9 RX2):**
 
 1. **Vectorize ANF and SQ inner loops.**  Half a day each.  Removes
    the CPU bottleneck.  Gates everything else.

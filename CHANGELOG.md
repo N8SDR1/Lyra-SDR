@@ -13,104 +13,11 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
-## [0.0.7.4] — 2026-05-02
+## [0.0.8] — 2026-05-02 — "Quiet & Polish Pass"
 
-### Fixed
-
-- **Snap-to-tune now commits to the reticle target reliably.**
-  Operator-reported: "reticle appears but the click misses."
-  Pre-fix, the release handler recomputed the snap target using
-  `event.modifiers()` at release time -- if the operator released
-  Shift slightly before the mouse button (very common gesture
-  pattern), the modifier check failed and the click fell through
-  to literal-tune at the press position, "missing" the reticle
-  the operator had been looking at.
-
-  Fix: latch the snap target AT PRESS TIME when Shift is held.
-  The `_drag_tune` tuple now carries
-  `(start_x, start_center, in_drag, press_snap_target)`.  Press
-  computes the target once with the modifier and cursor state
-  known; release commits that latched target unconditionally if
-  the gesture didn't escalate to a drag.  Modifier state at
-  release no longer matters.
-
-  Same fix applied to both panadapter backends (QPainter
-  SpectrumWidget and GPU-OpenGL SpectrumGpuWidget).
-
-  Operator UX is now what was originally documented:
-    * Plain click       -> literal click-to-tune
-    * Shift+press+click -> snap to nearest peak (timing of Shift
-                          release within the click gesture is
-                          irrelevant)
-
----
-
-## [0.0.7.3] — 2026-05-02
-
-### Fixed
-
-- **GPU panadapter: hover-Shift snap reticle now appears.**  v0.0.7.2
-  added the snap algorithm + reticle drawing but the GPU widget
-  never called `setMouseTracking(True)`, which meant `mouseMoveEvent`
-  only fired while a mouse button was held.  Hover-with-Shift never
-  triggered the reticle (and the cursor never updated to its
-  hover-hint shape either).  Fixed by enabling mouse tracking in
-  `SpectrumGpuWidget.__init__`.
-- **Drag-to-pan no longer hangs the spectrum / waterfall.**  v0.0.7.2
-  rewired drag-to-pan but emitted `clicked_freq` on EVERY
-  mouseMoveEvent — up to ~120 Hz on modern systems.  Each emit
-  cascaded into HL2 C&C frame writes + notch coefficient rebuilds +
-  spectrum / waterfall pipeline updates, all 120 times/sec.  The
-  freq readout scrolled freely while the panadapter trace + waterfall
-  fell hopelessly behind.  Fix: rate-limit drag emits to ~30 Hz max
-  (33 ms minimum gap) AND require a 1 Hz minimum freq delta.  Same
-  rate-limit applied to the QPainter (CPU) backend for consistency.
-- **Snap range now scales with zoom.**  Pre-fix, the snap window was
-  a fixed 200 Hz regardless of zoom level.  At a typical 192 kHz IQ
-  span / 1500 px panadapter that's only ~3 pixels — far smaller than
-  operator click precision.  Effective range is now
-  `max(200 Hz, 80 px × hz_per_px)` so clicking within ~80 pixels of
-  a peak snaps to it at any zoom level.
-
----
-
-## [0.0.7.2] — 2026-05-02
-
-### Fixed
-
-- **GPU panadapter: snap-to-tune and drag-to-pan now work.**  v0.0.7.1
-  shipped the snap and drag-to-pan features wired into the QPainter
-  (Software / OpenGL) panadapter backends, but the GPU-OpenGL backend
-  was missing the drag state machine entirely.  On GPU backend the
-  click-tune fired immediately on press, so drag-to-pan never had a
-  chance (cursor motion was ignored after the click had already
-  committed).  Snap was technically wired but commit-on-press meant
-  the modifier check was sometimes timed wrong relative to the
-  cursor position.
-
-  Fix: GPU widget now mirrors the QPainter widget's design --
-  empty-spectrum left-press stashes a drag candidate; mouseMoveEvent
-  decides whether it becomes a pan-tune (cursor moves >5 px); mouse
-  release fires the click-tune (with snap if Shift held) ONLY if
-  no drag actually happened.  Same gesture model on both backends.
-
-  Operator-visible:
-    * Plain click   -> tune to clicked freq exactly.
-    * Shift+click   -> snap to nearest spectrum peak (200 Hz window,
-                       6 dB SNR threshold).
-    * Click+drag    -> pan the panadapter across a band (40m end to
-                       end in one gesture).
-
-  No other changes from v0.0.7.1.
-
----
-
-## [0.0.7.1] — 2026-05-02 — "Quiet & Polish Pass"
-
-Working on `feature/v0.0.7.1-quiet-pass` (merging back via
-`feature/threaded-dsp` → `main`).  Three operator-driven feature
-batches plus the post-v0.0.7 NR-stack hardening that already
-landed on the dev branch:
+Substantial DSP + UX upgrade on top of v0.0.7.  Three
+operator-driven feature batches plus the post-v0.0.7 NR-stack
+hardening that already landed on the dev branch:
 
   1. **Audio quiet pass** — eliminate the loud / random
      pops & clicks that the v0.0.7 audio chain produced.
@@ -187,17 +94,32 @@ landed on the dev branch:
 
 ### Added — click-to-tune v1
 
-- **Shift+click → snap to nearest peak** within ±200 Hz of the
-  cursor when the peak is at least 6 dB above the rolling noise
-  floor.  Sub-bin precision via parabolic peak interpolation.
-  Falls through to literal click-to-tune if no qualifying peak
-  is found in the snap window.  Plain click and drag-to-pan
-  behaviour unchanged.
+- **Shift+click → snap to nearest peak** when the peak is at
+  least 6 dB above the rolling noise floor.  Sub-bin precision
+  via parabolic peak interpolation.  Snap range scales with zoom
+  (effective `max(200 Hz, 80 px × hz_per_px)`) so clicking within
+  ~80 pixels of a peak snaps at any zoom level.  Falls through
+  to literal click-to-tune when no qualifying peak is in the
+  snap window.
 - **Hover preview reticle.**  While Shift is held the panadapter
   shows a cyan vertical-tick + crosshair + Hz-offset label at
   the snap target position.  Operator sees where the next click
   will land before committing.  Disappears when no peak is in
   range.  Active on both QPainter and GPU panadapter backends.
+- **Atomic press-time latch.**  Snap target is captured at
+  press time (when Shift state and cursor position are both
+  known) and committed unchanged on release.  Operator can
+  release Shift any time before the mouse without losing the
+  snap.  Same gesture model on both panadapter backends.
+- **Drag-to-pan rate-limited to 30 Hz.**  Click+drag horizontally
+  pans the band end-to-end; emits are throttled to 33 ms minimum
+  gap with 1 Hz minimum freq delta so the HL2 C&C / notch /
+  spectrum pipeline doesn't fall behind the cursor.
+
+  *Operator UX flow:*
+    * **Plain left-click** → literal tune to cursor freq.
+    * **Shift + left-click** → snap to nearest spectrum peak.
+    * **Left-click and drag** → pan the panadapter across a band.
 
 ### Changed — major NR audio improvements
 
@@ -303,7 +225,7 @@ landed on the dev branch:
 - Updated `docs/help/anf.md` — current chain order (ANF after
   LMS, before SQ/NR).
 - New `CLAUDE.md` — project context loaded by Claude across
-  sessions; section 9.6 documents the v0.0.7.1 audio pop fixes
+  sessions; section 9.6 documents the v0.0.8 audio pop fixes
   + parked residual-click investigation.
 
 ### Decisions explicitly recorded
@@ -319,7 +241,7 @@ landed on the dev branch:
   demod's bandpass FIR (single FIR convolution does both bandpass
   and notches).  Mathematically superior to per-notch IIR but
   requires demod refactor + has RX2 implications.  Out of
-  v0.0.7.1 scope; `notch_v2_design.md` §2.2 has the full
+  v0.0.8 scope; `notch_v2_design.md` §2.2 has the full
   reasoning.
 - **Notch presets: Scope A only (operator-named banks).**  Scope
   B (band-aware auto-load) considered and rejected — operators

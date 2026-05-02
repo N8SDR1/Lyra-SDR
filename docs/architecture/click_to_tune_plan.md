@@ -370,7 +370,7 @@ no precedence rework needed.
 **Recommendation:** ship phases 1-3 as one feature ("click-to-tune
 v1"). Phases 4-6 ship as polish in the same release if time permits.
 
-This is small enough to slot before v0.0.8 RX2 work — could ship as
+This is small enough to slot before v0.0.9 RX2 work — could ship as
 v0.0.7.x alongside the audio-pop and notch-filter improvements.
 
 ---

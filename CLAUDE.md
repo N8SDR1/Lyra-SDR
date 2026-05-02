@@ -8,13 +8,27 @@ session.  Keep it concise — long-form research lives in
 
 When in doubt, consult:
 - `docs/architecture/implementation_playbook.md` — current authoritative
-  spec for RX2 / TX / PureSignal (v0.0.8 / v0.0.9 / v0.1).  **Start here**
+  spec for RX2 / TX / PureSignal (v0.0.9 / v0.1 / v0.2).  **Start here**
   for any RX2/TX/PS implementation question.
-- `docs/architecture/v0.0.8_rx2_plan.md` — phase plan, operator decisions.
+- `docs/architecture/v0.0.9_rx2_plan.md` — phase plan, operator decisions.
 - `docs/architecture/hl2_puresignal_audio_research.md` — HL2-specific
   PureSignal + audio chain research.
 - `docs/architecture/rx2_research_notes.md` — first-pass Thetis
   research (some content superseded by the playbook; cross-reference).
+
+**Version-numbering note (2026-05-02):** the audio + notch +
+click-tune work originally scoped as v0.0.7.1-.4 patch tags was
+rolled up and released as **v0.0.8 "Quiet & Polish Pass"** (since
+cumulatively it was feature-level scope, not patch).  All planned
+work shifted by one minor:
+- **v0.0.8** = Quiet & Polish Pass (CURRENT — just shipped)
+- **v0.0.9** = RX2 (was originally v0.0.8)
+- **v0.1**   = TX (was originally v0.0.9)
+- **v0.2**   = PureSignal (was originally v0.1)
+
+References to the old numbering in commit history / older doc
+revisions are historical and intentionally not back-edited.  Doc
+content below has been mass-renumbered to the new scheme.
 
 ---
 
@@ -147,7 +161,7 @@ HL2's TX I/Q rate is also 48 kHz (no resampling needed in TX path).
 Per Thetis's `cmaster.c::SetDDCRate(i, rate)`, each DDC can run at
 its own rate (48k / 96k / 192k / 384k).  Lyra's existing decimator
 in `lyra/dsp/channel.py` already handles arbitrary input rates →
-fixed audio rate, so per-DDC rate independence is "free" for v0.0.8
+fixed audio rate, so per-DDC rate independence is "free" for v0.0.9
 (no new code needed).
 
 ### 3.7 PureSignal is one bit (well, three)
@@ -186,12 +200,12 @@ the rest.
 
 | WDSP file | Lyra target | Effort | Phase |
 |---|---|---|---|
-| `patchpanel.c::SetRXAPanelPan` (50 LOC) | `lyra/dsp/mix.py` (pan curve) | 1 hour | v0.0.8 |
-| `compress.c` (~150 LOC) | `lyra/dsp/tx_compressor.py` | 1 day | v0.0.9.1 |
-| `lmath.c::xbuilder` (~200 LOC) | `lyra/dsp/ps_xbuilder.py` | 2 days | v0.1 |
-| `delay.c` (~80 LOC) | `lyra/dsp/delay_line.py` | 4 hours | v0.1 |
-| `iqc.c` (315 LOC) | `lyra/dsp/ps_iqc.py` | 4 days | v0.1 |
-| `calcc.c` (1164 LOC) | `lyra/dsp/ps_calcc.py` | 2 weeks | v0.1 |
+| `patchpanel.c::SetRXAPanelPan` (50 LOC) | `lyra/dsp/mix.py` (pan curve) | 1 hour | v0.0.9 |
+| `compress.c` (~150 LOC) | `lyra/dsp/tx_compressor.py` | 1 day | v0.1.1 |
+| `lmath.c::xbuilder` (~200 LOC) | `lyra/dsp/ps_xbuilder.py` | 2 days | v0.2 |
+| `delay.c` (~80 LOC) | `lyra/dsp/delay_line.py` | 4 hours | v0.2 |
+| `iqc.c` (315 LOC) | `lyra/dsp/ps_iqc.py` | 4 days | v0.2 |
+| `calcc.c` (1164 LOC) | `lyra/dsp/ps_calcc.py` | 2 weeks | v0.2 |
 
 ### 4.2 Write Lyra-native (don't port)
 
@@ -211,27 +225,27 @@ that conflicts with Lyra's "pip install and go" ethos.
 
 ## 5. Lyra threading model
 
-Five threads across the v0.0.8 / v0.0.9 / v0.1 roadmap:
+Five threads across the v0.0.9 / v0.1 / v0.2 roadmap:
 
 ```
 Thread 1: HL2Stream._rx_loop          (recvfrom loop)
-Thread 2: DSP worker                   (RX1 + RX2 chains, audio sink, TX chain in v0.0.9)
-Thread 3 (NEW in v0.1): PS calc thread (semaphore-driven, runs calc())
+Thread 2: DSP worker                   (RX1 + RX2 chains, audio sink, TX chain in v0.1)
+Thread 3 (NEW in v0.2): PS calc thread (semaphore-driven, runs calc())
 Thread 4: HL2Stream TX writer          (drains TX queue at EP2 cadence)
 Thread 5: Qt main thread               (UI; signals/slots only)
 ```
 
-**No MMCSS / OS thread priority** for v0.0.8.  Python's GIL is the
+**No MMCSS / OS thread priority** for v0.0.9.  Python's GIL is the
 binding constraint, not OS priority.  Add MMCSS only if profiling
 shows audio drops.
 
-**Buffer flow contract** (RX side, v0.0.8):
+**Buffer flow contract** (RX side, v0.0.9):
 
 ```
 HL2Stream._rx_loop  → parser splits to {0,1,2,3}
                     → on_ddc_samples(ddc=0, ...) → Radio.dispatch_rx1
                     → on_ddc_samples(ddc=1, ...) → Radio.dispatch_rx2
-                    → on_ddc_samples(ddc=2, ...) → drop (v0.0.8) / PS feedback (v0.1)
+                    → on_ddc_samples(ddc=2, ...) → drop (v0.0.9) / PS feedback (v0.2)
 
 Radio.dispatch_rx*  → DspChannel[k].process(iq) → audio_k
                     → both audios in hand → StereoMixer.mix() → stereo
@@ -256,7 +270,7 @@ hard-left, RX2 hard-right.  Auto-applied when RX2 enables.
   pan=0.5, both channels at unity (6 dB louder than endpoints).
   Don't use Lyra's existing equal-power Balance rule; use WDSP's.
 - L/R swap option in Settings (HL2 firmware-rev compensation).
-- No host-side sounddevice path for v0.0.8 — AK4951 is the canonical
+- No host-side sounddevice path for v0.0.9 — AK4951 is the canonical
   HL2 audio route.
 
 ### 6.2 RX2 UI model — hybrid
@@ -278,7 +292,7 @@ hard-left, RX2 hard-right.  Auto-applied when RX2 enables.
 - VFO B lock toggle prevents accidental tuning during pile-up
   listening.
 - Buttons: A→B, B→A, Swap.
-- TX cursor renders on whichever RX shows the TX VFO (in v0.0.8 even
+- TX cursor renders on whichever RX shows the TX VFO (in v0.0.9 even
   before TX itself ships).
 
 ### 6.4 DDC frequency-source abstraction
@@ -286,20 +300,20 @@ hard-left, RX2 hard-right.  Auto-applied when RX2 enables.
 ```python
 ddc[0].freq_source = "VFOA"   # RX1 — always VFOA
 ddc[1].freq_source = "VFOB"   # RX2 — always VFOB
-ddc[2].freq_source = "TX"     # PS feedback in v0.1; static TX in v0.0.8
+ddc[2].freq_source = "TX"     # PS feedback in v0.2; static TX in v0.0.9
 ddc[3].freq_source = "TX"     # Same
 ```
 
 DDC2/DDC3 always carry TX freq in C&C frames 5/6 regardless of PS
-state.  Parser must always skip those bytes.  When v0.1 lands and
+state.  Parser must always skip those bytes.  When v0.2 lands and
 sets `puresignal_run=True`, the same freq writes become "PS feedback
 freq" — no protocol redesign.
 
 ### 6.5 PureSignal posture
 
-- Plumb the protocol surface in v0.0.8 (`puresignal_run` flag in C&C
-  writer, DDC freq-source abstraction).  Inert in v0.0.8.
-- v0.1 = port `calcc.c` + `iqc.c` + supporting modules.
+- Plumb the protocol surface in v0.0.9 (`puresignal_run` flag in C&C
+  writer, DDC freq-source abstraction).  Inert in v0.0.9.
+- v0.2 = port `calcc.c` + `iqc.c` + supporting modules.
 - Operator self-attestation that they have the HL2 PS hardware mod
   installed.  Settings checkbox: "I have the PureSignal hardware mod
   installed."  Default OFF; until checked, PS controls disabled with
@@ -307,10 +321,10 @@ freq" — no protocol redesign.
 - N8SDR runs PS on HL2/HL2+ with appropriate gateware + mod.  This is
   the working configuration.
 
-### 6.6 PTT state machine (v0.0.9)
+### 6.6 PTT state machine (v0.1)
 
 States: RX → MOX_TX (UI button or CAT) → CW_TX (key down) → TUN_TX
-(low-power tune) → VOX_TX (deferred to v0.1).
+(low-power tune) → VOX_TX (deferred to v0.2).
 
 - RX-mute fade ~50 ms when MOX→TX (no clicks).
 - Hardware PTT input via HL2 EP6 status bytes (`prn->ptt_in =
@@ -320,7 +334,7 @@ States: RX → MOX_TX (UI button or CAT) → CW_TX (key down) → TUN_TX
 
 ## 7. Phased delivery roadmap
 
-### v0.0.8 — RX2
+### v0.0.9 — RX2
 
 - Phase 0: multi-channel refactor (no behavior change).
 - Phase 1: protocol RX2 enablement (nddc=4, EP6 parser rewrite).
@@ -330,15 +344,15 @@ States: RX → MOX_TX (UI button or CAT) → CW_TX (key down) → TUN_TX
 - Phase 5: polish, persistence, docs.
 - Rolling pre-releases per phase.
 
-### v0.0.9 — TX (post-RX2)
+### v0.1 — TX (post-RX2)
 
-- v0.0.9.0: SSB only (USB/LSB) + PTT + drive level + fwd/rev power.
-- v0.0.9.1: CW (with internal keyer + sidetone, CWX PTT bit), AM,
+- v0.1.0: SSB only (USB/LSB) + PTT + drive level + fwd/rev power.
+- v0.1.1: CW (with internal keyer + sidetone, CWX PTT bit), AM,
   compressor port from WDSP.
-- v0.0.9.2: FM, CFC.
-- v0.0.9.3: Leveler, equalizer.
+- v0.1.2: FM, CFC.
+- v0.1.3: Leveler, equalizer.
 
-### v0.1 — PureSignal
+### v0.2 — PureSignal
 
 - Port `calcc.c` + `iqc.c` + `xbuilder` + `delay.c`.
 - New `PSDialog` UI modeled on Thetis's `PSForm.cs`.
@@ -356,25 +370,25 @@ lyra/
 │   └── stream.py                  # HPSDR P1 — nddc=4, per-DDC freq, etc.
 ├── dsp/
 │   ├── channel.py                 # per-RX DSP chain (existing)
-│   ├── mix.py                     # NEW v0.0.8 — StereoMixer + WDSP pan curve
-│   ├── tx_channel.py              # NEW v0.0.9 — TX DSP chain
-│   ├── ssb_mod.py                 # NEW v0.0.9 — SSB modulator
-│   ├── cw_keyer.py                # NEW v0.0.9.1
-│   ├── tx_compressor.py           # NEW v0.0.9.1 — port from compress.c
-│   ├── ps_calcc.py                # NEW v0.1 — port from calcc.c
-│   ├── ps_iqc.py                  # NEW v0.1 — port from iqc.c
-│   ├── ps_xbuilder.py             # NEW v0.1 — cubic-spline coef builder
-│   └── delay_line.py              # NEW v0.1
+│   ├── mix.py                     # NEW v0.0.9 — StereoMixer + WDSP pan curve
+│   ├── tx_channel.py              # NEW v0.1 — TX DSP chain
+│   ├── ssb_mod.py                 # NEW v0.1 — SSB modulator
+│   ├── cw_keyer.py                # NEW v0.1.1
+│   ├── tx_compressor.py           # NEW v0.1.1 — port from compress.c
+│   ├── ps_calcc.py                # NEW v0.2 — port from calcc.c
+│   ├── ps_iqc.py                  # NEW v0.2 — port from iqc.c
+│   ├── ps_xbuilder.py             # NEW v0.2 — cubic-spline coef builder
+│   └── delay_line.py              # NEW v0.2
 ├── radio/
-│   └── ptt.py                     # NEW v0.0.9 — PTT state machine
+│   └── ptt.py                     # NEW v0.1 — PTT state machine
 ├── ui/
 │   ├── panels.py                  # extend for RX2/TX/PS controls
 │   ├── spectrum.py                # add split-vertical mode for dual pan
-│   └── ps_dialog.py               # NEW v0.1 — modeled on PSForm.cs
+│   └── ps_dialog.py               # NEW v0.2 — modeled on PSForm.cs
 
 docs/architecture/                  # research + plans (this conversation)
 ├── implementation_playbook.md     # AUTHORITATIVE — start here
-├── v0.0.8_rx2_plan.md
+├── v0.0.9_rx2_plan.md
 ├── hl2_puresignal_audio_research.md
 ├── rx2_research_notes.md
 ├── threading.md                   # existing
@@ -401,9 +415,9 @@ D:\sdrprojects\OpenHPSDR-Thetis-2.10.3.13\Project Files\Source\
     ├── calcc.c, calcc.h           # PS calibration
     ├── iqc.c, iqc.h               # PS predistortion application
     ├── patchpanel.c               # pan curve (port for mix.py)
-    ├── compress.c                 # TX compressor (port for v0.0.9.1)
-    ├── lmath.c                    # xbuilder cubic-spline (port for v0.1)
-    ├── delay.c                    # delay line (port for v0.1)
+    ├── compress.c                 # TX compressor (port for v0.1.1)
+    ├── lmath.c                    # xbuilder cubic-spline (port for v0.2)
+    ├── delay.c                    # delay line (port for v0.2)
     └── (137 other files)          # consult as needed
 ```
 
@@ -662,7 +676,7 @@ This is a math constraint, not a tuning issue.
 - Not a v0.0.x quiet-pass tweak; substantial new feature surface
   (capture UX, profile management, scoring engine, attenuator
   gate).
-- Right after RX2 (v0.0.8) and TX (v0.0.9) is the natural slot
+- Right after RX2 (v0.0.9) and TX (v0.1) is the natural slot
   -- earlier and we're spreading bandwidth too thin.
 - Unattended-listening reliability bar is high enough that
   Approach 2 (ML) is the right target, which means the licensing
@@ -675,7 +689,7 @@ back, write `docs/architecture/speaker_filter_design.md` first
 (the probabilistic-attenuator math, ECAPA-TDNN evaluation
 checklist, license review for permissive ONNX models, capture +
 profile UX flows).  THEN implement on a feature branch alongside
-v0.1 work or as a v0.1.x post-PureSignal feature.
+v0.2 work or as a v0.2.x post-PureSignal feature.
 
 Pre-park reasoning lives in this conversation thread (operator
 asked, I gave the senior-engineering analysis, operator parked).
@@ -692,7 +706,7 @@ These weren't answered by code-reading; we'll find out on N8SDR's
 hardware:
 
 1. **HL2 mic samples in EP6 with AK4951 audio active** — value or
-   zero?  Affects v0.0.9 mic-input source choice.
+   zero?  Affects v0.1 mic-input source choice.
 2. **DDC2/DDC3 sample rate during PS+TX** — Thetis sets RX1 rate but
    actual gateware delivery is TBD.  Wireshark a PS+TX session.
 3. **HL2 PA-on bit power-up default** — is `pa & 1` set by gateware
@@ -734,7 +748,7 @@ hardware:
 
 - Cut pre-releases per phase during long features (worked well for
   v0.0.6 / v0.0.7).
-- v0.0.8 phases: 0 (refactor), 1 (protocol), 2 (audio), 3 (UI),
+- v0.0.9 phases: 0 (refactor), 1 (protocol), 2 (audio), 3 (UI),
   4 (panadapter), 5 (polish).  One pre-release per phase.
 
 ## 12. How to point Claude back to these docs
@@ -755,7 +769,7 @@ can prompt me with any of:
   `D:\sdrprojects\OpenHPSDR-Thetis-2.10.3.13\Project Files\Source\wdsp\`.
 
 For specific implementation work, give me the phase number from §7
-and I'll know what's in scope.  For example: "Start v0.0.8 Phase 0"
+and I'll know what's in scope.  For example: "Start v0.0.9 Phase 0"
 means multi-channel refactor with no behavior change.
 
 When something I do conflicts with this doc, **trust this doc over

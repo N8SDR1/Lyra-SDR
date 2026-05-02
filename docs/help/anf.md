@@ -89,7 +89,7 @@ enhancer and before the squelch / broadband NR:
 IQ → NB → decimate → manual notches → demod → LMS → ANF → SQ → NR → APF
 ```
 
-Rationale (current chain — corrected v0.0.7.x; earlier versions
+Rationale (current chain — corrected v0.0.8; earlier versions
 ran ANF before LMS):
 
 1. **NB** removes IQ-domain impulses (pre-decimation so they
@@ -159,7 +159,7 @@ correctness (sub-block size = delay guarantees no
 intra-block-window contamination).  At 48 kHz audio rate this
 runs in well under a millisecond per 2048-sample block.
 
-The block-LMS optimization landed in v0.0.7.x; earlier Lyra
+The block-LMS optimization landed in v0.0.8; earlier Lyra
 versions used a Python per-sample loop that consumed
 ~5 ms per audio block — most of the chain's CPU budget.
 Vectorizing freed enough headroom to bump NR2's FFT size from

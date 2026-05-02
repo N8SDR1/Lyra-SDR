@@ -114,7 +114,7 @@ frequency.  Click-to-tune honors landmark triangles on the band-plan
 overlay — clicking a triangle tunes AND switches to the landmark's
 suggested mode (FT8 → DIGU, WSPR → DIGU, PSK → DIGU, etc.).
 
-### Shift+click — snap to nearest peak (v0.0.7.1)
+### Shift+click — snap to nearest peak (v0.0.8)
 
 Hold **Shift** while clicking and Lyra snaps the VFO to the
 strongest spectrum peak within ±200 Hz of the cursor, provided that

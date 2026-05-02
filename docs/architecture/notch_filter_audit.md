@@ -371,7 +371,7 @@ Before any code change:
 2. Operator confirms the proposed UX (separate width / depth
    sliders, cascade integer instead of `deep` boolean).
 3. We open a feature branch and implement N1+N2+N3 with bench
-   tests, ship as v0.0.7.x or v0.0.8 alpha.
+   tests, ship as v0.0.7.x or v0.0.9 alpha.
 
 Existing Notch dataclass migration: `width_hz` and `active`/`deep`
 already persist in QSettings. Migration:

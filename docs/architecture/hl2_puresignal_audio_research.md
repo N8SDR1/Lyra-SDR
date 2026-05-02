@@ -282,13 +282,13 @@ networkproto1.c).
 
 ---
 
-## 3. Lyra v0.0.8 implications
+## 3. Lyra v0.0.9 implications
 
 ### 3.1 RX2 protocol
 
 - `protocol/stream.py`: when RX2 is enabled, set **`nddc=4`** (not 2!).
   Matches `console.cs::UpdateDDCs` HL2 case.
-- DDC0=RX1, DDC1=RX2, DDC2/DDC3=available for PS in v0.1+.
+- DDC0=RX1, DDC1=RX2, DDC2/DDC3=available for PS in v0.2+.
 - C4 byte in C&C frame 0 must include `(nddc-1)<<3 = 0x18`.
 - Duplex bit `C4 |= 0x04` mandatory regardless (HL2 quirk we already
   honor).
@@ -318,9 +318,9 @@ networkproto1.c).
   (full stereo split).  Operator can adjust per-RX pan in Settings if
   they want a different mix.
 
-### 3.3 Forward-compat hooks for v0.1+ PureSignal
+### 3.3 Forward-compat hooks for v0.2+ PureSignal
 
-If Lyra v0.0.8 abstracts:
+If Lyra v0.0.9 abstracts:
 
 - **DDC frequency source per-DDC** (currently RX1 freq, RX2 freq,
   optional TX freq for DDC2/DDC3) — that's the only thing PS needs at
@@ -330,11 +330,11 @@ If Lyra v0.0.8 abstracts:
 - **Full-duplex bit always set** (already required for HL2 RX during TX
   anyway — see `C4 |= 0x04` in `WriteMainLoop_HL2` line 967).
 
-…then **v0.1 PS becomes mostly a UI + DSP problem** (predistortion
+…then **v0.2 PS becomes mostly a UI + DSP problem** (predistortion
 math + calibration loop), not a protocol problem.  Lyra should plumb
-these now even though they're inert in v0.0.8.
+these now even though they're inert in v0.0.9.
 
-### 3.4 v0.0.9 TX implications
+### 3.4 v0.1 TX implications
 
 - Mic sample is in the same EP6/return frame stream as IQ — Lyra's RX
   path already gets it for free.  TX path needs the `outIQbufp`
@@ -418,8 +418,8 @@ There is no Thetis-side hardware mod detection or gateware version
 check.  The only HL2-specific PS code is the PSForm auto-attenuate
 clamps (-28..+31 dB range and the recalibrate threshold).
 
-For Lyra: RX2 (v0.0.8) is straightforward — use **`nddc=4`** (not 2),
+For Lyra: RX2 (v0.0.9) is straightforward — use **`nddc=4`** (not 2),
 plumb DDC0/DDC1 to RX1/RX2 freqs, route audio through a per-RX `pan`
 knob into the standard EP2 LR bytes — and the architectural setup
-naturally supports v0.1 PureSignal as a flag-flip plus DSP work, no
+naturally supports v0.2 PureSignal as a flag-flip plus DSP work, no
 protocol redesign needed.

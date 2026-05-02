@@ -2,8 +2,8 @@
 
 Senior-engineering deep dive across Thetis 2.10.3.13 and WDSP source
 trees at `D:\sdrprojects\OpenHPSDR-Thetis-2.10.3.13\Project Files\
-Source\`.  Goal: concrete implementation plan for Lyra v0.0.8 (RX2),
-v0.0.9 (TX), and v0.1 (PureSignal), targeting **Hermes Lite 2 / 2+
+Source\`.  Goal: concrete implementation plan for Lyra v0.0.9 (RX2),
+v0.1 (TX), and v0.2 (PureSignal), targeting **Hermes Lite 2 / 2+
 only**.
 
 License posture: Lyra is GPL v3+.  WDSP is GPL v3+ (post Pratt
@@ -22,13 +22,13 @@ This playbook supersedes parts of `rx2_research_notes.md` and
 
 ## 1. Executive summary
 
-The three-release roadmap (RX2 in v0.0.8, TX in v0.0.9, PureSignal in
-v0.1) is structurally sound.  The prior-pass research notes are mostly
+The three-release roadmap (RX2 in v0.0.9, TX in v0.1, PureSignal in
+v0.2) is structurally sound.  The prior-pass research notes are mostly
 correct; the three corrections in §2 are minor.
 
 **Top-level recommendation per topic:**
 
-- **RX2 (v0.0.8): pure Lyra-native, no WDSP port required.**  Lyra
+- **RX2 (v0.0.9): pure Lyra-native, no WDSP port required.**  Lyra
   already has Python-native ports of every per-channel DSP block
   needed (NR1/NR2/LMS/ANF/NB/AGC/SQ in `lyra/dsp/`).  The work is (a)
   making the protocol layer multi-DDC-aware at `nddc=4`, (b)
@@ -38,31 +38,31 @@ correct; the three corrections in §2 are minor.
   vector-multiply-accumulate.  Just write the multiply-and-accumulate
   in NumPy in `lyra/dsp/mix.py`.
 
-- **TX (v0.0.9): hybrid — Lyra-native protocol + PTT state machine,
+- **TX (v0.1): hybrid — Lyra-native protocol + PTT state machine,
   but the TXA DSP chain (mic processing → modulator → IF filtering →
   ALC → I/Q out) is too large to port to Python in a useful
   timeframe.**  Recommendation: build a minimum-viable TX in pure
   Python first (mic → bandpass → SSB modulator → I/Q clip → I/Q
   frame), defer compressor / leveler / CFC / preemph / EER to a later
-  v0.0.9.x once we know the field-tested Python implementation hits
+  v0.1.x once we know the field-tested Python implementation hits
   no CPU walls.  Don't reach for cffi/WDSP DLL until profiling forces
   it; the Hermes-Lite TX I/Q rate is 48 kHz on a Python NumPy budget
   that's roughly 50× the per-sample cost we can absorb.
 
-- **PureSignal (v0.1): the only path that genuinely benefits from
+- **PureSignal (v0.2): the only path that genuinely benefits from
   porting WDSP C → Python.**  Port `calcc.c` and `iqc.c` directly —
   these files are 1164 + 315 = ~1500 lines of C, but the math is a
   finite-set: pair-binning, complex-envelope distortion fitting,
   cubic-spline coefficient builder (`xbuilder` from `lmath.c`), and a
   Hann-windowed swap/begin/end coefficient loader.  Estimated 2–3
   weeks Python port.  The protocol surface is already plumbed by
-  v0.0.8 (`puresignal_run`, DDC2/DDC3 freq-source = TX).  Operator UX
+  v0.0.9 (`puresignal_run`, DDC2/DDC3 freq-source = TX).  Operator UX
   is a port of `PSForm.cs` to a Lyra-native `PSDialog` — modeled on
   the pattern, written from scratch.
 
 **Threading**: Lyra's "one network reader thread, all DSP on one
-worker" matches Thetis's pattern.  Don't change it for v0.0.8.  PS in
-v0.1 may want a separate thread for `calc()` (the slow predistortion-
+worker" matches Thetis's pattern.  Don't change it for v0.0.9.  PS in
+v0.2 may want a separate thread for `calc()` (the slow predistortion-
 coefficient builder) — that's the **only** new thread the three
 releases require beyond what Lyra has today.
 
@@ -95,7 +95,7 @@ case 4:
 
 DDC2/DDC3 samples are **always** delivered when `nddc==4`.  Lyra's
 parser must accept and discard them when PS is off.  The existing-plan
-note "DDC2/DDC3 samples are quietly dropped in v0.0.8 (PS not
+note "DDC2/DDC3 samples are quietly dropped in v0.0.9 (PS not
 engaged)" is correct but understated — these aren't optional bytes;
 they take their slots in the 26-byte cadence and Lyra's parser must
 skip them.
@@ -144,7 +144,7 @@ For Lyra: the **prior pass's stereo-split spec is fine** because both
 endpoints are still (1,0) / (0,1).  But if operators ever sit at
 intermediate pan values, the perceived loudness differs from Lyra's
 existing Balance.  **Recommendation**: in Lyra's per-channel `pan`
-parameter (new in v0.0.8), use the WDSP curve verbatim — Thetis users
+parameter (new in v0.0.9), use the WDSP curve verbatim — Thetis users
 will recognize the behavior and Lyra's existing Balance can be
 reframed as "pan slider" cleanly.  Cite `wdsp/patchpanel.c:158–176`
 in the port-attribution comment.
@@ -171,15 +171,15 @@ opens those DDCs to produce useful samples is gateware-dependent.
 The protocol cost is zero; it's just an extra freq write per
 round-robin cycle.
 
-**Recommendation**: in Lyra v0.0.8, write DDC2/DDC3 freq = current
+**Recommendation**: in Lyra v0.0.9, write DDC2/DDC3 freq = current
 TX-VFO freq (which equals VFOA when SPLIT is off, VFOB when SPLIT is
-on).  The samples are dropped at the parser.  When v0.1 lands and we
+on).  The samples are dropped at the parser.  When v0.2 lands and we
 set `puresignal_run=True`, the same freq writes become "PS feedback
 freq is TX freq" — no additional protocol work needed.
 
 ---
 
-## 3. RX2 implementation playbook (v0.0.8)
+## 3. RX2 implementation playbook (v0.0.9)
 
 ### 3.1 Module-by-module decisions
 
@@ -214,7 +214,7 @@ extend Lyra's existing dict:
 0x00: (sr_code, 0x00, 0x00, 0x1C)             # general, c4=0x1C with nddc=4
 0x02: TX freq (4 bytes, big-endian)            # TX VFO
 0x04: DDC0 freq = RX1 / VFOA                   # RX1
-0x06: DDC1 freq = RX2 / VFOB                   # RX2  (new in v0.0.8)
+0x06: DDC1 freq = RX2 / VFOB                   # RX2  (new in v0.0.9)
 0x08: DDC2 freq = TX freq                      # static TX, harmless if PS off (new)
 0x0A: DDC3 freq = TX freq                      # static TX, harmless if PS off (new)
 0x0E: ADC assignments + tx_step_attn           # frame 4
@@ -224,7 +224,7 @@ extend Lyra's existing dict:
 0x20: CW hang/sidetone                         # frame 14
 0x22: EER PWM                                  # frame 15
 0x24: BPF2 + xvtr_en + puresignal_run<<6       # frame 16 (new — puresignal bit)
-0x2E: tx_latency + ptt_hang                    # frame 17 (HL2-specific, defer to v0.0.9)
+0x2E: tx_latency + ptt_hang                    # frame 17 (HL2-specific, defer to v0.1)
 ```
 
 The current Lyra round-robin steps through the dict each frame.
@@ -258,7 +258,7 @@ and adding `on_rx2_samples=None`, `on_ps_samples=None` keyword args.
 When `on_rx2_samples` is None (single-RX mode), still call the
 parser, just discard DDC1 output.  Cleaner alternative: introduce a
 single `on_ddc_samples(ddc_idx, samples, stats)` callback and let
-Radio dispatch — recommended for v0.0.8 because v0.1 PureSignal will
+Radio dispatch — recommended for v0.0.9 because v0.2 PureSignal will
 need DDC2/DDC3 too.
 
 ### 3.3 Audio mix module (new file: `lyra/dsp/mix.py`)
@@ -325,7 +325,7 @@ if it stretches.
 ### 3.5 Threading and buffer flow
 
 Today: HL2Stream's `_rx_loop` thread → `on_samples(samples, stats)`
-→ Radio's worker (or main thread via signal, depending on v0.0.8
+→ Radio's worker (or main thread via signal, depending on v0.0.9
 worker-mode setting) → DSP Channel → AudioSink → back into HL2Stream's
 TX queue.
 
@@ -335,7 +335,7 @@ For RX2, the diagram becomes:
 HL2Stream._rx_loop  → parser splits to {0,1,2,3}
                     → on_ddc_samples(ddc=0, ...) → Radio.dispatch_rx1
                     → on_ddc_samples(ddc=1, ...) → Radio.dispatch_rx2
-                    → on_ddc_samples(ddc=2, ...) → Radio.dispatch_ps_feedback (v0.1; v0.0.8 = drop)
+                    → on_ddc_samples(ddc=2, ...) → Radio.dispatch_ps_feedback (v0.2; v0.0.9 = drop)
 
 Radio.dispatch_rx*  → DspChannel[k].process(iq) → audio_k (np.ndarray)
                     → buffered until both channels have audio for this packet
@@ -390,7 +390,7 @@ sample-rate independence.**
 
 ---
 
-## 4. TX implementation playbook (v0.0.9)
+## 4. TX implementation playbook (v0.1)
 
 ### 4.1 Strategic decision: Python TXA vs C extension
 
@@ -414,16 +414,16 @@ Rationale:
 
 **Phased TX delivery**:
 
-- **v0.0.9.0**: SSB only (USB/LSB).  Mic → bandpass → SSB modulator
+- **v0.1.0**: SSB only (USB/LSB).  Mic → bandpass → SSB modulator
   → ALC → EP2.  PTT state machine, drive-level slider, fwd/rev power
   meter.  No PS hooks, no compressor.  Clean linear PA operation
   only.
-- **v0.0.9.1**: CW (key + sidetone, internal keyer; CWX PTT bit on
+- **v0.1.1**: CW (key + sidetone, internal keyer; CWX PTT bit on
   HL2).  AM (carrier injection).  Compressor (port `wdsp/compress.c`
   — small file).
-- **v0.0.9.2**: FM (deviation, preemph).  CFC (continuous frequency
+- **v0.1.2**: FM (deviation, preemph).  CFC (continuous frequency
   compressor — port `cfcomp.c`).
-- **v0.0.9.3**: Leveler, equalizer.
+- **v0.1.3**: Leveler, equalizer.
 
 ### 4.2 Modules to write (Lyra-native)
 
@@ -431,7 +431,7 @@ Rationale:
 
 ```python
 class TxChannel:
-    """Mic input → modulator → I/Q output. SSB-only at v0.0.9.0.
+    """Mic input → modulator → I/Q output. SSB-only at v0.1.0.
 
     Contract:
       - Inputs: float32 mic samples at 48 kHz, arbitrary block size
@@ -451,7 +451,7 @@ class TxChannel:
 scipy.signal.hilbert + bandpass.  ~50 LOC.  The math is well-known;
 no porting attribution needed.
 
-`lyra/dsp/cw_keyer.py` (new in v0.0.9.1): internal keyer state
+`lyra/dsp/cw_keyer.py` (new in v0.1.1): internal keyer state
 machine matching `wdsp/main.c::keyer*` patterns — but trivial enough
 to write Lyra-native.  dot/dash bytes go to the EP2 frame builder via
 the protocol layer.
@@ -508,7 +508,7 @@ mode, the I-sample LSB (the second byte of TX I-MSB or rather the
 
 **Recommended HL2 defaults**: tx_latency=10ms, ptt_hang=4 (samples)
 per pi-HPSDR community values.  Lyra exposes these in the TX setup
-tab in v0.0.9.
+tab in v0.1.
 
 **Drive level** — frame 10 C1 (`networkproto1.c:1078`):
 `prn->tx[0].drive_level` is a 0..255 byte.  Operator-facing: a 0..100%
@@ -520,7 +520,7 @@ slider.
 -28..+31 dB rather than 0..31 like ANAN.  Lyra's UI label this as
 "TX gain" (negative = attenuation, positive = gain) to match operator
 mental model.  **This is PS-relevant** — auto-cal adjusts this — but
-it's also the standard TX gain control on HL2.  v0.0.9 exposes it as
+it's also the standard TX gain control on HL2.  v0.1 exposes it as
 a slider.
 
 **PA-on bit** — frame 10 C3 bit 7 (line 1084): `(pa & 1) << 7`.  HL2
@@ -559,7 +559,7 @@ From operator-side controls + radio feedback:
 States:    RX (default) → MOX_TX (UI button or CAT) → RX
                        → CW_TX (key down sources keyer) → RX with hang-time
                        → TUN_TX (TUNE button drives at low power) → RX
-                       → VOX_TX (audio level threshold; deferred to v0.1)
+                       → VOX_TX (audio level threshold; deferred to v0.2)
 Inputs:    UI MOX button, UI TUN button, CAT command,
            keyer state (dot/dash detected), hardware PTT (deferred — HL2 bit feedback)
 Outputs:   per-EP2-frame mox bit, ptt_hang_active flag,
@@ -601,7 +601,7 @@ state machine.
 
 ---
 
-## 5. PureSignal implementation playbook (v0.1)
+## 5. PureSignal implementation playbook (v0.2)
 
 ### 5.1 The algorithm in plain language
 
@@ -762,12 +762,12 @@ on PS-on if the most recent file is < 24 h old.
 |---|---|---|---|---|
 | 1 | `patchpanel.c` (just `SetRXAPanelPan`) | 50 (relevant) | `lyra/dsp/mix.py` (curve) | 1 hour |
 | 2 | (No port) — write `lyra/dsp/mix.py` Lyra-native | n/a | `lyra/dsp/mix.py` (mixer) | 2 hours |
-| 3 | (TX, v0.0.9): SSB modulator | n/a (Lyra-native) | `lyra/dsp/ssb_mod.py` | 1 day |
-| 4 | (TX, v0.0.9): `compress.c` | ~150 | `lyra/dsp/tx_compressor.py` | 1 day |
-| 5 | (PS, v0.1): `lmath.c::xbuilder` (cubic-spline coef builder) | ~200 | `lyra/dsp/ps_xbuilder.py` (or numpy.polynomial) | 2 days |
-| 6 | (PS, v0.1): `calcc.c` (full) | 1164 | `lyra/dsp/ps_calcc.py` | 2 weeks |
-| 7 | (PS, v0.1): `iqc.c` (full) | 315 | `lyra/dsp/ps_iqc.py` | 4 days |
-| 8 | (PS, v0.1): `delay.c` (used by calcc for tx/rx alignment) | ~80 | `lyra/dsp/delay_line.py` | 4 hours |
+| 3 | (TX, v0.1): SSB modulator | n/a (Lyra-native) | `lyra/dsp/ssb_mod.py` | 1 day |
+| 4 | (TX, v0.1): `compress.c` | ~150 | `lyra/dsp/tx_compressor.py` | 1 day |
+| 5 | (PS, v0.2): `lmath.c::xbuilder` (cubic-spline coef builder) | ~200 | `lyra/dsp/ps_xbuilder.py` (or numpy.polynomial) | 2 days |
+| 6 | (PS, v0.2): `calcc.c` (full) | 1164 | `lyra/dsp/ps_calcc.py` | 2 weeks |
+| 7 | (PS, v0.2): `iqc.c` (full) | 315 | `lyra/dsp/ps_iqc.py` | 4 days |
+| 8 | (PS, v0.2): `delay.c` (used by calcc for tx/rx alignment) | ~80 | `lyra/dsp/delay_line.py` | 4 hours |
 
 **Files we deliberately do not port**: TXA.c / RXA.c (channel
 scaffolding, Lyra-native), channel.c (buffer mgmt, Lyra-native),
@@ -777,13 +777,13 @@ threading).
 
 **Files we already ported**: `nr.py`, `nr2.py`, `lms.py`, `anf.py`,
 `nb.py`, `squelch.py`.  Continue per-feature decisions (e.g., port
-`wdsp/cfcomp.c` for v0.0.9.2 if compressor needs it).
+`wdsp/cfcomp.c` for v0.1.2 if compressor needs it).
 
 ---
 
 ## 7. Threading and buffer-flow architecture
 
-**Final Lyra architecture across v0.0.8, v0.0.9, v0.1**:
+**Final Lyra architecture across v0.0.9, v0.1, v0.2**:
 
 ```
 Thread 1: HL2Stream._rx_loop          (recvfrom loop)
@@ -795,11 +795,11 @@ Thread 2: DSP worker                   (Lyra existing DspWorker)
   → DspChannel[1].process(iq) → audio_1
   → StereoMixer.mix([audio_0, audio_1]) → stereo
   → audio_sink.write(stereo)
-  → (TX path, v0.0.9+) TxChannel.process(mic_block) → tx_iq
+  → (TX path, v0.1+) TxChannel.process(mic_block) → tx_iq
   → HL2Stream.queue_tx_iq(tx_iq)
-  → (PS path, v0.1) PsCalcc.tick(tx_iq, rx_feedback_iq)
+  → (PS path, v0.2) PsCalcc.tick(tx_iq, rx_feedback_iq)
 
-Thread 3 (NEW in v0.1): PS calc thread
+Thread 3 (NEW in v0.2): PS calc thread
   → semaphore wait
   → calc() ← compute new coefficients
   → coefficient atomic-swap into PsIqc
@@ -813,7 +813,7 @@ Thread 5: Qt main thread
 ```
 
 **Thread priorities**: Lyra doesn't currently use MMCSS.
-Recommendation: don't add it for v0.0.8.  Python's GIL is the binding
+Recommendation: don't add it for v0.0.9.  Python's GIL is the binding
 constraint, not OS-thread priority.  If audio drops appear post-RX2,
 profile first; MMCSS via ctypes is a tactical addition, not a
 strategic one.
@@ -826,8 +826,8 @@ Keep that flexibility.
 **Sample rates**: Lyra currently defaults to one rate.  Per the prior
 plan, **per-DDC rate independence** is supported by HL2 protocol
 (`SetDDCRate(i, ...)`, `cmaster.c`) and by Lyra's existing decimator
-design.  Recommended v0.0.8 default: both DDCs at 192 kHz.  Add a
-per-DDC rate dropdown in v0.0.8.x if testers ask.
+design.  Recommended v0.0.9 default: both DDCs at 192 kHz.  Add a
+per-DDC rate dropdown in v0.0.9.x if testers ask.
 
 ---
 
@@ -860,14 +860,14 @@ In execution order:
 - Click-to-tune within RX2 panadapter half doesn't move RX1.
 - A↔B operations correct.
 
-**Phase 5 — TX (v0.0.9.0)**
+**Phase 5 — TX (v0.1.0)**
 
 - Dummy load fwd power calibration (§4.6 #1).
 - SSB modulator carrier and opposite-sideband suppression (§4.6 #2).
 - MOX → RX-mute fade timing (§4.6 #4).
 - Wireshark EP2 MOX-bit confirmation (§4.6 #5).
 
-**Phase 6 — PureSignal (v0.1)**
+**Phase 6 — PureSignal (v0.2)**
 
 - Single Cal IMD reduction (§5.6 #2).
 - Auto Cal stability (§5.6 #3).
@@ -891,7 +891,7 @@ In execution order:
    Lyra's RX path gets mic samples via the same EP6 stream
    (`networkproto1.c:570–576`).  With the AK4951 codec on, do these
    mic bytes carry actual mic input, or are they zeroed/unused?  This
-   affects whether v0.0.9's mic-input source is EP6-mic or PC-host-
+   affects whether v0.1's mic-input source is EP6-mic or PC-host-
    mic-via-sounddevice.  **Test**: at idle, blow into the HL2 mic
    input, see if EP6 mic bytes show signal.
 
@@ -923,25 +923,25 @@ SDRProject\lyra\`):
 
 - `protocol/stream.py` — extend round-robin C&C registers, rewrite
   EP6 parser for nddc=4, add per-DDC freq writers (DDC1/DDC2/DDC3),
-  add `puresignal_run` flag (inert in v0.0.8).
-- `dsp/mix.py` (NEW, v0.0.8) — StereoMixer with WDSP-style sin-pi pan
+  add `puresignal_run` flag (inert in v0.0.9).
+- `dsp/mix.py` (NEW, v0.0.9) — StereoMixer with WDSP-style sin-pi pan
   curve.
 - `dsp/channel.py` — already has the abstract DspChannel; add a
   multi-instance lifecycle.
-- `dsp/tx_channel.py` (NEW, v0.0.9).
-- `dsp/ssb_mod.py` (NEW, v0.0.9).
-- `dsp/cw_keyer.py` (NEW, v0.0.9.1).
-- `dsp/tx_compressor.py` (NEW, v0.0.9.1).
-- `dsp/ps_calcc.py` (NEW, v0.1).
-- `dsp/ps_iqc.py` (NEW, v0.1).
-- `dsp/ps_xbuilder.py` (NEW, v0.1).
-- `dsp/delay_line.py` (NEW, v0.1, used by ps_calcc).
-- `radio/ptt.py` (NEW, v0.0.9).
+- `dsp/tx_channel.py` (NEW, v0.1).
+- `dsp/ssb_mod.py` (NEW, v0.1).
+- `dsp/cw_keyer.py` (NEW, v0.1.1).
+- `dsp/tx_compressor.py` (NEW, v0.1.1).
+- `dsp/ps_calcc.py` (NEW, v0.2).
+- `dsp/ps_iqc.py` (NEW, v0.2).
+- `dsp/ps_xbuilder.py` (NEW, v0.2).
+- `dsp/delay_line.py` (NEW, v0.2, used by ps_calcc).
+- `radio/ptt.py` (NEW, v0.1).
 - `radio.py` — extend to dict of channels + facades; add PTT
-  integration; add PS protocol coordination in v0.1.
-- `ui/ps_dialog.py` (NEW, v0.1) — modeled on `PSForm.cs`.
+  integration; add PS protocol coordination in v0.2.
+- `ui/ps_dialog.py` (NEW, v0.2) — modeled on `PSForm.cs`.
 - `ui/panels.py` — promote RX2 placeholder; add focus state, A↔B/
-  Swap/Lock buttons, MOX/TUN buttons (v0.0.9), PS toggle (v0.1).
+  Swap/Lock buttons, MOX/TUN buttons (v0.1), PS toggle (v0.2).
 - `ui/spectrum.py` — split-vertical mode for dual panadapter.
 
 **Thetis source paths cited** (under `D:/sdrprojects/OpenHPSDR-
@@ -956,11 +956,11 @@ Thetis-2.10.3.13/Project Files/Source/`):
 **WDSP files we will port** (port-attribution citations under
 `D:/sdrprojects/OpenHPSDR-Thetis-2.10.3.13/Project Files/Source/wdsp/`):
 
-- `patchpanel.c::SetRXAPanelPan` lines 158–176 (RX2 pan curve, v0.0.8).
-- `calcc.c` (full file, v0.1 PS).
-- `iqc.c` (full file, v0.1 PS).
-- `lmath.c::xbuilder` (subset, v0.1 PS — locate via grep when ready).
-- `delay.c` (subset, v0.1 PS).
+- `patchpanel.c::SetRXAPanelPan` lines 158–176 (RX2 pan curve, v0.0.9).
+- `calcc.c` (full file, v0.2 PS).
+- `iqc.c` (full file, v0.2 PS).
+- `lmath.c::xbuilder` (subset, v0.2 PS — locate via grep when ready).
+- `delay.c` (subset, v0.2 PS).
 
 The path forward is concrete, the prior research only needs the small
 corrections in §2, and the core engineering decisions (Python-native

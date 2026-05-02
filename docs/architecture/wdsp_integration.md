@@ -3,7 +3,7 @@
 **Status:** DESIGN DOC — companion to `threading.md`. No code yet.
 **Author:** N8SDR + Claude
 **Date:** 2026-04-29
-**Target version range:** v0.1.x (TX path) → v0.2.x (PureSignal)
+**Target version range:** v0.2.x (TX path) → v0.2.x (PureSignal)
 
 ---
 
@@ -380,14 +380,14 @@ v0.0.6 — Phase 3 threading (BETA toggle) — DSP worker thread
 v0.0.7 — Captured-noise-profile NR (the headline ask) — runs on
          either backend
    │
-v0.0.8 — NR2-native (minimum-statistics noise estimator)
+v0.0.9 — NR2-native (minimum-statistics noise estimator)
    │
-v0.0.9 — ANF (auto-notch, LMS adaptive)
+v0.1 — ANF (auto-notch, LMS adaptive)
    │
 v0.0.10 — NB (impulse blanker, IQ-domain)
          At this point the noise toolkit is complete on Native.
    │
-v0.1.0 — Native TX scaffolding (TX-1) — first transmit-capable Lyra
+v0.2.0 — Native TX scaffolding (TX-1) — first transmit-capable Lyra
    │
 v0.2.0 — WDSP integration (WD-1) — opt-in second DSP engine for RX
    │
@@ -398,7 +398,7 @@ v0.4.0 — RX2 + diversity (depends on threading + WDSP being settled)
 
 If at any point a release runs out of time, items slip to the
 next without disrupting the order. Worker-thread default
-promotion likely happens around v0.0.8 or v0.0.9 once it has 2-3
+promotion likely happens around v0.0.9 or v0.1 once it has 2-3
 release cycles of operator field testing.
 
 ### Could WD-1 move earlier?

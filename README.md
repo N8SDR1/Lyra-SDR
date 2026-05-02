@@ -1,6 +1,6 @@
 # Lyra — Qt6 SDR Transceiver for Hermes Lite 2 / 2+
 
-**Current version: 0.0.7 — "Polish Pass"**
+**Current version: 0.0.8 — "Quiet & Polish Pass"**
 
 Modern PySide6 desktop SDR for Steve Haynal's Hermes Lite 2 and HL2+.
 Native Python HPSDR Protocol 1, TCI v1.9 server, glassy UI with
@@ -34,13 +34,31 @@ display surface follows automatically.
 
 ## Latest release — see [CHANGELOG.md](./CHANGELOG.md)
 
-The current release is **0.0.7 — "Polish Pass"** (2026-05-01), a
-tester-feedback UI polish pass on top of v0.0.6.  Headline fixes:
-rebalanced three-column Noise Settings tab, Tuning-panel vertical
-resize restored, brighter checkboxes / radio buttons, working
-pre-release update notifications + new toolbar update indicator.
+The current release is **0.0.8 — "Quiet & Polish Pass"**
+(2026-05-02), a substantial DSP + UX upgrade on top of v0.0.7.
+Headline changes:
 
-For the full version history (0.0.3 → 0.0.7), see
+- **Audio quiet pass.**  Per-sample AGC envelope (eliminates the
+  loud block-boundary pops), decimator state preservation across
+  freq / mode change (eliminates tune-clicks), AK4951 sink-swap
+  fade-out.  See `docs/architecture/audio_pops_audit.md`.
+- **Notch v2.**  Manual notches finally kill carriers across
+  their visible width.  Operator-controllable depth (default
+  −50 dB), cascade integer (1-4 stages, sharper shoulders),
+  3-preset profile (Normal / Deep / Surgical), saved notch banks
+  ("My 40m setup"), click-free coefficient-swap crossfade.  See
+  `docs/architecture/notch_v2_design.md`.
+- **Click-to-tune v1.**  Shift+click snaps to the nearest spectrum
+  peak; hover preview reticle shows the snap target before commit;
+  click-and-drag pans across a band end-to-end.
+- **NR-stack hardening (post-v0.0.7 work merged in).**  NR2 FFT
+  bump from 256 → 1024 (cleaner voice formants), captured-profile
+  + NR2 fixed (Wiener-from-profile path), DSP chain order corrected
+  (LMS → ANF → SQ → NR → APF), LMS slider rebuilt with real
+  perceptual swing, ANF/SQ vectorized, captured-profile staleness
+  toast.
+
+For the full version history (0.0.3 → 0.0.8), see
 [CHANGELOG.md](./CHANGELOG.md).
 
 See `docs/help/getting-started.md` for the full guided tour or press

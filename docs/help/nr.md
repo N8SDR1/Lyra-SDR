@@ -198,7 +198,7 @@ profile.  If you've captured a good profile of your local noise
 environment, NR2 with captured-source on is the strongest
 spectral noise reduction Lyra has.
 
-This was a v0.0.7.x fix — earlier Lyra versions reused the live
+This was a v0.0.8 fix — earlier Lyra versions reused the live
 MMSE-LSA pipeline when captured-source was on, which was
 mathematically wrong (the decision-directed update assumes a
 moving noise estimate; a frozen captured profile defeated the
