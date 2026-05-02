@@ -444,6 +444,32 @@ From the NR audit (`docs/architecture/nr_audit.md`) §9 open questions:
   ML-based VAD (i) since auto-select reduces live-source usage.
   Skipping (j) cross-channel validation pending RX2.
 
+- **AUTO-SELECT EXPLICITLY DEFERRED INDEFINITELY (2026-05-02).**
+  Operator decision after senior-engineering review of the
+  proposed implementation: captured profiles are operator-curated
+  by design (each station / location / operator is unique;
+  operator ears pick up things the algorithm can't).  Algorithmic
+  auto-select — even in "suggest" mode — overrides operator
+  choice with a spectral-distance metric and creates UX noise
+  without delivering value.  See `docs/architecture/nr_audit.md`
+  §4.3(a) STATUS block for the full reasoning.
+
+  What stays in scope for the captured-profile feature:
+    * Operator-driven explicit blending (manual slider in manager)
+    * Diagnostic readouts ("this profile is X dB different from
+      current band noise") — informational, operator decides
+    * Smart-guard improvements (already shipped P1.1)
+    * Staleness toast notifications (already shipped P1.2 —
+      passive notification, operator decides whether to recapture)
+
+  Out of scope:
+    * Any feature where Lyra picks a profile FOR the operator
+    * Suggestion toasts the algorithm initiates
+    * The math module `lyra/dsp/noise_profile_match.py` was
+      prototyped briefly and **removed** as part of the same
+      decision — keeps the "no auto-comparison code" principle
+      enforced at the file-system level.
+
 ## 10. Open empirical questions (need HL2+ bench testing)
 
 These weren't answered by code-reading; we'll find out on N8SDR's

@@ -476,6 +476,43 @@ The user asked for deep evaluation of these.  Each gets DSP-soundness
   the best fit per band.  Genuinely differentiating.
 - Risk: low.  Fully orthogonal to existing NR.
 
+**STATUS: AUTO-SELECT EXPLICITLY DEFERRED INDEFINITELY (2026-05-02)**
+
+Reviewed and scrapped during P1 work after operator-led
+discussion:
+
+> "It's best to let the user switch if he thinks it's a noise
+> issue.  The user's ears will pick up things that the interface
+> cannot, and each user has different perceived noise issues —
+> each station, location and operator is unique.  Great thought,
+> just not the right type of application for it."
+
+The captured-noise-profile feature is operator-curated by design —
+operators capture profiles that subjectively sound right to them
+in the moments they captured.  An algorithmic auto-select reduces
+profiles to a spectral-distance metric and overrides operator
+choice with a number.  Even a "suggest" mode (toast → click to
+apply) creates noise that doesn't deliver value when operator
+ears are the better judge.
+
+**What stays in scope going forward:**
+- Operator-driven explicit blending UI (pick two profiles + slider →
+  save new profile).  Implementation deferred; if/when this lands,
+  the blending math is straightforward (geometric mean in log
+  space — see audit §4.3(a) original DSP description).
+- Diagnostic readouts: e.g. "this profile is X dB different from
+  current band noise" displayed in the manager.  Informational;
+  operator decides what to do with it.
+
+**Out of scope (do NOT revive without operator request):**
+- Algorithmic auto-loading of profiles
+- Suggestion toasts that the algorithm initiates
+- Any feature where Lyra picks a profile FOR the operator
+- The previously-prototyped `lyra/dsp/noise_profile_match.py`
+  utility module was removed in the same operator decision —
+  zero auto-comparison code in the codebase keeps the principle
+  enforced at the file-system level.
+
 **b) Adaptive profile refinement.**
 
 - DSP: sound but needs care.  Slow exp-smoothing of profile toward
