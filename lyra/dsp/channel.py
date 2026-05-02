@@ -805,31 +805,54 @@ class PythonRxChannel(DspChannel):
                                 getattr(n, "filter", None) is not None:
                             chunk = n.filter.process(chunk)
                 audio = demod.process(chunk)
-                # ANF (Phase 3.D #3) — LMS adaptive notch.  Slots
-                # between demod and NR per the canonical ham-SDR
-                # noise-toolkit chain (see docs/architecture/
-                # noise_toolkit.md §6): manual notches handle KNOWN
-                # carriers (already done up above when notch_enabled);
-                # ANF handles UNKNOWN / drifting tones; NR handles
-                # whatever broadband residual is left.
-                # Bypass-fast when ANF is disabled.
-                audio = self._anf.process(audio)
-                # All-mode squelch — slotted BEFORE the NR stages
-                # so the voice-presence detector sees audio with
-                # its full noise variance.  Putting it AFTER NR
-                # (where Pratt's WDSP chain has it) leaves the
-                # detector looking at heavily-smoothed audio where
-                # voice and noise are indistinguishable; the
-                # detector then mis-classifies real signals as
-                # noise and over-mutes.  When the squelch is
-                # closed, downstream LMS/NR see silence and
-                # consume essentially zero CPU.
-                audio = self._squelch.process(audio)
-                # LMS adaptive line enhancer — sits between ANF and
-                # NR.  Predictive: lifts periodic content (CW,
-                # voice formants) above broadband noise.  Bypass-
-                # fast when disabled (single attribute check).
+                # Chain order — corrected v0.0.7.x per nr_audit §3:
+                #
+                #   demod -> LMS -> ANF -> SQ -> NR -> APF
+                #
+                # Why this order:
+                #   * LMS is a *predictor* — it lifts periodic
+                #     content (CW carriers, voice formants) above
+                #     broadband noise.  It needs to see the FULL
+                #     periodic spectrum to learn from.
+                #   * ANF is a *remover* — it cancels periodic
+                #     content (whistles, heterodynes).  Running ANF
+                #     before LMS would feed LMS the residual *with
+                #     the periodic content already removed*, which
+                #     defeats LMS's predictor entirely.
+                #   * SQ comes after the adaptive filters so they
+                #     keep adapting during gate-closed periods —
+                #     fixes the "LMS weights stale on gate-open"
+                #     issue.
+                #   * SQ stays BEFORE NR so the voice-presence
+                #     detector sees audio with full noise variance
+                #     (NR-smoothed audio confuses the detector and
+                #     causes over-muting).
+                #
+                # Pre-v0.0.7.x order was demod -> ANF -> SQ -> LMS
+                # -> NR which had ANF stripping the very content
+                # LMS was trying to predict.
+                #
+                # LMS adaptive line enhancer — predictive; lifts
+                # periodic content (CW, voice formants) above
+                # broadband noise.  Bypass-fast when disabled
+                # (single attribute check).
                 audio = self._lms.process(audio)
+                # ANF (Phase 3.D #3) — LMS adaptive notch.  Cancels
+                # KNOWN-but-drifting tones (heterodynes that the
+                # operator hasn't manually notched, BC-station
+                # bleed-through, etc.).  Sits AFTER LMS so LMS sees
+                # the periodic content it needs to predict; sits
+                # BEFORE NR so NR cleans up whatever broadband
+                # residual is left.
+                audio = self._anf.process(audio)
+                # All-mode squelch — slotted BEFORE the NR stage
+                # but AFTER the adaptive filters (LMS + ANF).  The
+                # voice-presence detector sees audio with its full
+                # noise variance (no NR smoothing); LMS / ANF
+                # continue adapting during gate-closed periods.
+                # When the squelch is closed, downstream NR / APF
+                # see silence and consume essentially zero CPU.
+                audio = self._squelch.process(audio)
                 # Route NR through whichever processor the operator
                 # selected.  Both have identical STFT framing and
                 # length-preserving contracts, so switching is

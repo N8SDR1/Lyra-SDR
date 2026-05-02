@@ -623,18 +623,31 @@ class SpectralSubtractionNR:
         """Install a previously-saved captured profile (loaded from
         the JSON persistence layer).
 
-        Validates the array size against the current FFT bin count
-        and raises ValueError on mismatch — used to flag profiles
-        from a different FFT_SIZE as incompatible at load time
-        rather than silently producing wrong-sized output.
+        Auto-resamples the bin axis to match the current FFT_SIZE.
+        Captured profiles cover the same frequency range (DC → Nyquist)
+        regardless of FFT_SIZE — they just sample it at different
+        resolutions — so linear interpolation across normalized bin
+        index produces a valid profile at any target FFT size.  This
+        unblocks FFT_SIZE upgrades without invalidating saved
+        profiles.
+
+        Raises ValueError only on degenerate inputs (1-D shape,
+        non-empty).
         """
         n_bins = self._fft // 2 + 1
-        arr = np.asarray(mag, dtype=np.float32)
-        if arr.shape != (n_bins,):
+        arr = np.asarray(mag, dtype=np.float32).ravel()
+        if arr.size < 2:
             raise ValueError(
-                f"captured profile size {arr.shape} does not match "
-                f"current FFT bin count ({n_bins},) — "
-                f"profile was likely saved with a different FFT_SIZE")
+                f"captured profile must have >=2 bins; got {arr.size}")
+        if arr.size != n_bins:
+            # Linear interp across normalized bin axis.  Both old and
+            # new arrays represent the same frequency range, so
+            # x_old = linspace(0, 1, n_old), x_new = linspace(0, 1, n_new),
+            # and np.interp gives the right answer.  Endpoints are
+            # preserved exactly.
+            x_old = np.linspace(0.0, 1.0, arr.size, dtype=np.float64)
+            x_new = np.linspace(0.0, 1.0, n_bins, dtype=np.float64)
+            arr = np.interp(x_new, x_old, arr).astype(np.float32)
         # Defensive: ensure no zero / negative bins (would divide-
         # by-zero in the gain calc).  Floor at 1e-6 (well below any
         # real noise, well above zero).

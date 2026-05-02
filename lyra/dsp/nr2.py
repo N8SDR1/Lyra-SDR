@@ -527,10 +527,34 @@ class EphraimMalahNR:
     """
 
     # ── STFT / framing constants ─────────────────────────────────
-    # Match NR1 exactly so they share the same timing characteristics
-    # and switching between them is sample-accurate.
-    FFT_SIZE: int = 256
-    HOP: int = 128
+    # FFT_SIZE bumped 256 → 1024 in v0.0.7.x per nr_audit §2.2.
+    # WDSP defaults to fsize=4096 / ovrlp=4 (1024-sample hop) for
+    # EMNR; at 48 kHz that's 11.7 Hz bin spacing.  Lyra's old
+    # FFT=256 had 187.5 Hz bin spacing — voice fundamentals (90-
+    # 250 Hz) and the first formant smear across 1-2 bins, where
+    # WDSP cleanly resolves them.  FFT=1024 splits the difference:
+    # 46.9 Hz bin spacing (4× better than old, half WDSP), 50%
+    # Hanning overlap (HOP=512) preserves the COLA-exact synthesis
+    # path, and per-frame internal latency rises from 2.7 ms to
+    # ~10.7 ms — still well below the audible threshold for SSB
+    # voice and CW reception.
+    #
+    # NR1 stays at FFT=256 (handles its own capture pipeline);
+    # cross-size profile loads into NR2 transparently auto-resample
+    # via load_captured_profile()'s linear-interp path.
+    #
+    # The Martin minimum-statistics tracker auto-rescales all its
+    # smoothing factors via _alpha_for(rate, hop) — no per-constant
+    # tuning needed.
+    #
+    # AEPF_PSI stays at 20 BINS, which now represents a narrower
+    # absolute frequency window (~940 Hz half-width vs ~3750 Hz
+    # before).  This is the desired direction — narrower
+    # smoothing on a higher-resolution mask gives more precise
+    # speech-vs-noise discrimination.  Operator feedback will tell
+    # us if PSI needs further bench-tuning.
+    FFT_SIZE: int = 1024
+    HOP: int = 512
 
     # ── Noise-tracker constants ──────────────────────────────────
     # α_track: smoothing factor when current bin power is BELOW
@@ -964,15 +988,23 @@ class EphraimMalahNR:
         reference.  Stored as POWER (mag²) since MMSE-LSA operates
         on PSD, not magnitude.
 
-        Raises ValueError on size mismatch — the captured profile
-        must match NR2's bin count (FFT_SIZE//2 + 1).
+        Auto-resamples the bin axis to match NR2's current FFT_SIZE.
+        See NR1.load_captured_profile() for the rationale — same
+        approach, same math (linear interpolation across normalized
+        bin index, both arrays represent DC→Nyquist).
         """
         n_bins = self._fft // 2 + 1
         arr = np.asarray(mag, dtype=np.float64).ravel()
-        if arr.size != n_bins:
+        if arr.size < 2:
             raise ValueError(
-                f"NR2 captured-profile size {arr.size} doesn't match "
-                f"NR2 FFT bin count {n_bins}; resample or recapture")
+                f"NR2 captured profile must have >=2 bins; got {arr.size}")
+        if arr.size != n_bins:
+            # Linear interp across normalized bin axis to match
+            # NR2's FFT bin count.  See NR1's load_captured_profile()
+            # for the rationale — auto-resample, don't reject.
+            x_old = np.linspace(0.0, 1.0, arr.size, dtype=np.float64)
+            x_new = np.linspace(0.0, 1.0, n_bins, dtype=np.float64)
+            arr = np.interp(x_new, x_old, arr)
         # Floor at 1e-12 (same protection NR1 uses) and square to
         # convert magnitude → power.
         self._captured_lambda_d = np.maximum(arr, 1e-6) ** 2
@@ -1075,8 +1107,18 @@ class EphraimMalahNR:
             # Pick the noise-PSD reference the gain math will use.
             # Captured wins when the toggle is on AND a profile is
             # loaded; otherwise the live tracker drives the math.
-            if (self._use_captured_profile
-                    and self._captured_lambda_d is not None):
+            #
+            # CRITICAL: when captured profile is active, the gain
+            # math takes a different path entirely (Wiener-from-
+            # profile, see below).  See nr_audit.md §2.2 / §4.2(c)
+            # for the rationale — frozen λ_d defeats decision-
+            # directed ξ smoothing and produces theoretically WORSE
+            # output than the live MMSE-LSA path.  The Wiener-from-
+            # profile path is the mathematically correct optimum
+            # estimator when the noise PSD is known a priori.
+            captured_active = (self._use_captured_profile
+                               and self._captured_lambda_d is not None)
+            if captured_active:
                 lambda_ref = self._captured_lambda_d
             else:
                 lambda_ref = self._lambda_d
@@ -1084,22 +1126,67 @@ class EphraimMalahNR:
             # γ — a-posteriori SNR (current frame).
             gamma = mag_sq / lambda_ref
 
-            # ξ — a-priori SNR via decision-directed smoothing.
-            alpha = (self.XI_SMOOTHING_ON
-                     if self.musical_noise_smoothing
-                     else self.XI_SMOOTHING_OFF)
-            # |G[n-1] · Y[n-1]|² / λ_d[n] — using stored prev clean
-            # estimate squared (which IS |G[n-1]·Y[n-1]|² already).
-            ml_estimate = self._prev_clean_pow / lambda_ref
-            # Maximum-likelihood term: max(γ - 1, 0).
-            ml_term = np.maximum(gamma - 1.0, 0.0)
-            xi = alpha * ml_estimate + (1.0 - alpha) * ml_term
-            # Floor on ξ to prevent gain collapse at very-low-SNR
-            # bins.
-            np.maximum(xi, self.XI_FLOOR, out=xi)
+            if captured_active:
+                # ── Wiener-from-profile path ─────────────────────
+                # Closed-form Wiener gain when the noise PSD is
+                # known (= the captured profile, fixed).  The
+                # Wiener form (signal/(signal+noise)) is the
+                # MSE-optimal linear estimator under Gaussian
+                # assumptions when the noise PSD is known a priori
+                # — exactly the captured-profile case.
+                #
+                # Unlike MMSE-LSA's decision-directed ξ smoothing
+                # (which assumes a moving λ_d), this path's quality
+                # only depends on the captured profile being a good
+                # model of the actual band noise — operator's
+                # responsibility (smart-guard catches obvious
+                # capture errors).
+                #
+                # Math:
+                #   signal_pow = max(|Y|² - profile², 0)
+                #   SNR_post   = signal_pow / profile²
+                #   gain²      = SNR_post / (1 + SNR_post)
+                #   gain       = sqrt(gain²)  (mag domain)
+                #
+                # Operator aggression is applied via the standard
+                # _apply_aggression() blend at the end of the
+                # pipeline, identical to the MMSE-LSA path — keeps
+                # the slider's semantic ("less = gentler, more =
+                # cleaner") consistent across both modes.
+                #
+                # XI_FLOOR doubles as the gain² floor here so the
+                # output never collapses to literal zero (which
+                # produces clicks at low-SNR bins).
+                signal_pow = np.maximum(mag_sq - lambda_ref, 0.0)
+                snr_post = signal_pow / lambda_ref
+                gain_sq = snr_post / (1.0 + snr_post)
+                np.maximum(gain_sq, self.XI_FLOOR, out=gain_sq)
+                gain = np.sqrt(gain_sq).astype(np.float32)
 
-            # MMSE-LSA gain via 2-D LUT lookup.
-            gain = self._lookup_gain(gamma, xi)
+                # ξ for SPP downstream — under the Wiener model,
+                # SNR_post IS the a-priori SNR estimate.  Provides
+                # SPP with a sensible value even though the
+                # decision-directed update isn't running.
+                xi = snr_post
+            else:
+                # ── Live MMSE-LSA path (unchanged) ───────────────
+                # ξ — a-priori SNR via decision-directed smoothing.
+                alpha = (self.XI_SMOOTHING_ON
+                         if self.musical_noise_smoothing
+                         else self.XI_SMOOTHING_OFF)
+                # |G[n-1] · Y[n-1]|² / λ_d[n] — using stored prev
+                # clean estimate squared (which IS |G[n-1]·Y[n-1]|²
+                # already).
+                ml_estimate = self._prev_clean_pow / lambda_ref
+                # Maximum-likelihood term: max(γ - 1, 0).
+                ml_term = np.maximum(gamma - 1.0, 0.0)
+                xi = alpha * ml_estimate + (1.0 - alpha) * ml_term
+                # Floor on ξ to prevent gain collapse at very-low-SNR
+                # bins.
+                np.maximum(xi, self.XI_FLOOR, out=xi)
+
+                # MMSE-LSA gain via 2-D LUT lookup.
+                gain = self._lookup_gain(gamma, xi)
 
             # Speech-Presence-Probability soft mask ("witchHat").
             # Multiplies gain by a sigmoid that's high in bins
