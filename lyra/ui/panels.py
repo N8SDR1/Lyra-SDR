@@ -1884,10 +1884,16 @@ class DspPanel(GlassPanel):
         self.lms_strength_slider.setTickInterval(25)
         self.lms_strength_slider.setFixedWidth(160)
         self.lms_strength_slider.setToolTip(
-            "LMS line-enhancer strength.\n"
-            "  0   = light effect (slow adapt, gentle)\n"
-            "  50  = WDSP default (Pratt's classic-ANR tuning)\n"
-            "  100 = aggressive (fast adapt, stronger)\n"
+            "LMS line-enhancer strength (multi-parameter).\n"
+            "  0   = subtle:  32 taps, 50% wet/dry mix\n"
+            "  50  = default: 80 taps, 75% wet (WDSP-class)\n"
+            "  100 = full:   128 taps, 100% wet (pure prediction)\n"
+            "\n"
+            "Higher = more selective predictor + less of the\n"
+            "original signal blended in.  Bigger perceptual\n"
+            "swing than just adapt-rate alone — operator should\n"
+            "hear ~10 dB difference between min and max on\n"
+            "stable signals like CW carriers.\n"
             "\n"
             "Right-click the LMS button for preset shortcuts.")
         self.lms_strength_slider.valueChanged.connect(

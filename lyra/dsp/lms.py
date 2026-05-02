@@ -134,8 +134,7 @@ class LineEnhancerLMS:
     # ── Default tunings (Pratt's WDSP defaults; 48 kHz baseline) ──
     # These produce the classic "ANR ON" sound on Thetis and have
     # been operator-validated for over a decade across the openHPSDR
-    # community.  Lyra's strength slider interpolates 2μ and γ
-    # around these defaults; taps and delay stay fixed.
+    # community.  At strength 0.5 the slider lands on these.
     DEFAULT_TAPS: int = 64
     DEFAULT_DELAY: int = 16              # decorrelation lag (samples)
     DEFAULT_TWO_MU: float = 1.0e-4       # NLMS step size
@@ -153,14 +152,42 @@ class LineEnhancerLMS:
     LINCR: float = 1.0
     LDECR: float = 3.0
 
-    # Strength slider anchors.  Linear interpolation on 2μ and γ;
-    # lower values = subtler effect, slower adaptation, less
-    # weight-shaping.  At strength 0.5 the parameters land on
-    # Pratt's defaults.
+    # Strength slider anchors.  v0.0.7.x revision — operator feedback:
+    # "I'm not noticing a fair amount of difference in the slider
+    # control for LMS."  Senior-tech analysis (CLAUDE.md note):
+    # the original slider controlled only 2μ and γ (both ADAPTATION
+    # parameters) — once weights converge at any slider position,
+    # the steady-state output is essentially identical, so the
+    # slider only changed transient-response behavior.  The
+    # perceptual "strength" of LMS comes mostly from prediction
+    # SELECTIVITY (= tap count) and the wet/dry blend, neither of
+    # which the slider previously touched.
+    #
+    # New mapping — the slider drives FIVE parameters in concert:
+    #
+    #   strength   taps   2μ      γ      wet_mix    note
+    #   0.00       32     5e-5   0.05    0.50      gentle: subtle, half wet
+    #   0.50       64     1e-4   0.10    0.85      Pratt defaults + 85% wet
+    #   1.00       128    3e-4   0.20    1.00      aggressive: full prediction
+    #
+    # Tap count is the biggest perceptual change: 32 → 128 taps =
+    # 4× more selective predictor = much harder rejection of
+    # broadband noise.  Wet/dry mix is the second biggest — at 50%
+    # wet the operator hears half-input + half-prediction, which is
+    # smoother and more natural-sounding than pure prediction
+    # (which can sound "artificial" on voice).
+    #
+    # Decorrelation delay stays fixed at 16 samples — changing it
+    # mid-stream invalidates all weight-to-position correspondence;
+    # tap count can change cleanly via zero-extend / truncate.
+    STRENGTH_MIN_TAPS: int = 32
+    STRENGTH_MAX_TAPS: int = 128
     STRENGTH_MIN_TWO_MU: float = 5.0e-5
     STRENGTH_MAX_TWO_MU: float = 3.0e-4
     STRENGTH_MIN_GAMMA: float = 0.05
     STRENGTH_MAX_GAMMA: float = 0.20
+    STRENGTH_MIN_WET_MIX: float = 0.50
+    STRENGTH_MAX_WET_MIX: float = 1.00
     DEFAULT_STRENGTH: float = 0.5
 
     def __init__(self, rate: int = 48000) -> None:
@@ -181,6 +208,11 @@ class LineEnhancerLMS:
         self._delay: int = self.DEFAULT_DELAY
         self._two_mu: float = self.DEFAULT_TWO_MU
         self._gamma: float = self.DEFAULT_GAMMA
+        # Wet/dry mix — fraction of LMS prediction in output (vs
+        # original input).  1.0 = pure prediction (Lyra's pre-v0.0.7.x
+        # behavior); 0.5 = half input + half prediction.  Set via
+        # _apply_strength as part of the multi-parameter slider.
+        self._wet_mix: float = 1.0
 
         # Adaptive-leakage state.
         self._lidx: float = self.LIDX_INIT
@@ -217,20 +249,90 @@ class LineEnhancerLMS:
         """Process one audio block.  Length-preserving; returns
         float32 even if input was float64.  Bypass-fast (exact
         identity, single attribute check) when ``enabled`` is
-        False."""
+        False.
+
+        Wet/dry blend (v0.0.7.x): output is a linear mix of the LMS
+        prediction (= the periodic content the filter could lock
+        onto) and the original input audio.  Operator's strength
+        slider controls the wet fraction:
+          strength 0.0 → 50% wet (subtle, mostly original)
+          strength 0.5 → 85% wet (Pratt defaults + slight blend)
+          strength 1.0 → 100% wet (pure prediction; pre-v0.0.7.x)
+        At wet=1.0 the result is exactly identical to the legacy
+        behavior, so there's no regression path for operators who
+        relied on the old slider feel."""
         if not self.enabled or audio.size == 0:
             return audio
         x = audio.astype(np.float64, copy=False)
-        return self._process_block(x).astype(np.float32, copy=False)
+        prediction = self._process_block(x)
+        # Wet/dry blend: out = wet · prediction + (1 - wet) · input.
+        # When wet == 1.0, this short-circuits to the prediction
+        # alone (legacy behavior preserved bit-exact at slider=1).
+        if self._wet_mix >= 0.999:
+            out = prediction
+        else:
+            out = (
+                self._wet_mix * prediction
+                + (1.0 - self._wet_mix) * x
+            )
+        return out.astype(np.float32, copy=False)
 
     # ── Internals ─────────────────────────────────────────────────
 
     def _apply_strength(self, s: float) -> None:
+        """Multi-parameter strength mapping (v0.0.7.x revision).
+
+        Maps the operator's 0..1 strength slider to FIVE algorithm
+        parameters in concert.  See class docstring (STRENGTH_*
+        constants) for the full table.  Tap count drives the biggest
+        perceptual change (= prediction selectivity); wet/dry mix is
+        the second biggest (= how much of the original signal blends
+        into the output).
+        """
         s = max(0.0, min(1.0, float(s)))
+
+        # Adaptation parameters — linear interp between the anchors.
         lo_mu, hi_mu = self.STRENGTH_MIN_TWO_MU, self.STRENGTH_MAX_TWO_MU
         lo_g, hi_g = self.STRENGTH_MIN_GAMMA, self.STRENGTH_MAX_GAMMA
+        lo_w, hi_w = self.STRENGTH_MIN_WET_MIX, self.STRENGTH_MAX_WET_MIX
         self._two_mu = lo_mu + (hi_mu - lo_mu) * s
         self._gamma = lo_g + (hi_g - lo_g) * s
+        self._wet_mix = lo_w + (hi_w - lo_w) * s
+
+        # Tap count — quantized to even values (block-LMS update path
+        # works with any tap count, but even values give cleaner
+        # numpy gathers).  Round-to-nearest, then clamp.
+        new_taps = int(round(
+            self.STRENGTH_MIN_TAPS
+            + (self.STRENGTH_MAX_TAPS - self.STRENGTH_MIN_TAPS) * s))
+        new_taps = max(self.STRENGTH_MIN_TAPS,
+                       min(self.STRENGTH_MAX_TAPS, new_taps))
+        # Round down to multiple of 2 for cleaner block-LMS gathers.
+        new_taps = new_taps & ~1
+        self._set_n_taps(new_taps)
+
+    def _set_n_taps(self, new_taps: int) -> None:
+        """Change tap count without resetting the existing trained
+        weights.  Zero-extends if growing; truncates if shrinking.
+
+        Why this matters: the operator may sweep the slider mid-QSO
+        to find the sweet spot.  Resetting weights every slider step
+        would produce a 1-2 sec retraining gap each time, audible as
+        a brief "swimming" artifact.  Zero-extending preserves
+        existing weights — the new tap positions train from zero
+        within ~0.5 sec while old positions stay valid throughout.
+        """
+        old_taps = self._n_taps
+        if new_taps == old_taps:
+            return
+        if new_taps < old_taps:
+            # Truncate: zero-out positions [new_taps..old_taps).
+            # The active weight slice self._w[:new_taps] is unchanged.
+            self._w[new_taps:old_taps] = 0.0
+        # Growing case: self._w[old_taps..new_taps] is already 0
+        # (from __init__ or previous truncate), so no work needed.
+        self._n_taps = new_taps
+        self._tap_offsets = np.arange(new_taps, dtype=np.int64)
 
     def _process_block(self, x: np.ndarray) -> np.ndarray:
         """Block-LMS dispatch.
