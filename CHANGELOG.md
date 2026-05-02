@@ -13,12 +13,99 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
-## [Unreleased] — Post-v0.0.7 NR-stack hardening
+## [Unreleased] — v0.0.7.1 "Quiet & Polish Pass" (in progress)
 
-Working in `feature/threaded-dsp`; landed on `main` but no tagged
-release cut yet.  Operators running the v0.0.7 binary installer
-do NOT have these changes; operators running from source on `main`
-do.
+Working on `feature/v0.0.7.1-quiet-pass` (merging back via
+`feature/threaded-dsp` → `main`).  Three operator-driven feature
+batches plus the post-v0.0.7 NR-stack hardening that already
+landed on the dev branch:
+
+  1. **Audio quiet pass** — eliminate the loud / random
+     pops & clicks that the v0.0.7 audio chain produced.
+  2. **Notch v2** — manual notches now actually kill carriers
+     across their visible kill region instead of leaking 3 dB
+     at the edges.  Operator-tunable depth + cascade + saved
+     banks.
+  3. **Click-to-tune v1** — Shift+click snaps the VFO to the
+     nearest spectrum peak with a hover-preview reticle.
+     Plain click + drag-to-pan unchanged.
+
+### Changed — audio quiet pass
+
+- **AGC per-sample envelope tracker** (was block-scalar).  Pre-
+  fix, the AGC gain could change abruptly at every block boundary
+  (~21 ms cadence) which produced sample-domain steps audible as
+  loud pops on signal arrival and during release recovery.  Now
+  tracks peak / hang / release per audio sample with the same
+  operator-facing time constants — boundary discontinuity
+  eliminated by construction.  Bench: boundary step 0.029 → 0.0041
+  (= natural sine slope at AGC target).  CPU: ~0.11 ms/block,
+  0.5% of the 21 ms budget.  See
+  `docs/architecture/audio_pops_audit.md` §3 P0.1.
+- **Decimator state preservation across freq/mode change.**  v0.0.7
+  rebuilt the anti-alias FIR from zeros on every channel reset,
+  producing a 1.35 ms ramp-up transient = audible click on every
+  tune.  Fix: keep filter state across reset (rate-dependent
+  coefficients are unchanged anyway).  Bench: tune-boundary step
+  0.100 → 0.013 (= natural slope), recovery 1.35 ms → 0 ms.  See
+  `audio_pops_audit.md` §3 P0.2.
+- **AK4951 sink-swap fade-out.**  Switching audio output (or
+  closing on shutdown) used to flip `inject_audio_tx` instantly,
+  cutting EP2 audio bytes from real samples to zeros in one frame
+  — click at the AK4951 codec.  Fix: 5 ms linear fade tail
+  injected before the cut, then ~7 ms drain wait, then disable
+  injection.  See `audio_pops_audit.md` §3 P0.3.
+
+### Changed — notch v2
+
+- **NotchFilter rewritten** as parametric peaking-EQ biquad (RBJ
+  Audio EQ Cookbook) with operator-set depth_db parameter.
+  Replaces `scipy.signal.iirnotch` whose kill region only achieved
+  −3 dB at the visible width edges.  Default depth −50 dB.  Range
+  −20 to −80 dB.
+- **Cascade integer (1-4 stages) replaces deep:bool.**  Each stage
+  gets `depth/cascade` so total at center matches operator's
+  setting; more stages = sharper transition shoulders within the
+  kill region AND faster fall-off outside.  Default cascade=2.
+- **3-preset profile submenu (Normal / Deep / Surgical) on
+  right-click.**  One-click to set both depth and cascade for an
+  existing notch.  Parallel "Default profile for new notches"
+  submenu sets what newly-placed notches start as.
+- **Two-filter crossfade on coefficient swap.**  When operator
+  drags a notch's freq / width / depth / cascade, the old filter
+  and the new filter both run for 5 ms with their outputs
+  linearly mixed.  Eliminates the drag-tick clicks that the
+  pre-fix code produced on every parameter change.  Bench:
+  boundary step ratio 0.98× of natural input slope = zero
+  swap-induced transient.
+- **`Notch` dataclass migrated**: `deep: bool` replaced with
+  `depth_db: float` + `cascade: int`.  `n.deep` retained as a
+  derived property (`cascade > 1`) for backward-compat with
+  existing readers.  `notch_details` emits 6-tuples
+  `(freq, width, active, deep, depth_db, cascade)`.
+
+### Added — notch v2
+
+- **Saved notch banks (operator-named presets).**  Right-click →
+  Notch banks → Save current bank as... saves the current set of
+  notches under a name ('My 40m setup', 'Contest weekend').
+  Submenu lists saved banks for one-click restore; per-bank
+  delete with confirm dialog.  Persists across Lyra restarts via
+  QSettings under `notches/banks/<name>`.
+
+### Added — click-to-tune v1
+
+- **Shift+click → snap to nearest peak** within ±200 Hz of the
+  cursor when the peak is at least 6 dB above the rolling noise
+  floor.  Sub-bin precision via parabolic peak interpolation.
+  Falls through to literal click-to-tune if no qualifying peak
+  is found in the snap window.  Plain click and drag-to-pan
+  behaviour unchanged.
+- **Hover preview reticle.**  While Shift is held the panadapter
+  shows a cyan vertical-tick + crosshair + Hz-offset label at
+  the snap target position.  Operator sees where the next click
+  will land before committing.  Disappears when no peak is in
+  range.  Active on both QPainter and GPU panadapter backends.
 
 ### Changed — major NR audio improvements
 
@@ -92,6 +179,21 @@ do.
 
 ### Documentation
 
+- New `docs/architecture/audio_pops_audit.md` — pre-implementation
+  audit ranking all audio-pop suspects with bench-test plan;
+  three P0 fixes shipped, P1/P2 noted as future work.
+- New `docs/architecture/notch_filter_audit.md` — first-pass
+  audit of manual-notch shortcomings.
+- New `docs/architecture/notch_v2_design.md` — senior-engineering
+  deep-dive on notch math, WDSP architecture comparison, RBJ
+  Cookbook biquad design, stability analysis, crossfade design,
+  10 operator-locked decisions.
+- New `docs/architecture/click_to_tune_plan.md` — design doc for
+  snap-to-peak + drag-to-pan UX.
+- Updated `docs/help/notches.md` — full v2 docs: depth, cascade,
+  3-preset profiles, saved banks.
+- Updated `docs/help/spectrum.md` — Shift+click snap-to-peak,
+  hover reticle, drag-to-pan section.
 - New `docs/architecture/nr_audit.md` — comprehensive NR-stack
   audit identifying what shipped, what was broken, and what
   could be improved.
@@ -109,7 +211,8 @@ do.
 - Updated `docs/help/anf.md` — current chain order (ANF after
   LMS, before SQ/NR).
 - New `CLAUDE.md` — project context loaded by Claude across
-  sessions.
+  sessions; section 9.6 documents the v0.0.7.1 audio pop fixes
+  + parked residual-click investigation.
 
 ### Decisions explicitly recorded
 
@@ -119,6 +222,27 @@ do.
   profiles are operator-curated by design and Lyra shouldn't
   algorithmically override operator choice.  Recorded in
   `docs/architecture/nr_audit.md` §4.3(a) and `CLAUDE.md` §9.5.
+- **WDSP-style FIR-integrated notches deferred to v0.1.**  Reading
+  WDSP's `nbp.c` revealed manual notches are integrated into the
+  demod's bandpass FIR (single FIR convolution does both bandpass
+  and notches).  Mathematically superior to per-notch IIR but
+  requires demod refactor + has RX2 implications.  Out of
+  v0.0.7.1 scope; `notch_v2_design.md` §2.2 has the full
+  reasoning.
+- **Notch presets: Scope A only (operator-named banks).**  Scope
+  B (band-aware auto-load) considered and rejected — operators
+  prefer to choose which bank to load rather than have Lyra
+  guess based on the tuned frequency.
+- **Residual audio-click investigation parked.**  After the three
+  P0 audio fixes shipped, operator flight-tested as "noticeably
+  better, loud spikes gone, but occasional smaller pops remain
+  even with all DSP off into a dummy load."  Diagnosis points at
+  HL2 hardware/gateware glitches, Python GIL/GC pauses, or
+  per-sample AGC + Rayleigh tail edge cases.  Diagnostic
+  instrumentation already in place (`LYRA_AUDIO_DEBUG=1` env var
+  enables a step-event logger in `_apply_agc_and_volume`).  Will
+  pick up later with operator-collected log data.  See
+  `CLAUDE.md` §9.6.
 
 ---
 

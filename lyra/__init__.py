@@ -11,14 +11,14 @@ bar, About dialog, status bar, settings dialog footer) and the install
 guide all read from this string — bump it once here per release and
 everything else follows automatically.
 """
-__version__      = "0.0.7"
-__version_name__ = "Polish Pass"
+__version__      = "0.0.7.1"
+__version_name__ = "Quiet & Polish Pass"
 # Stamped at release time to today's date when packaging the
 # Inno Setup installer. During raw-source-tree development this stays
 # "dev"; the packaging script rewrites this constant before the
 # PyInstaller bundle is frozen, so the About dialog + status bar in
 # the released .exe show the date the operator received it.
-__build_date__   = "2026-05-01"
+__build_date__   = "2026-05-02"
 
 
 def version_string() -> str:

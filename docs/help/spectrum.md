@@ -110,9 +110,68 @@ frequency.
 ## Click-to-tune
 
 **Left-click** anywhere on the spectrum or waterfall to tune that
-frequency. Click-to-tune honors landmark triangles on the band-plan
+frequency.  Click-to-tune honors landmark triangles on the band-plan
 overlay — clicking a triangle tunes AND switches to the landmark's
 suggested mode (FT8 → DIGU, WSPR → DIGU, PSK → DIGU, etc.).
+
+### Shift+click — snap to nearest peak (v0.0.7.1)
+
+Hold **Shift** while clicking and Lyra snaps the VFO to the
+strongest spectrum peak within ±200 Hz of the cursor, provided that
+peak is at least 6 dB above the rolling noise floor.  If no peak
+is found inside the snap window, the click falls through to literal
+click-to-tune (cursor freq).
+
+Snap is sub-bin precise — parabolic interpolation around the peak
+bin gives placement accuracy of ~10–20 Hz at typical FFT bin
+widths (50–100 Hz at 192 kHz IQ).  In practice you click *near*
+the bump on the panadapter and the radio centers exactly on the
+signal.
+
+#### Hover preview reticle
+
+While Shift is held and you move the cursor over the spectrum, a
+small cyan reticle appears showing where the next click will snap
+to:
+
+```
+                            ⊥             ← snap target tick
+                          [ + ]            ← crosshair at bottom
+                          +180             ← Hz offset from VFO
+```
+
+The reticle disappears when no peak is in range — visual
+confirmation that a Shift+click here would behave as a literal
+click instead.
+
+The reticle can be turned off (Settings → Spectrum, forthcoming);
+the snap behaviour stays usable without it.
+
+### Drag-to-pan
+
+**Left-click and hold, then drag horizontally** to pan the panadapter
+across a band — drag from one end of 40m to the other in one gesture
+without touching the freq display.  The VFO follows the cursor as
+you drag; on release the new center sticks.  A click that doesn't
+move past a small dead-zone (5 px) is treated as a click-to-tune
+instead, so you don't have to be careful about not micro-jittering.
+
+Drag-to-pan works on the QPainter and GPU panadapter backends
+identically.
+
+### Choosing between modes
+
+| Use case | What to do |
+|---|---|
+| Tune to exactly where I clicked | **Plain left-click** |
+| Tune to that signal I'm pointing at | **Shift + left-click** |
+| Sweep the whole band | **Left-click and drag** |
+
+Snap is most useful on busy bands with discrete signals (CW,
+digital).  On AM / FM / wide-bandwidth signals snap finds the
+spectrum peak which may not be where you actually want to be (you
+probably want the carrier, not the modulation peak) — use plain
+click for those.
 
 ## Right-click
 
