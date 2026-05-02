@@ -13,6 +13,115 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [Unreleased] — Post-v0.0.7 NR-stack hardening
+
+Working in `feature/threaded-dsp`; landed on `main` but no tagged
+release cut yet.  Operators running the v0.0.7 binary installer
+do NOT have these changes; operators running from source on `main`
+do.
+
+### Changed — major NR audio improvements
+
+- **NR2 voice quality dramatically improved.**  FFT_SIZE bumped
+  256 → 1024 (hop 128 → 512).  Bin spacing went from 187.5 Hz to
+  46.9 Hz at 48 kHz audio.  Voice formants now resolve cleanly
+  where they previously smeared across 1-2 bins.  Internal
+  latency rises 2.7 ms → 10.7 ms — well below audible threshold.
+  NR1 stays at FFT=256 (handles its own capture pipeline);
+  cross-size profile loads into NR2 transparently auto-resample.
+- **Captured profile + NR2 mode no longer broken.**  Was
+  mathematically incorrect since v0.0.6 — frozen captured profile
+  defeated the decision-directed musical-noise damping in
+  MMSE-LSA.  NR2 now takes a closed-form Wiener filter path when
+  captured-source mode is on, mathematically optimal for
+  known-noise-PSD scenarios.  Captured-source NR2 should now
+  produce noticeably cleaner output than captured-source NR1.
+- **DSP chain order corrected: LMS → ANF → SQ → NR → APF**
+  (was ANF → SQ → LMS → NR).  ANF was stripping exactly the
+  periodic content LMS was trying to predict; LMS+ANF together
+  produced less effect than expected.  New order: LMS lifts
+  periodic content, ANF cleans residual whistles, SQ gates
+  silence, NR cleans broadband.  Operators using LMS+ANF
+  together should hear a meaningful improvement.
+- **LMS strength slider has actual perceptual swing now.**
+  Previously controlled only adaptation parameters (transient
+  behavior); steady-state output was nearly identical at any
+  slider position.  Now drives FIVE parameters in concert: tap
+  count (32→128), step size, leakage, AND wet/dry output mix.
+  Bench-validated swing: ~10 dB residual-noise reduction
+  difference between min and max on stable signals.
+
+### Fixed
+
+- **ANF + Squelch CPU bottleneck removed.**  Both had per-sample
+  Python loops eating ~7.5 ms of every 10.7 ms audio block at
+  48 kHz.  ANF rewritten as block-LMS (sub-block size = decorr
+  delay = 10 samples); Squelch's RMS computation vectorized via
+  cumsum.  Total chain CPU dropped from ~93% utilization to
+  ~25-30% on a single thread.  Bench: ANF processes 1 sec audio
+  in 55 ms (18× realtime); Squelch in 10 ms (102× realtime).
+- **Smart-guard upgrade — catches contamination it used to
+  miss.**  Legacy total-power-CV check passed CW/SSB
+  contamination concentrated in just a few bins (because
+  total-power averages across all bins).  Added per-bin variance
+  anomaly check that catches single-bin contamination via
+  median+MAD outlier detection.  Stable powerline harmonics still
+  pass cleanly (low per-bin CV); intermittent signals flagged.
+  6/6 correct on bench validation suite.
+- **STFT buffer flush on capture begin.**  Subtle bug: leftover
+  samples from a previous block could contaminate the first STFT
+  frame of a new capture.  Operator-visible only when captures
+  happened back-to-back without multi-second gaps.  Now flushed.
+- **Captured profile FFT-bin-resampling on load.**  Profiles
+  saved at any historical FFT_SIZE auto-resample to the loading
+  processor's bin count via linear interpolation.  Unblocked the
+  NR2 FFT_SIZE bump without invalidating saved profiles.
+
+### Added
+
+- **Captured-profile staleness notification.**  Every ~133 ms
+  while a profile is loaded, Lyra computes a scale-invariant
+  shape-distance between the live noise spectrum and the loaded
+  profile.  When drift exceeds threshold (default 10 dB) for
+  sustained period, status-bar toast: *"⚠ Noise profile drifted
+  X dB from current band conditions — consider recapturing."*
+  Hysteresis prevents spam (at most one fire per stale event,
+  re-arm after band conditions stabilize).  Default ON; toggle
+  via Settings → Noise.  Passive notification ONLY — operator
+  decides whether to recapture.
+
+### Documentation
+
+- New `docs/architecture/nr_audit.md` — comprehensive NR-stack
+  audit identifying what shipped, what was broken, and what
+  could be improved.
+- New `docs/architecture/implementation_playbook.md` —
+  senior-engineering pass on RX2 / TX / PureSignal architecture
+  for v0.0.8+ work.
+- New `docs/architecture/v0.0.8_rx2_plan.md`,
+  `rx2_research_notes.md`, `hl2_puresignal_audio_research.md` —
+  RX2 and PureSignal planning docs.
+- Updated `docs/help/nr.md` — current FFT sizes, two-layer
+  smart-guard, Wiener-from-profile NR2 mode, staleness toast,
+  full chain order.
+- New `docs/help/lms.md` — dedicated LMS line-enhancer help with
+  multi-parameter slider documentation.
+- Updated `docs/help/anf.md` — current chain order (ANF after
+  LMS, before SQ/NR).
+- New `CLAUDE.md` — project context loaded by Claude across
+  sessions.
+
+### Decisions explicitly recorded
+
+- **Auto-select feature deferred indefinitely.**  Earlier audit
+  flagged "library auto-select" as a P1 feature; senior-engineering
+  review and operator-led discussion concluded that captured
+  profiles are operator-curated by design and Lyra shouldn't
+  algorithmically override operator choice.  Recorded in
+  `docs/architecture/nr_audit.md` §4.3(a) and `CLAUDE.md` §9.5.
+
+---
+
 ## [0.0.7] — "Polish Pass" — 2026-05-01
 
 A focused tester-feedback release.  No new DSP or radio features — every

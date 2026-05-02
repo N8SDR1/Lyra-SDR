@@ -34,8 +34,10 @@ specific carriers you've identified; ANF mops up everything else.
   from the audio without affecting broadband content (speech,
   noise floor).
 
-ANF and NR are often run together: ANF first to remove the
-tones, then NR to reduce the broadband residual.
+ANF and NR are often run together: LMS first to lift periodic
+signal content, ANF to remove residual whistles, then NR to
+reduce the broadband residual.  See the chain-order section
+below for the full sequence.
 
 ## Toggling on/off
 
@@ -80,24 +82,33 @@ vowels briefly dipping):
 
 ## Position in the audio chain
 
-ANF runs AT 48 kHz audio rate, post-demod, between the
-demodulator output and the broadband NR processor:
+ANF runs AT 48 kHz audio rate, post-demod, after the LMS line
+enhancer and before the squelch / broadband NR:
 
 ```
-IQ → NB → decimate → notches (manual) → demod → ANF → NR → APF
+IQ → NB → decimate → manual notches → demod → LMS → ANF → SQ → NR → APF
 ```
 
-Rationale (canonical ham-SDR noise-toolkit chain):
+Rationale (current chain — corrected v0.0.7.x; earlier versions
+ran ANF before LMS):
 
 1. **NB** removes IQ-domain impulses (pre-decimation so they
    stay narrow).
-2. **Manual notches** zap KNOWN carriers operator has placed.
+2. **Manual notches** zap KNOWN carriers the operator has placed.
 3. **Demod** does its thing.
-4. **ANF** catches UNKNOWN tones the operator didn't manually
-   notch.
-5. **NR** sees a tone-free residual, so its broadband noise-
+4. **LMS** ([LMS help](./lms.md)) — predictive line enhancer.
+   Lifts periodic content (CW, voice formants).  Sits BEFORE
+   ANF so LMS sees the periodic content it needs to predict —
+   running ANF first would strip exactly what LMS was trying to
+   lift.
+5. **ANF** ← this filter.  Catches UNKNOWN tones the operator
+   didn't manually notch (heterodynes, BFO leakage,
+   intermodulation tones).
+6. **SQ** — voice-presence squelch.  Sits AFTER the adaptive
+   filters so they keep adapting during gate-closed periods.
+7. **NR** sees a tone-free residual, so its broadband noise-
    floor estimator isn't fooled by tonal energy.
-6. **APF** sharpens the CW pitch (CW only).
+8. **APF** sharpens the CW pitch (CW only).
 
 ## Settings → Noise → Auto Notch Filter
 
@@ -140,9 +151,19 @@ where any tones the filter learned belong to a band you've
 left.
 
 Implementation: `lyra/dsp/anf.py` (`AutoNotchFilter` class).
-Pure Python per-sample loop with locally-cached state — at 48
-kHz audio rate this runs in well under a millisecond per
-2048-sample block.
+Vectorized **block-LMS** (sub-block size = decorrelation delay
+= 10 samples) in NumPy — frozen weights within a block, single
+weight update at block end with averaged gradient.  This is
+~10× faster than per-sample LMS while preserving algorithmic
+correctness (sub-block size = delay guarantees no
+intra-block-window contamination).  At 48 kHz audio rate this
+runs in well under a millisecond per 2048-sample block.
+
+The block-LMS optimization landed in v0.0.7.x; earlier Lyra
+versions used a Python per-sample loop that consumed
+~5 ms per audio block — most of the chain's CPU budget.
+Vectorizing freed enough headroom to bump NR2's FFT size from
+256 to 1024 without breaking the per-block deadline.
 
 ## What ANF doesn't do
 
@@ -163,7 +184,7 @@ kHz audio rate this runs in well under a millisecond per
   want to hear; use [APF](./apf.md) instead to *boost* CW at
   pitch.
 
-## ANF + manual notches + NR — order of operations
+## ANF + manual notches + LMS + NR — order of operations
 
 The audio chain runs (in order):
 
@@ -171,13 +192,16 @@ The audio chain runs (in order):
 2. **Decimator** (input rate → 48 kHz)
 3. **Manual notches**
 4. **Demodulator** (mode-specific)
-5. **ANF** ← this filter
-6. **NR**
-7. **APF** (CW only)
+5. **LMS** (line enhancer — lifts periodic content)
+6. **ANF** ← this filter (cancels remaining whistles)
+7. **SQ** (voice-presence squelch)
+8. **NR** (broadband noise reduction)
+9. **APF** (CW pitch boost — CW only)
 
 Each step's job is clear: kill localized impulses → kill known
-carriers → demodulate → kill unknown tones → reduce broadband
-residual → boost CW pitch.
+carriers → demodulate → lift periodic signal → kill unknown
+tones → gate silence → reduce broadband residual → boost CW
+pitch.
 
 ## Tips by mode
 

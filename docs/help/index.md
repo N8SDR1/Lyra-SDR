@@ -38,9 +38,14 @@ up changes.
 - **AGC** — profiles (Off / Fast / Med / Slow / Auto / Custom),
   threshold, auto-tracking
 - **Notch Filters** — placing, adjusting, multi-notch
-- **Noise Reduction** — spectral-subtraction NR, profiles
-  (Light / Medium / Aggressive), captured-noise-profile workflow
-  (Audacity-style), neural roadmap
+- **Noise Reduction** — NR1 (spectral subtraction) and NR2
+  (Ephraim-Malah / MMSE-LSA / Wiener), continuous strength
+  slider, captured-noise-profile workflow with auto-staleness
+  notification (Audacity-style)
+- **LMS Line Enhancer** — predictive NR3 stage that lifts CW
+  carriers and voice formants above broadband noise; the inverse
+  of NR (where NR removes what isn't signal, LMS amplifies what
+  looks periodic).  Multi-parameter strength slider
 - **Noise Blanker** — IQ-domain impulse suppression, profiles
   (Off / Light / Medium / Aggressive / Custom), threshold tuning
 - **Auto Notch Filter** — LMS adaptive notch, surgical removal
