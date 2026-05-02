@@ -689,7 +689,21 @@ class SpectrumWidget(_PaintedWidget):
             # Stash drag-tune candidate state — mouseMoveEvent decides
             # whether this becomes a pan-tune; mouseReleaseEvent fires
             # the legacy single-click tune if no pan happened.
-            self._drag_tune = (int(x), float(self._center_hz), False)
+            #
+            # v0.0.7.3+: latch the snap target AT PRESS TIME if Shift
+            # is held.  Capturing the snap intent here (vs recomputing
+            # on release) makes the commit atomic w.r.t. Shift state
+            # -- the operator can release Shift any time after press
+            # and the click still snaps to what the reticle was
+            # showing.  Without this, releasing Shift slightly before
+            # the mouse caused the release-time modifier check to
+            # fail and the click to fall through to literal-click,
+            # "missing" the reticle.
+            press_snap = None
+            if shift:
+                press_snap = self._find_snap_target(x)
+            self._drag_tune = (
+                int(x), float(self._center_hz), False, press_snap)
             self.setCursor(Qt.OpenHandCursor)
         elif event.button() == Qt.RightButton:
             gpos = event.globalPosition().toPoint()
@@ -756,13 +770,14 @@ class SpectrumWidget(_PaintedWidget):
         # 33 ms / 1 Hz gating keeps the operator-perceived pan
         # smooth at ~30 fps with no backend overload.
         if self._drag_tune is not None:
-            start_x, start_center, in_drag = self._drag_tune
+            start_x, start_center, in_drag, press_snap = self._drag_tune
             dx = int(event.position().x()) - start_x
             if not in_drag:
                 if abs(dx) < self.DRAG_TUNE_THRESHOLD_PX:
                     return  # still inside the click dead-zone
                 in_drag = True
-                self._drag_tune = (start_x, start_center, True)
+                self._drag_tune = (
+                    start_x, start_center, True, press_snap)
                 self.setCursor(Qt.ClosedHandCursor)
                 self._drag_last_emit_ms = 0.0
                 self._drag_last_emit_hz = float(start_center)
@@ -850,19 +865,17 @@ class SpectrumWidget(_PaintedWidget):
         # sharp single click still re-tunes to exactly where the user
         # clicked (the test the operator instinctively reaches for).
         if self._drag_tune is not None:
-            start_x, _start_center, in_drag = self._drag_tune
+            start_x, _start_center, in_drag, press_snap = self._drag_tune
             self._drag_tune = None
             self.setCursor(Qt.CrossCursor)
             if not in_drag:
-                # v0.0.7.1 click-to-tune v1: Shift+click snaps to the
-                # nearest spectrum peak within +/- snap_range_hz when
-                # SNR exceeds the threshold.  Plain click is the
-                # legacy literal-tune behaviour.
-                target = None
-                if self._should_snap(event):
-                    target = self._find_snap_target(float(start_x))
-                if target is not None:
-                    self.clicked_freq.emit(float(target))
+                # v0.0.7.3+: snap target was latched at press time
+                # so the commit is atomic w.r.t. Shift state.
+                # Operator can release Shift any time before
+                # releasing the mouse; the click still snaps to
+                # what the reticle was showing.
+                if press_snap is not None:
+                    self.clicked_freq.emit(float(press_snap))
                 else:
                     self.clicked_freq.emit(
                         self._freq_at_x(float(start_x)))

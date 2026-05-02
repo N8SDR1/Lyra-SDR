@@ -13,6 +13,38 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.7.4] — 2026-05-02
+
+### Fixed
+
+- **Snap-to-tune now commits to the reticle target reliably.**
+  Operator-reported: "reticle appears but the click misses."
+  Pre-fix, the release handler recomputed the snap target using
+  `event.modifiers()` at release time -- if the operator released
+  Shift slightly before the mouse button (very common gesture
+  pattern), the modifier check failed and the click fell through
+  to literal-tune at the press position, "missing" the reticle
+  the operator had been looking at.
+
+  Fix: latch the snap target AT PRESS TIME when Shift is held.
+  The `_drag_tune` tuple now carries
+  `(start_x, start_center, in_drag, press_snap_target)`.  Press
+  computes the target once with the modifier and cursor state
+  known; release commits that latched target unconditionally if
+  the gesture didn't escalate to a drag.  Modifier state at
+  release no longer matters.
+
+  Same fix applied to both panadapter backends (QPainter
+  SpectrumWidget and GPU-OpenGL SpectrumGpuWidget).
+
+  Operator UX is now what was originally documented:
+    * Plain click       -> literal click-to-tune
+    * Shift+press+click -> snap to nearest peak (timing of Shift
+                          release within the click gesture is
+                          irrelevant)
+
+---
+
 ## [0.0.7.3] — 2026-05-02
 
 ### Fixed

@@ -335,10 +335,20 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # whether it becomes a pan-tune (when the cursor moves past
         # DRAG_TUNE_THRESHOLD_PX); mouseReleaseEvent fires the
         # click-tune (with snap if Shift held) only if no drag
-        # actually happened.  Without this state machine, click
-        # fires on press and any subsequent drag can't pan the
-        # spectrum.
-        self._drag_tune: Optional[tuple[int, float, bool]] = None
+        # actually happened.
+        #
+        # v0.0.7.3+: tuple is now
+        #   (start_x, start_center, in_drag, snap_target_at_press)
+        # The fourth field captures the snap target computed AT
+        # press time when Shift was held — pre-fix, the release
+        # handler recomputed snap using press_x, which missed if
+        # the operator released Shift slightly before the mouse
+        # (modifier check at release would fail).  Latching the
+        # target at press makes the click-commit atomic with
+        # respect to Shift state and matches what the reticle was
+        # showing at the click moment.
+        self._drag_tune: Optional[
+            tuple[int, float, bool, Optional[float]]] = None
 
         # Passband overlay (Phase B.11). lo/hi are Hz offsets from
         # the carrier (negative = below, positive = above). For USB
@@ -1003,17 +1013,27 @@ class SpectrumGpuWidget(QOpenGLWidget):
             elif self._is_in_db_zone(x):
                 self._db_drag = (y, self._min_db, self._max_db)
             else:
-                # v0.0.7.1 click-to-tune v1 (release-based commit).
+                # v0.0.7.1+ click-to-tune (release-based commit).
                 # Stash drag-tune candidate state.  mouseMoveEvent
                 # decides whether this becomes a pan-tune (cursor
                 # moves > DRAG_TUNE_THRESHOLD_PX); mouseReleaseEvent
-                # fires the final click-tune (with optional snap if
-                # Shift is held) ONLY if no drag actually happened.
-                # Pre-fix the GPU widget emitted on press, which made
-                # drag-to-pan impossible: by the time the cursor
-                # moved, the click had already fired.
+                # fires the final click-tune ONLY if no drag actually
+                # happened.
+                #
+                # v0.0.7.3+: latch the snap target AT PRESS TIME if
+                # Shift is held.  Capturing the snap intent here (vs
+                # recomputing on release) means the commit is
+                # atomic w.r.t. Shift state -- the operator can
+                # release Shift any time after press and the click
+                # still snaps to what the reticle was showing.
+                # Without this, releasing Shift slightly before the
+                # mouse would cause the click to fall through to
+                # literal-click behaviour, "missing" the reticle.
+                press_snap = None
+                if event.modifiers() & Qt.ShiftModifier:
+                    press_snap = self._find_snap_target_gpu(float(x))
                 self._drag_tune = (
-                    int(x), float(self._center_hz), False)
+                    int(x), float(self._center_hz), False, press_snap)
                 self.setCursor(Qt.OpenHandCursor)
         elif event.button() == Qt.RightButton:
             shift_held = bool(event.modifiers() & Qt.ShiftModifier)
@@ -1080,13 +1100,14 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # one by at least 1 Hz at the current zoom level (otherwise
         # tiny cursor jitter spams pointless updates).
         if self._drag_tune is not None:
-            start_x, start_center, in_drag = self._drag_tune
+            start_x, start_center, in_drag, press_snap = self._drag_tune
             dx = int(event.position().x()) - start_x
             if not in_drag:
                 if abs(dx) < self.DRAG_TUNE_THRESHOLD_PX:
                     return  # still inside the click dead-zone
                 in_drag = True
-                self._drag_tune = (start_x, start_center, True)
+                self._drag_tune = (
+                    start_x, start_center, True, press_snap)
                 self.setCursor(Qt.ClosedHandCursor)
                 self._drag_last_emit_ms = 0.0
                 self._drag_last_emit_hz = float(start_center)
@@ -1132,22 +1153,26 @@ class SpectrumGpuWidget(QOpenGLWidget):
             # ── Drag-tune release (click-to-tune v1) ───────────
             # If the operator pressed and released on empty spectrum
             # without crossing DRAG_TUNE_THRESHOLD_PX, treat it as a
-            # click: snap to nearest peak if Shift held, otherwise
-            # literal click-to-tune.  If a drag DID happen, the pan
-            # was already committed live during mouseMoveEvent, so
-            # we just clean up state.
+            # click: snap to nearest peak if Shift was held AT PRESS,
+            # otherwise literal click-to-tune.  If a drag DID happen,
+            # the pan was already committed live during mouseMoveEvent,
+            # so we just clean up state.
+            #
+            # v0.0.7.3+: snap target was latched in mousePressEvent
+            # so the commit is atomic w.r.t. Shift state.  Operator
+            # can release Shift any time before mouse-release and the
+            # click still snaps to the latched target.
             if self._drag_tune is not None:
-                start_x, _start_center, in_drag = self._drag_tune
+                start_x, _start_center, in_drag, press_snap = (
+                    self._drag_tune)
                 self._drag_tune = None
                 self.setCursor(Qt.CrossCursor)
                 if not in_drag:
-                    target = None
-                    if event.modifiers() & Qt.ShiftModifier:
-                        target = self._find_snap_target_gpu(
-                            float(start_x))
-                    if target is not None:
-                        self.clicked_freq.emit(float(target))
+                    if press_snap is not None:
+                        # Press-time Shift+snap target wins.
+                        self.clicked_freq.emit(float(press_snap))
                     else:
+                        # Plain click -- literal tune to press freq.
                         self.clicked_freq.emit(
                             float(self._freq_at_pixel(int(start_x))))
                 # Clear hover reticle on commit so it doesn't ghost
