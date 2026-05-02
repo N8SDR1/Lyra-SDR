@@ -23,7 +23,7 @@
 ;     launch under HKEY_CURRENT_USER\Software\N8SDR\Lyra
 ;   - Run any service / scheduled task / startup hook
 
-#define LyraVersion       "0.0.8"
+#define LyraVersion       "0.0.8.1"
 #define LyraVersionName   "Quiet & Polish Pass"
 #define LyraBuildDate     "2026-05-02"
 #define LyraPublisher     "Rick Langford (N8SDR)"

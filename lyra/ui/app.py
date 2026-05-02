@@ -1546,19 +1546,33 @@ class MainWindow(QMainWindow):
     # ── Auto-update check (silent, on startup) ────────────────────
     def _maybe_run_startup_update_check(self):
         """Decide whether to run the silent startup update check, and
-        if so, kick it off. Honors three opt-out paths:
+        if so, kick it off.
 
-          1. Operator setting `update_check/check_on_startup` is false
-             (Settings → General → "Check for updates on startup").
-          2. A previous check this calendar day already ran (24-hour
-             cache via QSettings `update_check/last_check_iso`).
-          3. The dev tree (build_date == "dev") — devs see release
-             notifications via the manual Help menu, not on every
-             test launch.
+        v0.0.8.x bug fix: pre-fix this had three issues that combined
+        to silently swallow update notifications:
+
+          1. 24-hour throttle was too long.  Operator launched Lyra
+             on Day 1 (no update yet), Day 2 v0.0.8 drops, operator
+             launches Lyra still within 24 h cache -> skipped.
+             Reduced to 4-hour throttle.
+          2. No version-aware cache bypass.  After installing a new
+             release the cache stayed valid even though local version
+             changed.  Now we bypass the throttle when local version
+             differs from what was last checked.
+          3. Cached "update available" state wasn't surfaced unless
+             a fresh check just ran.  Now we show the indicator from
+             persisted QSettings on every launch as long as the
+             cached tag is still newer than local.
+
+        Opt-out paths (unchanged):
+          * Operator setting `update_check/check_on_startup` = false.
+          * Dev tree (build_date == "dev").
         """
+        import lyra
+        from datetime import datetime, timedelta
+        from lyra.ui.update_check import is_newer
         # Opt-out paths
         try:
-            import lyra
             if lyra.__build_date__ == "dev":
                 return
         except Exception:
@@ -1569,16 +1583,51 @@ class MainWindow(QMainWindow):
             if s.value("update_check/check_on_startup") in (
                     False, "false", "False", 0, "0"):
                 return
-        # 24-hour cache so we don't hit GitHub on every launch.
-        from datetime import datetime, timedelta
-        last_iso = str(s.value("update_check/last_check_iso") or "")
-        if last_iso:
-            try:
-                last = datetime.fromisoformat(last_iso)
-                if datetime.now() - last < timedelta(hours=24):
-                    return
-            except ValueError:
-                pass
+
+        # ── First: surface cached "update available" state ─────────
+        # If a previous check found a newer version, show the
+        # indicator immediately on startup using QSettings-cached
+        # info -- no waiting on the fresh network check.  Operator
+        # sees the badge from the moment the window opens.  We still
+        # run a fresh check below if the throttle window has elapsed,
+        # which can refresh the cached tag/url to a newer one or
+        # clear the indicator if the operator has just upgraded.
+        cached_tag = str(s.value("update_check/latest_tag") or "")
+        cached_url = str(s.value("update_check/latest_url") or "")
+        if cached_tag and is_newer(cached_tag, lyra.__version__):
+            # Use the existing handler so toolbar indicator + Help
+            # menu badge + status-bar toast logic stays in one place.
+            self._on_startup_update_available(cached_tag, cached_url)
+        elif cached_tag:
+            # Cached tag is no longer newer (operator just upgraded).
+            # Clear it so we don't keep flashing a stale notification.
+            s.remove("update_check/latest_tag")
+            s.remove("update_check/latest_url")
+            self._set_update_menu_badge("", has_update=False)
+            if hasattr(self, "_update_indicator_action"):
+                self._update_indicator_action.setVisible(False)
+
+        # ── Second: decide whether to run a fresh network check ────
+        # Cache bypass: if the local version changed since the last
+        # check, the cached "checked recently" doesn't apply -- the
+        # operator has either upgraded (need to refresh "no update"
+        # state) or downgraded (need to find the latest again).
+        last_local = str(
+            s.value("update_check/last_local_version") or "")
+        if last_local == lyra.__version__:
+            # Same local version as last check -- honor 4-hour cache.
+            # (Was 24 hours; reduced because v0.0.7 -> v0.0.8 release
+            # cadence showed the longer window swallowed legitimate
+            # update notifications for up to a full day after a drop.)
+            last_iso = str(s.value("update_check/last_check_iso") or "")
+            if last_iso:
+                try:
+                    last = datetime.fromisoformat(last_iso)
+                    if datetime.now() - last < timedelta(hours=4):
+                        return
+                except ValueError:
+                    pass
+
         # Stash a checker as an instance attr so the worker thread
         # stays alive until it completes (Qt cleans it up via
         # parent ownership when the window closes).
@@ -1593,16 +1642,27 @@ class MainWindow(QMainWindow):
         self._startup_update_checker.start()
 
     def _on_startup_update_available(self, tag: str, url: str):
-        """Background check found a newer release. Show a non-modal
-        notification: status-bar message (10 s) + Help menu badge.
-        Operator can dismiss-once-per-version via the "Skipped
-        versions" QSettings list — already-skipped tags don't
-        re-nag. The Help menu badge sticks until the operator
-        clicks Help → Check for Updates…"""
+        """Background check (or cached state at startup) reports a
+        newer release. Show a non-modal notification: status-bar
+        message (10 s) + Help menu badge.  Operator can
+        dismiss-once-per-version via the "Skipped versions"
+        QSettings list -- already-skipped tags don't re-nag.  The
+        Help menu badge sticks until the operator clicks Help →
+        Check for Updates…
+
+        Also called from _maybe_run_startup_update_check on every
+        launch when the cached tag is still newer than local, so
+        the indicator persists across launches even within the
+        cache window.
+        """
+        import lyra
         from datetime import datetime
         s = self._settings
         s.setValue("update_check/last_check_iso",
                    datetime.now().isoformat())
+        # Track local version so the cache-bypass-on-version-change
+        # logic in _maybe_run_startup_update_check can detect upgrades.
+        s.setValue("update_check/last_local_version", lyra.__version__)
         s.setValue("update_check/latest_tag", tag)
         s.setValue("update_check/latest_url", url)
 
@@ -1633,10 +1693,16 @@ class MainWindow(QMainWindow):
             12000)
 
     def _on_startup_update_none(self):
+        import lyra
         from datetime import datetime
         s = self._settings
         s.setValue("update_check/last_check_iso",
                    datetime.now().isoformat())
+        s.setValue("update_check/last_local_version", lyra.__version__)
+        # Clear any cached "newer tag" so a stale cached value doesn't
+        # keep flashing the indicator across future launches.
+        s.remove("update_check/latest_tag")
+        s.remove("update_check/latest_url")
         # Make sure any previous "Update available" badge clears
         # (operator just upgraded to the latest).
         self._set_update_menu_badge("", has_update=False)

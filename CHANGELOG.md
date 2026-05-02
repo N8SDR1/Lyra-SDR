@@ -13,6 +13,37 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.8.1] — 2026-05-02
+
+### Fixed
+
+- **Auto-update notification now fires reliably after a release.**
+  Operator-reported: v0.0.8 dropped, v0.0.7-binary operators didn't
+  see the toolbar update indicator until they manually clicked
+  Help → Check for Updates.  Three compounding causes:
+
+  1. **24-hour throttle was too long.**  Operator launched on Day 1
+     (no update yet), v0.0.8 dropped on Day 2, operator launched
+     within the 24 h cache window so the silent check was skipped
+     entirely.  Reduced to **4 hours** -- still well below the
+     GitHub-API rate-limit envelope, much faster discovery.
+  2. **No version-aware cache bypass.**  After a local upgrade the
+     cache stayed valid even though the local version changed.
+     Now the throttle is **bypassed when local version differs**
+     from what was last checked.
+  3. **Cached "update available" state wasn't surfaced unless a
+     fresh check just ran.**  The toolbar indicator now shows
+     **immediately on every launch** if QSettings holds a cached
+     newer-tag, even before the fresh network check runs.  If the
+     cached tag is no longer newer than local (operator just
+     upgraded), it's cleared.
+
+  Net result: the toolbar indicator lights up the moment a newer
+  release is known about (cached or freshly checked) and stays
+  visible until the operator upgrades.
+
+---
+
 ## [0.0.8] — 2026-05-02 — "Quiet & Polish Pass"
 
 Substantial DSP + UX upgrade on top of v0.0.7.  Three
