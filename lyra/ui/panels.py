@@ -266,17 +266,27 @@ class TuningPanel(GlassPanel):
         super().__init__("TUNING", parent, help_topic="tuning")
         self.radio = radio
 
+        # Operator feedback v0.0.6.x: "I cannot adjust the height of
+        # the Tuning panel."  Root cause: the FrequencyDisplay widget
+        # ships with QSizePolicy.Fixed vertically, which made the
+        # RX1/RX2 columns refuse extra height; even with the logo
+        # column's internal stretches, Qt's layout engine reported
+        # row1 as effectively Fixed vertical to the parent dock, so
+        # the QMainWindow row separator wouldn't drag.  We declare an
+        # explicit MinimumExpanding vertical policy on the panel and
+        # a friendly minimum height (operator can still shrink it
+        # well below the default), and override the freq_display
+        # vertical policy further down to Preferred so the column
+        # cooperates.
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+        self.setMinimumHeight(180)
+
         outer = QVBoxLayout()
         outer.setSpacing(4)
 
         # ── Row 1: RX1 | LOGO | RX2 ──────────────────────────────
         row1 = QHBoxLayout()
         row1.setSpacing(10)
-
-        # Both frequency displays get a max height a bit under the
-        # widget default so the row overall is a touch shorter —
-        # leaves more visual room for the logo between them.
-        FREQ_MAX_H = 46   # smaller digits, logo gets the spotlight
 
         # RX1 — the live VFO. Small "RX1" label above it so its
         # identity is explicit once RX2 and TX split come online.
@@ -288,7 +298,14 @@ class TuningPanel(GlassPanel):
             "letter-spacing: 1.5px; font-size: 9px;")
         rx1_col.addWidget(rx1_label)
         self.freq_display = FrequencyDisplay()
-        self.freq_display.setMaximumHeight(FREQ_MAX_H)
+        # Override the class-level QSizePolicy.Fixed → Preferred so
+        # the freq column cooperates when the row is asked to grow
+        # (see panel-level note above on Tuning vertical resize).
+        # Also drop the maximum-height cap: it was 46 but the class
+        # minimum is 66, so it was a no-op constraint anyway, and
+        # the LED renderer scales gracefully when given more room.
+        self.freq_display.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.freq_display.set_freq_hz(radio.freq_hz)
         self.freq_display.freq_changed.connect(self.radio.set_freq_hz)
         rx1_col.addWidget(self.freq_display)
@@ -337,7 +354,11 @@ class TuningPanel(GlassPanel):
             "letter-spacing: 1.5px; font-size: 9px;")
         rx2_col.addWidget(rx2_label)
         self.freq_display_rx2 = FrequencyDisplay()
-        self.freq_display_rx2.setMaximumHeight(FREQ_MAX_H)
+        # Same vertical policy override as the RX1 freq display —
+        # without it, this column also reports Fixed vertical and
+        # blocks row resizing.
+        self.freq_display_rx2.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.freq_display_rx2.set_freq_hz(0)
         self.freq_display_rx2.set_vfo_enabled(False, "RX2 — not yet wired")
         rx2_col.addWidget(self.freq_display_rx2)
