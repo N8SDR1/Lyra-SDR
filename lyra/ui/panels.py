@@ -3923,6 +3923,44 @@ def _build_notch_menu(parent_widget, radio, freq_hz: float) -> QMenu:
                 radio.set_notch_default_preset(p))
         p_menu.addAction(act)
 
+    # ── Saved notch banks (operator-named presets) ──────────────
+    # v0.0.7.1 notch v2 -- operator can save the current bank under
+    # a name ('My 40m setup') and reload it later.  Banks persist
+    # to QSettings under notches/banks/<name>.
+    menu.addSeparator()
+    saved_banks = []
+    try:
+        saved_banks = list(radio.list_notch_banks())
+    except Exception:
+        saved_banks = []
+    banks_menu = menu.addMenu("Notch banks  (saved presets)")
+
+    save_act = QAction("Save current bank as...", banks_menu)
+    save_act.setEnabled(have_any)
+    save_act.triggered.connect(
+        lambda: _prompt_save_notch_bank(parent_widget, radio))
+    banks_menu.addAction(save_act)
+
+    if saved_banks:
+        load_menu = banks_menu.addMenu("Load saved bank")
+        for nm in saved_banks:
+            act = QAction(nm, load_menu)
+            act.triggered.connect(
+                lambda _=False, n=nm: radio.load_notch_bank(n))
+            load_menu.addAction(act)
+
+        del_menu = banks_menu.addMenu("Delete saved bank")
+        for nm in saved_banks:
+            act = QAction(nm, del_menu)
+            act.triggered.connect(
+                lambda _=False, n=nm:
+                    _confirm_delete_notch_bank(parent_widget, radio, n))
+            del_menu.addAction(act)
+    else:
+        empty = QAction("(no saved banks yet)", banks_menu)
+        empty.setEnabled(False)
+        banks_menu.addAction(empty)
+
     # Turn-off action — convenient exit from notch mode back to
     # "right-click does nothing notch-related" state. Sits at the
     # bottom so it's out of the way of the common Add action.
@@ -3933,6 +3971,50 @@ def _build_notch_menu(parent_widget, radio, freq_hz: float) -> QMenu:
     menu.addAction(off_act)
 
     return menu
+
+
+def _prompt_save_notch_bank(parent_widget, radio) -> None:
+    """Pop a small text-input dialog asking for the bank name, then
+    save.  If the name already exists, ask for confirmation before
+    overwriting.  Called from the right-click menu's Save action."""
+    from PySide6.QtWidgets import QInputDialog, QMessageBox
+    name, ok = QInputDialog.getText(
+        parent_widget, "Save notch bank",
+        "Save current notches as:",
+    )
+    if not ok:
+        return
+    name = (name or "").strip()
+    if not name:
+        return
+    existing = []
+    try:
+        existing = list(radio.list_notch_banks())
+    except Exception:
+        existing = []
+    if name in existing:
+        confirm = QMessageBox.question(
+            parent_widget, "Overwrite saved bank?",
+            f"A bank named '{name}' already exists.\n\nOverwrite?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+    radio.save_notch_bank(name)
+
+
+def _confirm_delete_notch_bank(parent_widget, radio, name: str) -> None:
+    """Confirm-and-delete dialog for a saved notch bank.  Called
+    from the right-click menu's Delete submenu."""
+    from PySide6.QtWidgets import QMessageBox
+    confirm = QMessageBox.question(
+        parent_widget, "Delete notch bank?",
+        f"Delete saved notch bank '{name}'?\n\n"
+        "This cannot be undone.",
+        QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+    )
+    if confirm == QMessageBox.Yes:
+        radio.delete_notch_bank(name)
 
 
 # ── Spectrum / Waterfall panels ─────────────────────────────────────────

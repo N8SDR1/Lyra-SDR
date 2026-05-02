@@ -101,6 +101,10 @@ class Radio(QObject):
     notches_changed      = Signal(list)           # list[Notch] (see dataclass above)
     notch_enabled_changed = Signal(bool)
     notch_default_width_changed = Signal(float)   # default width for new notches, in Hz
+    # v0.0.7.1 notch v2: fires whenever the saved-bank list changes
+    # (save / delete).  Right-click menu rebuilds its 'Load preset'
+    # submenu when this fires.  See save_notch_bank / delete_notch_bank.
+    notch_banks_changed  = Signal()
     audio_output_changed = Signal(str)
     pc_audio_device_changed = Signal(object)   # int index, or None for auto
     ip_changed           = Signal(str)
@@ -4370,6 +4374,147 @@ class Radio(QObject):
         self._notch_default_depth_db = float(params["depth_db"])
         self._notch_default_cascade = int(params["cascade"])
         self._notch_default_deep = self._notch_default_cascade > 1
+
+    # ── Notch bank save/load (operator-named presets) ───────────
+
+    def save_notch_bank(self, name: str) -> bool:
+        """Persist the current notch bank to QSettings under
+        ``notches/banks/<name>``.  Operator-facing feature — they
+        save current setups as 'My 40m setup', 'Contest weekend',
+        etc., and load them later via ``load_notch_bank``.
+
+        Each notch is serialized as a dict with the fields needed
+        to reconstruct it: abs_freq_hz, width_hz, active, depth_db,
+        cascade.  The filter object itself is rebuilt on load (its
+        coefficients depend on the current VFO freq anyway).
+
+        Empty name strings are rejected (return False).  Existing
+        names are silently overwritten -- caller (right-click menu
+        UX) confirms with the operator before invoking this.
+
+        Fires ``notch_banks_changed`` so the UI can refresh the
+        right-click submenu listing.
+        """
+        import json
+        from PySide6.QtCore import QSettings as _QS
+        nm = (name or "").strip()
+        if not nm:
+            return False
+        items = [
+            {
+                "abs_freq_hz": float(n.abs_freq_hz),
+                "width_hz": float(n.width_hz),
+                "active": bool(n.active),
+                "depth_db": float(n.depth_db),
+                "cascade": int(n.cascade),
+            }
+            for n in self._notches
+        ]
+        try:
+            qs = _QS("N8SDR", "Lyra")
+            qs.setValue(f"notches/banks/{nm}", json.dumps(items))
+        except Exception as e:
+            self.status_message.emit(
+                f"Save notch bank failed: {e}", 3000)
+            return False
+        self.notch_banks_changed.emit()
+        self.status_message.emit(
+            f"Notch bank '{nm}' saved ({len(items)} notches)", 2000)
+        return True
+
+    def load_notch_bank(self, name: str,
+                        replace: bool = True) -> bool:
+        """Restore a previously-saved notch bank.
+
+        ``replace=True`` (default) clears the current notch bank
+        before loading -- operator gets exactly what was saved.
+        ``replace=False`` appends, useful for combining banks
+        (uncommon).
+
+        Returns True on success, False if the bank doesn't exist or
+        the JSON payload is malformed.
+        """
+        import json
+        from PySide6.QtCore import QSettings as _QS
+        nm = (name or "").strip()
+        if not nm:
+            return False
+        try:
+            qs = _QS("N8SDR", "Lyra")
+            raw = qs.value(f"notches/banks/{nm}", None)
+        except Exception:
+            return False
+        if raw is None:
+            self.status_message.emit(
+                f"Notch bank '{nm}' not found", 3000)
+            return False
+        try:
+            items = json.loads(str(raw))
+            if not isinstance(items, list):
+                raise ValueError("not a list")
+        except Exception as e:
+            self.status_message.emit(
+                f"Notch bank '{nm}' corrupt: {e}", 3000)
+            return False
+        if replace:
+            self._notches.clear()
+        loaded = 0
+        for it in items:
+            try:
+                self.add_notch(
+                    abs_freq_hz=float(it["abs_freq_hz"]),
+                    width_hz=float(it.get("width_hz",
+                                          self._notch_default_width_hz)),
+                    active=bool(it.get("active", True)),
+                    depth_db=float(it.get("depth_db",
+                                          self._notch_default_depth_db)),
+                    cascade=int(it.get("cascade",
+                                       self._notch_default_cascade)),
+                )
+                loaded += 1
+            except Exception:
+                # Skip malformed entries; keep loading the rest.
+                continue
+        self.notches_changed.emit(self.notch_details)
+        self.status_message.emit(
+            f"Loaded '{nm}' ({loaded} notches)", 2000)
+        return True
+
+    def delete_notch_bank(self, name: str) -> bool:
+        """Remove a saved notch bank from QSettings.  Returns True
+        if removed, False if it didn't exist."""
+        from PySide6.QtCore import QSettings as _QS
+        nm = (name or "").strip()
+        if not nm:
+            return False
+        try:
+            qs = _QS("N8SDR", "Lyra")
+            key = f"notches/banks/{nm}"
+            if qs.value(key, None) is None:
+                return False
+            qs.remove(key)
+        except Exception as e:
+            self.status_message.emit(
+                f"Delete failed: {e}", 3000)
+            return False
+        self.notch_banks_changed.emit()
+        self.status_message.emit(
+            f"Notch bank '{nm}' deleted", 2000)
+        return True
+
+    def list_notch_banks(self) -> list[str]:
+        """Return saved notch-bank names, sorted alphabetically.
+        Right-click menu builds its 'Load preset...' submenu from
+        this list."""
+        from PySide6.QtCore import QSettings as _QS
+        try:
+            qs = _QS("N8SDR", "Lyra")
+            qs.beginGroup("notches/banks")
+            keys = qs.childKeys()
+            qs.endGroup()
+        except Exception:
+            return []
+        return sorted(str(k) for k in keys)
 
     def clear_notches(self):
         self._notches.clear()
