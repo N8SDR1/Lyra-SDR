@@ -307,6 +307,16 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._noise_floor_db: Optional[float] = None
         self._nf_color_hex: str = ""  # empty = use sage-green default
 
+        # ── Click-to-tune snap (v0.0.7.1 click-to-tune v1) ──────
+        # Plain click = literal tune (legacy); Shift+click = snap to
+        # nearest spectrum peak within +/- range_hz when SNR exceeds
+        # min_snr_db.  Hover with Shift held = reticle preview of
+        # where the next click will land.  See click_to_tune_plan.md.
+        self._snap_tune_range_hz: float = 200.0
+        self._snap_tune_min_snr_db: float = 6.0
+        self._snap_tune_show_reticle: bool = True
+        self._snap_hover_freq: Optional[float] = None
+
         # Passband overlay (Phase B.11). lo/hi are Hz offsets from
         # the carrier (negative = below, positive = above). For USB
         # we have lo=0, hi=+bw; for LSB lo=-bw, hi=0; for SSB-equiv
@@ -857,6 +867,66 @@ class SpectrumGpuWidget(QOpenGLWidget):
         hz_per_px = self._span_hz / w
         return self._center_hz + (x - w / 2.0) * hz_per_px
 
+    def _bin_to_freq_gpu(self, bin_idx: float) -> float:
+        """Inverse of the implicit bin-to-freq mapping in
+        ``self._smoothed_db``.  Bin 0 = center - span/2; bin N-1 =
+        center + span/2 - bin_width.  Float bin_idx supports
+        parabolic-peak sub-bin interpolation."""
+        if self._smoothed_db is None or len(self._smoothed_db) < 2:
+            return self._center_hz
+        n = len(self._smoothed_db)
+        return self._center_hz + (
+            (float(bin_idx) / max(1, n - 1)) - 0.5) * self._span_hz
+
+    def _find_snap_target_gpu(self, x_pixel: float) -> Optional[float]:
+        """Click-to-tune snap (GPU widget).  Mirrors the QPainter
+        widget's ``_find_snap_target`` -- finds the strongest
+        spectrum bin within +/- snap_range_hz of the cursor freq
+        and returns its parabolically-interpolated center freq, or
+        None if no peak is at least snap_min_snr_db above the
+        rolling noise floor."""
+        if (self._smoothed_db is None
+                or len(self._smoothed_db) < 3
+                or self._span_hz <= 0):
+            return None
+        f_cursor = self._freq_at_pixel(int(x_pixel))
+        n = len(self._smoothed_db)
+        bins_per_hz = (n - 1) / max(1.0, self._span_hz)
+        half_bins = max(1, int(round(
+            self._snap_tune_range_hz * bins_per_hz)))
+        cursor_bin = int(round(
+            ((f_cursor - self._center_hz) / self._span_hz + 0.5)
+            * (n - 1)))
+        cursor_bin = max(0, min(n - 1, cursor_bin))
+        bin_lo = max(0, cursor_bin - half_bins)
+        bin_hi = min(n, cursor_bin + half_bins + 1)
+        if bin_hi - bin_lo < 2:
+            return None
+        window = self._smoothed_db[bin_lo:bin_hi]
+        peak_local = int(np.argmax(window))
+        peak_idx = peak_local + bin_lo
+        peak_db = float(self._smoothed_db[peak_idx])
+        if self._noise_floor_db is not None:
+            ref_db = float(self._noise_floor_db)
+        else:
+            ref_db = float(np.min(window))
+        if (peak_db - ref_db) < self._snap_tune_min_snr_db:
+            return None
+        if 0 < peak_idx < n - 1:
+            y0 = float(self._smoothed_db[peak_idx - 1])
+            y1 = float(self._smoothed_db[peak_idx])
+            y2 = float(self._smoothed_db[peak_idx + 1])
+            denom = (y0 - 2.0 * y1 + y2)
+            if abs(denom) > 1e-9:
+                delta = max(-1.0, min(1.0,
+                                      0.5 * (y0 - y2) / denom))
+                peak_idx_refined = float(peak_idx) + delta
+            else:
+                peak_idx_refined = float(peak_idx)
+        else:
+            peak_idx_refined = float(peak_idx)
+        return self._bin_to_freq_gpu(peak_idx_refined)
+
     def _is_in_db_zone(self, x: int) -> bool:
         """True if x falls in the right-edge dB-scale grab strip."""
         w = self.width()
@@ -894,7 +964,21 @@ class SpectrumGpuWidget(QOpenGLWidget):
             elif self._is_in_db_zone(x):
                 self._db_drag = (y, self._min_db, self._max_db)
             else:
-                self.clicked_freq.emit(float(self._freq_at_pixel(x)))
+                # v0.0.7.1 click-to-tune v1: Shift+click snaps to the
+                # nearest spectrum peak within +/- snap_range_hz when
+                # SNR >= snap_min_snr_db.  Plain click is literal.
+                target = None
+                if event.modifiers() & Qt.ShiftModifier:
+                    target = self._find_snap_target_gpu(float(x))
+                if target is not None:
+                    self.clicked_freq.emit(float(target))
+                else:
+                    self.clicked_freq.emit(
+                        float(self._freq_at_pixel(x)))
+                # Clear hover reticle on commit so it doesn't
+                # ghost on the next hover.
+                self._snap_hover_freq = None
+                self.update()
         elif event.button() == Qt.RightButton:
             shift_held = bool(event.modifiers() & Qt.ShiftModifier)
             self.right_clicked_freq.emit(
@@ -941,6 +1025,18 @@ class SpectrumGpuWidget(QOpenGLWidget):
             new_max = max(new_min + 3.0, min(0.0, new_max))
             self.db_scale_drag.emit(float(new_min), float(new_max))
             return
+
+        # ── Snap-target hover reticle (click-to-tune v1) ─────────
+        # When the modifier is held over empty spectrum, find the
+        # snap target and stash it for paintEvent.
+        prev = self._snap_hover_freq
+        if (self._snap_tune_show_reticle
+                and bool(event.modifiers() & Qt.ShiftModifier)):
+            self._snap_hover_freq = self._find_snap_target_gpu(x)
+        else:
+            self._snap_hover_freq = None
+        if prev != self._snap_hover_freq:
+            self.update()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
@@ -1294,6 +1390,48 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._draw_notches(painter)
         self._draw_spots(painter)
         self._draw_freq_scale_labels(painter)
+        # Click-to-tune v1: snap-target reticle.  Drawn LAST so it
+        # sits on top of every other overlay -- the operator's pre-
+        # click visual confirmation must be unambiguous.
+        self._draw_snap_reticle(painter)
+
+    def _draw_snap_reticle(self, painter: QPainter) -> None:
+        """Draw the snap-target reticle when the operator is hovering
+        with Shift held.  Vertical tick + crosshair + freq-offset
+        label.  See ``_find_snap_target_gpu`` for the source.
+        """
+        if (self._snap_hover_freq is None
+                or not self._snap_tune_show_reticle
+                or self._span_hz <= 0):
+            return
+        from PySide6.QtGui import QFont as _QFont
+        w = self.width()
+        h = self.height()
+        sx = ((self._snap_hover_freq - self._center_hz)
+              / self._span_hz + 0.5) * w
+        if not (0 <= sx <= w):
+            return
+        sxi = int(round(sx))
+        painter.setPen(QPen(QColor(80, 220, 255, 220), 1, Qt.SolidLine))
+        # Vertical tick across the bottom 1/3 of the widget.
+        painter.drawLine(sxi, h - h // 3, sxi, h - 4)
+        # Crosshair at bottom edge.
+        painter.drawLine(sxi - 5, h - 4, sxi + 5, h - 4)
+        painter.drawLine(sxi, h - 9, sxi, h - 4)
+        # Freq-offset label (kHz from center) for fast operator
+        # confirmation.  Bias label to whichever side has room.
+        offset_hz = int(round(
+            self._snap_hover_freq - self._center_hz))
+        if abs(offset_hz) >= 1000:
+            label = f"{offset_hz / 1000:+.1f}k"
+        else:
+            label = f"{offset_hz:+d}"
+        f = _QFont(painter.font())
+        f.setPointSize(7)
+        f.setBold(True)
+        painter.setFont(f)
+        lx = sxi + 4 if sxi < w - 40 else sxi - 38
+        painter.drawText(lx, h - h // 3 - 4, label)
 
     # ── Axis labels ─────────────────────────────────────────────────
     AXIS_COLOR = QColor(170, 204, 238)  # matches spectrum.py AXIS

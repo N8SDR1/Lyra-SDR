@@ -147,6 +147,23 @@ class SpectrumWidget(_PaintedWidget):
         # toggle. Default ON; switched via Settings → Visuals.
         self._show_grid: bool = True
         self._passband_hi_hz: int = 0
+        # ── Click-to-tune snap (v0.0.7.1 click-to-tune v1) ──────
+        # See docs/architecture/click_to_tune_plan.md.  Plain click =
+        # literal tune to cursor freq (legacy behaviour); Shift+click
+        # = snap to nearest spectrum peak within +/- range_hz, if the
+        # peak is at least min_snr_db above the rolling noise floor.
+        # Operator-tunable defaults can be wired through Radio later.
+        self._snap_tune_range_hz: float = 200.0
+        self._snap_tune_min_snr_db: float = 6.0
+        # When True, hover with the modifier held shows a reticle at
+        # the predicted snap target so the operator sees where the
+        # click will land before committing.
+        self._snap_tune_show_reticle: bool = True
+        # Cached hover snap target -- None when not hovering with
+        # modifier held, otherwise the absolute freq the next click
+        # would snap to.  Updated in mouseMoveEvent, drawn in
+        # paintEvent.
+        self._snap_hover_freq: float | None = None
         # Noise-floor reference line. None = hidden; otherwise draw a
         # muted dashed horizontal line at the corresponding y-pixel.
         # Radio pushes updates via Radio.noise_floor_changed; the
@@ -513,6 +530,83 @@ class SpectrumWidget(_PaintedWidget):
         frac = x / self.width()
         return self._center_hz + (frac - 0.5) * self._span_hz
 
+    def _bin_to_freq(self, bin_idx: float) -> float:
+        """Inverse of the implicit bin-to-freq mapping in _spec_db.
+        Bin 0 sits at center - span/2, bin N-1 at center + span/2 -
+        bin_width.  Accepts a float bin index for parabolic-peak
+        interpolation."""
+        if self._spec_db is None or len(self._spec_db) < 2:
+            return self._center_hz
+        n = len(self._spec_db)
+        return self._center_hz + (
+            (float(bin_idx) / max(1, n - 1)) - 0.5) * self._span_hz
+
+    def _find_snap_target(self, x_pixel: float) -> float | None:
+        """Find the strongest spectrum bin within +/- snap_range_hz of
+        the cursor frequency.  Return the parabolically-interpolated
+        center frequency of that peak, or None if no peak is at
+        least ``snap_min_snr_db`` above the rolling noise floor.
+
+        Used by mouseReleaseEvent (commit-on-click) and mouseMoveEvent
+        (hover reticle)."""
+        if self._spec_db is None or len(self._spec_db) < 3:
+            return None
+        if self._span_hz <= 0:
+            return None
+        f_cursor = self._freq_at_x(x_pixel)
+        n = len(self._spec_db)
+        # Convert freq range to bin range.
+        bins_per_hz = (n - 1) / max(1.0, self._span_hz)
+        half_bins = max(1, int(round(
+            self._snap_tune_range_hz * bins_per_hz)))
+        # Cursor bin index (clamped) — the search window centers here.
+        cursor_bin = int(round(
+            ((f_cursor - self._center_hz) / self._span_hz + 0.5)
+            * (n - 1)))
+        cursor_bin = max(0, min(n - 1, cursor_bin))
+        bin_lo = max(0, cursor_bin - half_bins)
+        bin_hi = min(n, cursor_bin + half_bins + 1)
+        if bin_hi - bin_lo < 2:
+            return None
+        window = self._spec_db[bin_lo:bin_hi]
+        peak_local = int(np.argmax(window))
+        peak_idx = peak_local + bin_lo
+        peak_db = float(self._spec_db[peak_idx])
+        # SNR check vs the rolling noise floor.  When floor isn't
+        # known yet (first second of streaming), gate on peak vs
+        # min-of-window (still a useful local-prominence test).
+        if self._noise_floor_db is not None:
+            ref_db = float(self._noise_floor_db)
+        else:
+            ref_db = float(np.min(window))
+        if (peak_db - ref_db) < self._snap_tune_min_snr_db:
+            return None
+        # Parabolic peak interpolation for sub-bin precision.  Only
+        # works when the peak isn't on the window edge; fall back to
+        # the integer bin otherwise.
+        if 0 < peak_idx < n - 1:
+            y0 = float(self._spec_db[peak_idx - 1])
+            y1 = float(self._spec_db[peak_idx])
+            y2 = float(self._spec_db[peak_idx + 1])
+            denom = (y0 - 2.0 * y1 + y2)
+            if abs(denom) > 1e-9:
+                delta = 0.5 * (y0 - y2) / denom
+                # Parabolic interpolation can suggest |delta|>1 when
+                # the spectrum is non-parabolic; clamp for safety.
+                delta = max(-1.0, min(1.0, delta))
+                peak_idx_refined = float(peak_idx) + delta
+            else:
+                peak_idx_refined = float(peak_idx)
+        else:
+            peak_idx_refined = float(peak_idx)
+        return self._bin_to_freq(peak_idx_refined)
+
+    def _should_snap(self, event) -> bool:
+        """Decide whether the click should snap based on modifiers.
+        v0.0.7.1: Shift = snap, plain = literal.  In a future
+        Settings tab the operator can flip this default."""
+        return bool(event.modifiers() & Qt.ShiftModifier)
+
     def _notch_half_px(self, width_hz: float) -> int:
         """Half-pixel-width of the notch's visible rectangle. Used
         for both rendering and hit-testing — clicking anywhere inside
@@ -692,6 +786,20 @@ class SpectrumWidget(_PaintedWidget):
         else:
             self.setCursor(Qt.CrossCursor)
 
+        # ── Snap-target hover reticle (click-to-tune v1) ─────────
+        # When the modifier is held over empty spectrum, find the
+        # snap target and stash it for paintEvent to draw a reticle.
+        # Updates as the cursor moves so the operator sees where the
+        # next click will land.  Clear when modifier releases.
+        prev = self._snap_hover_freq
+        if (self._snap_tune_show_reticle
+                and bool(event.modifiers() & Qt.ShiftModifier)):
+            self._snap_hover_freq = self._find_snap_target(x)
+        else:
+            self._snap_hover_freq = None
+        if prev != self._snap_hover_freq:
+            self.update()
+
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
@@ -716,7 +824,22 @@ class SpectrumWidget(_PaintedWidget):
             self._drag_tune = None
             self.setCursor(Qt.CrossCursor)
             if not in_drag:
-                self.clicked_freq.emit(self._freq_at_x(float(start_x)))
+                # v0.0.7.1 click-to-tune v1: Shift+click snaps to the
+                # nearest spectrum peak within +/- snap_range_hz when
+                # SNR exceeds the threshold.  Plain click is the
+                # legacy literal-tune behaviour.
+                target = None
+                if self._should_snap(event):
+                    target = self._find_snap_target(float(start_x))
+                if target is not None:
+                    self.clicked_freq.emit(float(target))
+                else:
+                    self.clicked_freq.emit(
+                        self._freq_at_x(float(start_x)))
+            # Clear any lingering hover-reticle state so it doesn't
+            # ghost on subsequent hovers.
+            self._snap_hover_freq = None
+            self.update()
 
     def wheelEvent(self, event):
         if self.width() <= 0:
@@ -1372,6 +1495,45 @@ class SpectrumWidget(_PaintedWidget):
                 # visually noisy on busy bands. Matches the GPU
                 # backend's rendering and standard SDR-client
                 # convention.
+
+        # ── Snap-target reticle (click-to-tune v1) ───────────────
+        # Drawn AFTER spots / notches / passband so it's always on
+        # top — operator's pre-click visual confirmation of where
+        # the snap will land.  Only when modifier-hover stashed a
+        # target in mouseMoveEvent.
+        if (self._snap_hover_freq is not None
+                and self._snap_tune_show_reticle
+                and self._span_hz > 0):
+            sx = ((self._snap_hover_freq - self._center_hz)
+                  / self._span_hz + 0.5) * w
+            if 0 <= sx <= w:
+                # Cyan reticle: vertical tick + small crosshair.
+                # Subtle but unmistakable; matches the
+                # spectrum-trace accent palette.
+                p.setPen(QPen(QColor(80, 220, 255, 220), 1,
+                              Qt.SolidLine))
+                sxi = int(round(sx))
+                # Vertical tick spanning the bottom 1/3 of the
+                # widget so it doesn't overlap the dB scale labels
+                # at the right edge.
+                p.drawLine(sxi, h - h // 3, sxi, h - 4)
+                # Crosshair at the bottom edge.
+                p.drawLine(sxi - 5, h - 4, sxi + 5, h - 4)
+                p.drawLine(sxi, h - 9, sxi, h - 4)
+                # Small label showing the snap-target freq in kHz
+                # offset from center -- helps operator confirm at
+                # a glance which signal they're about to hit.
+                p.setFont(self._font_7pt_bold)
+                offset_hz = int(round(
+                    self._snap_hover_freq - self._center_hz))
+                if abs(offset_hz) >= 1000:
+                    label = f"{offset_hz/1000:+.1f}k"
+                else:
+                    label = f"{offset_hz:+d}"
+                # Place label above the tick, biased to whichever
+                # side has room.
+                lx = sxi + 4 if sxi < w - 40 else sxi - 38
+                p.drawText(lx, h - h // 3 - 4, label)
 
         # End of paintEvent — record duration for diagnostics if the
         # operator launched with LYRA_PAINT_DEBUG=1. Cheap when off.
