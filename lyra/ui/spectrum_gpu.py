@@ -227,6 +227,11 @@ class SpectrumGpuWidget(QOpenGLWidget):
     PASSBAND_HIT_PX = 6
     # Click halo around each notch (also the minimum visual width).
     NOTCH_HIT_PX = 14
+    # Cursor must move > this many pixels from the press point before
+    # we treat the gesture as a drag (vs a click).  Mirrors
+    # SpectrumWidget.DRAG_TUNE_THRESHOLD_PX so the two backends feel
+    # identical to the operator.
+    DRAG_TUNE_THRESHOLD_PX = 5
 
     # Synthetic-data point count — mimics Lyra's typical FFT size
     # (4096) so the test exercises the same draw cost as real usage.
@@ -316,6 +321,17 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._snap_tune_min_snr_db: float = 6.0
         self._snap_tune_show_reticle: bool = True
         self._snap_hover_freq: Optional[float] = None
+
+        # ── Drag-to-tune / drag-to-pan state (v0.0.7.1 fix) ──────
+        # Mirrors the CPU SpectrumWidget design: empty-spectrum
+        # left-press stashes a candidate; mouseMoveEvent decides
+        # whether it becomes a pan-tune (when the cursor moves past
+        # DRAG_TUNE_THRESHOLD_PX); mouseReleaseEvent fires the
+        # click-tune (with snap if Shift held) only if no drag
+        # actually happened.  Without this state machine, click
+        # fires on press and any subsequent drag can't pan the
+        # spectrum.
+        self._drag_tune: Optional[tuple[int, float, bool]] = None
 
         # Passband overlay (Phase B.11). lo/hi are Hz offsets from
         # the carrier (negative = below, positive = above). For USB
@@ -964,21 +980,18 @@ class SpectrumGpuWidget(QOpenGLWidget):
             elif self._is_in_db_zone(x):
                 self._db_drag = (y, self._min_db, self._max_db)
             else:
-                # v0.0.7.1 click-to-tune v1: Shift+click snaps to the
-                # nearest spectrum peak within +/- snap_range_hz when
-                # SNR >= snap_min_snr_db.  Plain click is literal.
-                target = None
-                if event.modifiers() & Qt.ShiftModifier:
-                    target = self._find_snap_target_gpu(float(x))
-                if target is not None:
-                    self.clicked_freq.emit(float(target))
-                else:
-                    self.clicked_freq.emit(
-                        float(self._freq_at_pixel(x)))
-                # Clear hover reticle on commit so it doesn't
-                # ghost on the next hover.
-                self._snap_hover_freq = None
-                self.update()
+                # v0.0.7.1 click-to-tune v1 (release-based commit).
+                # Stash drag-tune candidate state.  mouseMoveEvent
+                # decides whether this becomes a pan-tune (cursor
+                # moves > DRAG_TUNE_THRESHOLD_PX); mouseReleaseEvent
+                # fires the final click-tune (with optional snap if
+                # Shift is held) ONLY if no drag actually happened.
+                # Pre-fix the GPU widget emitted on press, which made
+                # drag-to-pan impossible: by the time the cursor
+                # moved, the click had already fired.
+                self._drag_tune = (
+                    int(x), float(self._center_hz), False)
+                self.setCursor(Qt.OpenHandCursor)
         elif event.button() == Qt.RightButton:
             shift_held = bool(event.modifiers() & Qt.ShiftModifier)
             self.right_clicked_freq.emit(
@@ -1026,9 +1039,33 @@ class SpectrumGpuWidget(QOpenGLWidget):
             self.db_scale_drag.emit(float(new_min), float(new_max))
             return
 
+        # ── Drag-to-pan (click-and-hold to sweep the band) ────────
+        # Sign convention: cursor moves right -> spectrum slides
+        # right "following the finger" -> center freq DECREASES.
+        # Same gesture model as SpectrumWidget (CPU backend) and as
+        # the typical SDR-client convention.
+        if self._drag_tune is not None:
+            start_x, start_center, in_drag = self._drag_tune
+            dx = int(event.position().x()) - start_x
+            if not in_drag:
+                if abs(dx) < self.DRAG_TUNE_THRESHOLD_PX:
+                    return  # still inside the click dead-zone
+                in_drag = True
+                self._drag_tune = (start_x, start_center, True)
+                self.setCursor(Qt.ClosedHandCursor)
+            if self._span_hz <= 0 or self.width() <= 0:
+                return
+            hz_per_px = self._span_hz / self.width()
+            new_center = start_center - dx * hz_per_px
+            # Reuse the existing tune signal — the panel handler is
+            # set_freq_hz(int(...)) so frequent updates are cheap and
+            # Radio dedupes same-value writes downstream.
+            self.clicked_freq.emit(float(new_center))
+            return
+
         # ── Snap-target hover reticle (click-to-tune v1) ─────────
-        # When the modifier is held over empty spectrum, find the
-        # snap target and stash it for paintEvent.
+        # When the modifier is held over empty spectrum (no drag in
+        # flight), find the snap target and stash it for paintEvent.
         prev = self._snap_hover_freq
         if (self._snap_tune_show_reticle
                 and bool(event.modifiers() & Qt.ShiftModifier)):
@@ -1044,6 +1081,31 @@ class SpectrumGpuWidget(QOpenGLWidget):
             self._db_drag = None
             self._drag_pb_edge = None
             self._drag_notch_freq = None
+            # ── Drag-tune release (click-to-tune v1) ───────────
+            # If the operator pressed and released on empty spectrum
+            # without crossing DRAG_TUNE_THRESHOLD_PX, treat it as a
+            # click: snap to nearest peak if Shift held, otherwise
+            # literal click-to-tune.  If a drag DID happen, the pan
+            # was already committed live during mouseMoveEvent, so
+            # we just clean up state.
+            if self._drag_tune is not None:
+                start_x, _start_center, in_drag = self._drag_tune
+                self._drag_tune = None
+                self.setCursor(Qt.CrossCursor)
+                if not in_drag:
+                    target = None
+                    if event.modifiers() & Qt.ShiftModifier:
+                        target = self._find_snap_target_gpu(
+                            float(start_x))
+                    if target is not None:
+                        self.clicked_freq.emit(float(target))
+                    else:
+                        self.clicked_freq.emit(
+                            float(self._freq_at_pixel(int(start_x))))
+                # Clear hover reticle on commit so it doesn't ghost
+                # on the next hover.
+                self._snap_hover_freq = None
+                self.update()
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event) -> None:

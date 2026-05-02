@@ -13,7 +13,38 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
-## [Unreleased] — v0.0.7.1 "Quiet & Polish Pass" (in progress)
+## [0.0.7.2] — 2026-05-02
+
+### Fixed
+
+- **GPU panadapter: snap-to-tune and drag-to-pan now work.**  v0.0.7.1
+  shipped the snap and drag-to-pan features wired into the QPainter
+  (Software / OpenGL) panadapter backends, but the GPU-OpenGL backend
+  was missing the drag state machine entirely.  On GPU backend the
+  click-tune fired immediately on press, so drag-to-pan never had a
+  chance (cursor motion was ignored after the click had already
+  committed).  Snap was technically wired but commit-on-press meant
+  the modifier check was sometimes timed wrong relative to the
+  cursor position.
+
+  Fix: GPU widget now mirrors the QPainter widget's design --
+  empty-spectrum left-press stashes a drag candidate; mouseMoveEvent
+  decides whether it becomes a pan-tune (cursor moves >5 px); mouse
+  release fires the click-tune (with snap if Shift held) ONLY if
+  no drag actually happened.  Same gesture model on both backends.
+
+  Operator-visible:
+    * Plain click   -> tune to clicked freq exactly.
+    * Shift+click   -> snap to nearest spectrum peak (200 Hz window,
+                       6 dB SNR threshold).
+    * Click+drag    -> pan the panadapter across a band (40m end to
+                       end in one gesture).
+
+  No other changes from v0.0.7.1.
+
+---
+
+## [0.0.7.1] — 2026-05-02 — "Quiet & Polish Pass"
 
 Working on `feature/v0.0.7.1-quiet-pass` (merging back via
 `feature/threaded-dsp` → `main`).  Three operator-driven feature
