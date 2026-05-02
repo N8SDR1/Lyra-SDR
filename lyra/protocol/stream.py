@@ -382,6 +382,56 @@ class HL2Stream:
         with self._tx_audio_lock:
             self._tx_audio.clear()
 
+    def fade_and_replace_tx_audio(self, fade_ms: float = 5.0) -> int:
+        """Replace the TX audio queue with a short fade-out tail.
+
+        Quiet-pass v0.0.7.1 (audio_pops_audit P0.3): on AK4951 sink
+        close the previous behaviour was to flip ``inject_audio_tx``
+        instantly, which caused the EP2 frame builder's audio L/R
+        bytes to jump from real samples to zero in one frame
+        (~2.6 ms cadence at 380 Hz EP2 rate).  At the AK4951 codec
+        this presented as a sample-domain step from steady-state
+        amplitude to silence — an audible click on every sink swap.
+
+        The fix: replace whatever is currently queued with a short
+        linearly-ramped fade-out of the FIRST ``fade_ms`` worth of
+        the existing queue.  After this returns, the queue contains
+        at most ``fade_ms × 48`` samples ramping from the current
+        amplitude down to zero.  Any samples beyond the fade window
+        are dropped (operator was closing the session anyway).
+
+        Caller is expected to sleep ``fade_ms + ~2`` ms (so the
+        EP2 builder pulls and sends the faded samples) BEFORE
+        flipping ``inject_audio_tx = False`` and calling
+        ``clear_tx_audio``.
+
+        Returns the number of samples queued in the fade tail
+        (useful for the caller to compute the drain wait).
+        """
+        FADE_SAMPLES = max(1, int(fade_ms * 48.0))
+        with self._tx_audio_lock:
+            n = len(self._tx_audio)
+            if n == 0:
+                # Nothing playing to fade out.  No click possible.
+                return 0
+            # Pull all queued samples; we'll repush only the faded tail.
+            # Using the FIRST fade_n samples (head-of-queue) preserves
+            # signal continuity — those are the next samples that
+            # would have played anyway.  Tail samples (back-of-queue)
+            # would arrive later and are dropped on close.
+            all_pairs = [self._tx_audio.popleft() for _ in range(n)]
+            fade_n = min(FADE_SAMPLES, n)
+            for i in range(fade_n):
+                l, r = all_pairs[i]
+                # Linear ramp 1.0 -> 0.0 across the fade window.
+                # A cosine ramp would be smoother but linear is
+                # imperceptible at 5 ms — humans don't resolve
+                # envelope shape that fast.
+                ramp = 1.0 - (float(i) / float(fade_n))
+                self._tx_audio.append(
+                    (float(l) * ramp, float(r) * ramp))
+            return fade_n
+
     def _send_cc(self, c0: int, c1: int, c2: int, c3: int, c4: int):
         """Send one C&C write via EP2. Thread-safe."""
         if self._sock is None:

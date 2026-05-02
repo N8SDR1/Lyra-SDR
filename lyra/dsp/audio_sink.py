@@ -83,6 +83,36 @@ class AK4951Sink:
         self._right_gain = float(right)
 
     def close(self) -> None:
+        # Quiet-pass v0.0.7.1 (audio_pops_audit P0.3): apply a brief
+        # fade-out before disabling EP2 audio injection.  Pre-fix this
+        # method flipped ``inject_audio_tx`` instantly, which made the
+        # AK4951's audio L/R bytes jump from real samples to zero in
+        # one EP2 frame (~2.6 ms cadence) — operator heard a click on
+        # every sink swap.
+        #
+        # Sequence:
+        #   1. Replace the queued audio with a 5 ms linear fade tail.
+        #      EP2 builder pulls these as the next samples while the
+        #      operator-perceived audio gracefully decays to zero.
+        #   2. Sleep ~7 ms so the EP2 thread has time to pull and
+        #      send the faded samples (at 380 Hz EP2 cadence × 126
+        #      samples/frame, 7 ms ≈ 2.7 frames = 336 audio samples,
+        #      comfortably more than 240 fade samples).
+        #   3. Disable injection — subsequent EP2 frames carry zero
+        #      audio bytes, but the AK4951 has just heard a clean
+        #      fade so there's nothing to click against.
+        #   4. Clear any stragglers (defensive — fade_and_replace_tx_
+        #      audio already dropped the long tail, but the EP2 thread
+        #      might have missed pulling a few samples if it was
+        #      busy when we slept).
+        FADE_MS = 5.0
+        DRAIN_BUFFER_MS = 2.0
+        if hasattr(self._stream, "fade_and_replace_tx_audio"):
+            queued = self._stream.fade_and_replace_tx_audio(
+                fade_ms=FADE_MS)
+            if queued > 0:
+                import time
+                time.sleep((FADE_MS + DRAIN_BUFFER_MS) / 1000.0)
         self._stream.inject_audio_tx = False
         # Clear the queue on close so the NEXT sink (PC Soundcard
         # or another AK4951 instance) starts from a known empty
