@@ -3758,6 +3758,24 @@ class SMeterPanel(GlassPanel):
 #   3. Existing notches persist while NF is off (DSP just bypasses
 #      them — see radio.set_notch_enabled), so re-enabling brings
 #      back whatever they had before.
+def _notch_preset_name_for(radio, n) -> str:
+    """Return the preset key (Normal / Deep / Surgical) that matches
+    notch ``n``'s (depth_db, cascade), or 'Custom' if no preset
+    matches exactly.
+
+    Threshold: depth_db match within 1 dB (sub-perceptible drift),
+    cascade exact.  Used by the right-click menu to show "currently:
+    X" for the operator and to mark which preset the notch is on.
+    """
+    presets = getattr(radio, "NOTCH_PRESETS", {})
+    for key, params in presets.items():
+        if (int(params["cascade"]) == int(n.cascade)
+                and abs(float(params["depth_db"])
+                         - float(n.depth_db)) <= 1.0):
+            return key.capitalize()
+    return "Custom"
+
+
 def _build_notch_menu(parent_widget, radio, freq_hz: float) -> QMenu:
     menu = QMenu(parent_widget)
 
@@ -3795,8 +3813,11 @@ def _build_notch_menu(parent_widget, radio, freq_hz: float) -> QMenu:
         flag_str = []
         if not nearest.active:
             flag_str.append("OFF")
-        if nearest.deep:
-            flag_str.append("DEEP")
+        # v0.0.7.1 notch v2: per-notch flag readout shows the
+        # preset that matches its current depth/cascade params if
+        # any, otherwise a custom indicator.
+        preset_match = _notch_preset_name_for(radio, nearest)
+        flag_str.append(preset_match.upper())
         flags = f" — {' / '.join(flag_str)}" if flag_str else ""
         # Active-state toggle
         toggle_label = ("Disable this notch" if nearest.active
@@ -3808,15 +3829,31 @@ def _build_notch_menu(parent_widget, radio, freq_hz: float) -> QMenu:
             lambda _=False, f=nearest.abs_freq_hz:
                 radio.toggle_notch_active_at(f))
         menu.addAction(toggle_act)
-        # Deep-mode toggle (cascade)
-        deep_label = ("Make this notch normal (1× iirnotch)"
-                      if nearest.deep else
-                      "Make this notch DEEP (cascade — ~2× attenuation)")
-        deep_act = QAction(deep_label, menu)
-        deep_act.triggered.connect(
-            lambda _=False, f=nearest.abs_freq_hz:
-                radio.toggle_notch_deep_at(f))
-        menu.addAction(deep_act)
+
+        # v0.0.7.1 notch v2: 3-preset profile submenu.  Replaces the
+        # legacy "Make this notch DEEP" toggle with explicit
+        # operator-controlled depth + cascade choices.  See
+        # notch_v2_design.md sec 7.1 for the operator-facing UX.
+        prof_menu = menu.addMenu(
+            f"Notch profile  (currently: {preset_match})")
+        for preset_key, preset_label, descr in (
+            ("normal",
+             "Normal",
+             "balanced — 2× cascade, -50 dB.  Default for new notches."),
+            ("deep",
+             "Deep",
+             "stronger — 2× cascade, -70 dB.  Stubborn carriers."),
+            ("surgical",
+             "Surgical",
+             "sharp — 4× cascade, -50 dB.  Narrow kill, fast shoulders."),
+        ):
+            full = f"{preset_label}  —  {descr}"
+            mark = "✓  " if preset_key == preset_match else "    "
+            act = QAction(mark + full, prof_menu)
+            act.triggered.connect(
+                lambda _=False, f=nearest.abs_freq_hz, p=preset_key:
+                    radio.set_notch_preset_at(f, p))
+            prof_menu.addAction(act)
 
     rm_act = QAction("Remove nearest notch", menu)
     rm_act.setEnabled(have_any)
@@ -3856,6 +3893,35 @@ def _build_notch_menu(parent_widget, radio, freq_hz: float) -> QMenu:
             lambda _checked=False, w=w_preset:
                 radio.set_notch_default_width_hz(float(w)))
         w_menu.addAction(act)
+
+    # Default profile for new notches (notch v2).  Same 3 presets
+    # exposed in the per-notch profile submenu above; this picks
+    # which preset newly-placed notches start with.
+    cur_default_depth = float(
+        getattr(radio, "_notch_default_depth_db", -50.0))
+    cur_default_cascade = int(
+        getattr(radio, "_notch_default_cascade", 2))
+    cur_default_key = "custom"
+    for key, params in getattr(radio, "NOTCH_PRESETS", {}).items():
+        if (int(params["cascade"]) == cur_default_cascade
+                and abs(float(params["depth_db"])
+                         - cur_default_depth) <= 1.0):
+            cur_default_key = key
+            break
+    p_menu = menu.addMenu(
+        f"Default profile for new notches  "
+        f"(currently: {cur_default_key.capitalize()})")
+    for preset_key, preset_label, descr in (
+        ("normal",   "Normal",   "balanced — 2× cascade, -50 dB"),
+        ("deep",     "Deep",     "stronger — 2× cascade, -70 dB"),
+        ("surgical", "Surgical", "sharp — 4× cascade, -50 dB"),
+    ):
+        mark = "✓  " if preset_key == cur_default_key else "    "
+        act = QAction(mark + f"{preset_label}  —  {descr}", p_menu)
+        act.triggered.connect(
+            lambda _=False, p=preset_key:
+                radio.set_notch_default_preset(p))
+        p_menu.addAction(act)
 
     # Turn-off action — convenient exit from notch mode back to
     # "right-click does nothing notch-related" state. Sits at the
