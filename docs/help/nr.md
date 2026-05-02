@@ -29,7 +29,7 @@ engaged; dim = bypass.
 | **Light**      | α = 1.0, β = 0.20 | SSB ragchew, subtle hiss only |
 | **Medium** *(default)* | α = 1.8, β = 0.12 | General speech — best all-rounder |
 | **Aggressive** | α = 2.8, β = 0.06 | Noisy bands, weak DX, heavy QRN |
-| **Neural**     | *RNNoise / DeepFilterNet* | (greyed out until installed) |
+| **Neural**     | *deferred* | *(disabled — pending RX2 + TX)* |
 
 Where:
 
@@ -223,21 +223,22 @@ profile has the most of this artifact by design. The captured
 source generally has *less* musical noise than live-source because
 the noise model is more accurate.
 
-**Neural noise reduction** (RNNoise, DeepFilterNet) learns from
-speech+noise datasets and suppresses noise without that musical-
-noise signature. Lyra has a reserved **Neural** slot in the profile
-menu. When RNNoise or DeepFilterNet is importable (e.g., via
-`pip install rnnoise-wrapper` or similar), the slot enables
-automatically and the Radio's NR backend can swap to the neural
-engine. Until then it's greyed out with an "install RNNoise or
-DeepFilterNet" hint in the menu.
+**Neural noise reduction** (RNNoise / DeepFilterNet / NSNet2)
+learns from speech+noise datasets and suppresses noise without
+that musical-noise signature.  Lyra has a reserved **Neural**
+slot in the profile menu, currently **disabled** with the label
+*(deferred — pending RX2 + TX)*.
 
-When Neural is active, the source badge silently disables —
-neural NR has its own internal trained noise model and doesn't
-use the source toggle. Switching back to a classical profile
-re-enables the badge and restores your last source choice.
+The v0.0.6 development cycle briefly explored both PyTorch /
+DeepFilterNet and onnxruntime / NSNet2 paths.  Both are viable
+but introduce dependency-management friction (Python-version
+lag, Rust toolchain requirements, model-file distribution)
+that's better tackled when the broader transceiver functionality
+(second receiver, TX path) is in place.  The integration code
+was removed in v0.0.7 and will return as a clean implementation
+once the radio side is feature-complete.
 
-This was a day-one project goal — see `docs/backlog.md`.
+This is still a tracked project goal — see `docs/backlog.md`.
 
 ## What NR doesn't do
 

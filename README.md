@@ -1,6 +1,6 @@
 # Lyra — Qt6 SDR Transceiver for Hermes Lite 2 / 2+
 
-**Current version: 0.0.6 — "Operator Awareness"**
+**Current version: 0.0.7 — "Polish Pass"**
 
 Modern PySide6 desktop SDR for Steve Haynal's Hermes Lite 2 and HL2+.
 Native Python HPSDR Protocol 1, TCI v1.9 server, glassy UI with
@@ -32,7 +32,66 @@ The version string above is the single source of truth maintained in
 Bumping the version is a one-line edit in `lyra/__init__.py`; every
 display surface follows automatically.
 
-## What's in 0.0.6 — "Operator Awareness"
+## What's in 0.0.7 — "Polish Pass"
+
+A focused tester-feedback release.  No new DSP or radio features — every
+change is an operator-visible UI fix from feedback on the v0.0.6 install.
+
+### UI polish
+
+- **Three-column Noise Settings tab** — was two columns, the right
+  column was getting tall enough to scroll on 1080p heights.  Three
+  columns rebalanced after tester feedback that the middle column had
+  too much weight: `Cap + Squelch | NB + ANF | NR2 + Method + LMS`.
+- **Brighter checkboxes + radio buttons** — tick-box borders now use
+  the dusty-blue text-muted color against the dark recess instead of
+  the near-invisible BORDER tone.  Also bumped 14 → 16 px for visual
+  weight.
+- **Global font 10pt → 11pt** — slight bump for readability on the
+  dense Settings tabs.
+- **Tuning panel: vertical breathing room** — the MHz / Step labels
+  were being clipped against the freq-display digits; added 10 px
+  spacing between the freq row and the MHz/Step controls.
+- **Tuning panel: vertical resize works again** — the panel was
+  height-locked because the `FrequencyDisplay` widget shipped with
+  `QSizePolicy.Fixed` vertical, which made Qt's row layout refuse
+  extra height.  Fixed by overriding the policy and giving the panel
+  an explicit MinimumExpanding policy with a 180 px floor.
+- **DSP+Audio panel: AGC + notch readouts fixed-height** — the
+  `@notches` / AGC labels were stretching to fill the row when the
+  panel grew taller, while the buttons next to them stayed put.  Now
+  they all behave the same way.
+- **Lock panels actually locks all panels** — the v0.0.6
+  implementation disabled splitter handles but missed the QMainWindow
+  internal dock-area separator.  Third lock layer added (per-dock
+  fixed-size pin) and gated so it only fires when actually
+  transitioning between locked / unlocked states.
+
+### Update notifications
+
+- **Pre-release + full-release parity** — the silent update checker
+  was hitting `/releases/latest`, which by GitHub's design hides
+  pre-releases.  Switched to `/releases` and pick the highest semver
+  tag ourselves so testers on a pre-release get notified of newer
+  pre-releases AND any subsequent full release.
+- **Toolbar update indicator** — when an update is available, a
+  small orange "🆕 vX.Y.Z available" pill now appears centered
+  between the clocks and the HL2 telemetry block on the header
+  toolbar.  Click to open Help → Check for Updates.
+
+### Other
+
+- Neural NR work formally **deferred until after RX2 + TX** —
+  `onnxruntime` / DeepFilterNet exploration code removed (~1,100
+  lines) and the menu entry left in place as a `(deferred)`
+  placeholder.  WDSP-derived NR1 / NR2 / NR3 (LMS) / ANF / NB /
+  Squelch all stay.
+- Self-compile error messages on the DSP+Audio device list
+  distinguish "sounddevice not installed" vs "PortAudio failed to
+  load" vs "no devices reported by Windows," with copy-pasteable
+  pip install hints.
+
+## What was in 0.0.6 — "Operator Awareness"
 
 The deepest DSP refresh since the 0.0.x series began plus the
 introduction of all-station awareness features.  Five WDSP modules
