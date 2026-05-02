@@ -2249,7 +2249,6 @@ class DspPanel(GlassPanel):
         if current in ("light", "medium", "heavy", "aggressive",
                        "captured"):
             current = "nr1"
-        neural_ok = Radio.neural_nr_available()
 
         # Classical NR1 (spectral subtraction).
         nr1_act = QAction(self._NR_PROFILE_LABELS["nr1"], menu)
@@ -2267,22 +2266,18 @@ class DspPanel(GlassPanel):
             lambda _=False: self.radio.set_nr_profile("nr2"))
         menu.addAction(nr2_act)
 
-        # Neural placeholder — backend integration is on the v0.0.7
-        # roadmap.  The menu entry stays so operators see what's
-        # coming, but it's disabled until either RNNoise or
-        # DeepFilterNet is wired in (the import-probe in
-        # neural_nr_available() will start returning True at that
-        # point and the entry lights up).
+        # Neural NR placeholder — explored in v0.0.6 dev (PyTorch /
+        # DeepFilterNet path, then onnxruntime / NSNet2 path) but
+        # ultimately deferred until after RX2 + TX work lands.
+        # The menu entry stays as a permanently-disabled "planned"
+        # marker so operators know it's on the roadmap.  When we
+        # come back to it, this entry lights up + becomes
+        # selectable.
         neural_label = self._NR_PROFILE_LABELS["neural"]
-        neu_act = QAction(neural_label, menu)
+        neu_act = QAction(
+            f"{neural_label}  (deferred — pending RX2 + TX)", menu)
         neu_act.setCheckable(True)
-        neu_act.setChecked(current == "neural")
-        if not neural_ok:
-            neu_act.setEnabled(False)
-            neu_act.setText(
-                f"{neural_label}  (coming in v0.0.7)")
-        neu_act.triggered.connect(
-            lambda _=False: self.radio.set_nr_profile("neural"))
+        neu_act.setEnabled(False)
         menu.addAction(neu_act)
 
         menu.addSeparator()

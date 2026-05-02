@@ -251,18 +251,15 @@ class PythonRxChannel(DspChannel):
         # menu.
         from lyra.dsp.nr2 import EphraimMalahNR
         self._nr2 = EphraimMalahNR(rate=self.audio_rate)
-        # Neural NR — DeepFilterNet wrapper.  Constructed
-        # unconditionally; the underlying torch model loads lazily
-        # only on first process() call when the operator actually
-        # selects "neural" as the active NR, so creating the
-        # object is a near-zero-cost stub until then.
-        from lyra.dsp.nr_neural import DeepFilterNetNR
-        self._nr_neural = DeepFilterNetNR(rate=self.audio_rate)
         # Tracks which NR processor process() should route through.
         # Mirror of operator's active NR profile string:
         #   "nr1" → use _nr (spectral subtraction)
         #   "nr2" → use _nr2 (Ephraim-Malah MMSE-LSA / Wiener)
-        #   "neural" → use _nr_neural (DeepFilterNet)
+        # ("neural" was explored in v0.0.6 development as both
+        # PyTorch/DeepFilterNet and onnxruntime/NSNet2 backends but
+        # ultimately deferred until after RX2 + TX work — the menu
+        # entry stays as a "planned" marker.  set_nr_profile()
+        # silently routes neural-requests to nr1 in the meantime.)
         # The "off" / NR-disabled state is independent of this flag
         # — it's controlled by the active NR's .enabled attribute.
         self._active_nr: str = "nr1"
@@ -315,7 +312,6 @@ class PythonRxChannel(DspChannel):
         # blend in stale spectral state from the previous mode.
         self._nr.reset()
         self._nr2.reset()
-        self._nr_neural.reset()
         # LMS weights/delay line are similarly mode-dependent — a
         # converged CW lock would mispredict on switching to SSB.
         self._lms.reset()
@@ -351,12 +347,10 @@ class PythonRxChannel(DspChannel):
         on = bool(enabled)
         self._nr.enabled = on
         self._nr2.enabled = on
-        self._nr_neural.enabled = on
         if not on:
             # Reset whichever was active so resuming starts clean.
             self._nr.reset()
             self._nr2.reset()
-            self._nr_neural.reset()
 
     def set_nr_profile(self, profile: str) -> None:
         """Apply an NR backend selection.
@@ -365,41 +359,23 @@ class PythonRxChannel(DspChannel):
                           Strength is controlled via set_nr1_strength.
         - ``"nr2"``     → NR2 (Ephraim-Malah MMSE-LSA / Wiener).
                           Strength is via set_nr2_aggression.
-        - ``"neural"``  → DeepFilterNet (NR4).  Requires the
-                          deepfilternet pip package; soft-fails to
-                          NR1 if the package isn't installed.
+        - ``"neural"``  → reserved.  Silently routes to NR1 until
+                          we revisit AI noise filtering after RX2
+                          + TX work lands.
         - Legacy names (light/medium/heavy/aggressive/captured) are
           accepted for QSettings backwards compat and routed to NR1
           with the appropriate strength via NR1's legacy alias map.
 
-        All three processors stay alive; the active one is selected
-        by ``_active_nr`` and consumed in ``process()``.
+        Both NR1 and NR2 processors stay alive; the active one is
+        selected by ``_active_nr`` and consumed in ``process()``.
         """
         if profile == "nr2":
             self._active_nr = "nr2"
-        elif profile == "neural":
-            # Verify onnxruntime + model file are both available
-            # before flipping the routing — otherwise we'd silently
-            # route audio through a stub that returns input
-            # unchanged.
-            from lyra.dsp.nr_neural import (
-                is_available, import_error_message)
-            if is_available():
-                self._active_nr = "neural"
-            else:
-                # Soft-fall to NR1 with a log line.  The Settings
-                # UI surfaces the install instructions; here we
-                # just log the actual import-error message so
-                # operators running from a console can diagnose.
-                err = import_error_message() or "unknown reason"
-                print(f"[Channel] Neural NR unavailable ({err}) — "
-                      f"routing to NR1")
-                self._active_nr = "nr1"
         else:
+            # nr1, neural, or legacy → all route to nr1.
             self._active_nr = "nr1"
-            # Legacy profile names (light/medium/heavy/aggressive)
-            # still set NR1 strength via the alias map; "nr1" /
-            # "neural" leave the strength alone.
+            # Legacy profile names still set NR1 strength via the
+            # alias map.
             if profile in ("light", "medium", "heavy", "aggressive"):
                 self._nr.set_profile(profile)
 
@@ -612,44 +588,6 @@ class PythonRxChannel(DspChannel):
     def lms_strength(self) -> float:
         return float(self._lms.strength)
 
-    # ── Neural NR proxies ──────────────────────────────────────────────
-
-    def set_neural_device(self, device: str) -> None:
-        """Set the DFN inference device preference: 'auto', 'cpu',
-        'cuda'.  Takes effect on next model reload (call
-        force_neural_reload() if currently active)."""
-        self._nr_neural.set_device(device)
-
-    def force_neural_reload(self) -> bool:
-        """Force the neural model to (re)load with current device
-        preference.  Returns True on success, False if the package
-        isn't installed or the load fails."""
-        return self._nr_neural.reload()
-
-    @property
-    def neural_device_pref(self) -> str:
-        return str(self._nr_neural.device_pref)
-
-    @property
-    def neural_device_actual(self) -> str:
-        """Device the model is currently running on — 'cuda' / 'cpu'
-        / '' if not loaded."""
-        return str(self._nr_neural.device_actual)
-
-    @property
-    def neural_avg_inference_ms(self) -> float:
-        """Recent per-frame inference time.  UI badge can show this
-        to give the operator real-time visibility into the cost."""
-        return float(self._nr_neural.avg_inference_ms)
-
-    @property
-    def neural_is_active(self) -> bool:
-        """True if the audio path is currently routing through the
-        neural processor (operator picked 'neural' AND it loaded
-        successfully)."""
-        return (self._active_nr == "neural"
-                and self._nr_neural.is_loaded)
-
     # ── All-mode squelch proxies ──────────────────────────────────────
 
     def set_squelch_enabled(self, on: bool) -> None:
@@ -747,9 +685,6 @@ class PythonRxChannel(DspChannel):
         # NR2 state — noise estimate per bin, prev-frame gain,
         # decision-directed memory.  Discontinuity = clean start.
         self._nr2.reset()
-        # Neural NR streaming buffers — drop them so the new band
-        # doesn't get the previous band's tail audio.
-        self._nr_neural.reset()
         # LMS state — adaptive weights + delay line ring.  Same
         # rationale as ANF: a stale converged state for a different
         # signal would mispredict on the new band/mode.
@@ -911,16 +846,6 @@ class PythonRxChannel(DspChannel):
                     # idle (single state-check + early return).
                     self._nr.feed_capture(audio)
                     audio = self._nr2.process(audio)
-                elif self._active_nr == "neural":
-                    # Same Cap-side-channel pattern as NR2.
-                    self._nr.feed_capture(audio)
-                    # Neural NR is a heavy DSP stage — operator was
-                    # warned about latency / CPU cost in Settings
-                    # before they got here.  Inference happens in
-                    # 10 ms (480-sample) frames inside the wrapper;
-                    # streaming buffer absorbs Lyra's variable block
-                    # size without forcing an audible interruption.
-                    audio = self._nr_neural.process(audio)
                 else:
                     audio = self._nr.process(audio)
                 # APF — only useful in CW. The operator's enable

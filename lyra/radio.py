@@ -2201,96 +2201,13 @@ class Radio(QObject):
 
     @staticmethod
     def neural_nr_available() -> bool:
-        """Probe whether the onnxruntime-based neural NR backend is
-        usable — both the runtime AND the model file must be
-        present.  Safe to call anywhere; returns False on any
-        failure rather than raising.
-
-        Implementation lives in ``lyra.dsp.nr_neural``.  Switched
-        from PyTorch + DeepFilterNet to onnxruntime in the
-        post-v0.0.6 cleanup pass: same operator-facing semantics
-        ('is Neural NR available'), much friendlier dependency
-        story (no Rust, no PyTorch, wheels for Python 3.10..3.14).
+        """Permanently False — Neural NR was explored in v0.0.6
+        development (PyTorch / DeepFilterNet, then onnxruntime /
+        NSNet2) but deferred until after RX2 + TX work lands.
+        The right-click NR menu shows 'Neural (deferred — pending
+        RX2 + TX)' as a planned-feature marker.
         """
-        try:
-            from lyra.dsp.nr_neural import is_available
-            return is_available()
-        except Exception:
-            return False
-
-    # ── Neural NR (DeepFilterNet) operator-facing API ──────────────
-
-    @property
-    def neural_acknowledged(self) -> bool:
-        """True if the operator has ticked 'I understand' on the
-        Settings -> Noise -> Neural NR warning panel.  Required
-        before set_nr_profile('neural') will succeed."""
-        try:
-            from PySide6.QtCore import QSettings
-            return bool(QSettings("N8SDR", "Lyra").value(
-                "noise/neural_acknowledged", False, type=bool))
-        except Exception:
-            return False
-
-    @property
-    def neural_device_pref(self) -> str:
-        """'auto' / 'cpu' / 'cuda' — operator preference."""
-        return self._rx_channel.neural_device_pref
-
-    @property
-    def neural_device_actual(self) -> str:
-        """Device the loaded model is actually running on, or ''
-        if the model isn't loaded yet."""
-        return self._rx_channel.neural_device_actual
-
-    @property
-    def neural_avg_inference_ms(self) -> float:
-        """Recent per-frame DFN inference time in ms — populated
-        as the worker processes audio.  Header indicator polls
-        this to show real-time cost to the operator."""
-        return self._rx_channel.neural_avg_inference_ms
-
-    @property
-    def neural_is_active(self) -> bool:
-        """True iff Neural NR is currently the active processor AND
-        the model loaded successfully."""
-        return self._rx_channel.neural_is_active
-
-    def set_neural_device(self, device: str) -> None:
-        """Set DFN inference device preference: 'auto', 'cpu',
-        'cuda'.  Persists.  Takes effect on next model load — if
-        the model is already loaded, also forces a reload so the
-        switch is immediate."""
-        dev = (device or "").strip().lower()
-        if dev not in ("auto", "cpu", "cuda"):
-            dev = "auto"
-        self._rx_channel.set_neural_device(dev)
-        try:
-            from PySide6.QtCore import QSettings
-            QSettings("N8SDR", "Lyra").setValue(
-                "noise/neural_device", dev)
-        except Exception as exc:
-            print(f"[Radio] could not persist neural_device: {exc}")
-        # If neural is currently the active backend, reload now so
-        # the device change takes effect immediately rather than at
-        # the next backend switch.
-        if self.neural_is_active:
-            self._rx_channel.force_neural_reload()
-
-    def autoload_neural_settings(self) -> None:
-        """Restore the operator's Neural NR device preference at
-        app startup.  Acknowledgment state is read directly from
-        QSettings on demand (see neural_acknowledged property)."""
-        try:
-            from PySide6.QtCore import QSettings
-            s = QSettings("N8SDR", "Lyra")
-            dev = str(s.value("noise/neural_device", "auto", type=str))
-        except Exception:
-            return
-        try:
-            self._rx_channel.set_neural_device(dev)
-        except Exception as exc:
-            print(f"[Radio] could not autoload neural device: {exc}")
+        return False
 
     @property
     def nr_enabled(self) -> bool:
@@ -2344,32 +2261,13 @@ class Radio(QObject):
         backend = self._NR_PROFILE_ALIASES.get(raw, raw)
         if backend not in self.NR_PROFILES:
             backend = "nr1"
-        # ── Neural NR safety gate ────────────────────────────────
-        # Refuse to switch to neural unless ALL of the following
-        # are true:
-        #   1. deepfilternet is installed
-        #   2. Operator has acknowledged the latency/CPU warning
-        #      in Settings → Noise → Neural NR (the disclaimer
-        #      checkbox).
-        # On either failure, fall back to NR1 silently — the UI
-        # will reflect the actual backend via nr_profile_changed.
-        # This prevents accidentally routing audio through a
-        # processor the operator hasn't consented to enable.
+        # Neural backend is currently a deferred-feature placeholder
+        # — silently fall through to NR1 so any saved-state pointing
+        # at "neural" still produces functional audio.  See
+        # neural_nr_available() docstring for the deferment context.
         if backend == "neural":
-            if not self.neural_nr_available():
-                print("[Radio] Neural NR unavailable (onnxruntime "
-                      "or model file missing) — falling back to "
-                      "NR1.  Install with: pip install onnxruntime")
-                backend = "nr1"
-            elif not self.neural_acknowledged:
-                print("[Radio] Neural NR requested but operator "
-                      "has not acknowledged the latency/CPU "
-                      "warning — falling back to NR1.  Tick "
-                      "'I understand' in Settings → Noise.")
-                backend = "nr1"
+            backend = "nr1"
         self._nr_profile = backend
-        # Channel routes accordingly.  All three backends
-        # (nr1 / nr2 / neural) are valid downstream values.
         self._rx_channel.set_nr_profile(backend)
         self.nr_profile_changed.emit(backend)
 

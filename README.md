@@ -88,58 +88,24 @@ Lyra v0.0.6 onward is **GNU General Public License v3 or later**
 specifically to enable WDSP integration — see `NOTICE.md` for the
 full attribution and license history.
 
-### Neural noise reduction (opt-in, post-v0.0.6)
+### Neural noise reduction — deferred
 
-Neural NR is wired via **onnxruntime** + a public ONNX noise-
-suppression model (default: Microsoft NSNet2, MIT-licensed).
-Neither the ONNX runtime nor the model are bundled — operators
-who want Neural NR install separately:
-
-```
-pip install onnxruntime
-```
-
-(~150 MB).  Then download the NSNet2 model (~3 MB) from
-https://github.com/microsoft/DNS-Challenge releases, save as
-`nsnet2-20ms-baseline.onnx` in Lyra's `assets/models/` folder.
-
-After both steps:
-
-1. Settings → Noise → "Neural NR"
-2. Read the orange-bordered warning panel (latency / CPU)
-3. Tick **"I understand…"**
-4. Click **"🔬 Test on your system (5 sec)"**
-5. If green/yellow verdict, right-click the NR button on the
-   DSP+Audio panel and pick "Neural"
-
-Notes:
-
-- 16 kHz native (Lyra resamples 48k↔16k via scipy.signal.resample_poly)
-- ~20-40 ms additional latency vs NR1/NR2
-- 2-8 % CPU on a modern desktop; <1 % with DirectML or CUDA GPU
-- DirectML support means AMD + Intel GPUs work, not just NVIDIA
-- Soft-fails to NR1 if `onnxruntime` or the model file is missing
-- Works best on SSB voice in heavy noise.  CW / digital modes
-  don't benefit (model trained on speech)
-- A `🧠 12.3 ms` badge appears on the toolbar header when active
-
-**Why onnxruntime, not PyTorch / DeepFilterNet?**  PyTorch wheels
-lag new Python releases by 6-12 months — testers on bleeding-edge
-Python (3.13+) couldn't install at all.  DeepFilterNet's Rust
-extension also requires a Cargo toolchain on systems without
-pre-built wheels.  Switching to onnxruntime sidesteps both: pre-
-built wheels exist for Python 3.10..3.14, no Rust needed, no
-PyTorch needed, smaller install, broader GPU vendor support.
-Future Lyra releases may add DeepFilterNet or other models as
-additional onnxruntime-loaded options.
+AI-based neural noise reduction is on the roadmap but **deferred
+until after RX2 + TX work lands**.  v0.0.6 dev briefly explored
+PyTorch / DeepFilterNet and onnxruntime / NSNet2 paths; both are
+viable but introduce dependency-management friction (Python-version
+lag, Rust toolchain requirements, model-file distribution) that's
+better tackled when the broader transceiver functionality is in
+place.  The "Neural" entry stays in the right-click NR backend
+menu as a `(deferred — pending RX2 + TX)` placeholder so operators
+know it's planned.
 
 ### Minimum Windows version
 
 Lyra requires **Windows 10 build 17763 (1809, October 2018) or later**.
-This is the official baseline for PyTorch 2.x (DeepFilterNet
-dependency), winrt modern toast notifications (weather alerts), and
-PySide6 6.5+.  Older Windows installs are rejected by the installer
-with a clear error message.
+This is the official baseline for winrt modern toast notifications
+(weather alerts) and PySide6 6.5+.  Older Windows installs are
+rejected by the installer with a clear error message.
 
 ## What was in 0.0.5 — "Listening Tools"
 

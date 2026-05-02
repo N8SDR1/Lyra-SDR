@@ -122,14 +122,6 @@ class MainWindow(QMainWindow):
             self.radio.autoload_wx_settings()
         except Exception as exc:
             print(f"[app] wx settings autoload error: {exc}")
-        # Neural NR — operator's saved device preference.  Acknowledg-
-        # ment is read on demand (not stored on Radio).  This call is
-        # cheap regardless of whether deepfilternet is installed
-        # (just sets a string preference; no model load).
-        try:
-            self.radio.autoload_neural_settings()
-        except Exception as exc:
-            print(f"[app] neural NR autoload error: {exc}")
         # Phase 3.D #2 — restore NB profile + threshold across Lyra
         # restarts so the operator's last NB setting is in effect
         # from frame zero.  Same belt-and-suspenders pattern.
@@ -737,39 +729,10 @@ class MainWindow(QMainWindow):
             self.radio, distance_unit=_dist_unit, wind_unit=_wind_unit)
         tb.addWidget(self.wx_indicator)
 
-        # ── 7.7. Neural NR status badge ──────────────────────────
-        # Tiny "🧠 12 ms" badge that appears when Neural NR is the
-        # active backend.  Shows real-time per-frame inference cost
-        # so the operator has visibility into what DFN is costing
-        # them on their hardware.  Hidden when not active.
-        self.neural_badge = QLabel("")
-        self.neural_badge.setVisible(False)
-        self.neural_badge.setToolTip(
-            "Neural NR (DeepFilterNet) is active.  Number is\n"
-            "average per-frame inference time in ms.  Lower is\n"
-            "better — over ~20 ms means you're approaching\n"
-            "real-time saturation.")
-        self.neural_badge.setStyleSheet(
-            "color: #b890ff; font-family: Consolas, monospace; "
-            "font-weight: 700; font-size: 15px; padding: 4px 12px; "
-            "border: 1px solid #b890ff; border-radius: 10px; "
-            "background: rgba(184, 144, 255, 0.06); "
-            "margin-left: 8px;")
-        tb.addWidget(self.neural_badge)
-        # Polling timer — refresh the badge at 2 Hz (every 500 ms).
-        # Lighter than the audio thread but frequent enough that
-        # operators see latency changes when they switch device or
-        # when the system gets loaded.
-        from PySide6.QtCore import QTimer as _NbQTimer
-        self._neural_badge_timer = _NbQTimer(self)
-        self._neural_badge_timer.setInterval(500)
-        self._neural_badge_timer.timeout.connect(
-            self._refresh_neural_badge)
-        self._neural_badge_timer.start()
-        # Fixed gap between weather/neural indicators and the clocks
-        # — without this, when alerts are active the boxes hug right
-        # against the local-time clock.  20 px chosen so the gap
-        # is noticeable without pushing the clocks off-center.
+        # Fixed gap between weather indicator and the clocks — without
+        # this, when alerts are active the boxes hug right against the
+        # local-time clock and visually crowd it.  Width chosen so the
+        # gap is noticeable without pushing the clocks off-center.
         wx_gap = QWidget()
         wx_gap.setFixedWidth(20)
         tb.addWidget(wx_gap)
@@ -990,32 +953,6 @@ class MainWindow(QMainWindow):
         self.clock_local.setText(now_local.strftime("%H:%M:%S"))
         self.clock_utc.setText(now_utc.strftime("%H:%M:%SZ"))
 
-    def _refresh_neural_badge(self) -> None:
-        """2 Hz tick — show / hide the Neural NR badge based on
-        whether the audio path is currently routing through DFN,
-        and update the per-frame inference time readout."""
-        active = bool(self.radio.neural_is_active)
-        if not active:
-            if self.neural_badge.isVisible():
-                self.neural_badge.setVisible(False)
-            return
-        # Active — populate text with device + latency.
-        ms = float(self.radio.neural_avg_inference_ms)
-        dev = self.radio.neural_device_actual or "?"
-        # Color the latency value if it's getting close to the
-        # 20 ms-per-frame real-time ceiling.
-        if ms > 0:
-            self.neural_badge.setText(f"🧠 {ms:.1f} ms")
-        else:
-            self.neural_badge.setText("🧠 …")
-        self.neural_badge.setToolTip(
-            f"Neural NR (DeepFilterNet) is active.\n"
-            f"  Device: {dev}\n"
-            f"  Avg per-frame inference: {ms:.1f} ms\n"
-            f"  (real-time ceiling is ~20 ms/frame; over that\n"
-            f"   means audio dropouts are likely)")
-        if not self.neural_badge.isVisible():
-            self.neural_badge.setVisible(True)
 
     def _update_hl2_telemetry(self, payload: dict):
         """Radio.hl2_telemetry_changed → update banner label.
