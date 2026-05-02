@@ -2990,19 +2990,33 @@ class NoiseSettingsTab(QWidget):
         # most complex section), right column gets NB + ANF + NR2.
         # Right-column reassignments happen at the end of this
         # method.
+        # Three-column layout (was two).  After the v0.0.6 work
+        # added LMS + Squelch + NR2-method sections, the right
+        # column was getting tall enough to feel cramped at 1080p
+        # heights.  Three columns give each section room without
+        # introducing scroll.
+        #
+        # Distribution:
+        #   col_left   = Captured Noise Profile (largest section)
+        #   col_middle = NB + ANF + LMS + Squelch (the NB-family +
+        #                independent stages)
+        #   col_right  = NR2 + NR2 method picker (the spectral-NR
+        #                family — keeps related things together)
         outer = QHBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(12)
         col_left = QVBoxLayout()
+        col_middle = QVBoxLayout()
         col_right = QVBoxLayout()
         col_left.setSpacing(14)
+        col_middle.setSpacing(14)
         col_right.setSpacing(14)
         outer.addLayout(col_left, 1)
+        outer.addLayout(col_middle, 1)
         outer.addLayout(col_right, 1)
-        # Backwards-compat alias so existing `v.addWidget(grp_xxx)`
-        # calls below land in the LEFT column by default.  Sections
-        # that should go in the right column are reassigned at the
-        # bottom of this method.
+        # Backwards-compat alias — existing `v.addWidget(grp_xxx)`
+        # calls below land in the LEFT column by default.  Groups
+        # that belong in middle/right are reassigned at the end.
         v = col_left
 
         # ── Captured Noise Profile ──────────────────────────────
@@ -3585,23 +3599,25 @@ class NoiseSettingsTab(QWidget):
         # groups into the right column to balance the layout.
         # Captured Noise Profile (the largest section) stays alone
         # in the left column.
+        # Three-column reassignment.  All groups landed in
+        # col_left via the alias; route NB+ANF+LMS+SQ to middle
+        # and NR2+method-picker to right so the columns balance.
         col_left.removeWidget(grp_nb)
         col_left.removeWidget(grp_anf)
         col_left.removeWidget(grp_nr2)
         col_left.removeWidget(method_box)
         col_left.removeWidget(grp_lms)
         col_left.removeWidget(grp_sq)
-        col_right.addWidget(grp_nb)
-        col_right.addWidget(grp_anf)
+        col_middle.addWidget(grp_nb)
+        col_middle.addWidget(grp_anf)
+        col_middle.addWidget(grp_lms)
+        col_middle.addWidget(grp_sq)
         col_right.addWidget(grp_nr2)
         col_right.addWidget(method_box)
-        col_right.addWidget(grp_lms)
-        col_right.addWidget(grp_sq)
-        # Stretch on both columns so the groups stack from the top
-        # rather than spreading to fill.  Without this, the layout
-        # tries to vertically distribute the groups across the
-        # whole tab height which looks weird.
+        # Stretch on all three columns so groups stack from the
+        # top rather than spreading to fill the tab height.
         col_left.addStretch(1)
+        col_middle.addStretch(1)
         col_right.addStretch(1)
 
     # ── Slot implementations ─────────────────────────────────────

@@ -60,7 +60,11 @@ PEN_GRID     = 1.0
 FONT_BODY    = "Exo 2, Segoe UI, sans-serif"
 FONT_HEAD    = "Rajdhani, Segoe UI Semibold, sans-serif"
 FONT_MONO    = "Share Tech Mono, Consolas, monospace"
-FONT_SIZE    = 10
+# Global default font size — bumped 10 -> 11pt v0.0.6.x for
+# better readability on dense Settings tabs (Noise, Visuals).
+# Bigger panels stay tight via explicit per-widget sizing
+# overrides where needed.
+FONT_SIZE    = 11
 
 # Convenience single-family picks for QFont(...) calls
 FONT_FAMILY  = "Exo 2"
@@ -322,21 +326,44 @@ QGroupBox::title {{
 
 QCheckBox {{
     color: {qss_color(TEXT_PRIMARY)};
-    spacing: 6px;
+    spacing: 7px;
 }}
+/* Indicator: bumped 14 -> 16 px for better visual weight, and the
+   unchecked-state border uses TEXT_MUTED (a dusty blue-gray) rather
+   than BORDER (very dark) so empty checkboxes are clearly visible
+   against the dark BG_RECESS recess.  Operator feedback v0.0.6:
+   "Tick boxes blend into the background." */
 QCheckBox::indicator {{
-    width: 14px;
-    height: 14px;
+    width: 16px;
+    height: 16px;
     background: {qss_color(BG_RECESS)};
-    border: 1px solid {qss_color(BORDER)};
-    border-radius: 2px;
+    border: 1px solid {qss_color(TEXT_MUTED)};
+    border-radius: 3px;
 }}
 QCheckBox::indicator:hover {{
     border-color: {qss_color(ACCENT)};
+    background: {qss_color(BG_PANEL)};
 }}
 QCheckBox::indicator:checked {{
     background: {qss_color(ACCENT)};
     border-color: {qss_color(ACCENT)};
+    /* Built-in checkmark is rendered by Qt's native style — on
+       cyan (ACCENT) bg this shows as a darker pip which is the
+       contrast we want.  No explicit image: keeps the styling
+       scalable across DPI without bundling SVG assets. */
+}}
+QCheckBox::indicator:checked:hover {{
+    /* Slightly brighter ACCENT on hover-checked so the
+       indicator visibly responds even when already on. */
+    background: {qss_color(ACCENT.lighter(115))};
+    border-color: {qss_color(ACCENT.lighter(115))};
+}}
+QCheckBox:disabled {{
+    color: {qss_color(TEXT_MUTED)};
+}}
+QCheckBox::indicator:disabled {{
+    border-color: {qss_color(BORDER)};
+    background: {qss_color(BG_RECESS)};
 }}
 
 /* QRadioButton — round cousin of QCheckBox. Without this block Qt's
@@ -349,14 +376,17 @@ QRadioButton {{
     padding: 3px 0;
 }}
 QRadioButton::indicator {{
-    width: 14px;
-    height: 14px;
+    width: 16px;
+    height: 16px;
     background: {qss_color(BG_RECESS)};
-    border: 1px solid {qss_color(BORDER)};
-    border-radius: 8px;
+    /* Same brightness bump as QCheckBox — TEXT_MUTED border so
+       unchecked indicators are visible against the dark recess. */
+    border: 1px solid {qss_color(TEXT_MUTED)};
+    border-radius: 9px;
 }}
 QRadioButton::indicator:hover {{
     border-color: {qss_color(ACCENT)};
+    background: {qss_color(BG_PANEL)};
 }}
 QRadioButton::indicator:checked {{
     /* Inner-dot look: tint the whole disc accent, with a BG-colored

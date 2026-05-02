@@ -1252,10 +1252,27 @@ class MainWindow(QMainWindow):
             2500)
 
     def _apply_panel_lock(self, locked: bool) -> None:
-        """Push the lock state out to all dock features and splitter
-        handles. Split out from the toggle handler so we can re-apply
-        after a layout reset (which creates new QSplitters that don't
-        inherit the previous lock state)."""
+        """Push the lock state out to all dock features, splitter
+        handles, AND each dock's min/max size constraints. Split
+        out from the toggle handler so we can re-apply after a
+        layout reset (which creates new QSplitters that don't
+        inherit the previous lock state).
+
+        Lock layers (all three required for a true panel lock):
+          1. ``QDockWidget.setFeatures(NoDockWidgetFeatures)`` —
+             prevents the dock title-bar drag/float/close gestures.
+          2. Disable ``QSplitter`` handles between siblings —
+             prevents the operator from drag-resizing two adjacent
+             docks against each other.
+          3. ``QDockWidget.setFixedSize(currentSize())`` — the
+             critical missing piece in the v0.0.6 implementation.
+             Without this, the dock-area-to-central-widget
+             separator (which is built into QMainWindow's
+             internal layout, NOT a QSplitter) lets the operator
+             still grab and resize between the dock area and the
+             central panadapter widget.  Operator feedback
+             v0.0.6.x: "lock panels does not lock all panels."
+        """
         from PySide6.QtWidgets import QSplitter
         if locked:
             features = QDockWidget.NoDockWidgetFeatures
@@ -1265,10 +1282,29 @@ class MainWindow(QMainWindow):
                         | QDockWidget.DockWidgetClosable)
         for dock in self.docks.values():
             dock.setFeatures(features)
+            if locked:
+                # Pin each dock to its current size — defeats the
+                # QMainWindow internal separator's drag-resize.
+                # Use the dock's CURRENT size as the pin.  When
+                # the operator unlocks later, we lift the pins;
+                # when the window itself resizes while locked, the
+                # pinned docks stay put and the central widget
+                # absorbs the delta (which is fine — it's how
+                # other apps with locked panels behave).
+                sz = dock.size()
+                dock.setFixedSize(sz.width(), sz.height())
+            else:
+                # Lift the pins.  Use Qt's max-int-equivalent sizes
+                # for unconstrained — same defaults a fresh
+                # QDockWidget has.
+                dock.setMinimumSize(0, 0)
+                dock.setMaximumSize(16777215, 16777215)
         # QMainWindow internally builds QSplitters between docked
         # widgets. Disabling each handle blocks drag-to-resize while
         # keeping the visual separator visible (operator can still
-        # see the boundaries — just can't grab them).
+        # see the boundaries — just can't grab them).  Layered with
+        # the setFixedSize above so the user can't bypass via
+        # either path.
         for splitter in self.findChildren(QSplitter):
             for i in range(1, splitter.count()):
                 handle = splitter.handle(i)

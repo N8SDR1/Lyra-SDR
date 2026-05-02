@@ -364,6 +364,13 @@ class TuningPanel(GlassPanel):
         self.tx_split_row.setVisible(False)      # flip on when TX ships
         outer.addWidget(self.tx_split_row)
 
+        # Breathing room between the freq-display row and the MHz +
+        # Step controls below — operator feedback v0.0.6.x reported
+        # the MHz/Step labels were getting visually clipped against
+        # the bottom edge of the freq-display digits.  10 px gap is
+        # noticeable without pushing the rest of the panel down too far.
+        outer.addSpacing(10)
+
         # ── Row 3: MHz type-in + Step ────────────────────────────
         h = QHBoxLayout()
         h.addWidget(QLabel("MHz"))
@@ -1468,6 +1475,13 @@ class DspPanel(GlassPanel):
         self.notch_info.setStyleSheet(
             "color: #cdd9e5; font-family: Consolas, monospace; "
             "font-size: 10px;")
+        # Lock vertical sizing so this label behaves like the DSP
+        # buttons — fixed height regardless of panel height.
+        # Operator feedback v0.0.6.x: the notch + AGC readouts were
+        # stretching to fill the row when the DSP+Audio panel grew
+        # taller, while the buttons to the left stayed put.
+        self.notch_info.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Fixed)
         dsp_row.addWidget(self.notch_info)
 
         # ── NR (Noise Reduction) ─────────────────────────────────
@@ -1655,10 +1669,14 @@ class DspPanel(GlassPanel):
 
         # Right-click menu on the AGC widgets to pick profile without
         # opening Settings. "Auto" profile replaces the old dedicated button.
+        # Also lock vertical sizing — same operator-feedback fix as
+        # notch_info above: these labels were stretching to fill the
+        # row when the panel grew taller, while DSP buttons stayed put.
         for w in (agc_panel_label, self.agc_profile_lbl, thr_label,
                   self.agc_threshold_lbl, action_label, self.agc_action_lbl):
             w.setContextMenuPolicy(Qt.CustomContextMenu)
             w.customContextMenuRequested.connect(self._show_agc_menu)
+            w.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
         dsp_row.addStretch(1)
 
