@@ -426,6 +426,24 @@ Specific landmarks worth remembering:
 - `wdsp/calcc.c::calc()` lines 324–483 — predistortion math
 - `wdsp/iqc.c::xiqc()` lines 122–203 — predistortion application
 
+## 9.5. NR audit follow-up notes (operator-confirmed)
+
+From the NR audit (`docs/architecture/nr_audit.md`) §9 open questions:
+
+- **AC mains frequency at N8SDR's QTH: 60 Hz** (US standard).  When
+  cyclostationary 60/120 Hz powerline modeling lands (audit §4.3(c)),
+  it must be operator-configurable — most of EU + Asia + Africa +
+  Australia run on 50 Hz mains.  Settings → Noise → "AC mains
+  frequency" with options:
+    * 60 Hz (Americas, parts of Asia)
+    * 50 Hz (EU, most of Asia, Africa, Australia)
+    * Auto-detect (lock onto dominant low-freq peak in capture)
+
+- **NR polish strategy chosen: P1 (auto-select / staleness /
+  smart-guard) → P2 (cyclostationary) → P3 trickles in.**  Skipping
+  ML-based VAD (i) since auto-select reduces live-source usage.
+  Skipping (j) cross-channel validation pending RX2.
+
 ## 10. Open empirical questions (need HL2+ bench testing)
 
 These weren't answered by code-reading; we'll find out on N8SDR's
