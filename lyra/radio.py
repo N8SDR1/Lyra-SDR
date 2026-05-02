@@ -650,6 +650,16 @@ class Radio(QObject):
         self._agc_profile = "med"        # off / fast / med / slow / custom
         self._agc_release = 0.003
         self._agc_hang_blocks = 23
+        # Audio-pop diagnostic gate.  Lit by env var LYRA_AUDIO_DEBUG=1
+        # at process start; can also be flipped at runtime via
+        # set_lyra_audio_debug() for live A/B testing.  Zero-cost when
+        # off (single attribute check inside the audio hot path).
+        # See _diagnose_audio_step for what it prints.
+        import os as _os
+        self._lyra_audio_debug: bool = (
+            _os.environ.get("LYRA_AUDIO_DEBUG", "0") == "1")
+        self._lyra_audio_debug_count: int = 0  # rate-limit log spam
+        self._lyra_audio_debug_t0: float = 0.0
         # Per-sample envelope tracker state.  _agc_peak (above) is the
         # PER-SAMPLE peak carried across audio blocks.  _agc_hang_counter
         # is in samples (not blocks) — counts down inside the per-sample
@@ -5326,6 +5336,19 @@ class Radio(QObject):
         # Per-sample gain × volume.  Cast to audio's dtype so the
         # multiply stays in float32 (no allocation churn).
         audio = audio * gain_arr.astype(audio.dtype) * vol
+
+        # ── Audio-pop diagnostic (env-var gated) ──────────────────
+        # Set LYRA_AUDIO_DEBUG=1 to enable.  Prints one line per
+        # audio block whenever any sample-to-sample step in the
+        # post-AGC, pre-tanh signal exceeds the audibility threshold
+        # (default 0.05 amplitude ~= -26 dBFS).  Includes peak
+        # ratio, input mag at the offending sample, and the gain at
+        # that sample so we can root-cause whether the click came
+        # from the input signal or the AGC.  Zero-cost when the env
+        # var isn't set (one attribute check).
+        if self._lyra_audio_debug:
+            self._diagnose_audio_step(audio, mag, peak_arr, gain_arr)
+
         # Audio leveler — soft-knee compressor for taming transient
         # bursts.  Sits BEFORE tanh so its smooth gain reduction
         # can prevent the tanh limiter from clipping; tanh stays
@@ -5381,6 +5404,83 @@ class Radio(QObject):
         self._agc_release = params["release"]
         self._agc_hang_blocks = params["hang_blocks"]
         self._refresh_agc_per_sample_constants()
+
+    def set_lyra_audio_debug(self, on: bool) -> None:
+        """Live toggle for the audio-pop diagnostic logger.  When on,
+        ``_apply_agc_and_volume`` prints one line per audio block where
+        any sample-to-sample output step exceeds the audibility
+        threshold.  See ``_diagnose_audio_step`` for the format."""
+        self._lyra_audio_debug = bool(on)
+
+    def _diagnose_audio_step(self, audio_post_gain, mag, peak_arr,
+                             gain_arr) -> None:
+        """Pop / click diagnostic — prints when output has an audible
+        sample-to-sample step.
+
+        Threshold: 0.05 amplitude (~ -26 dBFS).  Below this is
+        usually inaudible against ambient room noise + DAC dither;
+        above is a candidate click.
+
+        Per-line format::
+
+            [Audio] step=0.087 @523/1024 out=+0.064/-0.023
+                in_mag=0.0034 peak=0.0142 gain=2.22
+                peak_ratio=15.4x (jumped at sample 522)
+
+        Where:
+          step      : |out[i] - out[i-1]|, the actual sample step
+          @i/N      : index of the offending sample within the block
+          out=+/-    : output[i] / output[i-1] values
+          in_mag    : |input audio[i]| at the offending sample
+          peak      : AGC peak[i] at the offending sample
+          gain      : AGC gain at the offending sample
+          peak_ratio: peak[i] / peak[i-1] — useful to spot AGC instant-attack events
+
+        Rate-limited to ~5 lines/sec so a stream of clicks doesn't
+        flood the console.
+
+        Note: this examines the post-gain, pre-tanh signal so the
+        amplitudes shown can exceed +/-1; tanh would clamp them in
+        the actual output but we want to see the underlying step.
+        """
+        import time
+        # NumPy diff is faster than a Python loop and only runs when
+        # the diagnostic is enabled.
+        out_arr = np.asarray(audio_post_gain).reshape(-1)
+        if out_arr.size < 2:
+            return
+        diffs = np.abs(np.diff(out_arr.astype(np.float64)))
+        max_step = float(np.max(diffs))
+        STEP_THRESHOLD = 0.05
+        if max_step < STEP_THRESHOLD:
+            return
+        # Rate-limit spam: at most 5 lines/sec.
+        now = time.monotonic()
+        if (now - self._lyra_audio_debug_t0) < 0.2:
+            return
+        self._lyra_audio_debug_t0 = now
+        self._lyra_audio_debug_count += 1
+
+        idx = int(np.argmax(diffs)) + 1   # idx of the second sample of the step
+        i = idx
+        out_curr = float(out_arr[i])
+        out_prev = float(out_arr[i - 1])
+        in_mag = float(mag[i]) if i < len(mag) else 0.0
+        pk = float(peak_arr[i]) if i < len(peak_arr) else 0.0
+        gn = float(gain_arr[i]) if i < len(gain_arr) else 0.0
+        # Peak ratio across the boundary (catches instant-attack
+        # events where peak just jumped).
+        if i >= 1 and i < len(peak_arr):
+            pk_prev = float(peak_arr[i - 1])
+            ratio = pk / max(pk_prev, 1e-12)
+        else:
+            ratio = 1.0
+        print(
+            f"[Audio] step={max_step:.4f} @{idx}/{out_arr.size} "
+            f"out={out_curr:+.4f}/{out_prev:+.4f} "
+            f"in_mag={in_mag:.5f} peak={pk:.5f} gain={gn:.2f} "
+            f"peak_ratio={ratio:.1f}x  [#{self._lyra_audio_debug_count}]"
+        )
 
     def _refresh_agc_per_sample_constants(self) -> None:
         """Translate per-block AGC release / hang into per-sample form.
