@@ -243,33 +243,13 @@ class MainWindow(QMainWindow):
             "padding: 0 8px;")
         self.statusBar().addPermanentWidget(self._stream_status_label)
 
-        # Audio-sink underrun/overrun indicator (v0.0.9.1+).  Counts
-        # samples lost at the producer/consumer interface between the
-        # DSP worker and the audio sink (AK4951 EP2 path or PC sound
-        # card via PortAudio).  Each underrun (sink ran out of audio)
-        # or overrun (sink couldn't keep up) injects a sample-level
-        # discontinuity = audible click.  This indicator was added to
-        # diagnose the residual click symptom that survived the AGC
-        # smooth-attack revert and the UDP RX buffer bump.  If the
-        # number climbs while the operator hears clicks, the sink
-        # interface is the culprit; a larger jitter buffer is the
-        # real fix.  If it stays at 0 during clicks, the bug is
-        # upstream (AGC artifacts, decimator, demod) and we look
-        # there instead.
-        self._audio_status_label = _QLabel("Audio OK")
-        self._audio_status_label.setToolTip(
-            "Audio-sink underrun + overrun counter.\n\n"
-            "Underrun = sink ran out of audio (silence injected).\n"
-            "Overrun  = producer outpaced sink (oldest dropped).\n"
-            "Either one produces an audible click.\n\n"
-            "Tracks the AK4951 EP2 path AND the PC sound card path,\n"
-            "whichever is currently selected in DSP+Audio Out.\n\n"
-            "Healthy: 0 (both)\n"
-            "Unhealthy: count climbs while clicks are heard.")
-        self._audio_status_label.setStyleSheet(
-            "color: #4a8a4a; font-family: Consolas, monospace; "
-            "padding: 0 8px;")
-        self.statusBar().addPermanentWidget(self._audio_status_label)
+        # Audio-sink underrun/overrun counters live on
+        # HL2Stream.tx_audio_underruns / tx_audio_overruns and on
+        # SoundDeviceSink._underruns / _overruns.  Operator-facing
+        # status indicator was removed in v0.0.9.1 (showing a
+        # climbing counter that operators can't act on creates
+        # unnecessary anxiety; the underlying counters stay
+        # available for developer-side diagnosis).
 
         self._load_settings()
 
@@ -1129,37 +1109,11 @@ class MainWindow(QMainWindow):
                 "color: #d8a040; font-family: Consolas, monospace; "
                 "padding: 0 8px;")
 
-        # Audio-sink underrun/overrun label refresh.  Two sources:
-        #  - AK4951 (EP2 audio sent back to HL2): stream.tx_audio_*
-        #  - SoundDeviceSink (PC sound card via PortAudio):
-        #    sink._underruns / sink._overruns
-        # We sum both so the operator sees one number regardless of
-        # which sink they have selected; in practice only the active
-        # sink contributes to the count.  See label tooltip.
-        try:
-            ur = 0
-            ov = 0
-            stream = getattr(self.radio, "_stream", None)
-            if stream is not None:
-                ur += int(getattr(stream, "tx_audio_underruns", 0))
-                ov += int(getattr(stream, "tx_audio_overruns", 0))
-            sink = getattr(self.radio, "_audio_sink", None)
-            if sink is not None:
-                ur += int(getattr(sink, "_underruns", 0))
-                ov += int(getattr(sink, "_overruns", 0))
-        except Exception:
-            ur = ov = 0
-        if ur == 0 and ov == 0:
-            self._audio_status_label.setText("Audio OK")
-            self._audio_status_label.setStyleSheet(
-                "color: #4a8a4a; font-family: Consolas, monospace; "
-                "padding: 0 8px;")
-        else:
-            self._audio_status_label.setText(
-                f"Audio: {ur} under / {ov} over")
-            self._audio_status_label.setStyleSheet(
-                "color: #d8a040; font-family: Consolas, monospace; "
-                "padding: 0 8px;")
+        # Audio-sink under/overrun status indicator was removed in
+        # v0.0.9.1 (operator UX call -- climbing counter that
+        # operators couldn't act on created unnecessary anxiety).
+        # Counters still increment on the underlying objects for
+        # developer-side diagnosis.
 
     # _tick_gpu and the GPU label widget were removed — see git
     # history for the NVML / PDH polling implementation if it ever
