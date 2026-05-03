@@ -277,6 +277,17 @@ class HL2Stream:
         # Opt-in: pack audio into EP2 frames. When False (default), the TX
         # audio slots are left at zero. Turn this on only for AK4951 output.
         self.inject_audio_tx = False
+        # AK4951 sink diagnostics — each is a frame-level event counter.
+        # Underrun: EP2 frame builder asked for N audio samples and the
+        # tx_audio deque had fewer; we padded with zeros (= silent
+        # samples = audible click on AK4951 codec).  Overrun: tx_audio
+        # deque was already at maxlen=48000 when the producer pushed
+        # more; deque silently dropped the OLDEST samples (= sample
+        # discontinuity = audible click).  Both counters surfaced in
+        # the UI status bar so operators can correlate counter ticks
+        # with audible clicks.  v0.0.9.1+
+        self.tx_audio_underruns: int = 0
+        self.tx_audio_overruns: int = 0
 
     # -- control frame (EP2) for initial config -----------------------------
     def _build_ep2_frame(self, c0: int, c1: int, c2: int, c3: int, c4: int) -> bytes:
@@ -325,6 +336,14 @@ class HL2Stream:
             avail = min(len(self._tx_audio), n_samples)
             pulled = [self._tx_audio.popleft() for _ in range(avail)]
         if avail < n_samples:
+            # Underrun — TX queue had less data than EP2 wants to send.
+            # Pad with zeros so the EP2 frame is always the right size,
+            # but COUNT the event so the operator can see it in the
+            # status bar.  Each underrun = silent samples injected into
+            # the AK4951 audio stream = audible click on the codec
+            # output.  Counter is read by the UI's 1 Hz status tick
+            # (lyra/ui/app.py::_tick_cpu).  v0.0.9.1+
+            self.tx_audio_underruns += 1
             pulled.extend([(0.0, 0.0)] * (n_samples - avail))
         # pulled is a list of (L, R) tuples — split into separate arrays.
         lr = np.asarray(pulled, dtype=np.float32)        # shape (N, 2)
@@ -375,6 +394,14 @@ class HL2Stream:
             flat = a.reshape(-1)
             pairs = list(zip(flat.tolist(), flat.tolist()))
         with self._tx_audio_lock:
+            # Detect overrun: when the deque is at maxlen and we
+            # extend, the oldest elements are silently DROPPED.  Count
+            # the would-be-dropped samples as overrun events so the
+            # operator can see queue saturation in the status bar.
+            # v0.0.9.1+ click investigation.
+            free_slots = self._tx_audio.maxlen - len(self._tx_audio)
+            if len(pairs) > free_slots:
+                self.tx_audio_overruns += len(pairs) - free_slots
             self._tx_audio.extend(pairs)
 
     def clear_tx_audio(self):
