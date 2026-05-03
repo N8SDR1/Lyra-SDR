@@ -45,6 +45,34 @@ class AK4951Sink:
         # we start enqueuing fresh samples.
         if hasattr(stream, "clear_tx_audio"):
             stream.clear_tx_audio()
+
+        # Pre-fill the EP2 TX audio deque with 100 ms of silence
+        # BEFORE enabling EP2 audio injection.  This is the v0.0.9.1
+        # fix for the audio-click symptom -- operator-instrumented
+        # data showed ~3 underruns/second sustained, all at the
+        # producer/consumer interface.  Root cause: the worker
+        # thread produces audio in bursts of 2048 samples every
+        # ~43 ms (block_size at 48 kHz), but the EP2 frame builder
+        # polls the deque at 380 Hz (~2.6 ms cadence) asking for 126
+        # samples each call.  Between worker bursts, the deque
+        # drains to empty and EP2 pads zeros = audible click.
+        #
+        # 4800-sample pre-fill (100 ms at 48 kHz) gives the deque
+        # enough headroom that the burst-vs-steady cadence mismatch
+        # oscillates the deque level around 4800 samples WITHOUT
+        # ever hitting zero.  Cost: 100 ms of audio latency at the
+        # AK4951 codec output.  Acceptable for RX listening; will
+        # need re-evaluation when TX lands in v0.2 (PTT cadence).
+        # Maxlen of the deque is 48000 (1 second), so the pre-fill
+        # uses 10 % of capacity -- plenty of room for production
+        # bursts to grow the level temporarily without overrunning.
+        if hasattr(stream, "_tx_audio_lock") and hasattr(stream, "_tx_audio"):
+            PREFILL_MS = 100
+            n_silence = int(48000 * PREFILL_MS / 1000)
+            silence = [(0.0, 0.0)] * n_silence
+            with stream._tx_audio_lock:
+                stream._tx_audio.extend(silence)
+
         self._stream.inject_audio_tx = True
         # Stereo balance gains. Default = equal-power center
         # (cos/sin at π/4 = √2/2 each). Updated by Radio whenever the
@@ -198,9 +226,26 @@ class SoundDeviceSink:
         self._ring_capacity_frames = capacity_frames
         self._ring = np.zeros(
             (capacity_frames, self._channels), dtype=np.float32)
+        # Pre-fill the ring with 100 ms of silence at startup so the
+        # PortAudio callback has buffer headroom for the worker's
+        # 43 ms-cadence audio bursts -- v0.0.9.1 click fix, mirrors
+        # the AK4951 sink pre-fill above.  Without this, the callback
+        # underruns from the moment PortAudio starts (well before the
+        # worker has produced its first audio block) and continues
+        # underrunning every cycle the worker burst lands just after
+        # the callback poll.  Operator data: ~3 underruns/sec without
+        # pre-fill = audible clicks every 300 ms.  100 ms pre-fill
+        # gives ~2 worker-burst cycles of margin -- enough to absorb
+        # the natural drift between burst and callback cadences.
+        # Ring is already filled with zeros from np.zeros() above; we
+        # just advance write_idx and count to expose those zeros as
+        # "available" frames for the callback to read.
+        PREFILL_MS = 100
+        prefill_frames = min(
+            capacity_frames, int(rate * PREFILL_MS / 1000))
         self._ring_read_idx = 0     # next frame to read by callback
-        self._ring_write_idx = 0    # next frame to write by DSP
-        self._ring_count = 0        # frames currently in ring
+        self._ring_write_idx = prefill_frames  # writer starts past pre-fill
+        self._ring_count = prefill_frames     # pre-fill counted as available
         # Lock guards the three indices above. Hold time is O(N) frames
         # being copied which is a few hundred ints/floats — sub-ms even
         # in the worst case, so the audio thread waiting on it doesn't
