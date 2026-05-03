@@ -88,6 +88,26 @@ class Notch:
 class Radio(QObject):
     # ── State change signals (UI subscribes) ───────────────────────────
     stream_state_changed = Signal(bool)
+    # ── TCI streaming taps (v0.0.9.1+) ─────────────────────────────────
+    # These signals fire whenever the audio / IQ data is finalised so
+    # the TciServer can broadcast binary frames to subscribed clients.
+    # Both are cross-thread-safe -- when emitted from the worker thread
+    # in DSP_THREADING_WORKER mode, Qt automatically uses
+    # QueuedConnection to deliver to the main thread (where TciServer
+    # lives and where QWebSocket.sendBinaryMessage must run).
+    #
+    # audio_for_tci_emit:
+    #   payload = mono float32 audio block at 48 kHz, post-AGC,
+    #   post-leveler, post-tanh -- the same audio the operator hears.
+    #   Fires once per audio block written to the sink (~93 emits/sec
+    #   at 512-sample block_size).
+    #
+    # iq_for_tci_emit:
+    #   payload = (complex64 IQ array, sample_rate_hz)
+    #   Fires per IQ batch from the HL2 stream (~1500 emits/sec at
+    #   192 kHz IQ rate -- see Radio._stream_cb tap point for batching).
+    audio_for_tci_emit   = Signal(object)        # np.ndarray (float32 mono 48 kHz)
+    iq_for_tci_emit      = Signal(object, int)   # np.ndarray complex64, sample_rate
     freq_changed         = Signal(int)
     rate_changed         = Signal(int)
     mode_changed         = Signal(str)
@@ -5528,6 +5548,18 @@ class Radio(QObject):
                 self._rx_batch = []
             else:
                 return
+        # TCI IQ tap (v0.0.9.1+).  Emit at the post-batch boundary
+        # (~46 emits/sec at 192 kHz IQ with the default batch size)
+        # rather than per-EP6-frame, to keep Qt event-queue traffic
+        # manageable.  Slot is a no-op early-return when no clients
+        # are subscribed, so cost when nobody is listening is just
+        # the signal emit itself.  Cross-thread emit (RX thread →
+        # Qt main thread) is auto-handled by Qt.QueuedConnection.
+        try:
+            self.iq_for_tci_emit.emit(batch, self._rate)
+        except Exception:
+            pass
+
         # Route the batch to the DSP path selected at startup. We
         # check the at-startup mode (not the persisted preference) —
         # this is the mode currently RUNNING this session.  If the
@@ -5646,6 +5678,16 @@ class Radio(QObject):
             if _dbg:
                 _t = _ddtime.perf_counter()
             self._audio_sink.write(audio)
+            # TCI audio tap (v0.0.9.1+).  Emit a copy of the
+            # finalised audio so any subscribed TCI client gets the
+            # exact same audio the operator hears.  Cheap when no
+            # TCI server / no subscribed clients (slot is a no-op
+            # early-return).  See lyra/control/tci.py
+            # broadcast_audio() for the consumer side.
+            try:
+                self.audio_for_tci_emit.emit(audio)
+            except Exception:
+                pass
             if _dbg:
                 _dt = (_ddtime.perf_counter() - _t) * 1000.0
                 self._dbg_stage_total["sink"] += _dt
@@ -5685,6 +5727,13 @@ class Radio(QObject):
         audio = np.tanh(audio * af * vol).astype(np.float32)
         try:
             self._audio_sink.write(audio)
+            # TCI audio tap (v0.0.9.1+) -- mirror of _do_demod path
+            # so tone mode also feeds TCI subscribers (useful for
+            # client-side audio-path verification).
+            try:
+                self.audio_for_tci_emit.emit(audio)
+            except Exception:
+                pass
         except Exception:
             pass
 

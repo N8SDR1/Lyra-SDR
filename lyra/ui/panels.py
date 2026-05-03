@@ -5310,6 +5310,16 @@ class TciPanel(GlassPanel):
         self.radio = radio
         self.server = TciServer(radio)
 
+        # Wire Radio's audio + IQ taps to TciServer's binary
+        # broadcast methods (v0.0.9.1+ TCI audio / IQ streaming).
+        # Cross-thread-safe: when the worker thread emits these
+        # signals, Qt automatically uses QueuedConnection to deliver
+        # on the main thread (where TciServer + QWebSocket live).
+        # Cost when no TCI clients are subscribed: one early-return
+        # in broadcast_audio / broadcast_iq.
+        radio.audio_for_tci_emit.connect(self.server.broadcast_audio)
+        radio.iq_for_tci_emit.connect(self.server.broadcast_iq)
+
         h = QHBoxLayout()
 
         self.enable_btn = QPushButton("Start")
