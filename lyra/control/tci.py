@@ -115,7 +115,10 @@ def _samples_to_bytes(
     """
     if samples.size == 0:
         return b""
-    a = np.asarray(samples, dtype=np.float32).reshape(-1)
+    # Defensive COPY -- the audio array is shared with the audio
+    # sink (AK4951 / SoundDevice) and possibly the panadapter.  An
+    # in-place clip here would corrupt those downstream consumers.
+    a = np.asarray(samples, dtype=np.float32).reshape(-1).copy()
     # Clip to [-1, 1] before format conversion so int formats don't
     # wrap on the rare over-target sample.
     np.clip(a, -1.0, 1.0, out=a)
@@ -721,7 +724,13 @@ class TciServer(QObject):
                 receiver=0,
                 sample_rate=rate,
                 sample_format=fmt,
-                length=block.size,    # samples per channel
+                # Per spec: length = total scalar values in data[],
+                # not frames.  Receiver computes
+                # frames_per_channel = length / channels.  For
+                # stereo this means length is 2× the mono frame
+                # count we got from the worker.  Bug fix v0.0.9.1
+                # post-MSHV-flight-test.
+                length=block.size * channels,
                 stream_type=STREAM_TYPE_RX_AUDIO,
                 channels=channels,
             )
@@ -764,7 +773,14 @@ class TciServer(QObject):
                 receiver=0,
                 sample_rate=sample_rate,
                 sample_format=fmt,
-                length=iq.size,       # complex sample count
+                # Per spec: length = total scalar values in data[].
+                # IQ is interleaved I,Q so for N complex samples the
+                # data[] holds 2N float32 values.  Receiver computes
+                # complex_samples = length / channels = (2N) / 2 = N.
+                # Bug fix v0.0.9.1 post-MSHV-flight-test (was sending
+                # length=N, which made the receiver decode N/2
+                # complex samples).
+                length=iq.size * 2,
                 stream_type=STREAM_TYPE_IQ,
                 channels=2,
             )
