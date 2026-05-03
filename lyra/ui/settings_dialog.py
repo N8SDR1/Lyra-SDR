@@ -4942,6 +4942,19 @@ class _SwDatabaseSubTab(QWidget):
         self._open_folder_btn.clicked.connect(
             self._on_open_folder_clicked)
         row.addWidget(self._open_folder_btn)
+        # v0.0.9 4c hotfix: manual-install fallback for the rare
+        # case where every fallback URL fails (TLS cert mismatch,
+        # firewall, etc.).  Operator downloads in their browser,
+        # drops the file in the swdb folder, clicks this button
+        # to load it.
+        self._load_local_btn = QPushButton("Load local CSV…")
+        self._load_local_btn.setToolTip(
+            "Pick an EiBi CSV you've already downloaded "
+            "manually.\nUseful when network downloads fail "
+            "(firewall / cert / mirror issue).")
+        self._load_local_btn.clicked.connect(
+            self._on_load_local_clicked)
+        row.addWidget(self._load_local_btn)
         row.addStretch(1)
         db_layout.addLayout(row)
         # Progress label / bar (visible only during download).
@@ -5108,6 +5121,8 @@ class _SwDatabaseSubTab(QWidget):
                 self,
                 user_agent_version=getattr(lyra, "__version__", ""))
             self._downloader.progress.connect(self._on_download_progress)
+            self._downloader.status.connect(
+                lambda s: self._progress_text.setText(s))
             self._downloader.finished_ok.connect(
                 self._on_download_ok)
             self._downloader.finished_error.connect(
@@ -5160,6 +5175,81 @@ class _SwDatabaseSubTab(QWidget):
         self._progress_text.setText(f"Update failed: {msg}")
         self._update_btn.setEnabled(True)
         # Leave the error text visible; clears on next interaction.
+
+    def _on_load_local_clicked(self) -> None:
+        """Operator-side fallback when network downloads fail.
+        Pops a file dialog, lets the operator pick a CSV they've
+        already downloaded manually, validates it parses, and
+        copies it into the standard swdb folder so future
+        startups auto-load.
+        """
+        from pathlib import Path
+        import shutil
+        from PySide6.QtCore import QStandardPaths
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load EiBi CSV",
+            "",
+            "EiBi CSV (sked-*.csv);;CSV files (*.csv);;All files (*)")
+        if not path_str:
+            return
+        src = Path(path_str)
+        # Validate parses.
+        from lyra.swdb.eibi_parser import parse_csv
+        try:
+            entries, errors = parse_csv(src)
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Couldn't parse file",
+                f"'{src.name}' didn't parse as an EiBi CSV:\n\n{e}")
+            return
+        if not entries:
+            QMessageBox.warning(
+                self, "No entries found",
+                f"'{src.name}' parsed but had 0 valid entries.\n\n"
+                "Are you sure this is an EiBi CSV?  If so, the "
+                "file may be corrupt -- try re-downloading.")
+            return
+        # Copy into the standard swdb folder so future startups
+        # auto-load.
+        appdata = QStandardPaths.writableLocation(
+            QStandardPaths.AppLocalDataLocation)
+        if not appdata:
+            QMessageBox.warning(
+                self, "No writable data location",
+                "Lyra couldn't determine a writable app-data folder.")
+            return
+        dest_dir = Path(appdata) / "swdb"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / src.name
+        try:
+            if src.resolve() != dest.resolve():
+                shutil.copyfile(src, dest)
+        except OSError as e:
+            QMessageBox.warning(
+                self, "Couldn't copy file", f"{e}")
+            return
+        # Update QSettings + reload.
+        self._qs.setValue("swdb/file_path", str(dest))
+        try:
+            self.radio.reload_eibi_store(dest)
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Loaded but couldn't index",
+                f"File copied to {dest} but the in-memory load "
+                f"failed: {e}")
+            return
+        self._progress_text.setVisible(True)
+        self._progress_text.setText(
+            f"Loaded {len(entries):,} entries from "
+            f"{src.name} ({len(errors)} skipped malformed rows)")
+        self._refresh_status()
+        try:
+            self.radio.status_message.emit(
+                f"EiBi loaded: {len(entries):,} entries", 3000)
+        except Exception:
+            pass
 
     def _on_open_folder_clicked(self) -> None:
         """Open the operating-system file manager at the swdb

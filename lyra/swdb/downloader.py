@@ -28,7 +28,28 @@ _log = logging.getLogger(__name__)
 
 # Default base URL.  Operator can override via QSettings to
 # accommodate mirrors or future URL changes without a Lyra release.
-EIBI_BASE_URL_DEFAULT = "https://www.eibispace.de/dx/"
+#
+# Hostname history note (2026-05): the canonical EiBi URL has
+# moved between www.eibispace.de and eibispace.de over the years.
+# As of this writing the apex domain (no www) has a valid TLS
+# cert; the www subdomain returns a cert issued for the apex,
+# producing SSL hostname-mismatch errors on download.  Default to
+# the apex URL; the worker iterates through fallback URLs below
+# if the primary fails.
+EIBI_BASE_URL_DEFAULT = "https://eibispace.de/dx/"
+
+# Fallback URLs tried in order when the primary fails.  Each is
+# logged so operators can see WHICH endpoint succeeded.  HTTP at
+# the end of the chain because EiBi historically also published
+# over plain HTTP (this is a freely-published broadcast schedule,
+# no auth or sensitive data; the tradeoff for getting the file
+# at all when TLS misconfig blocks HTTPS is acceptable).
+EIBI_FALLBACK_URLS = (
+    "https://eibispace.de/dx/",
+    "https://www.eibispace.de/dx/",
+    "http://eibispace.de/dx/",
+    "http://www.eibispace.de/dx/",
+)
 
 
 def current_season(now: Optional[datetime] = None) -> str:
@@ -73,22 +94,29 @@ def season_filename(season: Optional[str] = None,
 
 
 class _DownloadWorker(QObject):
-    """Worker that runs the actual HTTPS GET.  Lives on a
+    """Worker that runs the actual HTTP(S) GET.  Lives on a
     QThread so the UI stays responsive during the network call.
-    Emits progress + completion signals back to the main thread.
+    Iterates through the supplied URL list in order and stops on
+    the first success.  Emits progress + completion signals back
+    to the main thread.
     """
 
     progress = Signal(int, int)        # bytes_done, bytes_total (-1 if unknown)
+    status   = Signal(str)             # human-readable progress string
     finished_ok = Signal(str, int)     # path, byte_count
     finished_error = Signal(str)       # human-readable error
 
     TIMEOUT_S = 30.0
     USER_AGENT_PREFIX = "Lyra-SDR"
 
-    def __init__(self, url: str, dest: Path,
+    def __init__(self, urls: list, dest: Path,
                  user_agent_version: str = ""):
         super().__init__()
-        self._url = url
+        # Accept either a single URL string (legacy) or a list of
+        # fallback URLs to try in order.
+        if isinstance(urls, str):
+            urls = [urls]
+        self._urls = list(urls)
         self._dest = dest
         self._ua = (
             f"{self.USER_AGENT_PREFIX}/{user_agent_version}"
@@ -96,23 +124,52 @@ class _DownloadWorker(QObject):
 
     def run(self) -> None:
         """Background entry point.  Wired to QThread.started in
-        ``EibiDownloader.start``."""
+        ``EibiDownloader.start``.
+
+        Tries each URL in ``self._urls`` in order.  Stops on the
+        first success.  If ALL fail, emits ``finished_error`` with
+        a summary of what was tried.
+        """
+        if not self._urls:
+            self.finished_error.emit("No URLs to try.")
+            return
+        try:
+            self._dest.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.finished_error.emit(
+                f"Disk error preparing {self._dest.parent}: {e}")
+            return
+        attempts = []
+        for url in self._urls:
+            self.status.emit(f"Trying {url} …")
+            ok, msg = self._try_one(url)
+            if ok:
+                # msg is the byte count on success.
+                self.finished_ok.emit(str(self._dest), int(msg))
+                return
+            attempts.append(f"  {url}\n    -> {msg}")
+        # All URLs failed.  Show the operator everything we tried.
+        summary = ("All EiBi mirrors failed.  Attempts:\n"
+                   + "\n".join(attempts)
+                   + "\n\n"
+                   "Workaround: download the CSV in your browser "
+                   "from https://eibispace.de/ and place it in "
+                   f"{self._dest.parent} -- then restart Lyra.")
+        self.finished_error.emit(summary)
+
+    def _try_one(self, url: str) -> tuple[bool, str]:
+        """Attempt a single URL.  Returns (True, byte_count_str)
+        on success, (False, error_string) on failure."""
         from urllib.error import HTTPError, URLError
         from urllib.request import Request, urlopen
         try:
-            self._dest.parent.mkdir(parents=True, exist_ok=True)
-            req = Request(self._url, headers={"User-Agent": self._ua})
+            req = Request(url, headers={"User-Agent": self._ua})
             with urlopen(req, timeout=self.TIMEOUT_S) as resp:
-                # Some servers don't send Content-Length; surface
-                # -1 to the UI so it shows 'downloading...' instead
-                # of a phony percentage.
                 cl_header = resp.headers.get("Content-Length")
                 total = int(cl_header) if cl_header else -1
                 done = 0
-                # Stream into a tmp file then rename, so a
-                # mid-download crash can't leave the operator
-                # with a half-written CSV that fails to parse.
-                tmp = self._dest.with_suffix(self._dest.suffix + ".tmp")
+                tmp = self._dest.with_suffix(
+                    self._dest.suffix + ".tmp")
                 with tmp.open("wb") as out:
                     while True:
                         chunk = resp.read(64 * 1024)
@@ -121,23 +178,18 @@ class _DownloadWorker(QObject):
                         out.write(chunk)
                         done += len(chunk)
                         self.progress.emit(done, total)
-                # Atomic rename.  Replace existing.
                 if self._dest.exists():
                     self._dest.unlink()
                 tmp.replace(self._dest)
-            self.finished_ok.emit(str(self._dest), done)
+            return True, str(done)
         except HTTPError as e:
-            self.finished_error.emit(
-                f"HTTP {e.code}: {e.reason} -- {self._url}")
+            return False, f"HTTP {e.code}: {e.reason}"
         except URLError as e:
-            self.finished_error.emit(
-                f"Network error: {e.reason}")
+            return False, f"Network/SSL: {e.reason}"
         except OSError as e:
-            self.finished_error.emit(
-                f"Disk error writing {self._dest}: {e}")
+            return False, f"Disk error: {e}"
         except Exception as e:
-            self.finished_error.emit(
-                f"Download failed: {e}")
+            return False, f"{type(e).__name__}: {e}"
 
 
 class EibiDownloader(QObject):
@@ -155,17 +207,32 @@ class EibiDownloader(QObject):
     """
 
     progress = Signal(int, int)       # bytes_done, bytes_total
+    status   = Signal(str)            # which URL we're trying
     finished_ok = Signal(str, int)    # path, byte_count
     finished_error = Signal(str)
 
     def __init__(self, parent: Optional[QObject] = None,
-                 base_url: str = EIBI_BASE_URL_DEFAULT,
+                 base_url: Optional[str] = None,
                  user_agent_version: str = ""):
         super().__init__(parent)
-        self._base_url = base_url.rstrip("/") + "/"
+        # If operator overrode the base URL via QSettings, that
+        # wins -- otherwise iterate through the EIBI_FALLBACK_URLS
+        # chain.  base_url=None preserves the chain.
+        self._override_base_url = (
+            base_url.rstrip("/") + "/"
+            if base_url else None)
         self._user_agent_version = user_agent_version
         self._thread: Optional[QThread] = None
         self._worker: Optional[_DownloadWorker] = None
+
+    def _build_url_list(self, filename: str) -> list:
+        """Return the list of URLs to try, in priority order.
+        Uses operator override when set, otherwise the
+        EIBI_FALLBACK_URLS chain.
+        """
+        if self._override_base_url:
+            return [self._override_base_url + filename]
+        return [base + filename for base in EIBI_FALLBACK_URLS]
 
     def fetch(self, dest_dir: Path | str,
               season: str = "auto",
@@ -177,6 +244,10 @@ class EibiDownloader(QObject):
         ``filename`` overrides the auto-named season file -- useful
         for operators who want to load a specific file by URL
         (e.g. an archived season for historical analysis).
+
+        Iterates through the fallback URL chain on TLS / network
+        failures so a misconfigured cert on one mirror doesn't
+        block the operator from getting the data.
         """
         if self._thread is not None and self._thread.isRunning():
             self.finished_error.emit(
@@ -188,13 +259,14 @@ class EibiDownloader(QObject):
             self.finished_error.emit(str(e))
             return
         dest = Path(dest_dir) / fname
-        url = self._base_url + fname
+        urls = self._build_url_list(fname)
         self._thread = QThread(self)
         self._worker = _DownloadWorker(
-            url=url, dest=dest,
+            urls=urls, dest=dest,
             user_agent_version=self._user_agent_version)
         self._worker.moveToThread(self._thread)
         self._worker.progress.connect(self.progress)
+        self._worker.status.connect(self.status)
         self._worker.finished_ok.connect(self.finished_ok)
         self._worker.finished_error.connect(self.finished_error)
         # Auto-cleanup on completion.
