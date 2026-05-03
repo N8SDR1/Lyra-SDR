@@ -24,6 +24,7 @@ C&C write register selectors (host -> radio in EP2, for later use):
 """
 from __future__ import annotations
 
+import logging
 import socket
 import struct
 import threading
@@ -32,6 +33,8 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 import numpy as np
+
+_log = logging.getLogger(__name__)
 
 DISCOVERY_PORT = 1024
 
@@ -460,6 +463,31 @@ class HL2Stream:
 
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Bump UDP receive buffer to 4 MB.  Default Windows UDP RCVBUF
+        # is ~64-208 KB; at 192 kHz IQ rate the HL2 streams roughly
+        # 1.5 MB/sec of EP6 frames, so the kernel buffer fills in
+        # under a second of CPU stall and starts silently dropping
+        # frames.  Each drop produces a sequence-number gap which the
+        # parser counts in seq_errors and (post v0.0.9.1) covers with
+        # a fade in the audio path -- but the cheaper fix is just to
+        # not drop frames in the first place.  4 MB ≈ 2.6 seconds of
+        # buffer headroom, which covers any plausible Python GC pause
+        # or context-switch storm.  The kernel may clamp the request
+        # to a smaller value (rmem_max sysctl on Linux, registry
+        # AFD\Parameters\DefaultReceiveWindow on Windows); we log the
+        # actual buffer size so the operator can spot it if needed.
+        try:
+            self._sock.setsockopt(
+                socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+            actual = self._sock.getsockopt(
+                socket.SOL_SOCKET, socket.SO_RCVBUF)
+            _log.info(
+                "UDP RX buffer: requested 4 MB, kernel granted %.1f MB",
+                actual / 1024 / 1024)
+        except OSError as e:
+            # Non-fatal -- if SO_RCVBUF can't be bumped, we still run
+            # with default buffer size, just more vulnerable to drops.
+            _log.warning("Could not bump SO_RCVBUF: %s", e)
         self._sock.bind(("0.0.0.0", 0))  # ephemeral port; radio will reply here
         self._sock.settimeout(0.5)
 

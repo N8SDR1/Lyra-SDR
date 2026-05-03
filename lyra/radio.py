@@ -639,6 +639,18 @@ class Radio(QObject):
         self._audio_block = 2048
         self._tone_phase = 0.0
 
+        # Stream-gap tracking — every audio block compares stream's
+        # current seq_errors counter against this last-seen value;
+        # if it incremented, a UDP frame was dropped between this
+        # block and the previous one and the IQ stream is no longer
+        # continuous.  See _apply_agc_and_volume for the fade we
+        # apply on gap to mask the discontinuity.  v0.0.9.1 +.
+        self._last_seen_seq_errors = 0
+        # 10 ms ramp at 48 kHz audio rate.  Long enough to mask the
+        # decimator-FIR ringing + AGC gain step caused by the IQ
+        # discontinuity; short enough to be subliminal in voice or CW.
+        self._gap_fade_samples = 480
+
         # RX DSP channel — the WDSP integration seam. Owns its own
         # decimator, audio buffer, demod instances, NR, and notch
         # chain; Radio configures via setters and feeds IQ into
@@ -5827,6 +5839,30 @@ class Radio(QObject):
         # can prevent the tanh limiter from clipping; tanh stays
         # as a safety net when the leveler is off (profile = off).
         audio = self._leveler.process(audio)
+
+        # ── Stream-gap fade (v0.0.9.1) ──────────────────────────────
+        # If the UDP RX socket dropped a frame between this audio
+        # block and the previous one, the IQ stream is discontinuous
+        # at some point inside this block.  After decimation and
+        # demod, that produces an audible step in the audio output —
+        # operators heard this as occasional "louder than the rest"
+        # bursts.  Mask it with a 10 ms linear fade-in on the first
+        # samples of the post-AGC audio.  Detection is by comparing
+        # the stream's seq_errors counter against the last-seen
+        # value; cheap, lock-free (the int read is atomic under the
+        # GIL, slight staleness is fine).  See
+        # docs/architecture/audio_pops_audit.md §4 for the analysis.
+        if self._stream is not None:
+            current_seq_errors = self._stream.stats.seq_errors
+            if current_seq_errors > self._last_seen_seq_errors:
+                self._last_seen_seq_errors = current_seq_errors
+                if audio.size > 0:
+                    n = min(self._gap_fade_samples, audio.size)
+                    ramp = np.linspace(
+                        0.0, 1.0, n, dtype=audio.dtype)
+                    audio = audio.copy()
+                    audio[:n] *= ramp
+
         return np.tanh(audio).astype(np.float32)
 
     # ── AGC profile API ───────────────────────────────────────────────

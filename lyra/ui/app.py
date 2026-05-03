@@ -222,6 +222,27 @@ class MainWindow(QMainWindow):
             "padding: 0 8px;")
         self.statusBar().addPermanentWidget(self._version_label)
 
+        # Stream-error indicator (v0.0.9.1+).  Green "Stream OK" when
+        # the UDP RX path has not dropped any HPSDR frames; amber
+        # "Stream: N errors" once it has.  Refreshed by _tick_cpu at
+        # 1 Hz (close enough to feel live; not so fast we burn cycles
+        # for a counter that ticks rarely).  Tooltip explains what the
+        # number means and points the operator at the gap-fade fix
+        # so they don't think occasional drops are catastrophic.
+        self._stream_status_label = _QLabel("Stream OK")
+        self._stream_status_label.setToolTip(
+            "UDP frames dropped from the HL2 since stream start.\n"
+            "Each drop produces a brief discontinuity in the IQ\n"
+            "stream that Lyra masks with a 10 ms audio fade, but a\n"
+            "rapidly increasing count means your CPU or network is\n"
+            "stalling and pops may still leak through.\n\n"
+            "Healthy: 0, or a small number that doesn't grow.\n"
+            "Unhealthy: count climbs every few seconds.")
+        self._stream_status_label.setStyleSheet(
+            "color: #4a8a4a; font-family: Consolas, monospace; "
+            "padding: 0 8px;")
+        self.statusBar().addPermanentWidget(self._stream_status_label)
+
         self._load_settings()
 
         # Auto-snapshot of settings on every launch — gives the operator
@@ -1055,6 +1076,30 @@ class MainWindow(QMainWindow):
         self.cpu_label.setStyleSheet(
             f"color: {color}; font-family: Consolas, monospace; "
             "font-weight: 700; padding: 0 6px;")
+
+        # Stream-error label refresh.  Piggybacks the 1 Hz CPU tick
+        # to avoid a second QTimer for a counter that updates rarely.
+        # Source of truth: self.radio._stream.stats.seq_errors (or 0
+        # before the radio is started / after stop).  See the label
+        # tooltip for the operator-facing meaning.
+        try:
+            stream = getattr(self.radio, "_stream", None)
+            if stream is not None and getattr(stream, "stats", None):
+                n = int(stream.stats.seq_errors)
+            else:
+                n = 0
+        except Exception:
+            n = 0
+        if n == 0:
+            self._stream_status_label.setText("Stream OK")
+            self._stream_status_label.setStyleSheet(
+                "color: #4a8a4a; font-family: Consolas, monospace; "
+                "padding: 0 8px;")
+        else:
+            self._stream_status_label.setText(f"Stream: {n} errors")
+            self._stream_status_label.setStyleSheet(
+                "color: #d8a040; font-family: Consolas, monospace; "
+                "padding: 0 8px;")
 
     # _tick_gpu and the GPU label widget were removed — see git
     # history for the NVML / PDH polling implementation if it ever

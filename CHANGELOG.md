@@ -13,6 +13,74 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.1] — UNRELEASED — Stream-gap audio fix
+
+Bug-fix patch on top of v0.0.9.  Closes out the residual "occasional
+pops, sometimes louder than the rest" symptom that survived the
+v0.0.7.1 "Quiet Pass" — see CLAUDE.md §9.6 for the prior parked
+state.
+
+### Root cause
+
+Three compounding defects in the UDP RX path:
+
+1. **No `SO_RCVBUF` increase on the receive socket.**  Default
+   Windows UDP receive buffer is ~64-208 KB.  At 192 kHz IQ rate
+   the HL2 streams ~1.5 MB/sec of EP6 frames, so the kernel buffer
+   could fill in under a second of CPU stall and start silently
+   dropping frames.
+
+2. **Sequence-gap recovery did nothing audible.**  When the parser
+   detected a UDP frame drop (sequence-number jump) it incremented
+   `seq_errors` and passed the next frame's samples downstream as
+   if they were continuous.  The DSP chain (decimator FIR, AGC
+   envelope, NR/NB/ANF) has stateful filters; passing
+   discontinuous IQ through them produces a boundary glitch that
+   the post-AGC gain amplifies into an audible step — exactly the
+   "louder than the rest" pop signature.
+
+3. **`seq_errors` was invisible.**  No status-bar indicator, no
+   log line, no UI surface — operator could not correlate "I just
+   heard a pop" with "yes, the stream had a gap at that moment."
+   Diagnosis was harder than necessary.
+
+### Fixed
+
+- **`SO_RCVBUF` bumped to 4 MB** on the HPSDR P1 UDP RX socket
+  (`lyra/protocol/stream.py`).  Provides ~2.6 seconds of buffer
+  headroom at 192 kHz IQ rate, covering any plausible Python GC
+  pause or Windows context-switch storm.  Actual buffer size
+  granted by the kernel logged at INFO level on stream start.
+- **10 ms audio fade-in on detected sequence gap**
+  (`lyra/radio.py::_apply_agc_and_volume`).  Each audio block
+  compares the current `seq_errors` counter against the last-seen
+  value; if it incremented, a UDP frame was dropped between this
+  block and the previous one.  The next post-AGC, post-leveler
+  audio block gets a 0→1 linear ramp on the first 480 samples
+  (10 ms at 48 kHz audio rate), masking the IQ-discontinuity step
+  before it reaches the speaker.  Subliminal in voice / CW;
+  inaudible compared to the loud pop it replaces.
+- **Stream-error indicator in the status bar** (`lyra/ui/app.py`).
+  Permanent widget next to the version label.  Shows green
+  "Stream OK" while `seq_errors == 0`; switches to amber
+  "Stream: N errors" once any drop is detected.  Tooltip explains
+  the operator-facing meaning.  Refreshed at 1 Hz via the existing
+  CPU-tick timer (no new timer).
+
+### Operator-facing notes
+
+- Healthy stream: status reads "Stream OK" indefinitely.  An
+  occasional bump to a small number that doesn't grow further is
+  also healthy (one packet drop during a transient CPU load).
+  The 4 MB buffer should make even that rare.
+- Unhealthy stream: counter climbs every few seconds.  Indicates
+  sustained CPU starvation (DSP stages overrunning the audio
+  budget) or a flaky network link to the HL2.  Pops may still
+  leak through under heavy sustained drops — the fade is a mask,
+  not a cure for genuine packet loss.
+
+---
+
 ## [0.0.9] — 2026-05-02 — "Memory & Stations"
 
 Pre-RX2 polish release driven by operator wishlist.  Four feature
