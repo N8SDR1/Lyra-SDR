@@ -378,6 +378,14 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # color (0xAARRGGBB). Same payload shape as the CPU widget's
         # _spots so the rendering code can be a 1:1 port.
         self._spots: list[dict] = []
+        # EiBi SW broadcaster overlay (v0.0.9 Step 4c.2).
+        # Same shape as SpectrumWidget._eibi_entries: list of
+        # (freq_hz, station, language, target, on_air) tuples
+        # pushed in by SpectrumPanel._refresh_eibi_overlay.
+        self._eibi_entries: list[
+            tuple[int, str, str, str, bool]] = []
+        self._eibi_overlay_visible: bool = False
+        self._eibi_hit_rects: list = []
         # Age-fade lifetime in seconds. 0 = no fade. Mirrors radio
         # default of 600 s (10 min) — set authoritatively from
         # radio.spot_lifetime_s when the panel wires the signal.
@@ -729,6 +737,16 @@ class SpectrumGpuWidget(QOpenGLWidget):
         """Override the peak-marker color. Empty string reverts to
         the default warm amber."""
         self._user_peak_color = str(hex_str or "")
+        self.update()
+
+    def set_eibi_entries(self,
+                         entries: list,
+                         visible: bool) -> None:
+        """Push the visible-range EiBi entries into the widget.
+        Shape: list of (freq_hz, station, language, target,
+        on_air_now) tuples.  ``visible`` is the master gate."""
+        self._eibi_entries = list(entries)
+        self._eibi_overlay_visible = bool(visible)
         self.update()
 
     def set_spots(self, spots: list) -> None:
@@ -1523,12 +1541,76 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # the audible pitch position.
         self._draw_cw_zero_line(painter)
         self._draw_notches(painter)
+        # EiBi SW broadcaster overlay (v0.0.9 Step 4c.2) -- drawn
+        # before spots so live operator activity (TCI spots) wins
+        # on z-order when both are visible.
+        if (self._eibi_overlay_visible
+                and self._eibi_entries
+                and self._span_hz > 0):
+            self._draw_eibi_overlay(painter)
         self._draw_spots(painter)
         self._draw_freq_scale_labels(painter)
         # Click-to-tune v1: snap-target reticle.  Drawn LAST so it
         # sits on top of every other overlay -- the operator's pre-
         # click visual confirmation must be unambiguous.
         self._draw_snap_reticle(painter)
+
+    def _draw_eibi_overlay(self, painter) -> None:
+        """Draw EiBi station-name labels for entries in
+        ``self._eibi_entries`` at their freq positions.  Mirror
+        of SpectrumWidget._draw_eibi_overlay; see that method's
+        docstring for the design notes."""
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QColor, QFont, QFontMetrics
+        self._eibi_hit_rects = []
+        center = self._center_hz
+        span = self._span_hz
+        if span <= 0:
+            return
+        w = self.width()
+        font = QFont(painter.font())
+        font.setPointSize(8)
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+        band_strip_h = 18
+        label_y = band_strip_h + 4
+        tick_top = band_strip_h + 2
+        tick_bottom = label_y + fm.height() + 1
+        for entry in self._eibi_entries:
+            freq_hz, station, language, target, on_air = entry
+            offset_hz = freq_hz - center
+            if abs(offset_hz) > span / 2:
+                continue
+            x = int(w * (offset_hz / span + 0.5))
+            tick_color = (
+                QColor(80, 200, 220, 220) if on_air
+                else QColor(120, 130, 140, 140))
+            painter.setPen(tick_color)
+            painter.drawLine(x, tick_top, x, tick_bottom)
+            label_text = station[:20]
+            tw = fm.horizontalAdvance(label_text) + 4
+            label_x = x + 3
+            if label_x + tw > w - 4:
+                label_x = x - tw - 3
+            painter.setPen(
+                QColor(180, 220, 230, 220) if on_air
+                else QColor(160, 170, 180, 160))
+            painter.drawText(
+                label_x, label_y + fm.ascent(), label_text)
+            self._eibi_hit_rects.append((
+                QRectF(label_x, label_y, tw, fm.height()),
+                entry,
+            ))
+
+    def _eibi_hit_at(self, x: float, y: float):
+        """Hit-test the EiBi label rects from the latest paint."""
+        rects = getattr(self, "_eibi_hit_rects", None)
+        if not rects:
+            return None
+        for rect, entry in rects:
+            if rect.contains(x, y):
+                return entry
+        return None
 
     def _draw_snap_reticle(self, painter: QPainter) -> None:
         """Draw the snap-target reticle when the operator is hovering
