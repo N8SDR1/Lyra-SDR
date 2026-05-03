@@ -4356,6 +4356,530 @@ class WxAlertsSettingsTab(QWidget):
         self._loc_summary.setTextFormat(Qt.RichText)
 
 
+class BandsSettingsTab(QWidget):
+    """Bands tab — a lightweight tab-of-tabs that hosts band-related
+    Settings sub-tabs.
+
+    v0.0.9 sub-tabs:
+      * Memory      -- full table view + edit/delete/reorder/CSV
+                       import/export of operator memory presets.
+      * Time Stations -- (placeholder for now, defaults to right-
+                       click menu on the TIME button.  Settings
+                       configuration arrives in a future iteration.)
+      * SW Database -- (placeholder, populated in Step 4 with EiBi
+                       master enable + download + power filter.)
+
+    Each sub-tab is a self-contained QWidget; this class just wires
+    them into the inner QTabWidget.
+    """
+
+    def __init__(self, radio, parent=None):
+        super().__init__(parent)
+        self.radio = radio
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        self._inner_tabs = QTabWidget()
+        # Memory sub-tab: full management UI for the 20-slot bank.
+        self._memory_subtab = _MemorySubTab(radio, self)
+        self._inner_tabs.addTab(self._memory_subtab, "Memory")
+        # Time Stations placeholder.  Right-click menu on the TIME
+        # button covers daily operating; Settings management
+        # (per-station hide / reorder / mode override) lands later.
+        time_placeholder = QLabel(
+            "Time Stations management — coming in a follow-up "
+            "release.\n\nUse the right-click menu on the TIME "
+            "button on the Bands panel for direct station picks."
+        )
+        time_placeholder.setAlignment(Qt.AlignCenter)
+        time_placeholder.setStyleSheet(
+            "color: #5a7080; padding: 40px;")
+        time_placeholder.setWordWrap(True)
+        self._inner_tabs.addTab(time_placeholder, "Time Stations")
+        # SW Database placeholder for Step 4.
+        sw_placeholder = QLabel(
+            "SW Database (EiBi broadcaster overlay) — coming in "
+            "v0.0.9 Step 4.\n\nWill provide:\n"
+            "    • Download / update the EiBi schedule database\n"
+            "    • Master enable for the panadapter overlay\n"
+            "    • Power-class filter (likely receivable / strong only / etc.)\n"
+            "    • Auto-detection: overlay renders only outside\n"
+            "      the operator's region's amateur-band ranges."
+        )
+        sw_placeholder.setAlignment(Qt.AlignCenter)
+        sw_placeholder.setStyleSheet(
+            "color: #5a7080; padding: 40px;")
+        sw_placeholder.setWordWrap(True)
+        self._inner_tabs.addTab(sw_placeholder, "SW Database")
+        v.addWidget(self._inner_tabs)
+
+    def show_memory_subtab(self) -> None:
+        """Switch the inner tab widget to Memory.  Called when the
+        operator picks 'Manage presets…' from the Mem button's
+        right-click menu."""
+        for i in range(self._inner_tabs.count()):
+            if self._inner_tabs.tabText(i).lower() == "memory":
+                self._inner_tabs.setCurrentIndex(i)
+                return
+
+
+class _MemorySubTab(QWidget):
+    """Full-management UI for the 20-slot operator memory bank.
+
+    Loaded from the same ``MemoryStore`` instance used by the Bands
+    panel's Mem button -- mutations here are reflected there
+    immediately because both views read the same QSettings-backed
+    JSON list.
+
+    Operator-facing actions:
+      * Edit selected row (also via double-click on a row)
+      * Delete selected row (with confirm dialog)
+      * Move Up / Move Down to reorder
+      * Import CSV (merge or replace)
+      * Export CSV
+      * Clear All (with explicit confirm typing dialog)
+    """
+
+    HEADERS = ("#", "Name", "Frequency", "Mode", "Bandwidth", "Notes")
+
+    def __init__(self, radio, parent=None):
+        super().__init__(parent)
+        self.radio = radio
+        # Reuse the singleton MemoryStore the Bands panel uses.
+        # Both load from the same QSettings key, so mutations
+        # round-trip cleanly even though we technically have two
+        # in-memory copies during the dialog's lifetime.  On
+        # close, the panel's MemoryStore reloads from QSettings
+        # if needed.
+        from lyra.memory import MemoryStore
+        self._store = MemoryStore()
+
+        v = QVBoxLayout(self)
+        # Status line at top: "X of 20 saved".
+        self._status = QLabel("")
+        self._status.setStyleSheet(
+            "color: #80a0b0; font-size: 11px;")
+        v.addWidget(self._status)
+
+        # ── Table ────────────────────────────────────────────────
+        from PySide6.QtWidgets import (
+            QAbstractItemView, QHeaderView, QTableWidget,
+            QTableWidgetItem,
+        )
+        self._table = QTableWidget(0, len(self.HEADERS))
+        self._table.setHorizontalHeaderLabels(self.HEADERS)
+        # Single-row selection so up/down/edit/delete are
+        # unambiguous.
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        # Column sizing: # narrow, Freq + Mode + BW snug, Name +
+        # Notes stretch.
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # #
+        hdr.setSectionResizeMode(1, QHeaderView.Stretch)            # Name
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Freq
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Mode
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # BW
+        hdr.setSectionResizeMode(5, QHeaderView.Stretch)            # Notes
+        self._table.itemDoubleClicked.connect(
+            lambda _: self._on_edit_clicked())
+        v.addWidget(self._table, 1)
+
+        # ── Action button row ────────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        self._edit_btn = QPushButton("Edit…")
+        self._edit_btn.clicked.connect(self._on_edit_clicked)
+        btn_row.addWidget(self._edit_btn)
+        self._delete_btn = QPushButton("Delete…")
+        self._delete_btn.clicked.connect(self._on_delete_clicked)
+        btn_row.addWidget(self._delete_btn)
+        self._up_btn = QPushButton("Move Up")
+        self._up_btn.clicked.connect(lambda: self._move_selected(-1))
+        btn_row.addWidget(self._up_btn)
+        self._down_btn = QPushButton("Move Down")
+        self._down_btn.clicked.connect(lambda: self._move_selected(+1))
+        btn_row.addWidget(self._down_btn)
+        btn_row.addStretch(1)
+        # CSV import/export + clear all on the right.
+        self._import_btn = QPushButton("Import CSV…")
+        self._import_btn.clicked.connect(self._on_import_csv)
+        btn_row.addWidget(self._import_btn)
+        self._export_btn = QPushButton("Export CSV…")
+        self._export_btn.clicked.connect(self._on_export_csv)
+        btn_row.addWidget(self._export_btn)
+        self._clear_btn = QPushButton("Clear All…")
+        self._clear_btn.clicked.connect(self._on_clear_all)
+        btn_row.addWidget(self._clear_btn)
+        v.addLayout(btn_row)
+
+        # CSV format hint below the buttons.
+        hint = QLabel(
+            "<i>CSV columns: Name, Freq_Hz, Mode, RX_BW_Hz, Notes."
+            "  Example row:</i><br>"
+            "<code>\"My 40m FT8\",7074000,DIGU,3000,"
+            "\"weekend digital ops\"</code>")
+        hint.setTextFormat(Qt.RichText)
+        hint.setWordWrap(True)
+        hint.setStyleSheet(
+            "color: #80a0b0; font-size: 11px; padding-top: 8px;")
+        v.addWidget(hint)
+
+        # Initial population.
+        self._refresh()
+
+    # ── Refresh + status ─────────────────────────────────────────
+
+    def _refresh(self) -> None:
+        """Rebuild the table from the current store state."""
+        from PySide6.QtWidgets import QTableWidgetItem
+        # Reload from disk in case panel-side mutations happened
+        # outside this dialog's lifetime.
+        from lyra.memory import MemoryStore
+        self._store = MemoryStore()
+        presets = self._store.list()
+        self._table.setRowCount(len(presets))
+        for row, p in enumerate(presets):
+            cells = [
+                str(row + 1),
+                p.name,
+                f"{p.freq_hz/1e6:.4f} MHz",
+                p.mode,
+                (f"{p.rx_bw_hz} Hz"
+                 if p.rx_bw_hz is not None else "(default)"),
+                p.notes,
+            ]
+            for col, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if col in (0, 2, 3, 4):
+                    item.setTextAlignment(Qt.AlignCenter)
+                self._table.setItem(row, col, item)
+        # Status line.
+        cap = self._store.MAX_PRESETS
+        self._status.setText(
+            f"<b>{len(presets)}</b> of <b>{cap}</b> presets saved")
+        # Button enable state.
+        has_rows = len(presets) > 0
+        self._edit_btn.setEnabled(has_rows)
+        self._delete_btn.setEnabled(has_rows)
+        self._up_btn.setEnabled(has_rows)
+        self._down_btn.setEnabled(has_rows)
+        self._export_btn.setEnabled(has_rows)
+        self._clear_btn.setEnabled(has_rows)
+
+    def _selected_row(self) -> int:
+        """Return the currently-selected row index, or -1 if none."""
+        rows = self._table.selectionModel().selectedRows()
+        if not rows:
+            return -1
+        return rows[0].row()
+
+    # ── Actions ──────────────────────────────────────────────────
+
+    def _on_edit_clicked(self) -> None:
+        """Edit the selected preset (or first row if none selected)
+        via a small dialog with all fields populated."""
+        row = self._selected_row()
+        if row < 0:
+            return
+        preset = self._store.get(row)
+        if preset is None:
+            return
+        new = self._edit_dialog(preset)
+        if new is None:
+            return
+        # Name-collision check (skip the current row).
+        existing_idx = self._store.find_by_name(new.name)
+        if existing_idx is not None and existing_idx != row:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "Name collision",
+                f"Another preset is already named '{new.name}'.\n"
+                "Pick a different name or rename the other one first.")
+            return
+        self._store.update(row, new)
+        self._refresh()
+
+    def _on_delete_clicked(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        row = self._selected_row()
+        if row < 0:
+            return
+        preset = self._store.get(row)
+        if preset is None:
+            return
+        confirm = QMessageBox.question(
+            self, "Delete preset?",
+            f"Delete '{preset.name}' "
+            f"({preset.freq_hz/1e6:.4f} MHz {preset.mode})?\n\n"
+            "This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+        self._store.delete(row)
+        self._refresh()
+
+    def _move_selected(self, direction: int) -> None:
+        row = self._selected_row()
+        if row < 0:
+            return
+        target = row + direction
+        if target < 0 or target >= self._store.count:
+            return
+        self._store.move(row, target)
+        self._refresh()
+        # Re-select the moved row at its new position.
+        self._table.selectRow(target)
+
+    def _on_clear_all(self) -> None:
+        from PySide6.QtWidgets import (
+            QInputDialog, QMessageBox,
+        )
+        # Two-step confirm: first Yes/No, then "type CLEAR" so the
+        # operator can't accidentally wipe their bank.
+        confirm = QMessageBox.question(
+            self, "Clear ALL presets?",
+            f"Permanently delete ALL {self._store.count} memory "
+            "presets?\n\nThis cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+        text, ok = QInputDialog.getText(
+            self, "Type CLEAR to confirm",
+            "Type CLEAR (uppercase) to confirm the wipe, or "
+            "cancel to keep your presets:")
+        if not ok or text.strip() != "CLEAR":
+            return
+        self._store.clear()
+        self._refresh()
+
+    def _on_export_csv(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export memory presets",
+            "lyra_memory_presets.csv",
+            "CSV files (*.csv);;All files (*)")
+        if not path:
+            return
+        try:
+            self._write_csv(path)
+        except OSError as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "Export failed", f"Could not write '{path}': {e}")
+            return
+        try:
+            self.radio.status_message.emit(
+                f"Exported {self._store.count} presets to "
+                f"{path}", 2500)
+        except Exception:
+            pass
+
+    def _write_csv(self, path: str) -> None:
+        import csv
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(
+                ["Name", "Freq_Hz", "Mode", "RX_BW_Hz", "Notes"])
+            for p in self._store.list():
+                w.writerow([
+                    p.name,
+                    p.freq_hz,
+                    p.mode,
+                    p.rx_bw_hz if p.rx_bw_hz is not None else "",
+                    p.notes,
+                ])
+
+    def _on_import_csv(self) -> None:
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import memory presets",
+            "",
+            "CSV files (*.csv);;All files (*)")
+        if not path:
+            return
+        try:
+            new_presets, errors = self._parse_csv(path)
+        except OSError as e:
+            QMessageBox.warning(
+                self, "Import failed",
+                f"Could not read '{path}': {e}")
+            return
+        if errors:
+            details = "\n".join(errors[:10])
+            extra = (f"\n... and {len(errors) - 10} more"
+                     if len(errors) > 10 else "")
+            QMessageBox.warning(
+                self, "Import warnings",
+                f"{len(errors)} row(s) skipped due to errors:\n\n"
+                f"{details}{extra}")
+        if not new_presets:
+            QMessageBox.information(
+                self, "Nothing imported",
+                "No valid presets found in the file.")
+            return
+        # Merge or replace prompt.
+        action = self._ask_merge_or_replace(len(new_presets))
+        if action == "cancel":
+            return
+        from lyra.memory import MemoryStore
+        cap = MemoryStore.MAX_PRESETS
+        if action == "replace":
+            self._store.clear()
+        # Cap-aware merge.
+        added = 0
+        for p in new_presets:
+            if self._store.at_max:
+                break
+            existing_idx = self._store.find_by_name(p.name)
+            if existing_idx is not None:
+                # Overwrite same-name on import.  Operator opted
+                # in by selecting the file.
+                self._store.update(existing_idx, p)
+            else:
+                self._store.add(p)
+            added += 1
+        self._refresh()
+        if self._store.at_max and len(new_presets) > added:
+            QMessageBox.information(
+                self, "Imported up to bank limit",
+                f"Imported {added} of {len(new_presets)} presets "
+                f"(bank capped at {cap}).")
+        try:
+            self.radio.status_message.emit(
+                f"Imported {added} presets from {path}", 2500)
+        except Exception:
+            pass
+
+    def _parse_csv(self, path: str):
+        """Parse a CSV file into a list of MemoryPreset.  Returns
+        (presets, errors) where errors is a list of human-readable
+        messages for malformed rows."""
+        import csv
+        from lyra.memory import MemoryPreset
+        presets = []
+        errors = []
+        with open(path, "r", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for line_no, row in enumerate(reader, start=2):
+                try:
+                    name = (row.get("Name") or "").strip()
+                    if not name:
+                        errors.append(
+                            f"line {line_no}: missing Name")
+                        continue
+                    freq_str = (row.get("Freq_Hz") or "").strip()
+                    if not freq_str:
+                        errors.append(
+                            f"line {line_no}: missing Freq_Hz")
+                        continue
+                    freq = int(float(freq_str))
+                    mode = (row.get("Mode") or "").strip().upper()
+                    if not mode:
+                        errors.append(
+                            f"line {line_no}: missing Mode")
+                        continue
+                    rx_bw_raw = (row.get("RX_BW_Hz") or "").strip()
+                    rx_bw = int(rx_bw_raw) if rx_bw_raw else None
+                    notes = (row.get("Notes") or "").strip()
+                    presets.append(MemoryPreset(
+                        name=name, freq_hz=freq, mode=mode,
+                        rx_bw_hz=rx_bw, notes=notes))
+                except (ValueError, TypeError) as e:
+                    errors.append(
+                        f"line {line_no}: malformed -- {e}")
+                    continue
+        return presets, errors
+
+    def _ask_merge_or_replace(self, n_new: int) -> str:
+        """Three-button dialog asking whether to MERGE the imported
+        presets into the existing bank or REPLACE the bank entirely.
+        Returns 'merge', 'replace', or 'cancel'."""
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox(self)
+        box.setWindowTitle("Import memory presets")
+        box.setIcon(QMessageBox.Question)
+        existing = self._store.count
+        box.setText(
+            f"Found {n_new} preset(s) in the file.\n"
+            f"Current bank has {existing} preset(s).\n\n"
+            "How do you want to import?")
+        merge_btn = box.addButton(
+            "Merge (keep existing)", QMessageBox.AcceptRole)
+        replace_btn = box.addButton(
+            "Replace (clear existing first)",
+            QMessageBox.DestructiveRole)
+        cancel_btn = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(merge_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is replace_btn:
+            return "replace"
+        if clicked is cancel_btn:
+            return "cancel"
+        return "merge"
+
+    # ── Edit dialog ──────────────────────────────────────────────
+
+    def _edit_dialog(self, preset):
+        """Show edit dialog pre-populated from ``preset``.  Returns
+        the new MemoryPreset on Save, or None on Cancel."""
+        from PySide6.QtWidgets import (
+            QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
+            QSpinBox,
+        )
+        from lyra.memory import MemoryPreset, MemoryStore
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Edit '{preset.name}'")
+        form = QFormLayout(dlg)
+        name_edit = QLineEdit(preset.name, dlg)
+        name_edit.setMaxLength(MemoryStore.MAX_NAME_LEN)
+        form.addRow("Name:", name_edit)
+        # Frequency in Hz, displayed in MHz for readability.
+        freq_edit = QLineEdit(f"{preset.freq_hz / 1e6:.6f}", dlg)
+        form.addRow("Frequency (MHz):", freq_edit)
+        mode_edit = QLineEdit(preset.mode, dlg)
+        form.addRow("Mode:", mode_edit)
+        # Bandwidth: 0 / blank means "use mode default".
+        bw_edit = QLineEdit(
+            str(preset.rx_bw_hz) if preset.rx_bw_hz is not None else "",
+            dlg)
+        form.addRow("Bandwidth Hz (blank = default):", bw_edit)
+        notes_edit = QLineEdit(preset.notes, dlg)
+        notes_edit.setMaxLength(MemoryStore.MAX_NOTES_LEN)
+        form.addRow("Notes:", notes_edit)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel,
+            parent=dlg)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        form.addRow(btns)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        # Validate.
+        try:
+            new_name = name_edit.text().strip()
+            if not new_name:
+                raise ValueError("name is required")
+            new_freq = int(float(freq_edit.text().strip()) * 1e6)
+            new_mode = mode_edit.text().strip().upper()
+            if not new_mode:
+                raise ValueError("mode is required")
+            bw_text = bw_edit.text().strip()
+            new_bw = int(bw_text) if bw_text else None
+            new_notes = notes_edit.text().strip()
+        except (ValueError, TypeError) as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "Invalid input", f"Edit rejected: {e}")
+            return None
+        return MemoryPreset(
+            name=new_name, freq_hz=new_freq, mode=new_mode,
+            rx_bw_hz=new_bw, notes=new_notes)
+
+
 class SettingsDialog(QDialog):
     """App-wide tabbed settings — accessed from the main toolbar (⚙).
 
@@ -4402,11 +4926,15 @@ class SettingsDialog(QDialog):
         self.tab_visuals = VisualsSettingsTab(radio)
         self.tabs.addTab(self.tab_visuals, "Visuals")
 
-        for name in ("Keyer", "Bands"):
-            placeholder = QLabel(f"{name} settings — coming soon.")
-            placeholder.setAlignment(Qt.AlignCenter)
-            placeholder.setStyleSheet("color: #5a7080; padding: 40px;")
-            self.tabs.addTab(placeholder, name)
+        # Keyer placeholder still pending.
+        keyer_placeholder = QLabel("Keyer settings — coming soon.")
+        keyer_placeholder.setAlignment(Qt.AlignCenter)
+        keyer_placeholder.setStyleSheet("color: #5a7080; padding: 40px;")
+        self.tabs.addTab(keyer_placeholder, "Keyer")
+        # v0.0.9: Bands tab is now real -- hosts Memory + Time
+        # Stations + SW Database sub-tabs.
+        self.tab_bands = BandsSettingsTab(radio)
+        self.tabs.addTab(self.tab_bands, "Bands")
 
         # Phase 4 — Weather Alerts.  Lives last in the tab order
         # because it's an opt-in convenience feature (gated by an

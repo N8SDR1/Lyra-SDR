@@ -4991,14 +4991,48 @@ class BandPanel(GlassPanel):
                         self._delete_memory_with_confirm(idx))
                 del_sub.addAction(del_act)
         menu.addSeparator()
-        # Step 3b will wire this to open Settings → Bands →
-        # Memory tab.  For now it's a placeholder hint.
+        # v0.0.9 Step 3b: opens Settings → Bands → Memory for the
+        # full table-view management UI (edit / delete / reorder /
+        # import / export to CSV).
         manage_act = QAction(
-            "Manage presets… (full table view coming in Step 3b)",
-            menu)
-        manage_act.setEnabled(False)
+            "Manage presets…  (Settings → Bands → Memory)", menu)
+        manage_act.triggered.connect(self._open_memory_settings)
         menu.addAction(manage_act)
         menu.exec(anchor.mapToGlobal(pos))
+
+    def _open_memory_settings(self) -> None:
+        """Open the Settings dialog and switch to Bands → Memory.
+        Walks up the widget hierarchy looking for the main window
+        which owns the Settings-open action."""
+        # Use Lyra's existing Settings open path -- main window has
+        # an action wired up.  We emit through a signal-style path
+        # by walking up parents to find the MainWindow's
+        # _open_settings action.
+        try:
+            from PySide6.QtWidgets import QApplication, QDialog
+            # Find the main window via QApplication.
+            mw = None
+            for w in QApplication.topLevelWidgets():
+                if w.metaObject().className().endswith("MainWindow"):
+                    mw = w
+                    break
+            if mw is None or not hasattr(mw, "_open_settings"):
+                return
+            # Show the dialog.  _open_settings is the existing
+            # MainWindow handler that constructs the
+            # SettingsDialog.
+            mw._open_settings()
+            # After it's open, find the dialog and ask it to show
+            # the Bands -> Memory subtab.
+            for w in QApplication.topLevelWidgets():
+                if w.metaObject().className() == "SettingsDialog":
+                    if hasattr(w, "tab_bands"):
+                        w.show_tab("Bands")
+                        if hasattr(w.tab_bands, "show_memory_subtab"):
+                            w.tab_bands.show_memory_subtab()
+                    break
+        except Exception as e:
+            print(f"[Mem] open settings failed: {e}")
 
     def _recall_memory(self, idx: int) -> None:
         """Recall a memory preset by index: tune to its freq + mode.
