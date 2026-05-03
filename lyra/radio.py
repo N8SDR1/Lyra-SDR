@@ -636,7 +636,30 @@ class Radio(QObject):
         # ── Runtime ───────────────────────────────────────────────────
         self._stream: Optional[HL2Stream] = None
         self._audio_sink = NullSink()
-        self._audio_block = 2048
+        # Audio block size — channel.process produces audio in chunks
+        # of this many samples per inner-loop iteration.  v0.0.9.1
+        # reduced this from 2048 to 512 to fix audio-sink underrun
+        # symptoms.  Operator data: with block_size=2048, worker
+        # produces 43 ms bursts, deque oscillates by ±2050 samples
+        # between bursts -- the AK4951 EP2 builder polls every 2.6 ms
+        # and consumes 2050 samples in that 43 ms gap.  Any small
+        # producer jitter (worker scheduling, FFT compute, GC) tipped
+        # the deque into empty -> zero-padding -> click.  Operator
+        # measured ~1.5 underruns/sec sustained even with 100 ms
+        # pre-fill in v0.0.9.1.
+        #
+        # block_size=512 -> 10.7 ms bursts -> deque oscillates by
+        # ±500 samples (small fraction of the 4800-sample pre-fill).
+        # Worker has plenty of margin for any jitter up to ~85 ms
+        # before approaching empty.  Cost: ~4× more inner-loop
+        # iterations per second (4× worker overhead, but 2.6 % CPU
+        # base on the operator's machine -> projected <12 % under
+        # load -- well within budget).  Latency: 2048 -> 512 reduces
+        # audio-block latency from 43 ms to 11 ms.  Net latency to
+        # speaker drops slightly.  No DSP module depends on a
+        # specific block_size (NR FFTs use their own internal frame
+        # size; demods are length-agnostic).
+        self._audio_block = 512
         self._tone_phase = 0.0
 
         # Stream-gap tracking — every audio block compares stream's
