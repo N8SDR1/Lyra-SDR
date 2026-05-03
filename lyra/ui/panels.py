@@ -4495,8 +4495,178 @@ class BandPanel(GlassPanel):
             btn.clicked.connect(lambda _c, slot=g.name: self._on_gen_clicked(slot))
             self._gen_buttons[g.name] = btn
             row.addWidget(btn)
+        # ── TIME button (v0.0.9 Step 1) ──────────────────────────────
+        # HF time-station cycle.  Slotted right after GEN3 in the
+        # OTHER row.  Plain click cycles through (station, freq)
+        # entries in operator-country-priority order.  Right-click
+        # opens a full station list grouped by country.  Each click
+        # also sets the right mode (most are AM, CHU is USB).
+        # Cycle index persists across launches via QSettings under
+        # bands/time_cycle_idx.  See lyra/data/time_stations.py for
+        # the static data.
+        time_btn = self._make_band_button("TIME")
+        time_btn.setCheckable(False)  # cycle button -- never "active"
+        time_btn.setFixedWidth(self.BUTTON_WIDTH + 12)
+        time_btn.setToolTip(
+            "TIME — HF time-signal station cycle.\n"
+            "Click: tune to next station/frequency (WWV, CHU, BPM,\n"
+            "RWM, etc.).  Cycle order prioritizes stations near your\n"
+            "configured callsign's country.\n"
+            "Right-click: open full station list and pick directly.")
+        time_btn.clicked.connect(self._on_time_clicked)
+        from PySide6.QtCore import Qt as _Qt
+        time_btn.setContextMenuPolicy(_Qt.CustomContextMenu)
+        time_btn.customContextMenuRequested.connect(
+            lambda pos: self._show_time_menu(time_btn, pos))
+        self._time_button = time_btn
+        row.addWidget(time_btn)
         row.addStretch(1)
         return row
+
+    def _on_time_clicked(self) -> None:
+        """Cycle to the next time-station / frequency.
+
+        Cycle index persists via QSettings.  Country-aware ordering
+        derives from Radio.operator_country_iso (callsign-based
+        DXCC prefix lookup).  Tuning emits the right mode (AM for
+        most stations, USB for CHU).  Status-bar message confirms
+        what was tuned to.
+        """
+        from PySide6.QtCore import QSettings as _QS
+        from lyra.data.time_stations import (
+            order_stations, cycle_entry, total_cycle_length)
+        country = ""
+        try:
+            country = self.radio.operator_country_iso
+        except AttributeError:
+            country = ""
+        stations = order_stations(country)
+        total = total_cycle_length(stations)
+        if total == 0:
+            return  # no stations defined; should never happen
+        qs = _QS("N8SDR", "Lyra")
+        idx = int(qs.value("bands/time_cycle_idx", 0) or 0)
+        # Resolve current entry, then advance cycle for next press.
+        # Resolving with the OLD idx and advancing means the very
+        # first click after install lands on entry 0 (operator's
+        # most-likely-relevant station's lowest freq).
+        station, freq_khz = cycle_entry(stations, idx)
+        next_idx = (idx + 1) % total
+        qs.setValue("bands/time_cycle_idx", next_idx)
+        # Tune.  Mode set first so the demod is right when the
+        # freq lands.  Country/country-distance not used here for
+        # display reasons -- the simple status-bar message is
+        # plenty.
+        self.radio.set_mode(station.mode)
+        self.radio.set_freq_hz(freq_khz * 1000)
+        # Status-bar confirmation -- which station + freq.
+        try:
+            self.radio.status_message.emit(
+                f"TIME: {station.id} on {freq_khz/1000:.3f} MHz "
+                f"({station.mode}) -- {station.name}",
+                3000)
+        except Exception:
+            pass
+        # Mark active GEN clear -- we're not on a GEN slot anymore.
+        self._active_gen = None
+
+    def _show_time_menu(self, anchor_btn, pos) -> None:
+        """Right-click popup: full station list, grouped by country,
+        with each frequency selectable directly.  Lets the operator
+        jump to a specific station+freq without cycling through
+        intermediates.
+        """
+        from PySide6.QtCore import QSettings as _QS
+        from PySide6.QtWidgets import QMenu
+        from lyra.data.time_stations import (
+            order_stations, total_cycle_length)
+        country = ""
+        try:
+            country = self.radio.operator_country_iso
+        except AttributeError:
+            country = ""
+        stations = order_stations(country)
+        menu = QMenu(self)
+        # Header: indicate ordering basis.
+        if country:
+            hdr = QAction(
+                f"Station list  (priority: {country})", menu)
+        else:
+            hdr = QAction("Station list", menu)
+        hdr.setEnabled(False)
+        menu.addAction(hdr)
+        menu.addSeparator()
+        for s in stations:
+            sub = menu.addMenu(f"{s.id}  —  {s.name}")
+            if s.notes:
+                hint = QAction(s.notes, sub)
+                hint.setEnabled(False)
+                sub.addAction(hint)
+                sub.addSeparator()
+            for f_khz in s.freqs_khz:
+                act = QAction(
+                    f"{f_khz/1000:.3f} MHz  ({s.mode})", sub)
+                act.triggered.connect(
+                    lambda _c=False, st=s, fk=f_khz:
+                        self._tune_time_station(st, fk))
+                sub.addAction(act)
+        menu.addSeparator()
+        # Reset cycle index for those who like to start fresh.
+        reset_act = QAction("Reset cycle to first entry", menu)
+        reset_act.triggered.connect(self._reset_time_cycle)
+        menu.addAction(reset_act)
+        menu.exec(anchor_btn.mapToGlobal(pos))
+
+    def _tune_time_station(self, station, freq_khz: int) -> None:
+        """Tune directly to a specific time station + frequency from
+        the right-click menu.  Updates the cycle index so the next
+        plain click follows on from this position."""
+        from PySide6.QtCore import QSettings as _QS
+        from lyra.data.time_stations import order_stations
+        country = ""
+        try:
+            country = self.radio.operator_country_iso
+        except AttributeError:
+            country = ""
+        stations = order_stations(country)
+        # Find the absolute cycle index of the chosen (station, freq)
+        # so a subsequent plain click cycles correctly.
+        running = 0
+        new_idx = 0
+        for s in stations:
+            if s.id == station.id:
+                try:
+                    new_idx = running + s.freqs_khz.index(freq_khz)
+                except ValueError:
+                    new_idx = running
+                break
+            running += len(s.freqs_khz)
+        qs = _QS("N8SDR", "Lyra")
+        # Store CURRENT entry's index + 1 so next click advances past.
+        qs.setValue("bands/time_cycle_idx", new_idx + 1)
+        self.radio.set_mode(station.mode)
+        self.radio.set_freq_hz(freq_khz * 1000)
+        try:
+            self.radio.status_message.emit(
+                f"TIME: {station.id} on {freq_khz/1000:.3f} MHz "
+                f"({station.mode}) -- {station.name}",
+                3000)
+        except Exception:
+            pass
+        self._active_gen = None
+
+    def _reset_time_cycle(self) -> None:
+        """Reset the time-station cycle index to 0.  Operator's first
+        click after this lands on the highest-priority station's
+        lowest frequency."""
+        from PySide6.QtCore import QSettings as _QS
+        qs = _QS("N8SDR", "Lyra")
+        qs.setValue("bands/time_cycle_idx", 0)
+        try:
+            self.radio.status_message.emit(
+                "TIME cycle reset", 1500)
+        except Exception:
+            pass
 
     def _on_band_clicked(self, band):
         # Per-band memory: restore if previously visited, else use the

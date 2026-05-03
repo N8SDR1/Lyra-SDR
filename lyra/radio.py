@@ -1684,6 +1684,42 @@ class Radio(QObject):
         return self._operator_lat_manual
 
     @property
+    def operator_country_iso(self) -> str:
+        """Operator's country as ISO-3166-1 alpha-2 ('US', 'CA',
+        'DE', etc.).  Derived from the configured callsign via the
+        DXCC prefix table (lyra/ham/dxcc.py + cty.dat).  Returns
+        empty string when no callsign is set or the prefix isn't
+        in the DXCC table.
+
+        Used for features that benefit from operator-location
+        priority (time-station cycle ordering, EiBi-overlay
+        regional defaults, etc.) without requiring a separate
+        Settings field.
+
+        DxccLookup is cached on Radio so repeated property reads
+        don't re-parse cty.dat each time.
+        """
+        if not self._callsign:
+            return ""
+        try:
+            from pathlib import Path
+            from lyra.ham.dxcc import DxccLookup
+            from lyra.ham.country_iso import COUNTRY_TO_ISO
+            import lyra
+            dxcc = getattr(self, "_dxcc_lookup", None)
+            if dxcc is None:
+                # cty.dat ships alongside the package under <root>/data/.
+                # Use Lyra.resource_root() so the path is correct in
+                # both the dev tree and the PyInstaller-frozen bundle.
+                cty_path = Path(lyra.resource_root()) / "data" / "cty.dat"
+                dxcc = DxccLookup(cty_path)
+                self._dxcc_lookup = dxcc
+            country = dxcc.country_of(self._callsign)
+            return COUNTRY_TO_ISO.get(country, "") if country else ""
+        except Exception:
+            return ""
+
+    @property
     def operator_lon(self) -> Optional[float]:
         """Effective operator longitude — see operator_lat for the
         grid-vs-override resolution."""
