@@ -1,6 +1,6 @@
 # Contributor Onboarding Discussion — 2026-05-03
 
-**Forwarded to:** *(prospective contributor's name / callsign)*
+**Forwarded to:** Brent Crier (N9BC) — <https://www.qrz.com/db/N9BC>
 **From:** Rick Langford (N8SDR), project owner
 **Re:** Joining the Lyra-SDR project as a contributor
 
@@ -294,7 +294,7 @@ Reply with what needs talking through. Common candidates:
 **Branch C: "Not right now."**
 Door stays open. We'll catch up later.
 
-Whatever you decide — thanks for considering it.
+Whatever you decide — thanks for considering it, Brent.
 
 73,
 Rick (N8SDR)

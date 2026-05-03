@@ -203,4 +203,5 @@ What it does NOT change:
 For the canonical GPL v3 text, see `LICENSE` in this repository or
 <https://www.gnu.org/licenses/gpl-3.0.html>.
 
-© 2026 Rick Langford (N8SDR)
+© 2026 Rick Langford (N8SDR), Brent Crier (N9BC),
+and Lyra-SDR contributors — see [CONTRIBUTORS.md](./CONTRIBUTORS.md)

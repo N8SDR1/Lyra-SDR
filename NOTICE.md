@@ -105,6 +105,20 @@ clean-room implementation referencing only documentation.
 Past MIT-licensed releases remain available under their original
 terms; the relicense is forward-only.
 
+## Authors and contributors
+
+Lyra-SDR is jointly developed by amateur radio operators.  Each
+contributor retains copyright on their own contributions and
+licenses them to the project under the GPL v3+ on submission.
+
+- Rick Langford (N8SDR) — project lead, original author, all work
+  through v0.0.9
+- Brent Crier (N9BC) — joined 2026-05-03 during v0.0.9.1 testing
+
+See `CONTRIBUTORS.md` at the project root for the full active
+contributor roster and onboarding history.
+
 ---
 
-Last updated: 2026-05-01 (v0.0.6 release — WDSP integration)
+Last updated: 2026-05-03 (v0.0.9.1 — audio architecture fix +
+N9BC onboarding)

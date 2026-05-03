@@ -70,7 +70,8 @@ The short legal summary that goes on top of that text:
 ```
 Lyra-SDR — Qt6 SDR transceiver for Hermes Lite 2 / 2+
 
-Copyright (C) 2026 Rick Langford (N8SDR)
+Copyright (C) 2026 Rick Langford (N8SDR), Brent Crier (N9BC),
+                   and Lyra-SDR contributors (see CONTRIBUTORS.md)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by

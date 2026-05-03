@@ -81,7 +81,13 @@ is kept current.
 
 ## Who's behind Lyra
 
-Lyra is written by **Rick Langford (N8SDR)**.
+Lyra was started by **Rick Langford (N8SDR)** and is now jointly
+developed with **Brent Crier (N9BC)** as of v0.0.9.1.  Both are
+licensed amateur radio operators who actually use the rigs Lyra
+targets.
+
+See `CONTRIBUTORS.md` at the project root for the full contributor
+list.
 
 Versions through v0.0.5 are released under the MIT License.
 Starting with v0.0.6, Lyra is released under the **GNU General
