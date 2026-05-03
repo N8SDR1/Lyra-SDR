@@ -805,14 +805,27 @@ class PythonRxChannel(DspChannel):
             # Channel produces no audio for these — Radio handles them.
             return np.zeros(0, dtype=np.float32)
 
+        # Diagnostic — IQ amplitude at channel entry (pre-NB,
+        # pre-decimate).  Stashed for the inner-loop print so we can
+        # see whether the IQ arriving here matches what the spectrum
+        # display sees, or whether something earlier collapses it.
+        # Cheap when LYRA_APF_DEBUG isn't set (single env-var lookup).
+        import os as _dbg_os
+        if _dbg_os.environ.get("LYRA_APF_DEBUG") and iq.size:
+            self._dbg_last_raw_iq_max = float(np.max(np.abs(iq)))
+
         # ── Impulse blanker (NB, Phase 3.D #2) ────────────────────
         # Runs PRE-decimation so impulses are still narrow time-
         # domain spikes that the detect-then-replace algorithm can
         # surgically blank.  Bypass-fast when NB is disabled (the
         # default).
         iq = self._nb.process(iq)
+        if _dbg_os.environ.get("LYRA_APF_DEBUG") and iq.size:
+            self._dbg_last_nb_iq_max = float(np.max(np.abs(iq)))
 
         iq_48k = self._decimate_to_48k(iq)
+        if _dbg_os.environ.get("LYRA_APF_DEBUG") and iq_48k.size:
+            self._dbg_last_dec_iq_max = float(np.max(np.abs(iq_48k)))
         if iq_48k.size == 0:
             return np.zeros(0, dtype=np.float32)
 
@@ -838,12 +851,12 @@ class PythonRxChannel(DspChannel):
             )
             del self._audio_buf[:block]
             try:
-                # Diagnostic — v0.0.9.1 APF investigation.  When env
-                # var LYRA_APF_DEBUG=1, log magnitude at each stage
-                # so we can see exactly where the signal goes to zero
-                # in the chain.  Rate-limited (every 50th iteration ≈
-                # 1 Hz) and gated on the env var so cost is one
-                # attribute lookup when off.
+                # Diagnostic — v0.0.9.1 APF/IQ investigation.  When
+                # env var LYRA_APF_DEBUG=1, log magnitude at each
+                # stage so we can see exactly where the signal goes
+                # to zero in the chain.  Rate-limited (every 50th
+                # iteration ≈ 1 Hz) and gated on the env var so cost
+                # is one attribute lookup when off.
                 import os as _dbg_os
                 _dbg = _dbg_os.environ.get("LYRA_APF_DEBUG")
                 if _dbg:
@@ -852,7 +865,19 @@ class PythonRxChannel(DspChannel):
                     _dbg = (self._dbg_chan_iter % 50) == 0
                 if _dbg:
                     iq_mag = float(np.max(np.abs(chunk)))
+                    # Also peek at the channel's input IQ amplitude
+                    # (pre-NB / pre-decimate / pre-buffer).  Stored
+                    # by process() each call -- see entry-point.
+                    raw_max = getattr(
+                        self, "_dbg_last_raw_iq_max", -1.0)
+                    nb_max = getattr(
+                        self, "_dbg_last_nb_iq_max", -1.0)
+                    dec_max = getattr(
+                        self, "_dbg_last_dec_iq_max", -1.0)
                     print(f"[CHAN] mode={mode} block={block} "
+                          f"raw_iq_max={raw_max:.4f} "
+                          f"after_NB={nb_max:.4f} "
+                          f"after_dec={dec_max:.4f} "
                           f"iq_chunk_max={iq_mag:.4f}")
                 if self._notch_enabled:
                     for n in self._notches:
