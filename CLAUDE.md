@@ -16,15 +16,21 @@ When in doubt, consult:
 - `docs/architecture/rx2_research_notes.md` — first-pass Thetis
   research (some content superseded by the playbook; cross-reference).
 
-**Version-numbering note (2026-05-02):** the audio + notch +
-click-tune work originally scoped as v0.0.7.1-.4 patch tags was
-rolled up and released as **v0.0.8 "Quiet & Polish Pass"** (since
-cumulatively it was feature-level scope, not patch).  All planned
-work shifted by one minor:
-- **v0.0.8** = Quiet & Polish Pass (CURRENT — just shipped)
-- **v0.0.9** = RX2 (was originally v0.0.8)
-- **v0.1**   = TX (was originally v0.0.9)
-- **v0.2**   = PureSignal (was originally v0.1)
+**Version-numbering note (2026-05-03):** version numbering has
+shifted twice during the v0.0.7 → v0.0.9 cycle.  Current state:
+
+- **v0.0.8** "Quiet & Polish Pass" — audio quiet pass + notch v2
+  + click-to-tune (shipped 2026-05-02).
+- **v0.0.8.1** — auto-update notification fix (2026-05-02).
+- **v0.0.9** "Memory & Stations" — operator-driven pre-RX2
+  polish: TIME button, GEN customization, Memory bank, EiBi
+  shortwave broadcaster overlay (shipped 2026-05-02).
+- **v0.1**   = RX2 (was originally v0.0.9; shifted when the
+  Memory & Stations batch landed).
+- **v0.2**   = TX.
+- **v0.3**   = PureSignal.
+- **v0.4**   = Multi-radio refactor + Protocol 2 + ANAN family
+  (operator decision 2026-05-03; see §7 + §6.7).
 
 References to the old numbering in commit history / older doc
 revisions are historical and intentionally not back-edited.  Doc
@@ -37,8 +43,15 @@ content below has been mass-renumbered to the new scheme.
 **Lyra-SDR** is a Qt6 / PySide6 desktop SDR transceiver for the Hermes
 Lite 2 / 2+, written in Python.  Native HPSDR Protocol 1.
 
-- **Target hardware**: Hermes Lite 2 / 2+ ONLY.  We do not support
-  ANAN / Orion / Hermes / Hermes II.  Don't add code paths for them.
+- **Target hardware (current, v0.0.x → v0.3)**: Hermes Lite 2 / 2+
+  ONLY.  Don't add ANAN / Orion / Hermes / Hermes II code paths
+  during this phase — but **do** write hardware-agnostic code
+  wherever feasible (see §6.7).
+- **Future hardware support (v0.4)**: Protocol 2 + ANAN family
+  (G2 / G2-1K / 7000DLE / 8000) is on the long-term roadmap per
+  operator decision 2026-05-03.  v0.1 / v0.2 / v0.3 stay
+  HL2-only by scope, but the hardware-abstraction discipline in
+  §6.7 prevents painting into a corner.
 - **Author**: Rick Langford (N8SDR).  Memory note: nearby AM
   broadcaster causes 5th-harmonic interference on 7.250 MHz; factors
   into AGC / NR / notch defaults.
@@ -332,9 +345,76 @@ States: RX → MOX_TX (UI button or CAT) → CW_TX (key down) → TUN_TX
 - State machine in `lyra/radio/ptt.py`.  Qt signal `mox_changed
   (bool)` for UI.
 
+### 6.7 Hardware abstraction discipline (for v0.4 ANAN work)
+
+Operator decision 2026-05-03: ANAN family + Protocol 2 support
+is planned for v0.4.  v0.1-v0.3 stay HL2-only by scope, but the
+following five disciplines apply during HL2 work to avoid an
+expensive retrofit later.  Future Claude sessions: enforce these
+on every PR.
+
+1. **`nddc` is a runtime value, not a magic constant.**  Read
+   from `radio.protocol.nddc`, never hard-code `4`.  P2 ANAN
+   models have varying DDC counts (G2 = 4, 7000DLE = 7).  The
+   abstraction is free if added now; expensive to retrofit.
+
+2. **`Radio` facade is hardware-agnostic.**  Public methods
+   accept logical units (Hz, dB, mode names).  Hardware-specific
+   conversions (e.g. HL2's TX attenuator -28..+31 dB ↔ a generic
+   "TX drive" range) live inside `lyra/protocol/p1_hl2.py` and
+   eventually `p2_anan.py`.  Smell test: if a method name
+   contains "hl2", it's in the wrong layer.
+
+3. **Don't kill the sounddevice audio path permanently.**  §6.1
+   says "no host-side sounddevice path for v0.0.9" — that's right
+   for HL2 (AK4951 is canonical) but wrong as a permanent
+   architectural choice.  ANAN audio comes back via P2 over
+   Ethernet to the host; sounddevice (or sibling) renders it.
+   `AudioSink` interface stays clean so re-adding sounddevice is
+   one new file in `lyra/audio/`, not a refactor.
+
+4. **PureSignal posture conditional on radio capabilities.**
+   HL2 PS = hardware mod required (operator self-attestation
+   per §6.5).  ANAN G2 PS = built into stock gateware.  v0.3
+   should branch on `radio.capabilities.puresignal_requires_mod`,
+   not hardcode the attestation checkbox into the UI.  The
+   capabilities object is a per-radio-class struct populated in
+   the protocol module.
+
+5. **TX hardware quirks live in protocol module, not DSP.**  HL2:
+   TX attn -28..+31 dB, CWX PTT bit at I-LSB bit 3.  ANAN G2: TX
+   attn 0..31 dB, standard CWX bit positions.  None of this leaks
+   into `lyra/dsp/tx_*.py` — DSP produces baseband I/Q at the
+   rate the protocol layer asks for, full stop.  All hardware
+   quirks belong in `lyra/protocol/p1_hl2.py` (today) and
+   `lyra/protocol/p2_anan.py` (v0.4).
+
+When v0.4 starts, the protocol module gets split:
+
+```
+lyra/protocol/
+├── __init__.py
+├── stream.py            # current — rename to p1.py + thin shim
+├── p1.py                # NEW — HPSDR Protocol 1 base
+├── p1_hl2.py            # NEW — HL2-specific quirks (mostly today's stream.py)
+├── p2.py                # NEW v0.4 — HPSDR Protocol 2 base
+├── p2_anan.py           # NEW v0.4 — ANAN-specific quirks
+└── capabilities.py      # NEW v0.4 — radio-class capability struct
+```
+
+The §3 "HL2 protocol critical facts" reference stays under that
+heading; v0.4 adds §3b "ANAN P2 critical facts."
+
 ## 7. Phased delivery roadmap
 
-### v0.0.9 — RX2
+### v0.0.9 — Memory & Stations (SHIPPED 2026-05-02)
+
+Pre-RX2 polish release.  TIME button (HF time-station cycle),
+GEN1/2/3 customization, 20-slot Memory bank with CSV import/export,
+EiBi shortwave broadcaster overlay with auto-detection.  See
+`CHANGELOG.md` [0.0.9].
+
+### v0.1 — RX2 (next)
 
 - Phase 0: multi-channel refactor (no behavior change).
 - Phase 1: protocol RX2 enablement (nddc=4, EP6 parser rewrite).
@@ -344,21 +424,47 @@ States: RX → MOX_TX (UI button or CAT) → CW_TX (key down) → TUN_TX
 - Phase 5: polish, persistence, docs.
 - Rolling pre-releases per phase.
 
-### v0.1 — TX (post-RX2)
+### v0.2 — TX (post-RX2)
 
-- v0.1.0: SSB only (USB/LSB) + PTT + drive level + fwd/rev power.
-- v0.1.1: CW (with internal keyer + sidetone, CWX PTT bit), AM,
+- v0.2.0: SSB only (USB/LSB) + PTT + drive level + fwd/rev power.
+- v0.2.1: CW (with internal keyer + sidetone, CWX PTT bit), AM,
   compressor port from WDSP.
-- v0.1.2: FM, CFC.
-- v0.1.3: Leveler, equalizer.
+- v0.2.2: FM, CFC.
+- v0.2.3: Leveler, equalizer.
 
-### v0.2 — PureSignal
+### v0.3 — PureSignal
 
 - Port `calcc.c` + `iqc.c` + `xbuilder` + `delay.c`.
 - New `PSDialog` UI modeled on Thetis's `PSForm.cs`.
 - Auto-attenuator state machine (HL2-specific bounds).
 - Coefficient persistence to `~/.config/lyra/ps_corrections/`.
-- Operator self-attestation checkbox.
+- Operator self-attestation checkbox (HL2; ANAN G2 won't need it).
+
+### v0.4 — Multi-radio refactor + Protocol 2 + ANAN (long-term)
+
+Operator decision 2026-05-03: ANAN family support is a real
+future direction.  Approach:
+
+- v0.4.0: Protocol module split per §6.7 file layout (no
+  behavior change for HL2 operators).  Capability struct
+  populated for HL2; ANAN capability struct stubbed but inert.
+- v0.4.1: Protocol 2 base implementation (`p2.py`) — discovery,
+  framing, command structure.  Tested against an ANAN G2 unit.
+- v0.4.2: ANAN-specific gateware quirks (`p2_anan.py`) — radio
+  model detection, per-model DDC count, PS-without-attestation,
+  TX attenuator range, audio routing via sounddevice (since ANAN
+  has no AK4951 codec).
+- v0.4.3: Settings UI — radio-model picker (auto-discover then
+  select if multiple).  Documentation pass for ANAN operators.
+- v0.4.4: Polish, second-radio testing on ANAN-7000DLE Mk2 (P1
+  *or* P2 mode), older ANAN-100/200/8000 (P1-only — should
+  already work via the HL2 path with minor capability
+  differences).
+
+The five hardware-abstraction disciplines in §6.7 govern PRs
+during v0.1-v0.3 to keep this milestone tractable.  Without that
+discipline, v0.4 becomes a six-month rewrite; with it, v0.4 is
+a focused two-month push.
 
 ## 8. File path conventions
 
