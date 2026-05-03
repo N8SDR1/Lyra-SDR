@@ -1,6 +1,6 @@
 # Lyra — Qt6 SDR Transceiver for Hermes Lite 2 / 2+
 
-**Current version: 0.0.8 — "Quiet & Polish Pass"**
+**Current version: 0.0.9 — "Memory & Stations"**
 
 Modern PySide6 desktop SDR for Steve Haynal's Hermes Lite 2 and HL2+.
 Native Python HPSDR Protocol 1, TCI v1.9 server, glassy UI with
@@ -34,31 +34,37 @@ display surface follows automatically.
 
 ## Latest release — see [CHANGELOG.md](./CHANGELOG.md)
 
-The current release is **0.0.8 — "Quiet & Polish Pass"**
-(2026-05-02), a substantial DSP + UX upgrade on top of v0.0.7.
-Headline changes:
+The current release is **0.0.9 — "Memory & Stations"**
+(2026-05-02), a pre-RX2 polish release that operators asked for.
+Four feature batches:
 
-- **Audio quiet pass.**  Per-sample AGC envelope (eliminates the
-  loud block-boundary pops), decimator state preservation across
-  freq / mode change (eliminates tune-clicks), AK4951 sink-swap
-  fade-out.  See `docs/architecture/audio_pops_audit.md`.
-- **Notch v2.**  Manual notches finally kill carriers across
-  their visible width.  Operator-controllable depth (default
-  −50 dB), cascade integer (1-4 stages, sharper shoulders),
-  3-preset profile (Normal / Deep / Surgical), saved notch banks
-  ("My 40m setup"), click-free coefficient-swap crossfade.  See
-  `docs/architecture/notch_v2_design.md`.
-- **Click-to-tune v1.**  Shift+click snaps to the nearest spectrum
-  peak; hover preview reticle shows the snap target before commit;
-  click-and-drag pans across a band end-to-end.
-- **NR-stack hardening (post-v0.0.7 work merged in).**  NR2 FFT
-  bump from 256 → 1024 (cleaner voice formants), captured-profile
-  + NR2 fixed (Wiener-from-profile path), DSP chain order corrected
-  (LMS → ANF → SQ → NR → APF), LMS slider rebuilt with real
-  perceptual swing, ANF/SQ vectorized, captured-profile staleness
-  toast.
+- **TIME button (HF time-station cycle).**  Press TIME on the BANDS
+  panel to jump to WWV / WWVH / CHU.  Press again to step through
+  9 time-signal frequencies (2.5, 3.330, 5, 7.850, 10, 14.670, 15,
+  20, 25 MHz) in country-aware order — closest stations to your
+  callsign first.  Mode + filter set automatically.
+- **GEN1 / GEN2 / GEN3 customization.**  Right-click a GEN slot to
+  save your current frequency / mode / filter.  Confirm dialog
+  prevents accidental overwrites.  Defaults are sensible
+  (40m / 20m SSTV / 10m), but every slot is yours to remap.
+- **Memory bank — 20 named presets.**  New **Mem** button next to
+  GEN3 opens a dropdown of named operator memories (e.g. "OMISS Net
+  7.185", "30m beacon").  Add from the dropdown, manage from
+  Settings → Bands → Memory: rename, reorder, delete, CSV
+  import / export.
+- **Shortwave broadcaster overlay (EiBi).**  Lyra now paints
+  station IDs on the panadapter — name + language + target region
+  — for the broadcaster currently on-air at any visible frequency
+  inside the SW broadcast bands (49m through 11m).  Auto-suppressed
+  inside your region's amateur allocations so it doesn't clutter
+  ham bands.  Pulled from the EiBi seasonal CSV with a one-click
+  background updater (auto-update + manual install paths both
+  supported).  Multi-row label stacking when bands get crowded.
 
-For the full version history (0.0.3 → 0.0.8), see
+Plus: tooltip font bumped to 13 pt for readability, Settings dialog
+gained a **Bands** tab containing all of the above.
+
+For the full version history (0.0.3 → 0.0.9), see
 [CHANGELOG.md](./CHANGELOG.md).
 
 See `docs/help/getting-started.md` for the full guided tour or press

@@ -13,6 +13,151 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9] — 2026-05-02 — "Memory & Stations"
+
+Pre-RX2 polish release driven by operator wishlist.  Four feature
+batches plus tooltip + URL-fallback hardening.  No breaking
+changes; QSettings additions for new persistence (memory bank,
+GEN customization, EiBi paths) are forward-only.
+
+The original v0.0.9 milestone was RX2; that work shifted to v0.1
+when the operator captured the memory / time-station / SW-database
+items as gating UX before the RX2 build-out.  RX2 now follows in
+**v0.1**, TX in **v0.2**, PureSignal in **v0.3** — see CLAUDE.md
+§7 for the updated roadmap.
+
+### Added — TIME button (HF time-station cycle)
+
+- **TIME button** on the BANDS panel between **GEN3** and **Mem**.
+  Cycles through 9 HF time / standard-frequency broadcasters:
+  WWV / WWVH on 2.5 / 5 / 10 / 15 / 20 / 25 MHz, CHU on 3.330 /
+  7.850 / 14.670 MHz.  Mode auto-set to AM, filter to 6 kHz —
+  the right defaults for double-sideband AM time signals.
+- **Country-aware ordering.**  Lyra reads operator callsign from
+  Settings → Operator, looks up DXCC country code, and starts the
+  cycle from the closest stations to the operator's country
+  (US calls -> WWV first, Canadian calls -> CHU first, others ->
+  ascending frequency).  First press lands on a station you can
+  most likely hear from your QTH instead of a fading-out daytime
+  signal.
+- New `lyra/data/time_stations.py` with the 9-station table.
+- See `docs/help/time_stations.md` for the operator topic.
+
+### Added — GEN1 / GEN2 / GEN3 customization
+
+- **Right-click GEN1/2/3** to save the current frequency / mode /
+  filter into the slot.  Confirm dialog shows the proposed
+  overwrite ("Save current frequency, mode, and filter to GEN1?
+  7.125.000 USB 2.4 kHz") so accidental clicks don't blow away a
+  saved preset.
+- Defaults retained as starter values — operators are meant to
+  remap to their own habits.
+- Persistence via QSettings under
+  `HKEY_CURRENT_USER\Software\N8SDR\Lyra\GEN\` (one subkey per
+  slot, four leaf values: freq / mode / filter / name).
+
+### Added — Memory bank (Mem button + 20 named presets)
+
+- **New Mem button** on the BANDS panel (right of GEN3 + TIME).
+  Opens a dropdown of named operator memories with name, freq,
+  mode, and filter columns.  Click any entry to recall.
+- **+ Save current as new memory…** entry at the top of the
+  dropdown opens a name-prompt dialog and saves the current radio
+  state with that label.  20-entry cap with friendly explanation
+  when the bank is full.
+- **Manage presets…** entry at the bottom of the dropdown opens
+  Settings → **Bands → Memory** with full CRUD: rename
+  (double-click name column), delete (Del key), reorder (move
+  up/down), CSV import/export, reset to defaults.
+- New `lyra/memory.py` module with the bank model + persistence.
+- New Settings → Bands tab containing **Memory** sub-tab with the
+  full management UI.
+- CSV format: `name,frequency_hz,mode,filter_hz` — UTF-8, one
+  entry per line, header row required, malformed rows skipped
+  with error report.
+- See `docs/help/memory.md` for the operator topic.
+
+### Added — Shortwave broadcaster overlay (EiBi)
+
+- **EiBi station-ID overlay** on both the CPU (QPainter) and GPU
+  (QOpenGL / shader) panadapter widgets.  Renders broadcaster
+  name / language / target region as a stacked label above each
+  on-air signal in the SW broadcast bands (49m, 41m, 31m, 25m,
+  22m, 19m, 16m, 13m, 11m).
+- **Auto-detection via existing `lyra.band_plan.find_band`.**
+  Overlay is suppressed inside the operator's region's amateur
+  allocations (US 40m amateur 7.000-7.300 MHz wins over 41m
+  broadcast 7.200-7.450 MHz; Settings flip restores everywhere).
+  Region = NONE shows labels everywhere.
+- **Schedule-aware.**  Each entry has start / stop time + day-of-
+  week mask; Lyra checks the current UTC moment against each
+  station's schedule and only paints labels for stations
+  currently on the air.
+- **Multi-row label stacking** — up to 4 rows greedy-pack
+  collision-avoiding (mirrors the TCI spots renderer).  Bands
+  like 31m at 5pm UTC stay readable instead of becoming a wall
+  of overlapping text.
+- **EiBi data layer** — new `lyra/swdb/` package:
+  - `eibi_parser.py` — CSV parser with column-layout handling,
+    time-window math, day-of-week field, power-class default,
+    malformed-row skip.
+  - `store.py` — `EibiStore` with sorted-by-frequency binary
+    search, power filter, on-air filter.
+  - `time_filter.py` — UTC-aware schedule check including
+    wrap-around windows (2300-0100 UTC).
+  - `overlay_gate.py` — region / band-plan / force-on logic.
+  - `downloader.py` — background HTTPS downloader with QThread
+    worker, season-filename auto-compute, URL fallback chain.
+- **Settings → Bands → SW Database** tab — file-status display,
+  master enable, min-power filter, "show in ham bands too"
+  override, manual-install workflow buttons (**Open EiBi
+  website**, **Copy URL**, **Reload file**), and the
+  **Update database now** background fetch.
+- See `docs/help/sw_database.md` for the operator topic.
+
+### Changed
+
+- **Tooltip font 11pt → 13pt** globally (operator readability
+  feedback).  Applied in both `theme.py` QSS and `app.py`
+  `QToolTip.setFont()`.
+- **Settings dialog** gained a top-level **Bands** tab containing
+  three sub-tabs (Memory / Time Stations / SW Database).
+- **"Manage presets…"** from the Mem dropdown now navigates
+  directly to Bands → Memory at construction time (was opening
+  Settings on the previously-visible tab and requiring an extra
+  click).
+
+### Fixed (during v0.0.9 development)
+
+- **EiBi season filename was uppercase.**  Server is case-
+  sensitive — `sked-A26.csv` returned 404, must be lowercase
+  `sked-a26.csv`.  `season_filename()` now lowercases the season
+  letter on URL formatting; the rest of the code keeps `'A'` /
+  `'B'` as canonical uppercase identifiers.
+- **EiBi URL fallback chain.**  As of 2026-05, `www.eibispace.de`
+  presents a TLS cert issued for the apex domain, producing SSL
+  hostname-mismatch errors.  Default base URL now `eibispace.de`
+  (apex); downloader iterates through 4 fallback URLs (apex/www
+  × HTTPS/HTTP) and reports which combination succeeded.  HTTP at
+  the end of the chain is acceptable since EiBi is freely
+  published broadcast-schedule data with no auth or sensitive
+  payload.
+- **EiBi labels too small + overlapping.**  Bumped label font
+  8pt → 10pt and added multi-row greedy stacking
+  (MAX_EIBI_ROWS=4).
+
+### Operator-experience notes
+
+- The original v0.0.9 plan was a SW-Database **button** alongside
+  GEN/TIME/Mem.  Operator simplification request during design:
+  no SW button — auto-detect by band-plan, keep the BANDS row
+  uncluttered.  Final button order: **GEN1 GEN2 GEN3 TIME Mem**.
+- The original Memory plan was a sidebar list.  Operator
+  preference: dropdown off a **Mem** button — same button
+  vocabulary as GEN1/2/3, no extra panel real-estate.
+
+---
+
 ## [0.0.8.1] — 2026-05-02
 
 ### Fixed

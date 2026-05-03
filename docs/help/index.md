@@ -34,6 +34,15 @@ up changes.
   philosophy, who's behind it
 - **Getting Started** — first-time setup, connecting to the HL2
 - **Tuning** — frequency display, bands, VFO memory
+- **Time Stations** — TIME button cycles through WWV / WWVH / CHU
+  HF time-signal broadcasters; country-aware ordering puts your
+  closest stations first
+- **Memory presets** — GEN1/2/3 quick slots + 20-entry named
+  Memory bank with CSV import/export, all on the BANDS panel
+- **Shortwave broadcaster overlay (EiBi)** — auto-detected EiBi
+  station labels (name + language + target region) painted on the
+  panadapter inside SW broadcast bands; suppressed inside your
+  region's ham bands by default
 - **Modes & Filters** — demodulation modes, bandwidth presets
 - **AGC** — profiles (Off / Fast / Med / Slow / Auto / Custom),
   threshold, auto-tracking
