@@ -5001,36 +5001,33 @@ class BandPanel(GlassPanel):
         menu.exec(anchor.mapToGlobal(pos))
 
     def _open_memory_settings(self) -> None:
-        """Open the Settings dialog and switch to Bands → Memory.
-        Walks up the widget hierarchy looking for the main window
-        which owns the Settings-open action."""
-        # Use Lyra's existing Settings open path -- main window has
-        # an action wired up.  We emit through a signal-style path
-        # by walking up parents to find the MainWindow's
-        # _open_settings action.
+        """Open the Settings dialog already navigated to Bands →
+        Memory.  Construction-time navigation (vs. post-exec)
+        because ``SettingsDialog.exec()`` is modal-blocking and
+        any post-call hook would never fire until the dialog
+        already closed.
+        """
         try:
-            from PySide6.QtWidgets import QApplication, QDialog
-            # Find the main window via QApplication.
+            from PySide6.QtWidgets import QApplication
+            from lyra.ui.settings_dialog import SettingsDialog
+            # Locate the running MainWindow so we get the right
+            # parent + the TciServer reference SettingsDialog needs.
             mw = None
             for w in QApplication.topLevelWidgets():
-                if w.metaObject().className().endswith("MainWindow"):
+                if hasattr(w, "pnl_tci") and hasattr(w, "radio"):
                     mw = w
                     break
-            if mw is None or not hasattr(mw, "_open_settings"):
+            if mw is None:
                 return
-            # Show the dialog.  _open_settings is the existing
-            # MainWindow handler that constructs the
-            # SettingsDialog.
-            mw._open_settings()
-            # After it's open, find the dialog and ask it to show
-            # the Bands -> Memory subtab.
-            for w in QApplication.topLevelWidgets():
-                if w.metaObject().className() == "SettingsDialog":
-                    if hasattr(w, "tab_bands"):
-                        w.show_tab("Bands")
-                        if hasattr(w.tab_bands, "show_memory_subtab"):
-                            w.tab_bands.show_memory_subtab()
-                    break
+            tci_server = mw.pnl_tci.server
+            dlg = SettingsDialog(self.radio, tci_server, parent=mw)
+            # Navigate to Bands BEFORE exec() so the dialog opens
+            # already on the right tab.
+            dlg.show_tab("Bands")
+            if (hasattr(dlg, "tab_bands")
+                    and hasattr(dlg.tab_bands, "show_memory_subtab")):
+                dlg.tab_bands.show_memory_subtab()
+            dlg.exec()
         except Exception as e:
             print(f"[Mem] open settings failed: {e}")
 
