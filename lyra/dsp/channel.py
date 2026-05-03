@@ -838,12 +838,32 @@ class PythonRxChannel(DspChannel):
             )
             del self._audio_buf[:block]
             try:
+                # Diagnostic — v0.0.9.1 APF investigation.  When env
+                # var LYRA_APF_DEBUG=1, log magnitude at each stage
+                # so we can see exactly where the signal goes to zero
+                # in the chain.  Rate-limited (every 50th iteration ≈
+                # 1 Hz) and gated on the env var so cost is one
+                # attribute lookup when off.
+                import os as _dbg_os
+                _dbg = _dbg_os.environ.get("LYRA_APF_DEBUG")
+                if _dbg:
+                    self._dbg_chan_iter = getattr(
+                        self, "_dbg_chan_iter", 0) + 1
+                    _dbg = (self._dbg_chan_iter % 50) == 0
+                if _dbg:
+                    iq_mag = float(np.max(np.abs(chunk)))
+                    print(f"[CHAN] mode={mode} block={block} "
+                          f"iq_chunk_max={iq_mag:.4f}")
                 if self._notch_enabled:
                     for n in self._notches:
                         if getattr(n, "active", False) and \
                                 getattr(n, "filter", None) is not None:
                             chunk = n.filter.process(chunk)
                 audio = demod.process(chunk)
+                if _dbg:
+                    a_mag = float(np.max(np.abs(audio)))
+                    print(f"[CHAN]   after demod: max={a_mag:.4f} "
+                          f"size={audio.size}")
                 # Chain order — corrected v0.0.7.x per nr_audit §3:
                 #
                 #   demod -> LMS -> ANF -> SQ -> NR -> APF
@@ -876,6 +896,10 @@ class PythonRxChannel(DspChannel):
                 # broadband noise.  Bypass-fast when disabled
                 # (single attribute check).
                 audio = self._lms.process(audio)
+                if _dbg:
+                    a_mag = float(np.max(np.abs(audio)))
+                    print(f"[CHAN]   after LMS  (en={self._lms.enabled}): "
+                          f"max={a_mag:.4f}")
                 # ANF (Phase 3.D #3) — LMS adaptive notch.  Cancels
                 # KNOWN-but-drifting tones (heterodynes that the
                 # operator hasn't manually notched, BC-station
@@ -884,6 +908,10 @@ class PythonRxChannel(DspChannel):
                 # BEFORE NR so NR cleans up whatever broadband
                 # residual is left.
                 audio = self._anf.process(audio)
+                if _dbg:
+                    a_mag = float(np.max(np.abs(audio)))
+                    print(f"[CHAN]   after ANF  (en={self._anf.enabled}): "
+                          f"max={a_mag:.4f}")
                 # All-mode squelch — slotted BEFORE the NR stage
                 # but AFTER the adaptive filters (LMS + ANF).  The
                 # voice-presence detector sees audio with its full
@@ -892,6 +920,11 @@ class PythonRxChannel(DspChannel):
                 # When the squelch is closed, downstream NR / APF
                 # see silence and consume essentially zero CPU.
                 audio = self._squelch.process(audio)
+                if _dbg:
+                    a_mag = float(np.max(np.abs(audio)))
+                    sq_en = getattr(self._squelch, "enabled", "?")
+                    print(f"[CHAN]   after SQ   (en={sq_en}): "
+                          f"max={a_mag:.4f}")
                 # Route NR through whichever processor the operator
                 # selected.  Both have identical STFT framing and
                 # length-preserving contracts, so switching is
@@ -910,12 +943,21 @@ class PythonRxChannel(DspChannel):
                     audio = self._nr2.process(audio)
                 else:
                     audio = self._nr.process(audio)
+                if _dbg:
+                    a_mag = float(np.max(np.abs(audio)))
+                    nr_en = self._nr2.enabled if self._active_nr == "nr2" else self._nr.enabled
+                    print(f"[CHAN]   after NR   (active={self._active_nr} "
+                          f"en={nr_en}): max={a_mag:.4f}")
                 # APF — only useful in CW. The operator's enable
                 # state is preserved across mode switches (button
                 # stays "on"), but the filter only runs when there's
                 # actually CW content to boost.
                 if is_cw and self._apf.enabled:
                     audio = self._apf.process(audio)
+                if _dbg:
+                    a_mag = float(np.max(np.abs(audio)))
+                    print(f"[CHAN]   after APF  (en={self._apf.enabled} "
+                          f"is_cw={is_cw}): max={a_mag:.4f}")
                 out_chunks.append(audio)
             except Exception as e:
                 print(f"[channel] demod error: {e}")
