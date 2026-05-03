@@ -4413,9 +4413,21 @@ class BandPanel(GlassPanel):
         self._gen_buttons: dict[str, QPushButton] = {}
         self._all_bands = list(AMATEUR_BANDS) + list(BROADCAST_BANDS)
         # Per-GEN-slot memory: last freq/mode used while active.
+        # v0.0.9 Step 2: customizable via right-click "Save current
+        # freq+mode here".  Loaded from QSettings on init; falls
+        # back to the bands.py-defined defaults for slots that
+        # haven't been customized yet.  See _load_gen_memory and
+        # _save_gen_memory for the persistence layer.
         self._gen_memory: dict[str, tuple[int, str]] = {
             g.name: (g.default_hz, g.default_mode) for g in GEN_SLOTS
         }
+        # Optional per-slot operator-supplied label (e.g. "40m SSB",
+        # "AM Broadcast 1530").  Not the button TEXT (which stays
+        # "GEN1" etc. for visual consistency); shown in tooltip.
+        self._gen_labels: dict[str, str] = {
+            g.name: "" for g in GEN_SLOTS
+        }
+        self._load_gen_memory()
         self._active_gen: str | None = None   # when freq is outside all bands
 
         v = QVBoxLayout()
@@ -4488,12 +4500,18 @@ class BandPanel(GlassPanel):
         for g in GEN_SLOTS:
             btn = self._make_band_button(g.label)
             btn.setFixedWidth(self.BUTTON_WIDTH + 12)  # 4-char labels need more
-            btn.setToolTip(
-                f"{g.name} — general-coverage memory slot.\n"
-                f"Click: tune to remembered freq/mode for this slot.\n"
-                f"While active, tuning updates this slot's memory.")
-            btn.clicked.connect(lambda _c, slot=g.name: self._on_gen_clicked(slot))
+            btn.clicked.connect(
+                lambda _c, slot=g.name: self._on_gen_clicked(slot))
+            # v0.0.9 Step 2: right-click context menu lets the
+            # operator customize each GEN slot.  See
+            # _show_gen_menu for the menu items.
+            from PySide6.QtCore import Qt as _Qt
+            btn.setContextMenuPolicy(_Qt.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, slot=g.name, b=btn:
+                    self._show_gen_menu(slot, b, pos))
             self._gen_buttons[g.name] = btn
+            self._update_gen_tooltip(g.name)
             row.addWidget(btn)
         # ── TIME button (v0.0.9 Step 1) ──────────────────────────────
         # HF time-station cycle.  Slotted right after GEN3 in the
@@ -4665,6 +4683,196 @@ class BandPanel(GlassPanel):
         try:
             self.radio.status_message.emit(
                 "TIME cycle reset", 1500)
+        except Exception:
+            pass
+
+    # ── GEN1/2/3 customization (v0.0.9 Step 2) ────────────────────
+
+    def _load_gen_memory(self) -> None:
+        """Hydrate ``self._gen_memory`` and ``self._gen_labels`` from
+        QSettings.  Slots without a stored value keep their
+        bands.py-coded defaults.  Called once at __init__ time."""
+        from PySide6.QtCore import QSettings as _QS
+        qs = _QS("N8SDR", "Lyra")
+        for g in GEN_SLOTS:
+            freq_key = f"bands/{g.name.lower()}_freq_hz"
+            mode_key = f"bands/{g.name.lower()}_mode"
+            label_key = f"bands/{g.name.lower()}_label"
+            try:
+                freq = int(qs.value(freq_key, g.default_hz))
+            except (ValueError, TypeError):
+                freq = g.default_hz
+            mode = str(qs.value(mode_key, g.default_mode) or g.default_mode)
+            label = str(qs.value(label_key, "") or "")
+            self._gen_memory[g.name] = (freq, mode)
+            self._gen_labels[g.name] = label[:30]   # 30-char clamp
+
+    def _save_gen_memory(self, slot: str) -> None:
+        """Persist a single GEN slot's freq / mode / label to
+        QSettings.  Called after Save Current, Set Custom Label, or
+        Reset to Default."""
+        from PySide6.QtCore import QSettings as _QS
+        qs = _QS("N8SDR", "Lyra")
+        freq, mode = self._gen_memory[slot]
+        label = self._gen_labels.get(slot, "")
+        qs.setValue(f"bands/{slot.lower()}_freq_hz", int(freq))
+        qs.setValue(f"bands/{slot.lower()}_mode", str(mode))
+        qs.setValue(f"bands/{slot.lower()}_label", str(label))
+
+    def _update_gen_tooltip(self, slot: str) -> None:
+        """Refresh the tooltip on a GEN button to reflect the current
+        saved freq / mode / label."""
+        btn = self._gen_buttons.get(slot)
+        if btn is None:
+            return
+        freq, mode = self._gen_memory[slot]
+        label = self._gen_labels.get(slot, "")
+        tip_lines = [
+            f"{slot} — general-coverage memory slot.",
+        ]
+        if label:
+            tip_lines.append(f'  "{label}"')
+        tip_lines.append(
+            f"Saved: {freq/1e6:.4f} MHz, {mode}")
+        tip_lines.append("")
+        tip_lines.append("Click: tune to saved freq + mode.")
+        tip_lines.append("Right-click: save current / set label / reset.")
+        btn.setToolTip("\n".join(tip_lines))
+
+    def _show_gen_menu(self, slot: str, anchor_btn, pos) -> None:
+        """Right-click menu for a GEN slot.  Operator-facing
+        actions: save current, set custom label, reset to default.
+        See v0.0.9_memory_stations_design.md §3 for the UX spec."""
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        # Header showing what's currently saved.
+        freq, mode = self._gen_memory[slot]
+        label = self._gen_labels.get(slot, "")
+        hdr_text = f"{slot}: {freq/1e6:.4f} MHz, {mode}"
+        if label:
+            hdr_text += f'  ("{label}")'
+        hdr = QAction(hdr_text, menu)
+        hdr.setEnabled(False)
+        menu.addAction(hdr)
+        menu.addSeparator()
+        # Primary action: save current freq + mode here.
+        save_act = QAction("Save current freq + mode here…", menu)
+        save_act.triggered.connect(
+            lambda _c=False: self._gen_save_current(slot))
+        menu.addAction(save_act)
+        # Custom label.
+        label_act = QAction("Set custom label…", menu)
+        label_act.triggered.connect(
+            lambda _c=False: self._gen_set_label(slot))
+        menu.addAction(label_act)
+        menu.addSeparator()
+        # Reset to bands.py default.
+        reset_act = QAction("Reset to default", menu)
+        reset_act.triggered.connect(
+            lambda _c=False: self._gen_reset_default(slot))
+        menu.addAction(reset_act)
+        menu.exec(anchor_btn.mapToGlobal(pos))
+
+    def _gen_save_current(self, slot: str) -> None:
+        """Show a confirm dialog asking the operator to commit the
+        current radio freq + mode + optional label to ``slot``.
+
+        Per design doc §3.3 -- the dialog shows BOTH what's about
+        to be saved (current radio state) AND what's being
+        replaced (existing slot contents) so the operator can see
+        what they're losing.  Cancel = no-op.  Save = overwrite
+        QSettings, refresh tooltip, status-bar toast."""
+        from PySide6.QtWidgets import (
+            QDialog, QDialogButtonBox, QLabel, QLineEdit,
+            QVBoxLayout,
+        )
+        cur_freq = int(self.radio.freq_hz)
+        cur_mode = str(self.radio.mode)
+        old_freq, old_mode = self._gen_memory[slot]
+        old_label = self._gen_labels.get(slot, "")
+        # Build a small confirm dialog.  Inline rather than a
+        # separate class because this is operator-friction-light
+        # and we don't reuse the layout elsewhere.
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Save {slot} preset?")
+        v = QVBoxLayout(dlg)
+        v.addWidget(QLabel(
+            f"<b>Save current frequency + mode to {slot}?</b>"))
+        v.addWidget(QLabel(
+            f"<p>Current: <b>{cur_freq/1e6:.4f} MHz</b>, "
+            f"<b>{cur_mode}</b></p>"
+            f"<p>Existing: <b>{old_freq/1e6:.4f} MHz</b>, "
+            f"<b>{old_mode}</b>"
+            + (f' ("{old_label}")' if old_label else "")
+            + "</p>"))
+        v.addWidget(QLabel("Optional label (30 chars max):"))
+        edit = QLineEdit(old_label, dlg)
+        edit.setMaxLength(30)
+        v.addWidget(edit)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel,
+            parent=dlg,
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        v.addWidget(btns)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        # Commit.
+        new_label = edit.text().strip()[:30]
+        self._gen_memory[slot] = (cur_freq, cur_mode)
+        self._gen_labels[slot] = new_label
+        self._save_gen_memory(slot)
+        self._update_gen_tooltip(slot)
+        # Status-bar toast.
+        try:
+            label_part = f' ("{new_label}")' if new_label else ""
+            self.radio.status_message.emit(
+                f"{slot} saved: {cur_freq/1e6:.4f} MHz, "
+                f"{cur_mode}{label_part}", 2500)
+        except Exception:
+            pass
+
+    def _gen_set_label(self, slot: str) -> None:
+        """Open a small text-input dialog letting the operator name
+        an existing GEN preset without changing its freq/mode."""
+        from PySide6.QtWidgets import QInputDialog
+        cur_label = self._gen_labels.get(slot, "")
+        text, ok = QInputDialog.getText(
+            self, f"Set {slot} label",
+            f"Custom label for {slot} (30 chars max, blank to clear):",
+            text=cur_label,
+        )
+        if not ok:
+            return
+        self._gen_labels[slot] = text.strip()[:30]
+        self._save_gen_memory(slot)
+        self._update_gen_tooltip(slot)
+        try:
+            self.radio.status_message.emit(
+                f"{slot} label updated", 1500)
+        except Exception:
+            pass
+
+    def _gen_reset_default(self, slot: str) -> None:
+        """Restore the bands.py-coded default for a GEN slot.  Quick
+        action with status-bar toast (no confirm dialog -- design
+        doc §3.2 specifies confirm-on-save only, not on reset)."""
+        # Find the slot's default in GEN_SLOTS.
+        defaults = next(
+            (g for g in GEN_SLOTS if g.name == slot), None)
+        if defaults is None:
+            return
+        self._gen_memory[slot] = (
+            defaults.default_hz, defaults.default_mode)
+        self._gen_labels[slot] = ""
+        self._save_gen_memory(slot)
+        self._update_gen_tooltip(slot)
+        try:
+            self.radio.status_message.emit(
+                f"{slot} reset to default "
+                f"({defaults.default_hz/1e6:.4f} MHz, "
+                f"{defaults.default_mode})", 2000)
         except Exception:
             pass
 
