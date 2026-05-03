@@ -1556,12 +1556,19 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._draw_snap_reticle(painter)
 
     def _draw_eibi_overlay(self, painter) -> None:
-        """Draw EiBi station-name labels for entries in
-        ``self._eibi_entries`` at their freq positions.  Mirror
-        of SpectrumWidget._draw_eibi_overlay; see that method's
-        docstring for the design notes."""
+        """Draw EiBi station-name labels with multi-row stacking.
+        Mirror of SpectrumWidget._draw_eibi_overlay; see that
+        method's docstring for the design notes.
+
+        v0.0.9 hotfix: bumped font 8pt -> 10pt for readability;
+        added multi-row stacking so labels no longer overlap on
+        busy bands.
+        """
         from PySide6.QtCore import QRectF
         from PySide6.QtGui import QColor, QFont, QFontMetrics
+        MAX_EIBI_ROWS = 4
+        ROW_GAP_PX = 4
+        ROW_HEIGHT_GAP = 2
         self._eibi_hit_rects = []
         center = self._center_hz
         span = self._span_hz
@@ -1569,36 +1576,63 @@ class SpectrumGpuWidget(QOpenGLWidget):
             return
         w = self.width()
         font = QFont(painter.font())
-        font.setPointSize(8)
+        font.setPointSize(10)
+        font.setBold(False)
         painter.setFont(font)
         fm = QFontMetrics(font)
-        band_strip_h = 18
-        label_y = band_strip_h + 4
-        tick_top = band_strip_h + 2
-        tick_bottom = label_y + fm.height() + 1
+        text_h = fm.height()
+        row_h = text_h + ROW_HEIGHT_GAP
+        # Use the GPU widget's band-plan reservation if active.
+        band_strip_h = (
+            getattr(self, "_band_plan_reserved_px", 0) + 3
+            if getattr(self, "_band_plan_reserved_px", 0) > 0
+            else 18)
+        first_row_top = band_strip_h
+        visible = []
         for entry in self._eibi_entries:
             freq_hz, station, language, target, on_air = entry
             offset_hz = freq_hz - center
             if abs(offset_hz) > span / 2:
                 continue
             x = int(w * (offset_hz / span + 0.5))
+            visible.append((x, entry))
+        visible.sort(key=lambda t: t[0])
+        row_ranges = [[] for _ in range(MAX_EIBI_ROWS)]
+        for x, entry in visible:
+            freq_hz, station, language, target, on_air = entry
+            label_text = station[:24]
+            tw = fm.horizontalAdvance(label_text) + 4
+            label_x = x + 3
+            if label_x + tw > w - 4:
+                label_x = max(2, x - tw - 3)
+            x_start = label_x - ROW_GAP_PX
+            x_end = label_x + tw + ROW_GAP_PX
+            chosen_row = -1
+            for r in range(MAX_EIBI_ROWS):
+                fits = True
+                for rs, re in row_ranges[r]:
+                    if not (x_end <= rs or x_start >= re):
+                        fits = False
+                        break
+                if fits:
+                    chosen_row = r
+                    break
+            if chosen_row < 0:
+                continue
+            row_ranges[chosen_row].append((x_start, x_end))
+            label_y = first_row_top + chosen_row * row_h
             tick_color = (
                 QColor(80, 200, 220, 220) if on_air
                 else QColor(120, 130, 140, 140))
             painter.setPen(tick_color)
-            painter.drawLine(x, tick_top, x, tick_bottom)
-            label_text = station[:20]
-            tw = fm.horizontalAdvance(label_text) + 4
-            label_x = x + 3
-            if label_x + tw > w - 4:
-                label_x = x - tw - 3
+            painter.drawLine(x, first_row_top - 2, x, label_y + 1)
             painter.setPen(
-                QColor(180, 220, 230, 220) if on_air
-                else QColor(160, 170, 180, 160))
+                QColor(180, 220, 230, 230) if on_air
+                else QColor(160, 170, 180, 170))
             painter.drawText(
                 label_x, label_y + fm.ascent(), label_text)
             self._eibi_hit_rects.append((
-                QRectF(label_x, label_y, tw, fm.height()),
+                QRectF(label_x, label_y, tw, text_h),
                 entry,
             ))
 

@@ -1647,71 +1647,107 @@ class SpectrumWidget(_PaintedWidget):
         """Draw EiBi station-name labels for entries in
         ``self._eibi_entries`` at their freq positions.
 
-        Layout strategy: simple vertical-tick + label hanging
-        below the band-plan strip area (so it doesn't clutter
-        the trace).  No row-packing for v1; if labels collide
-        the rightmost wins and operators can zoom in for detail.
+        Layout: multi-row greedy stacking (same approach as TCI
+        spots).  Each visible station gets a vertical tick at its
+        freq position + a label box.  Labels are placed in the
+        first row that doesn't collide horizontally with already-
+        placed labels (+ small horizontal padding).  Up to
+        ``MAX_EIBI_ROWS`` rows below the band-plan strip; entries
+        that don't fit are dropped this frame (still hit-testable
+        via the ``_eibi_hit_rects`` cache, but only the placed
+        ones are added there).
 
         Color choices:
-          * On-air entries get a muted teal (visible against the
-            dark theme without overwhelming the trace).
-          * Off-air entries (when operator opted to show them
-            via the Settings checkbox) get desaturated grey so
-            they don't distract from currently-active stations.
+          * On-air entries get a muted teal label (visible against
+            the dark theme without overwhelming the trace).
+          * Off-air entries (when operator opted to show them via
+            Settings) get desaturated grey so they don't distract
+            from currently-active stations.
+
+        v0.0.9 hotfix: bumped font 8pt -> 10pt for readability;
+        added multi-row stacking so labels no longer overlap on
+        busy bands.
         """
         from PySide6.QtCore import QRectF
         from PySide6.QtGui import QColor, QFont, QFontMetrics
-        # Cache of label rects for hover hit-testing.  Kept in
-        # widget-coordinates so mouseMoveEvent can use it
-        # directly.  Cleared every paint.
-        self._eibi_hit_rects: list[
-            tuple[QRectF, tuple]
-        ] = []
+        MAX_EIBI_ROWS = 4
+        ROW_GAP_PX = 4         # horizontal padding between same-row boxes
+        ROW_HEIGHT_GAP = 2     # vertical gap between stacked rows
+        self._eibi_hit_rects = []
         center = self._center_hz
         span = self._span_hz
         if span <= 0:
             return
         font = QFont(p.font())
-        font.setPointSize(8)
+        font.setPointSize(10)
+        font.setBold(False)
         p.setFont(font)
         fm = QFontMetrics(font)
+        text_h = fm.height()
+        row_h = text_h + ROW_HEIGHT_GAP
         # Top y for label band -- below the band-plan strip so we
         # don't overlap the colored allocation rectangles at the
-        # very top of the widget.
-        band_strip_h = 18
-        label_y = band_strip_h + 4
-        tick_top = band_strip_h + 2
-        tick_bottom = label_y + fm.height() + 1
+        # top of the widget.
+        band_strip_h = (
+            self._band_plan_reserved_px + 3
+            if self._band_plan_reserved_px > 0 else 18)
+        first_row_top = band_strip_h
+        # Filter to on-screen entries first.
+        visible = []
         for entry in self._eibi_entries:
             freq_hz, station, language, target, on_air = entry
-            # Map freq to widget x.
             offset_hz = freq_hz - center
             if abs(offset_hz) > span / 2:
                 continue
             x = int(w * (offset_hz / span + 0.5))
-            # Tick mark.
+            visible.append((x, entry))
+        # Sort left-to-right so left-edge entries get first crack
+        # at the top row.
+        visible.sort(key=lambda t: t[0])
+        # Greedy row assignment.
+        row_ranges: list[list[tuple[int, int]]] = [
+            [] for _ in range(MAX_EIBI_ROWS)]
+        for x, entry in visible:
+            freq_hz, station, language, target, on_air = entry
+            label_text = station[:24]
+            tw = fm.horizontalAdvance(label_text) + 4
+            # Prefer label to the right of the tick; flip to left
+            # if running out of widget width.
+            label_x = x + 3
+            if label_x + tw > w - 4:
+                label_x = max(2, x - tw - 3)
+            x_start = label_x - ROW_GAP_PX
+            x_end = label_x + tw + ROW_GAP_PX
+            chosen_row = -1
+            for r in range(MAX_EIBI_ROWS):
+                fits = True
+                for rs, re in row_ranges[r]:
+                    if not (x_end <= rs or x_start >= re):
+                        fits = False
+                        break
+                if fits:
+                    chosen_row = r
+                    break
+            if chosen_row < 0:
+                # Couldn't find a free row; drop this label this
+                # frame.  Operator can zoom in to see it.
+                continue
+            row_ranges[chosen_row].append((x_start, x_end))
+            label_y = first_row_top + chosen_row * row_h
+            # Tick from band-plan strip down to this row's top.
             tick_color = (
                 QColor(80, 200, 220, 220) if on_air
                 else QColor(120, 130, 140, 140))
             p.setPen(tick_color)
-            p.drawLine(x, tick_top, x, tick_bottom)
-            # Label text -- truncate to keep things readable on
-            # busy bands.
-            label_text = station[:20]
-            tw = fm.horizontalAdvance(label_text) + 4
-            label_x = x + 3
-            # Right-edge clamp so labels near the right don't
-            # render off-screen.
-            if label_x + tw > w - 4:
-                label_x = x - tw - 3
+            p.drawLine(x, first_row_top - 2, x, label_y + 1)
+            # Label text.
             p.setPen(
-                QColor(180, 220, 230, 220) if on_air
-                else QColor(160, 170, 180, 160))
+                QColor(180, 220, 230, 230) if on_air
+                else QColor(160, 170, 180, 170))
             p.drawText(
                 label_x, label_y + fm.ascent(), label_text)
-            # Stash hit rect for hover tooltip.
             self._eibi_hit_rects.append((
-                QRectF(label_x, label_y, tw, fm.height()),
+                QRectF(label_x, label_y, tw, text_h),
                 entry,
             ))
 
