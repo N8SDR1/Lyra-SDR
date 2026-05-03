@@ -13,115 +13,121 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
-## [0.0.9.1] — UNRELEASED — Stream-gap audio fix
+## [0.0.9.1] — 2026-05-03 — "Memory & Stations"
 
-Bug-fix patch on top of v0.0.9.  Closes out the residual "occasional
-pops, sometimes louder than the rest" symptom that survived the
-v0.0.7.1 "Quiet Pass" — see CLAUDE.md §9.6 for the prior parked
-state.
+Bug-fix + feature patch on top of v0.0.9.  Two headline items:
+**audio click reduction** for the long-standing pops/ticks symptom,
+and **TCI audio + IQ binary streaming** so digital-mode apps can
+talk to Lyra without a Virtual Audio Cable.  Plus N9BC joining as
+co-contributor.
 
-### Root cause
+### Audio click reduction
 
-Three compounding defects in the UDP RX path:
+Operators reported sustained ~1.5 clicks/sec on both AK4951 and
+PC-soundcard output paths going back to v0.0.7.  This release
+substantially reduces them via three independent fixes:
 
-1. **No `SO_RCVBUF` increase on the receive socket.**  Default
-   Windows UDP receive buffer is ~64-208 KB.  At 192 kHz IQ rate
-   the HL2 streams ~1.5 MB/sec of EP6 frames, so the kernel buffer
-   could fill in under a second of CPU stall and start silently
-   dropping frames.
-
-2. **Sequence-gap recovery did nothing audible.**  When the parser
-   detected a UDP frame drop (sequence-number jump) it incremented
-   `seq_errors` and passed the next frame's samples downstream as
-   if they were continuous.  The DSP chain (decimator FIR, AGC
-   envelope, NR/NB/ANF) has stateful filters; passing
-   discontinuous IQ through them produces a boundary glitch that
-   the post-AGC gain amplifies into an audible step — exactly the
-   "louder than the rest" pop signature.
-
-3. **`seq_errors` was invisible.**  No status-bar indicator, no
-   log line, no UI surface — operator could not correlate "I just
-   heard a pop" with "yes, the stream had a gap at that moment."
-   Diagnosis was harder than necessary.
-
-### Fixed
-
-- **`SO_RCVBUF` bumped to 4 MB** on the HPSDR P1 UDP RX socket
-  (`lyra/protocol/stream.py`).  Provides ~2.6 seconds of buffer
-  headroom at 192 kHz IQ rate, covering any plausible Python GC
-  pause or Windows context-switch storm.  Actual buffer size
-  granted by the kernel logged at INFO level on stream start.
+- **UDP RX buffer bumped to 4 MB** on the HPSDR P1 receive socket
+  (`lyra/protocol/stream.py`).  Default Windows UDP RCVBUF is
+  ~64-208 KB; at 192 kHz IQ rate the HL2 streams ~1.5 MB/sec of
+  EP6 frames, so the kernel buffer could fill in under a second
+  of CPU stall and silently drop frames.  4 MB ≈ 2.6 sec of
+  headroom — covers any plausible Python GC pause or Windows
+  context-switch storm.  Verified: stream-error counter typically
+  stays at 0 across long sessions where the prior version
+  accumulated dozens of drops.
 - **10 ms audio fade-in on detected sequence gap**
-  (`lyra/radio.py::_apply_agc_and_volume`).  Each audio block
-  compares the current `seq_errors` counter against the last-seen
-  value; if it incremented, a UDP frame was dropped between this
-  block and the previous one.  The next post-AGC, post-leveler
-  audio block gets a 0→1 linear ramp on the first 480 samples
-  (10 ms at 48 kHz audio rate), masking the IQ-discontinuity step
-  before it reaches the speaker.  Subliminal in voice / CW;
-  inaudible compared to the loud pop it replaces.
-- **Stream-error indicator in the status bar** (`lyra/ui/app.py`).
-  Permanent widget next to the version label.  Shows green
-  "Stream OK" while `seq_errors == 0`; switches to amber
-  "Stream: N errors" once any drop is detected.  Tooltip explains
-  the operator-facing meaning.  Refreshed at 1 Hz via the existing
-  CPU-tick timer (no new timer).
-- **AGC smooth attack — eliminates click-on-strong-CW symptom**
-  (`lyra/radio.py::_apply_agc_and_volume`).  The v0.0.7.1 quiet-
-  pass replaced block-scalar AGC with a per-sample envelope
-  tracker (eliminating the 21 ms-cadence boundary pops), but the
-  per-sample tracker still had INSTANT attack — `peak <- mag` in
-  one sample on every input rise.  At the rising edge of a hard
-  signal transient (CW dits/dahs, square-wave on/off keys, loud
-  noise bursts), the gain change had a one-sample discontinuity
-  that was audible as a click — louder on stronger stations and
-  more frequent in CW than in SSB.
+  (`lyra/radio.py::_apply_agc_and_volume`).  When `seq_errors`
+  ticks up, the next audio block gets a 0→1 linear ramp on the
+  first 480 samples to mask the IQ discontinuity that would
+  otherwise reach the speaker as a step.
+- **Stream-error indicator in the status bar** — permanent
+  widget showing "Stream OK" / "Stream: N errors" so operators
+  can correlate audible pops with the underlying mechanism.
+- **Audio block size reduced 2048 → 512** (`lyra/radio.py`).
+  Worker bursts now 10.7 ms instead of 43 ms; tighter
+  producer/consumer cadence at the audio sink interface, which
+  reduces underrun frequency.
 
-  Operator-correlated symptom (2026-05-03 antenna test):
-  *"clicks/ticks more in CW, strong stations have more than weak
-  ones, occasional volume bursts even with stream errors at 0."*
-  All three observations match an AGC-attack-on-transient bug.
+### TCI audio + IQ streaming (new feature)
 
-  Fix: smooth attack with a 2.5 ms time constant.  Replaces the
-  instant assignment with a one-pole exponential ramp toward the
-  new peak (`p += (m - p) * attack_alpha`).  At 48 kHz audio rate,
-  attack_alpha ≈ 0.0083 (peak rises ~0.83 % per sample), so the
-  ramp covers ~120 samples (2.5 ms) — fast enough to limit loud
-  transients before the ear notices, slow enough that the gain
-  change is sample-domain smooth.  WDSP's `wcpAGC.c` (Thetis's
-  AGC) uses ~2 ms attack for the same reason; 2.5 ms is a hair
-  more conservative.  No change to release / hang / target — the
-  perceived AGC behaviour for steady-state signals is unchanged.
+`lyra/control/tci.py` extended to implement TCI v2.0 binary stream
+support per the EESDR Expert Electronics specification §3.4.
 
-### Diagnostic instrumentation (temporary)
+- **Binary frame infrastructure**: `Stream` struct packing
+  (64-byte little-endian header + payload), per-client subscription
+  state, command handlers for `AUDIO_START` / `AUDIO_STOP` /
+  `AUDIO_SAMPLERATE` / `AUDIO_STREAM_SAMPLE_TYPE` /
+  `AUDIO_STREAM_CHANNELS` / `IQ_START` / `IQ_STOP` /
+  `IQ_SAMPLERATE` / `LINE_OUT_*`.
+- **Radio-side audio + IQ taps**: `audio_for_tci_emit` and
+  `iq_for_tci_emit` signals fired per audio block / IQ batch from
+  the worker thread, queued to TCI server on the main thread for
+  binary-message dispatch.  Independent of the AK4951 / PortAudio
+  sink choice — TCI is a third parallel audio path.
+- **TCI Settings UI rewrite**: 3-column layout (Server / Audio + IQ
+  Streaming / Spots) matching the canonical Thetis TCI panel.  New
+  controls: master toggles for audio + IQ, "Always stream"
+  options, swap-IQ toggle, mode-name mapping flags
+  (CWL/CWU↔CW), Emulate ExpertSDR3 protocol, CW spot sideband
+  forcing, flash-spots + own-call color pickers, currently-streaming
+  client list.
+- **Validated** against MSHV (FT8 decoder) — TCI binary audio
+  produces decodable FT8 traffic on 7.074 MHz with no VAC
+  intermediary.
 
-- **APF diagnostic prints** (`lyra/dsp/apf.py`).  Operator-
-  reported: APF on/off in CW + AGC-off produces no audible
-  difference, even at +18 dB gain.  Code review confirmed the
-  setter chain wires correctly and the RBJ peaking biquad math
-  is the textbook formula — but something is still preventing
-  the boost from reaching the speaker.  Added rate-limited print
-  output (every ~50th call ≈ 1 Hz at 48 kHz block cadence) gated
-  on the `LYRA_APF_DEBUG` env var.  Logs: enabled state, center
-  frequency, BW, gain, sample rate, audio block size, input
-  max/rms, output max/rms, output/input ratio in dB.  Lets us
-  confirm whether APF is actually running, with what parameters,
-  and whether the biquad is producing the expected gain.
-  **Will be removed once root cause is identified.**
+  Setup recipes for WSJT-X / JS8Call / MSHV / FLDIGI / log4OM in
+  the in-app User Guide (`docs/help/tci.md`).
 
-  To enable: `set LYRA_APF_DEBUG=1` before launching Lyra.
+### Audio architecture investigation (parked)
 
-### Operator-facing notes
+A larger architectural rewrite was attempted on this branch
+(Thetis-style backpressure + sample-and-hold + AGC look-ahead) but
+**reverted** when operator flight-test confirmed it produced a new
+"thumping" symptom worse than the original click problem.  The
+sample-and-hold fallback turned out to be worse than zero-pad for
+tonal audio (CW especially); the backpressure timing parameters
+needed more design work than a hot-patch could safely deliver.
+v0.1's RX2 work will revisit this with proper thread-architecture
+design and a wider testing window.  Operator-instrumented data
+(audio under/over counters added during investigation, then UI-hidden
+per operator UX call) confirmed the click cause is at the
+producer/consumer interface between worker and audio sink, not in
+the DSP chain itself — which TCI audio (taps the chain directly,
+no sink interface) demonstrates by being completely click-free.
 
-- Healthy stream: status reads "Stream OK" indefinitely.  An
-  occasional bump to a small number that doesn't grow further is
-  also healthy (one packet drop during a transient CPU load).
-  The 4 MB buffer should make even that rare.
-- Unhealthy stream: counter climbs every few seconds.  Indicates
-  sustained CPU starvation (DSP stages overrunning the audio
-  budget) or a flaky network link to the HL2.  Pops may still
-  leak through under heavy sustained drops — the fade is a mask,
-  not a cure for genuine packet loss.
+### Other fixes
+
+- **AGC smooth-attack reverted** (was `[0.0.9.1] §A.5`).  Operator
+  validated that `peak <- mag` instant attack (the v0.0.7.1 quiet-
+  pass design) produces less audible artifact than the smooth-attack
+  attempt, which created tanh-saturation bursts during the 2.5 ms
+  attack ramp on hard CW transients.
+- **TCI binary stream `length` field** corrected per spec: total
+  scalar values in payload, not frame count.  Without this fix,
+  stereo audio decoded as half-rate (wrong pitch, undecodable for
+  FT8).  Found in MSHV flight-test.
+- **TCI sample-conversion in-place mutation** fixed.  Format
+  conversion was modifying the audio array shared with the
+  AK4951 / PortAudio sink, occasionally clipping the sink output
+  when AGC briefly drove > 1.0 amplitude.
+
+### Click-free workflow
+
+Side effect of the TCI streaming infrastructure: the `audio_for_tci_emit`
+signal posted from the worker thread to the main thread on every
+audio block acts as a regularizing pacemaker that smooths the
+worker's per-block cadence.  **Result: with TCI server enabled (with or
+without TCI clients connected), the AK4951 and PC soundcard output
+paths run substantially cleaner.**  Lyra's TCI server defaults to
+enabled; operators get this benefit automatically.  Architectural
+explanation in CLAUDE.md §9.6.
+
+### Contributors
+
+- **Brent Crier (N9BC)** joined as co-contributor 2026-05-03 during
+  v0.0.9.1 testing.  Independent flight-test on PC soundcard +
+  ANAN G2 (future v0.4 test rig).  See `CONTRIBUTORS.md`.
 
 ---
 

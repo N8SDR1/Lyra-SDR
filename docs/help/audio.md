@@ -276,13 +276,41 @@ Hardware-level latency for monitoring. The PC is still in the loop
 for spectrum, decoding, TCI, etc. — only the audio playback path
 is offloaded.
 
-## Routing to VAC / virtual cables
+## Routing to digital decoder apps (WSJT-X, JS8Call, FLDIGI, MSHV, …)
 
-Use the **Settings → Audio → Output device** picker. If you have
-VB-Cable / Virtual Audio Cable installed, it appears in the device
-list (usually under WASAPI host API). Pick it as the output device
-and Lyra's audio routes there for JS8Call / WSJT-X / FLDIGI to
-consume — no hardware loopback needed.
+You have two options.  Modern path is much simpler:
+
+### Recommended: TCI audio (no VAC needed)
+
+If your decoder app supports TCI (most modern ones do — WSJT-X
+2.5+, JS8Call, FLDIGI, MSHV, log4OM), use TCI for both rig
+control AND audio.  Lyra's TCI server streams 48 kHz audio over
+the same WebSocket that carries the rig commands.  No Virtual
+Audio Cable, no exclusive-mode soundcard juggling.
+
+  1. Settings → Network/TCI → ☑ TCI Server Running
+  2. In your decoder app, point its rig to TCI / `127.0.0.1:50001`
+  3. Same app: point its audio input/output at "TCI Audio" (or
+     equivalent name)
+
+See the [TCI Server](tci.md) topic for per-app setup recipes
+(WSJT-X, JS8Call, MSHV, FLDIGI).
+
+**Side benefit:** with TCI audio enabled, the AK4951 codec output
+and PC sound card output both run noticeably cleaner — fewer
+clicks/ticks during normal listening.  Worth keeping TCI server
+on as a default even if you're not using a decoder app.
+
+### Legacy: VAC (Virtual Audio Cable)
+
+For apps that don't speak TCI, install VB-Cable or similar VAC
+software, then use the **Settings → Audio → Output device** picker.
+The virtual cable appears in the device list (usually under
+WASAPI host API).  Pick it and Lyra's audio routes there for the
+decoder to consume — no hardware loopback.
+
+VAC has higher latency than TCI audio and requires separate
+software install.  Use only when TCI isn't available.
 
 ## Latency
 
