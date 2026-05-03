@@ -46,33 +46,26 @@ class AK4951Sink:
         if hasattr(stream, "clear_tx_audio"):
             stream.clear_tx_audio()
 
-        # Pre-fill the EP2 TX audio deque with 100 ms of silence
-        # BEFORE enabling EP2 audio injection.  This is the v0.0.9.1
-        # fix for the audio-click symptom -- operator-instrumented
-        # data showed ~3 underruns/second sustained, all at the
-        # producer/consumer interface.  Root cause: the worker
-        # thread produces audio in bursts of 2048 samples every
-        # ~43 ms (block_size at 48 kHz), but the EP2 frame builder
-        # polls the deque at 380 Hz (~2.6 ms cadence) asking for 126
-        # samples each call.  Between worker bursts, the deque
-        # drains to empty and EP2 pads zeros = audible click.
+        # NOTE on pre-fill (history): v0.0.9.1 first attempt added a
+        # 100 ms silence pre-fill here to keep the AK4951 EP2 builder
+        # from underrunning between worker bursts.  That was a
+        # band-aid -- it papered over the ABSENCE of producer/
+        # consumer backpressure.  The proper fix (now in stream.py:
+        # bounded deque + threading.Condition + sample-and-hold)
+        # makes pre-fill unnecessary AND wrong:
         #
-        # 4800-sample pre-fill (100 ms at 48 kHz) gives the deque
-        # enough headroom that the burst-vs-steady cadence mismatch
-        # oscillates the deque level around 4800 samples WITHOUT
-        # ever hitting zero.  Cost: 100 ms of audio latency at the
-        # AK4951 codec output.  Acceptable for RX listening; will
-        # need re-evaluation when TX lands in v0.2 (PTT cadence).
-        # Maxlen of the deque is 48000 (1 second), so the pre-fill
-        # uses 10 % of capacity -- plenty of room for production
-        # bursts to grow the level temporarily without overrunning.
-        if hasattr(stream, "_tx_audio_lock") and hasattr(stream, "_tx_audio"):
-            PREFILL_MS = 100
-            n_silence = int(48000 * PREFILL_MS / 1000)
-            silence = [(0.0, 0.0)] * n_silence
-            with stream._tx_audio_lock:
-                stream._tx_audio.extend(silence)
-
+        #   - With backpressure, the producer blocks if the deque is
+        #     full; the consumer waits briefly if it's short, then
+        #     sample-and-holds (DC continuity, not zero injection).
+        #   - Pre-filling silence would inflate the queue at startup
+        #     and the producer would immediately block waiting for
+        #     drainage -- needless 100 ms latency for no benefit.
+        #
+        # The new architecture self-regulates: the deque oscillates
+        # around the producer's natural delivery rate without ever
+        # depleting (because the consumer waits) or overflowing
+        # (because the producer waits).  Mirrors Thetis's obbuffs
+        # ring + WaitForSingleObject pattern in network.c:1337.
         self._stream.inject_audio_tx = True
         # Stereo balance gains. Default = equal-power center
         # (cos/sin at π/4 = √2/2 each). Updated by Radio whenever the
@@ -222,35 +215,51 @@ class SoundDeviceSink:
         self._right_gain = 0.7071067811865476
 
         # ── Ring buffer (frames × channels, float32) ────────────────
+        # v0.0.9.1 architectural rewrite: this ring now serves as the
+        # rendezvous buffer between the DSP worker (producer) and the
+        # PortAudio callback (consumer).  Two design properties:
+        #
+        #   1. PRODUCER backpressure.  write() blocks (with a short
+        #      timeout) when the ring is full, instead of dropping
+        #      oldest frames.  This locks the worker's audio
+        #      production rate to the consumer's drain rate, which
+        #      is the OS audio driver's hardware clock.  No drift,
+        #      no overrun.
+        #
+        #   2. CONSUMER sample-and-hold.  When the callback runs and
+        #      the ring is short, it FILLS the tail with the LAST
+        #      sample seen, NOT zeros.  Zero-padding produces a step
+        #      discontinuity from current-audio-amplitude to zero
+        #      (audible click).  Sample-and-hold holds DC at the
+        #      last value (subaudible).
+        #
+        # The callback can't block (it runs on a high-priority audio
+        # thread that must return inside the OS callback budget), so
+        # the consumer side gets sample-and-hold without waiting.
+        # The producer can wait, so it does.  This mirrors Thetis's
+        # obbuffs ring + WaitForSingleObject pattern with the same
+        # asymmetric blocking direction (network.c:1337).
         capacity_frames = max(1024, int(rate * self._RING_SECONDS))
         self._ring_capacity_frames = capacity_frames
         self._ring = np.zeros(
             (capacity_frames, self._channels), dtype=np.float32)
-        # Pre-fill the ring with 100 ms of silence at startup so the
-        # PortAudio callback has buffer headroom for the worker's
-        # 43 ms-cadence audio bursts -- v0.0.9.1 click fix, mirrors
-        # the AK4951 sink pre-fill above.  Without this, the callback
-        # underruns from the moment PortAudio starts (well before the
-        # worker has produced its first audio block) and continues
-        # underrunning every cycle the worker burst lands just after
-        # the callback poll.  Operator data: ~3 underruns/sec without
-        # pre-fill = audible clicks every 300 ms.  100 ms pre-fill
-        # gives ~2 worker-burst cycles of margin -- enough to absorb
-        # the natural drift between burst and callback cadences.
-        # Ring is already filled with zeros from np.zeros() above; we
-        # just advance write_idx and count to expose those zeros as
-        # "available" frames for the callback to read.
-        PREFILL_MS = 100
-        prefill_frames = min(
-            capacity_frames, int(rate * PREFILL_MS / 1000))
         self._ring_read_idx = 0     # next frame to read by callback
-        self._ring_write_idx = prefill_frames  # writer starts past pre-fill
-        self._ring_count = prefill_frames     # pre-fill counted as available
-        # Lock guards the three indices above. Hold time is O(N) frames
-        # being copied which is a few hundred ints/floats — sub-ms even
-        # in the worst case, so the audio thread waiting on it doesn't
-        # stutter audibly.
-        self._ring_lock = threading.Lock()
+        self._ring_write_idx = 0    # next frame to write by DSP
+        self._ring_count = 0        # frames currently in ring
+        # Last sample observed by the callback.  Initialized to
+        # silence so startup before any audio arrives is silent (not
+        # uninitialised noise).  Updated each callback that reads at
+        # least one frame.  Used for sample-and-hold on underrun.
+        self._last_sample = np.zeros(
+            self._channels, dtype=np.float32)
+        # threading.Condition for producer-side backpressure: write()
+        # waits if the ring is full, callback notifies after each
+        # drain.  Lock is the underlying primitive for read/write
+        # mutual exclusion (same role as the previous _ring_lock).
+        self._ring_cv = threading.Condition()
+        # Backwards-compat alias so any existing external code that
+        # used _ring_lock still works.
+        self._ring_lock = self._ring_cv
 
         # Diagnostic counters — incremented inside the lock so they
         # stay coherent with read/write activity. Printed periodically
@@ -298,11 +307,12 @@ class SoundDeviceSink:
         next `frames` frames from the ring buffer.
 
         Runs on a high-priority audio thread (NOT the DSP/main thread).
-        Must be fast and must NOT raise. If the ring is short, fill the
-        tail with silence rather than blocking — a brief glitch is
-        always better than stuttering or hanging the device.
+        Must be fast and must NOT raise. If the ring is short, fill
+        the tail with sample-and-hold (NOT zeros) so an empty ring
+        produces inaudible DC continuity instead of an audible step
+        to zero.  v0.0.9.1 architectural rewrite.
         """
-        with self._ring_lock:
+        with self._ring_cv:
             avail = self._ring_count
             take = min(avail, frames)
             if take > 0:
@@ -319,17 +329,43 @@ class SoundDeviceSink:
                     self._ring_read_idx + take) % self._ring_capacity_frames
                 self._ring_count -= take
                 self._frames_read += take
+                # Remember the LAST sample for sample-and-hold on
+                # the next underrun.
+                self._last_sample = outdata[take - 1].copy()
+            # Notify any producer that's waiting on a full ring -- we
+            # just freed up `take` frames of capacity.
+            self._ring_cv.notify()
             if take < frames:
-                # Underrun — pad the rest with silence. This produces a
-                # brief glitch rather than a device stutter.
-                outdata[take:] = 0.0
+                # Underrun — sample-and-hold the LAST sample seen
+                # (held in self._last_sample, initialized to silence
+                # so first-callback underrun still produces silence).
+                # No step discontinuity at the boundary; subaudible
+                # DC where the previous code produced an audible
+                # step to zero.
+                outdata[take:] = self._last_sample
                 self._underruns += 1
 
+    # Producer-side wait timeout: write() blocks for up to this many
+    # seconds when the ring is full, waiting for the PortAudio
+    # callback to drain frames.  50 ms is generous -- the callback
+    # fires at OS-driver cadence (typically 256-512 frames every
+    # 5-10 ms) so the ring should drain well within the timeout
+    # under healthy operation.  On timeout we fall back to dropping
+    # oldest (the previous behaviour) so a stalled audio device
+    # can't deadlock the DSP worker.  Mirrors the same asymmetric
+    # blocking semantics as the AK4951 sink: producer waits, drops
+    # only on giving-up timeout; consumer never blocks (callback
+    # is real-time priority).
+    _WRITE_WAIT_TIMEOUT_S = 0.050
+
     def write(self, audio: np.ndarray) -> None:
-        """Non-blocking write. Prepares stereo float32, applies balance
-        gains, then enqueues into the ring buffer. If the ring is full
-        the oldest frames are dropped (operator hears a brief glitch
-        rather than seeing the entire UI freeze)."""
+        """Producer-side blocking write -- v0.0.9.1 backpressure
+        rewrite.  Prepares stereo float32, applies balance gains, then
+        enqueues into the ring buffer.  Blocks (with a 50 ms timeout)
+        when the ring is full so the worker thread can't outrun the
+        PortAudio callback.  On timeout falls back to drop-oldest
+        (defensive against a stalled audio device).
+        """
         if audio.size == 0:
             return
         # Two input shapes are accepted (see AK4951Sink.write for
@@ -355,17 +391,25 @@ class SoundDeviceSink:
             a = np.ascontiguousarray(a, dtype=np.float32)
         n = a.shape[0]
 
-        with self._ring_lock:
-            free = self._ring_capacity_frames - self._ring_count
-            if n > free:
-                # Overrun — drop the oldest (n - free) frames by
-                # advancing the read pointer. Operator hears a brief
-                # discontinuity; we don't block the DSP thread.
-                drop = n - free
-                self._ring_read_idx = (
-                    self._ring_read_idx + drop) % self._ring_capacity_frames
-                self._ring_count -= drop
-                self._overruns += 1
+        import time as _time
+        with self._ring_cv:
+            # Producer backpressure: wait if the ring doesn't have
+            # room for this whole block.  The callback notifies us
+            # after each drain, so the wait wakes promptly.
+            deadline = _time.monotonic() + self._WRITE_WAIT_TIMEOUT_S
+            while self._ring_count + n > self._ring_capacity_frames:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    # Timeout -- audio device may have stalled (driver
+                    # crash, device unplugged, etc).  Fall back to
+                    # drop-oldest so we don't deadlock the DSP worker.
+                    drop = (self._ring_count + n) - self._ring_capacity_frames
+                    self._ring_read_idx = (
+                        self._ring_read_idx + drop) % self._ring_capacity_frames
+                    self._ring_count -= drop
+                    self._overruns += 1
+                    break
+                self._ring_cv.wait(timeout=remaining)
             # Copy `a` into the ring at write_idx, handling wrap-around.
             end = self._ring_write_idx + n
             if end <= self._ring_capacity_frames:
