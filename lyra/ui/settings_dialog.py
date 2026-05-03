@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
-    QButtonGroup, QColorDialog, QComboBox, QFrame, QRadioButton, QSlider,
+    QButtonGroup, QColorDialog, QComboBox, QFrame, QListWidget,
+    QRadioButton, QSlider,
 )
 
 # Shared with the front-panel ViewPanel slider — both UIs map slider
@@ -74,188 +75,342 @@ class TciSettingsTab(QWidget):
         # preview). Spot / CW controls only appear when radio is present.
         self.radio = radio
 
+        # v0.0.9.1 layout rewrite — three side-by-side columns to fit
+        # all the TCI server / streaming / spot controls without a
+        # multi-screen-tall stack.  Operator-requested layout based
+        # on the canonical Thetis TCI Settings panel, minus items
+        # that depend on RX2 (v0.1) or TX (v0.2) which stay parked
+        # in the placeholder groups below.
+
         v = QVBoxLayout(self)
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        v.addLayout(top_row)
 
-        # ── TCI Server group ────────────────────────────────────────
-        grp = QGroupBox("TCI Server")
-        g = QGridLayout(grp)
-        g.setColumnStretch(2, 1)
-        row = 0
+        # ╔══ Column 1: Server core ═════════════════════════════════╗
+        srv_grp = QGroupBox("TCI Server")
+        srv = QGridLayout(srv_grp)
+        srv.setColumnStretch(2, 1)
+        srv_row = 0
 
-        self.enable_chk = QCheckBox("TCI Server Running")
-        self.enable_chk.setChecked(server.is_running)
-        self.enable_chk.toggled.connect(self._on_enable)
-        g.addWidget(self.enable_chk, row, 0, 1, 3)
-        row += 1
-
-        g.addWidget(QLabel("Bind IP:Port"), row, 0)
+        srv.addWidget(QLabel("Bind IP:Port"), srv_row, 0)
         self.bind_edit = QLineEdit(f"{server.bind_host}:{server.port}")
-        self.bind_edit.setFixedWidth(160)
-        g.addWidget(self.bind_edit, row, 1)
-        default_btn = QPushButton("Default")
-        default_btn.setFixedWidth(80)
+        self.bind_edit.setFixedWidth(150)
+        srv.addWidget(self.bind_edit, srv_row, 1)
+        default_btn = QPushButton("Def")
+        default_btn.setFixedWidth(40)
         default_btn.clicked.connect(self._reset_bind_default)
-        g.addWidget(default_btn, row, 2, Qt.AlignLeft)
-        row += 1
+        srv.addWidget(default_btn, srv_row, 2, Qt.AlignLeft)
+        srv_row += 1
 
-        g.addWidget(QLabel("Rate Limit (msg/s)"), row, 0)
+        srv.addWidget(QLabel("Rate Limit (ms)"), srv_row, 0)
         self.rate_spin = QSpinBox()
+        # Per Thetis convention: minimum interval between same-key
+        # broadcast messages, in milliseconds.  Internal storage is
+        # rate_limit_hz (msg/sec), converted on read/write.
         self.rate_spin.setRange(1, 1000)
-        self.rate_spin.setValue(int(server.rate_limit_hz))
+        self.rate_spin.setValue(int(1000 / max(server.rate_limit_hz, 1)))
         self.rate_spin.setFixedWidth(80)
+        self.rate_spin.setSuffix(" ms")
         self.rate_spin.valueChanged.connect(
-            lambda v: setattr(self.server, "rate_limit_hz", v))
-        g.addWidget(self.rate_spin, row, 1)
-        row += 1
+            lambda ms: setattr(self.server, "rate_limit_hz",
+                               max(1, int(1000 / max(int(ms), 1)))))
+        srv.addWidget(self.rate_spin, srv_row, 1)
+        srv_row += 1
 
-        self.init_state_chk = QCheckBox("Send initial VFO state on connect")
+        self.init_state_chk = QCheckBox(
+            "Send initial state on client connect")
         self.init_state_chk.setChecked(server.send_initial_state_on_connect)
         self.init_state_chk.toggled.connect(
-            lambda v: setattr(self.server, "send_initial_state_on_connect", v))
-        g.addWidget(self.init_state_chk, row, 0, 1, 3)
-        row += 1
+            lambda v: setattr(self.server,
+                              "send_initial_state_on_connect", v))
+        srv.addWidget(self.init_state_chk, srv_row, 0, 1, 3)
+        srv_row += 1
 
-        g.addWidget(QLabel("Own Callsign"), row, 0)
-        self.callsign_edit = QLineEdit(server.own_callsign)
-        self.callsign_edit.setFixedWidth(120)
-        self.callsign_edit.setPlaceholderText("(for spots)")
-        self.callsign_edit.editingFinished.connect(
-            lambda: setattr(self.server, "own_callsign",
-                            self.callsign_edit.text().strip().upper()))
-        g.addWidget(self.callsign_edit, row, 1)
-        row += 1
+        # Mode-name mapping options — TCI's modulation enum is
+        # historically CWU/CWL-blind (one "CW" mode), but newer
+        # clients accept CWU/CWL verbatim.  These two flags let
+        # operators tune for the client mix they have.
+        self.mode_cwlcwu_out_chk = QCheckBox(
+            "CWL/CWU becomes CW (outbound)")
+        self.mode_cwlcwu_out_chk.setChecked(server.cwlcwu_becomes_cw_out)
+        self.mode_cwlcwu_out_chk.toggled.connect(
+            lambda v: setattr(self.server, "cwlcwu_becomes_cw_out", v))
+        srv.addWidget(self.mode_cwlcwu_out_chk, srv_row, 0, 1, 3)
+        srv_row += 1
+
+        self.mode_cw_to_cwu_chk = QCheckBox(
+            "CW becomes CWU above 10 MHz (inbound)")
+        self.mode_cw_to_cwu_chk.setChecked(
+            server.cw_becomes_cwu_above_10mhz_in)
+        self.mode_cw_to_cwu_chk.toggled.connect(
+            lambda v: setattr(self.server,
+                              "cw_becomes_cwu_above_10mhz_in", v))
+        srv.addWidget(self.mode_cw_to_cwu_chk, srv_row, 0, 1, 3)
+        srv_row += 1
+
+        self.emulate_expertsdr3_chk = QCheckBox(
+            "Emulate ExpertSDR3 protocol")
+        self.emulate_expertsdr3_chk.setToolTip(
+            "Some legacy TCI clients only recognize the\n"
+            "ExpertSDR3 protocol/device strings on connect.\n"
+            "Enable this to spoof those strings if your client\n"
+            "refuses to talk to Lyra.")
+        self.emulate_expertsdr3_chk.setChecked(server.emulate_expertsdr3)
+        self.emulate_expertsdr3_chk.toggled.connect(
+            lambda v: setattr(self.server, "emulate_expertsdr3", v))
+        srv.addWidget(self.emulate_expertsdr3_chk, srv_row, 0, 1, 3)
+        srv_row += 1
 
         self.log_chk = QCheckBox("Log TCI traffic to console / viewer")
         self.log_chk.setChecked(server.log_traffic)
         self.log_chk.toggled.connect(
             lambda v: setattr(self.server, "log_traffic", v))
-        g.addWidget(self.log_chk, row, 0, 1, 3)
-        row += 1
+        srv.addWidget(self.log_chk, srv_row, 0, 1, 3)
+        srv_row += 1
 
-        self.log_btn = QPushButton("Show TCI Log...")
+        self.enable_chk = QCheckBox("TCI Server Running")
+        self.enable_chk.setChecked(server.is_running)
+        self.enable_chk.toggled.connect(self._on_enable)
+        srv.addWidget(self.enable_chk, srv_row, 0, 1, 2)
+        self.log_btn = QPushButton("Show Log...")
+        self.log_btn.setFixedWidth(95)
         self.log_btn.clicked.connect(self._show_log)
-        g.addWidget(self.log_btn, row, 0)
-        row += 1
+        srv.addWidget(self.log_btn, srv_row, 2, Qt.AlignLeft)
+        srv_row += 1
 
         # Status
         self.status_label = QLabel()
-        self.status_label.setStyleSheet("color: #8a9aac; font-style: italic;")
-        g.addWidget(self.status_label, row, 0, 1, 3)
+        self.status_label.setStyleSheet(
+            "color: #8a9aac; font-style: italic;")
+        srv.addWidget(self.status_label, srv_row, 0, 1, 3)
         self._update_status()
 
         server.running_changed.connect(lambda _: self._update_status())
         server.client_count_changed.connect(lambda _: self._update_status())
 
-        v.addWidget(grp)
+        top_row.addWidget(srv_grp, 1)
 
-        # ── TCI Spots ────────────────────────────────────────────────
-        # DX-cluster / skimmer spots pushed from TCI clients (N1MM+,
-        # log4OM, CW Skimmer via TCI). Displayed as markers on the
-        # panadapter; click to tune. These controls live here rather
-        # than on the front panel because they're "set once and forget".
+        # ╔══ Column 2: Audio + IQ Streaming ════════════════════════╗
+        stream_grp = QGroupBox("Audio + IQ Streaming")
+        stm = QGridLayout(stream_grp)
+        stm.setColumnStretch(0, 1)
+        stm_row = 0
+
+        self.allow_audio_chk = QCheckBox("Allow RX audio over TCI")
+        self.allow_audio_chk.setToolTip(
+            "Master enable for the TCI RX audio stream.\n"
+            "When off, TCI clients receive no audio even if\n"
+            "they send AUDIO_START.  Disable for CPU / safety\n"
+            "reasons; default ON for normal use.")
+        self.allow_audio_chk.setChecked(server.allow_audio_streaming)
+        self.allow_audio_chk.toggled.connect(
+            lambda v: setattr(self.server, "allow_audio_streaming", v))
+        stm.addWidget(self.allow_audio_chk, stm_row, 0)
+        stm_row += 1
+
+        self.allow_iq_chk = QCheckBox("Allow IQ over TCI")
+        self.allow_iq_chk.setToolTip(
+            "Master enable for the TCI IQ stream.\n"
+            "Used by panorama / spectrum-analyzer clients\n"
+            "(SDRLogger+, etc.).  Default ON.")
+        self.allow_iq_chk.setChecked(server.allow_iq_streaming)
+        self.allow_iq_chk.toggled.connect(
+            lambda v: setattr(self.server, "allow_iq_streaming", v))
+        stm.addWidget(self.allow_iq_chk, stm_row, 0)
+        stm_row += 1
+
+        self.always_audio_chk = QCheckBox(
+            "Always stream audio (don't wait for AUDIO_START)")
+        self.always_audio_chk.setChecked(server.always_stream_audio)
+        self.always_audio_chk.toggled.connect(
+            lambda v: setattr(self.server, "always_stream_audio", v))
+        stm.addWidget(self.always_audio_chk, stm_row, 0)
+        stm_row += 1
+
+        self.always_iq_chk = QCheckBox(
+            "Always stream IQ (don't wait for IQ_START)")
+        self.always_iq_chk.setChecked(server.always_stream_iq)
+        self.always_iq_chk.toggled.connect(
+            lambda v: setattr(self.server, "always_stream_iq", v))
+        stm.addWidget(self.always_iq_chk, stm_row, 0)
+        stm_row += 1
+
+        self.swap_iq_chk = QCheckBox("Swap IQ on stream (Q,I instead of I,Q)")
+        self.swap_iq_chk.setChecked(server.swap_iq_on_stream)
+        self.swap_iq_chk.toggled.connect(
+            lambda v: setattr(self.server, "swap_iq_on_stream", v))
+        stm.addWidget(self.swap_iq_chk, stm_row, 0)
+        stm_row += 1
+
+        # Currently-streaming clients display: shows the operator
+        # which TCI clients are subscribed to which streams, with
+        # the per-client config (sample rate / format / channels).
+        # Read-only; refreshed on a 1 Hz timer.
+        stm.addWidget(QLabel("Currently streaming:"), stm_row, 0)
+        stm_row += 1
+        self.streaming_list = QListWidget()
+        self.streaming_list.setMaximumHeight(140)
+        self.streaming_list.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 10pt;")
+        stm.addWidget(self.streaming_list, stm_row, 0)
+        stm_row += 1
+        self._streaming_timer = QTimer(self)
+        self._streaming_timer.setInterval(1000)
+        self._streaming_timer.timeout.connect(self._refresh_streaming_list)
+        self._streaming_timer.start()
+        self._refresh_streaming_list()
+
+        top_row.addWidget(stream_grp, 1)
+
+        # ╔══ Column 3: Spots ═══════════════════════════════════════╗
         spots = QGroupBox("TCI Spots")
         sl = QGridLayout(spots)
-        sl.setColumnStretch(2, 1)
-        spots_row = 0
+        sl.setColumnStretch(1, 1)
+        sp_row = 0
 
-        sl.addWidget(QLabel("Max spots"), spots_row, 0)
+        sl.addWidget(QLabel("Max spots"), sp_row, 0)
         self.max_spots_spin = QSpinBox()
-        # Capped at 100 — anything more and the panadapter turns into a
-        # wall of overlapping call-sign boxes. With FT8 especially, even
-        # 30 visible spots is already crowded at a 4 kHz span.
         self.max_spots_spin.setRange(0, 100)
         self.max_spots_spin.setSingleStep(5)
-        self.max_spots_spin.setFixedWidth(90)
+        self.max_spots_spin.setFixedWidth(80)
         self.max_spots_spin.setToolTip(
-            "Maximum spots kept in memory (0–100). Oldest are evicted "
-            "(LRU) once this is exceeded. Lower values = less clutter "
-            "on the panadapter — 20–30 is a sensible default for HF.")
+            "Maximum spots kept in memory (0–100). "
+            "20–30 is a sensible default for HF.")
         if self.radio is not None:
             self.max_spots_spin.setValue(self.radio.max_spots)
             self.max_spots_spin.valueChanged.connect(
                 lambda v: self.radio.set_max_spots(v))
-        sl.addWidget(self.max_spots_spin, spots_row, 1)
-        spots_row += 1
+        sl.addWidget(self.max_spots_spin, sp_row, 1, Qt.AlignLeft)
+        sp_row += 1
 
-        sl.addWidget(QLabel("Lifetime"), spots_row, 0)
+        sl.addWidget(QLabel("Lifetime"), sp_row, 0)
         self.lifetime_spin = QSpinBox()
-        self.lifetime_spin.setRange(0, 86400)   # up to 24 h
+        self.lifetime_spin.setRange(0, 86400)
         self.lifetime_spin.setSingleStep(60)
         self.lifetime_spin.setFixedWidth(90)
         self.lifetime_spin.setSuffix(" s")
         self.lifetime_spin.setToolTip(
-            "Seconds after which a spot is considered stale and removed "
-            "from the panadapter. 0 = never expire. Use the preset "
-            "buttons for common values, or type a custom number.")
+            "Seconds after which a spot is considered stale.\n"
+            "0 = never expire.")
         if self.radio is not None:
             self.lifetime_spin.setValue(self.radio.spot_lifetime_s)
             self.lifetime_spin.valueChanged.connect(
                 lambda v: self.radio.set_spot_lifetime_s(v))
-        sl.addWidget(self.lifetime_spin, spots_row, 1)
-        # Preset shortcuts — minute-scale for typical ham use. Manual
-        # box stays editable for anything else the user wants.
+        sl.addWidget(self.lifetime_spin, sp_row, 1, Qt.AlignLeft)
+        sp_row += 1
+
+        # Lifetime quick presets
         preset_row = QHBoxLayout()
         preset_row.setSpacing(4)
-        for label, seconds in (("5 min",  300),
-                               ("10 min", 600),
-                               ("15 min", 900),
-                               ("30 min", 1800)):
+        for label, seconds in (("5m", 300), ("10m", 600),
+                               ("15m", 900), ("30m", 1800)):
             b = QPushButton(label)
-            b.setFixedWidth(54)
+            b.setFixedWidth(40)
             b.clicked.connect(
                 lambda _=False, s=seconds: self.lifetime_spin.setValue(s))
             preset_row.addWidget(b)
         preset_row.addStretch(1)
         preset_wrap = QWidget()
         preset_wrap.setLayout(preset_row)
-        sl.addWidget(preset_wrap, spots_row, 2)
-        spots_row += 1
+        sl.addWidget(preset_wrap, sp_row, 0, 1, 2)
+        sp_row += 1
 
-        # Mode filter — mirrors SDRLogger+ idiom: single CSV field,
-        # empty = all, case-insensitive, "SSB" auto-expands to match
-        # USB/LSB/SSB-tagged cluster spots. Reduces clutter when you
-        # only care about a specific mode (e.g. set to "FT8" to hide
-        # every CW/SSB spot on a congested band).
-        sl.addWidget(QLabel("Mode filter"), spots_row, 0)
+        sl.addWidget(QLabel("Mode filter"), sp_row, 0)
         self.mode_filter_edit = QLineEdit()
-        self.mode_filter_edit.setPlaceholderText(
-            "e.g. FT8,CW,SSB   (empty = show all)")
+        self.mode_filter_edit.setPlaceholderText("FT8,CW,SSB")
         self.mode_filter_edit.setToolTip(
-            "Comma-separated modes to render on the panadapter. "
-            "Case-insensitive. Empty = no filter.\n"
-            "'SSB' automatically includes USB and LSB — cluster "
-            "spots are almost always tagged USB/LSB, not SSB.\n"
-            "Examples:  FT8   |   FT8,FT4   |   CW,SSB   |   "
-            "RTTY,PSK31")
+            "Comma-separated modes to render on the panadapter.\n"
+            "Empty = show all.  'SSB' auto-includes USB+LSB.")
         if self.radio is not None:
             self.mode_filter_edit.setText(self.radio.spot_mode_filter_csv)
             self.mode_filter_edit.editingFinished.connect(
                 lambda: self.radio.set_spot_mode_filter_csv(
                     self.mode_filter_edit.text()))
-        sl.addWidget(self.mode_filter_edit, spots_row, 1, 1, 2)
-        spots_row += 1
+        sl.addWidget(self.mode_filter_edit, sp_row, 1)
+        sp_row += 1
 
-        # Master clear button
+        self.flash_spots_chk = QCheckBox("Flash new spots")
+        self.flash_spots_chk.setChecked(server.flash_new_spots)
+        self.flash_spots_chk.toggled.connect(
+            lambda v: setattr(self.server, "flash_new_spots", v))
+        sl.addWidget(self.flash_spots_chk, sp_row, 0)
+        # Color picker for flash color (small swatch button)
+        self._flash_color_btn = QPushButton("    ")
+        self._flash_color_btn.setFixedWidth(40)
+        self._update_color_button(self._flash_color_btn,
+                                  server.flash_spot_color)
+        self._flash_color_btn.clicked.connect(self._pick_flash_color)
+        sl.addWidget(self._flash_color_btn, sp_row, 1, Qt.AlignLeft)
+        sp_row += 1
+
+        self.flags_chk = QCheckBox("Show country flags on spots")
+        self.flags_chk.setChecked(server.show_country_flags)
+        self.flags_chk.toggled.connect(
+            lambda v: setattr(self.server, "show_country_flags", v))
+        sl.addWidget(self.flags_chk, sp_row, 0, 1, 2)
+        sp_row += 1
+
+        # Own callsign + own-spot color
+        sl.addWidget(QLabel("Own callsign"), sp_row, 0)
+        self.callsign_edit = QLineEdit(server.own_callsign)
+        self.callsign_edit.setFixedWidth(100)
+        self.callsign_edit.setPlaceholderText("(for spots)")
+        self.callsign_edit.editingFinished.connect(
+            lambda: setattr(self.server, "own_callsign",
+                            self.callsign_edit.text().strip().upper()))
+        sl.addWidget(self.callsign_edit, sp_row, 1, Qt.AlignLeft)
+        sp_row += 1
+
+        sl.addWidget(QLabel("Own-call color"), sp_row, 0)
+        self._own_color_btn = QPushButton("    ")
+        self._own_color_btn.setFixedWidth(40)
+        self._update_color_button(self._own_color_btn,
+                                  server.own_call_color)
+        self._own_color_btn.clicked.connect(self._pick_own_color)
+        sl.addWidget(self._own_color_btn, sp_row, 1, Qt.AlignLeft)
+        sp_row += 1
+
+        # CW Spot sideband forcing
+        sl.addWidget(QLabel("CW spot sideband"), sp_row, 0)
+        sp_row += 1
+        self._cw_sb_group = QButtonGroup(self)
+        cw_sb_row = QHBoxLayout()
+        for label, key in (("Default", "default"),
+                           ("Force CWU", "cwu"),
+                           ("Force CWL", "cwl")):
+            rb = QRadioButton(label)
+            rb.setChecked(server.cw_spot_sideband_force == key)
+            rb.toggled.connect(
+                lambda checked, k=key:
+                checked and setattr(self.server,
+                                    "cw_spot_sideband_force", k))
+            self._cw_sb_group.addButton(rb)
+            cw_sb_row.addWidget(rb)
+        cw_sb_row.addStretch(1)
+        cw_sb_wrap = QWidget()
+        cw_sb_wrap.setLayout(cw_sb_row)
+        sl.addWidget(cw_sb_wrap, sp_row, 0, 1, 2)
+        sp_row += 1
+
+        # Master clear button + spot count
         clear_btn = QPushButton("Clear All Spots")
         clear_btn.setFixedWidth(140)
-        clear_btn.setToolTip(
-            "Remove every spot from the panadapter. Next spot push from a "
-            "TCI client will start the list fresh.")
         if self.radio is not None:
             clear_btn.clicked.connect(self.radio.clear_spots)
-        sl.addWidget(clear_btn, spots_row, 0)
+        sl.addWidget(clear_btn, sp_row, 0)
 
         self.spot_count_lbl = QLabel()
         self.spot_count_lbl.setStyleSheet(
             "color: #8a9aac; font-style: italic;")
-        sl.addWidget(self.spot_count_lbl, spots_row, 1, 1, 2)
+        sl.addWidget(self.spot_count_lbl, sp_row, 1, Qt.AlignLeft)
         if self.radio is not None:
             self._update_spot_count()
             self.radio.spots_changed.connect(
                 lambda _: self._update_spot_count())
-        spots_row += 1
+        sp_row += 1
 
-        v.addWidget(spots)
+        top_row.addWidget(spots, 1)
 
         # ── CW / keying over TCI (placeholder — needs TX path) ──────
         # Planned controls: "CW Skimmer send via TCI", CW keyer keying
@@ -314,6 +469,69 @@ class TciSettingsTab(QWidget):
         n = len(self.radio.spots) if self.radio is not None else 0
         self.spot_count_lbl.setText(
             f"{n} spot{'s' if n != 1 else ''} currently held")
+
+    def _update_color_button(self, btn: QPushButton, argb: int) -> None:
+        """Paint the small color-picker swatch button with the given
+        ARGB color (alpha discarded -- buttons are opaque squares)."""
+        r = (argb >> 16) & 0xFF
+        g = (argb >> 8) & 0xFF
+        b = argb & 0xFF
+        btn.setStyleSheet(
+            f"background-color: rgb({r}, {g}, {b}); "
+            "border: 1px solid #555;")
+
+    def _pick_flash_color(self) -> None:
+        """QColorDialog launcher for the flash-new-spots color."""
+        argb = self.server.flash_spot_color
+        col = QColor((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF)
+        new = QColorDialog.getColor(col, self, "Flash spot color")
+        if new.isValid():
+            new_argb = (0xFF000000 | (new.red() << 16)
+                        | (new.green() << 8) | new.blue())
+            self.server.flash_spot_color = new_argb
+            self._update_color_button(self._flash_color_btn, new_argb)
+
+    def _pick_own_color(self) -> None:
+        """QColorDialog launcher for the own-callsign spot color."""
+        argb = self.server.own_call_color
+        col = QColor((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF)
+        new = QColorDialog.getColor(col, self, "Own callsign color")
+        if new.isValid():
+            new_argb = (0xFF000000 | (new.red() << 16)
+                        | (new.green() << 8) | new.blue())
+            self.server.own_call_color = new_argb
+            self._update_color_button(self._own_color_btn, new_argb)
+
+    def _refresh_streaming_list(self) -> None:
+        """1 Hz refresh of the currently-streaming clients display.
+        Reads TciServer.streaming_clients_summary() for the per-
+        client config (audio + IQ subscription, format, channels)."""
+        try:
+            clients = self.server.streaming_clients_summary()
+        except Exception:
+            clients = []
+        # Preserve current selection if any (rebuild-by-clear is the
+        # easy approach for a list this small; selection rarely
+        # matters for a read-only diagnostic).
+        self.streaming_list.clear()
+        if not clients:
+            self.streaming_list.addItem(
+                "(no TCI clients currently streaming)")
+            return
+        for c in clients:
+            audio = (
+                f"audio {c['audio_sample_rate']//1000}k "
+                f"{c['audio_format']} "
+                f"{'mono' if c['audio_channels'] == 1 else 'stereo'}"
+                if c['audio_enabled'] else "")
+            iq = (
+                f"IQ {c['iq_sample_rate']//1000}k "
+                f"{c['iq_format']}"
+                if c['iq_enabled'] else "")
+            streams = " · ".join(s for s in (audio, iq) if s)
+            if not streams:
+                streams = "(connected, no streams active)"
+            self.streaming_list.addItem(f"{c['address']}    {streams}")
 
     def _on_enable(self, checked: bool):
         self._apply_bind_edit()
