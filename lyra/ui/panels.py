@@ -4018,6 +4018,16 @@ def _confirm_delete_notch_bank(parent_widget, radio, name: str) -> None:
 
 
 # ── Spectrum / Waterfall panels ─────────────────────────────────────────
+def _read_qs_bool(qs, key, default):
+    """Tiny QSettings boolean coercion helper used by the
+    EiBi-overlay refresh path -- QSettings stores everything as
+    str on Windows so bool-cast doesn't work directly."""
+    val = qs.value(key, default)
+    if isinstance(val, bool):
+        return val
+    return str(val).lower() in ("true", "1", "yes")
+
+
 class SpectrumPanel(GlassPanel):
     def __init__(self, radio: Radio, parent=None):
         super().__init__("PANADAPTER", parent, help_topic="spectrum")
@@ -4119,6 +4129,21 @@ class SpectrumPanel(GlassPanel):
         self.radio.spot_mode_filter_changed.connect(
             self.widget.set_spot_mode_filter)
         self.radio.spots_changed.connect(self.widget.set_spots)
+        # ── EiBi SW broadcaster overlay (v0.0.9 Step 4c) ──────
+        # The panel watches freq + zoom + store-changes and pushes
+        # the visible-range entry list into the widget.  Auto-
+        # detection (no overlay inside ham bands) lives in the
+        # _refresh_eibi method.
+        self.radio.freq_changed.connect(
+            lambda *_: self._refresh_eibi_overlay())
+        self.radio.rate_changed.connect(
+            lambda *_: self._refresh_eibi_overlay())
+        self.radio.zoom_changed.connect(
+            lambda *_: self._refresh_eibi_overlay())
+        self.radio.eibi_store_changed.connect(
+            self._refresh_eibi_overlay)
+        # Initial pass.
+        self._refresh_eibi_overlay()
         # Drag-edge-to-resize-RX-BW (Phase B.11). Operator pulls a
         # cyan edge → widget emits proposed BW (Hz, already
         # quantized + clamped) → push straight into Radio for the
@@ -4320,6 +4345,81 @@ class SpectrumPanel(GlassPanel):
 
     def _on_spectrum_ready(self, spec_db, center_hz, rate):
         self.widget.set_spectrum(spec_db, center_hz, rate)
+
+    def _refresh_eibi_overlay(self) -> None:
+        """Recompute the EiBi visible-entry list and push it into
+        the panadapter widget.  Driven by freq / zoom / store /
+        settings change events; not called per paint.
+
+        Logic:
+          1. Read settings (master, force_all, min_power, hide_off_air)
+          2. Run overlay_gate to decide if we should render at all
+          3. If yes, query EibiStore.lookup_in_range across the
+             current visible span
+          4. Push (entries, visible_flag) to the widget
+
+        Skips the widget-push entirely when overlay is gated off
+        (visible_flag=False clears any stale labels)."""
+        try:
+            from PySide6.QtCore import QSettings as _QS
+            from lyra.swdb.overlay_gate import overlay_should_render
+            from lyra.swdb.time_filter import is_on_air
+            qs = _QS("N8SDR", "Lyra")
+            master = _read_qs_bool(
+                qs, "swdb/overlay_master_enabled", False)
+            force_all = _read_qs_bool(
+                qs, "swdb/overlay_force_all_bands", False)
+            try:
+                min_power = int(qs.value("swdb/min_power", 1) or 1)
+            except (TypeError, ValueError):
+                min_power = 1
+            hide_off_air = _read_qs_bool(
+                qs, "swdb/hide_off_air", True)
+            # Operator's region for the band-plan check.
+            region = ""
+            try:
+                region = str(qs.value(
+                    "operator/band_plan_region", "US") or "US")
+            except Exception:
+                region = "US"
+            freq_hz = int(getattr(self.radio, "freq_hz", 0))
+            should = overlay_should_render(
+                freq_hz, region, master, force_all)
+            if not should or not getattr(
+                    self.radio, "eibi_store", None):
+                # Clear any stale entries.
+                if hasattr(self.widget, "set_eibi_entries"):
+                    self.widget.set_eibi_entries([], False)
+                return
+            store = self.radio.eibi_store
+            if not store.loaded:
+                if hasattr(self.widget, "set_eibi_entries"):
+                    self.widget.set_eibi_entries([], False)
+                return
+            # Visible-range query.
+            span_hz = int(getattr(self.widget, "_span_hz", 0))
+            if span_hz <= 0:
+                return
+            lo_khz = (freq_hz - span_hz // 2) // 1000
+            hi_khz = (freq_hz + span_hz // 2) // 1000
+            entries = store.lookup_in_range(
+                lo_khz, hi_khz,
+                min_power=min_power,
+                only_on_air=hide_off_air)
+            # Tuple-pack for the widget; recompute on-air status
+            # so the renderer can color-code (only meaningful when
+            # hide_off_air is False, but cheap to always include).
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            packed = [
+                (e.freq_khz * 1000, e.station, e.language,
+                 e.target, is_on_air(e, now))
+                for e in entries
+            ]
+            if hasattr(self.widget, "set_eibi_entries"):
+                self.widget.set_eibi_entries(packed, True)
+        except Exception as ex:
+            print(f"[SpectrumPanel] EiBi overlay refresh failed: {ex}")
 
     def _on_click(self, freq_hz):
         # Click-to-tune. CW filters sit OFFSET from the marker by

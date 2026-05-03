@@ -121,6 +121,19 @@ class SpectrumWidget(_PaintedWidget):
         #                            attenuation
         self._notches: list[tuple[float, float, bool, bool]] = []
         self._spots: list[dict] = []
+        # ── EiBi SW broadcaster overlay (v0.0.9 Step 4c) ────────
+        # Visible-range entries are pushed in by SpectrumPanel
+        # (which owns the freq + settings + EibiStore plumbing).
+        # The widget just renders.  Each item is a tuple:
+        #   (freq_hz, station, language, target, on_air_now)
+        # The "on_air_now" hint lets the renderer pick a slightly
+        # different color for entries that ARE on the air vs ones
+        # the operator chose to show even when off-air.
+        self._eibi_entries: list[tuple[int, str, str, str, bool]] = []
+        # Master gate -- when False, the widget skips the overlay
+        # entirely regardless of how many entries are stashed.
+        # Set by SpectrumPanel based on the overlay_gate result.
+        self._eibi_overlay_visible: bool = False
         # Used for the age-fade on spot boxes (newer spots at full alpha,
         # older ones fading toward 30%). Kept in sync with Radio via
         # set_spot_lifetime_s; defaults to a sensible 10 min.
@@ -231,6 +244,24 @@ class SpectrumWidget(_PaintedWidget):
 
     def set_spots(self, spots: list[dict]):
         self._spots = list(spots)
+        self.update()
+
+    def set_eibi_entries(self,
+                         entries: list[tuple[int, str, str, str, bool]],
+                         visible: bool) -> None:
+        """Push the visible-range EiBi entries into the widget for
+        the next paint.  Called by SpectrumPanel after a freq /
+        zoom change or when the EibiStore reloads.
+
+        Each entry tuple is
+        ``(freq_hz, station, language, target, on_air_now)``.
+        ``visible`` is the master gate -- when False, the widget
+        skips drawing entirely.
+
+        Internal storage is the same shape as the input; no
+        further filtering happens at paint time."""
+        self._eibi_entries = list(entries)
+        self._eibi_overlay_visible = bool(visible)
         self.update()
 
     def set_spot_lifetime_s(self, seconds: int):
@@ -831,6 +862,26 @@ class SpectrumWidget(_PaintedWidget):
         else:
             self.setCursor(Qt.CrossCursor)
 
+        # ── EiBi label hover tooltip (v0.0.9 Step 4c) ────────────
+        # Hover an EiBi station label -> tooltip with full details
+        # (freq, language, target area, on-air status).
+        eibi_hit = self._eibi_hit_at(x, y)
+        if eibi_hit is not None:
+            freq_hz, station, language, target, on_air = eibi_hit
+            on_str = "ON AIR" if on_air else "off air"
+            tip_lines = [
+                f"<b>{station}</b>",
+                f"{freq_hz/1e6:.4f} MHz  ({on_str})",
+            ]
+            if language:
+                tip_lines.append(f"Language: {language}")
+            if target:
+                tip_lines.append(f"Target: {target}")
+            self.setToolTip("\n".join(tip_lines))
+        elif self.toolTip().startswith("<b>") and "MHz" in self.toolTip():
+            # Clear stale EiBi tooltip when we move off a label.
+            self.setToolTip("")
+
         # ── Snap-target hover reticle (click-to-tune v1) ─────────
         # When the modifier is held over empty spectrum, find the
         # snap target and stash it for paintEvent to draw a reticle.
@@ -1391,6 +1442,15 @@ class SpectrumWidget(_PaintedWidget):
             label = f"{freq_khz:,.1f}"
             p.drawText(x - 30, h - 4, label)
 
+        # ── EiBi SW broadcaster overlay (v0.0.9 Step 4c) ──────────
+        # Drawn BELOW the TCI spots so live operator activity (TCI
+        # spots) wins on z-order when both are visible.  EiBi
+        # entries are static-table broadcaster IDs; spots are the
+        # live "operators are talking RIGHT NOW" overlay.
+        if (self._eibi_overlay_visible
+                and self._eibi_entries
+                and self._span_hz > 0):
+            self._draw_eibi_overlay(p, w, h)
         # TCI Spots — conventional colored box with callsign text inside.
         # Callsign may contain the country-flag emoji (SDRLogger+ does this).
         #
@@ -1582,6 +1642,90 @@ class SpectrumWidget(_PaintedWidget):
         # operator launched with LYRA_PAINT_DEBUG=1. Cheap when off.
         if _paint_t0 is not None:
             self._record_paint_time(_paint_t0)
+
+    def _draw_eibi_overlay(self, p, w: int, h: int) -> None:
+        """Draw EiBi station-name labels for entries in
+        ``self._eibi_entries`` at their freq positions.
+
+        Layout strategy: simple vertical-tick + label hanging
+        below the band-plan strip area (so it doesn't clutter
+        the trace).  No row-packing for v1; if labels collide
+        the rightmost wins and operators can zoom in for detail.
+
+        Color choices:
+          * On-air entries get a muted teal (visible against the
+            dark theme without overwhelming the trace).
+          * Off-air entries (when operator opted to show them
+            via the Settings checkbox) get desaturated grey so
+            they don't distract from currently-active stations.
+        """
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QColor, QFont, QFontMetrics
+        # Cache of label rects for hover hit-testing.  Kept in
+        # widget-coordinates so mouseMoveEvent can use it
+        # directly.  Cleared every paint.
+        self._eibi_hit_rects: list[
+            tuple[QRectF, tuple]
+        ] = []
+        center = self._center_hz
+        span = self._span_hz
+        if span <= 0:
+            return
+        font = QFont(p.font())
+        font.setPointSize(8)
+        p.setFont(font)
+        fm = QFontMetrics(font)
+        # Top y for label band -- below the band-plan strip so we
+        # don't overlap the colored allocation rectangles at the
+        # very top of the widget.
+        band_strip_h = 18
+        label_y = band_strip_h + 4
+        tick_top = band_strip_h + 2
+        tick_bottom = label_y + fm.height() + 1
+        for entry in self._eibi_entries:
+            freq_hz, station, language, target, on_air = entry
+            # Map freq to widget x.
+            offset_hz = freq_hz - center
+            if abs(offset_hz) > span / 2:
+                continue
+            x = int(w * (offset_hz / span + 0.5))
+            # Tick mark.
+            tick_color = (
+                QColor(80, 200, 220, 220) if on_air
+                else QColor(120, 130, 140, 140))
+            p.setPen(tick_color)
+            p.drawLine(x, tick_top, x, tick_bottom)
+            # Label text -- truncate to keep things readable on
+            # busy bands.
+            label_text = station[:20]
+            tw = fm.horizontalAdvance(label_text) + 4
+            label_x = x + 3
+            # Right-edge clamp so labels near the right don't
+            # render off-screen.
+            if label_x + tw > w - 4:
+                label_x = x - tw - 3
+            p.setPen(
+                QColor(180, 220, 230, 220) if on_air
+                else QColor(160, 170, 180, 160))
+            p.drawText(
+                label_x, label_y + fm.ascent(), label_text)
+            # Stash hit rect for hover tooltip.
+            self._eibi_hit_rects.append((
+                QRectF(label_x, label_y, tw, fm.height()),
+                entry,
+            ))
+
+    def _eibi_hit_at(self, x: float, y: float):
+        """Hit-test the EiBi label rects from the latest paint.
+        Returns the matching entry tuple or None.  Called from
+        mouseMoveEvent to drive the hover tooltip."""
+        rects = getattr(self, "_eibi_hit_rects", None)
+        if not rects:
+            return None
+        for rect, entry in rects:
+            if rect.contains(x, y):
+                return entry
+        return None
 
     def _record_paint_time(self, t0: float) -> None:
         """Append one paint duration to the rolling window and, every
