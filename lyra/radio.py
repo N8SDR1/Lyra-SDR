@@ -727,6 +727,19 @@ class Radio(QObject):
         self._agc_hang_counter: int = 0
         self._agc_one_minus_alpha_per_sample: float = 1.0
         self._agc_hang_samples: int = 0
+        # AGC smooth attack — v0.0.9.1 §A.5 fix.  Pre-fix the per-
+        # sample tracker had INSTANT attack (peak <- mag in one
+        # sample), which produced a sample-level discontinuity at the
+        # rising edge of any hard signal transient (CW dits/dahs,
+        # square-wave on/off keys, loud noise bursts).  Operator-
+        # observed as ticks/clicks on strong CW stations and
+        # occasional volume bursts even with all-DSP-off + AGC-off
+        # paths.  WDSP's wcpAGC.c uses ~2 ms attack; we default to
+        # 2.5 ms here per operator preference (2.5 ms ≈ 120 samples
+        # at 48 kHz audio rate, audibly smooth for CW edges,
+        # responsive enough to limit loud noise transients).  Filled
+        # in by _refresh_agc_per_sample_constants().
+        self._agc_attack_per_sample: float = 1.0  # 1.0 = instant; replaced at __init__
         # Rolling noise-floor estimate — lowest block peak over the
         # recent window. Used by "Auto Threshold" to calibrate the
         # AGC target above ambient noise (like the right-click →
@@ -5764,12 +5777,23 @@ class Radio(QObject):
         p = float(self._agc_peak)
         h = int(self._agc_hang_counter)
         one_minus_alpha = float(self._agc_one_minus_alpha_per_sample)
+        attack_alpha = float(self._agc_attack_per_sample)
         hang_init = int(self._agc_hang_samples)
         PEAK_FLOOR = 1e-4
         for i in range(n):
             m = mag[i]
             if m > p:
-                p = m                    # instant attack
+                # Smooth attack — v0.0.9.1 §A.5.  Ramp peak toward m
+                # over ~2.5 ms (attack_alpha set in
+                # _refresh_agc_per_sample_constants).  Replaces the
+                # pre-fix instant assignment p = m which produced a
+                # one-sample gain discontinuity at every rising edge,
+                # heard as ticks/clicks on hard CW transitions and
+                # occasional loud volume bursts.  The peak always
+                # MOVES toward the new max (it doesn't lag behind the
+                # signal forever), it just gets there over a few ms
+                # instead of one sample.
+                p = p + (m - p) * attack_alpha
                 h = hang_init            # rearm hang
             elif h > 0:
                 h -= 1                   # hold during hang
@@ -6025,6 +6049,26 @@ class Radio(QObject):
             d_sample = one_minus_release ** (1.0 / BLOCK_N)
         self._agc_one_minus_alpha_per_sample = float(d_sample)
         self._agc_hang_samples = int(self._agc_hang_blocks) * BLOCK_N
+
+        # Attack constant — v0.0.9.1 §A.5.  Same form as the release
+        # exponential but in the rising direction.  alpha_attack =
+        # 1 - exp(-1 / (attack_ms * 0.001 * fs)).  At 2.5 ms attack +
+        # 48 kHz audio rate, alpha ≈ 0.0083 — peak rises ~0.83 % per
+        # sample toward the new target.  Across a 120-sample window
+        # (the 2.5 ms ramp), the peak reaches >63 % of the target,
+        # which is plenty fast to limit incoming transients while
+        # still being audibly smooth on CW edges.
+        AUDIO_RATE = 48000
+        ATTACK_MS = 2.5
+        attack_samples = max(1.0, ATTACK_MS * 0.001 * AUDIO_RATE)
+        # Use math.exp for the time-constant form so the attack
+        # behaves correctly even if AUDIO_RATE or ATTACK_MS shift in
+        # the future.  Bounded to the (0, 1] range — degenerate
+        # values would either disable the attack (0) or restore
+        # instant attack (1, the pre-v0.0.9.1 behaviour).
+        import math as _math
+        attack = 1.0 - _math.exp(-1.0 / attack_samples)
+        self._agc_attack_per_sample = max(0.0, min(1.0, attack))
 
     # ── CW pitch ─────────────────────────────────────────────────────
     @property

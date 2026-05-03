@@ -66,6 +66,50 @@ Three compounding defects in the UDP RX path:
   "Stream: N errors" once any drop is detected.  Tooltip explains
   the operator-facing meaning.  Refreshed at 1 Hz via the existing
   CPU-tick timer (no new timer).
+- **AGC smooth attack — eliminates click-on-strong-CW symptom**
+  (`lyra/radio.py::_apply_agc_and_volume`).  The v0.0.7.1 quiet-
+  pass replaced block-scalar AGC with a per-sample envelope
+  tracker (eliminating the 21 ms-cadence boundary pops), but the
+  per-sample tracker still had INSTANT attack — `peak <- mag` in
+  one sample on every input rise.  At the rising edge of a hard
+  signal transient (CW dits/dahs, square-wave on/off keys, loud
+  noise bursts), the gain change had a one-sample discontinuity
+  that was audible as a click — louder on stronger stations and
+  more frequent in CW than in SSB.
+
+  Operator-correlated symptom (2026-05-03 antenna test):
+  *"clicks/ticks more in CW, strong stations have more than weak
+  ones, occasional volume bursts even with stream errors at 0."*
+  All three observations match an AGC-attack-on-transient bug.
+
+  Fix: smooth attack with a 2.5 ms time constant.  Replaces the
+  instant assignment with a one-pole exponential ramp toward the
+  new peak (`p += (m - p) * attack_alpha`).  At 48 kHz audio rate,
+  attack_alpha ≈ 0.0083 (peak rises ~0.83 % per sample), so the
+  ramp covers ~120 samples (2.5 ms) — fast enough to limit loud
+  transients before the ear notices, slow enough that the gain
+  change is sample-domain smooth.  WDSP's `wcpAGC.c` (Thetis's
+  AGC) uses ~2 ms attack for the same reason; 2.5 ms is a hair
+  more conservative.  No change to release / hang / target — the
+  perceived AGC behaviour for steady-state signals is unchanged.
+
+### Diagnostic instrumentation (temporary)
+
+- **APF diagnostic prints** (`lyra/dsp/apf.py`).  Operator-
+  reported: APF on/off in CW + AGC-off produces no audible
+  difference, even at +18 dB gain.  Code review confirmed the
+  setter chain wires correctly and the RBJ peaking biquad math
+  is the textbook formula — but something is still preventing
+  the boost from reaching the speaker.  Added rate-limited print
+  output (every ~50th call ≈ 1 Hz at 48 kHz block cadence) gated
+  on the `LYRA_APF_DEBUG` env var.  Logs: enabled state, center
+  frequency, BW, gain, sample rate, audio block size, input
+  max/rms, output max/rms, output/input ratio in dB.  Lets us
+  confirm whether APF is actually running, with what parameters,
+  and whether the biquad is producing the expected gain.
+  **Will be removed once root cause is identified.**
+
+  To enable: `set LYRA_APF_DEBUG=1` before launching Lyra.
 
 ### Operator-facing notes
 

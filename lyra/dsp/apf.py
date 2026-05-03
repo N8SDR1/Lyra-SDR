@@ -165,6 +165,31 @@ class AudioPeakFilter:
         smooth; resetting zi on every change would CLICK on each
         slider step, which is much worse.
         """
+        # Diagnostic — v0.0.9.1 APF investigation.  Operator-
+        # reported: APF on/off in CW + AGC-off produces no audible
+        # difference.  Print rate-limited stats so we can confirm
+        # the filter is actually running, see input/output magnitudes
+        # to verify the boost is happening, and catch any silent
+        # bypass case (degenerate coefficients, zero input, etc.).
+        # REMOVE after diagnosis is complete.
+        import os as _os
+        if _os.environ.get("LYRA_APF_DEBUG"):
+            self._dbg_apf_call_count = getattr(
+                self, "_dbg_apf_call_count", 0) + 1
+            # Print every 50th call ≈ once per second at typical
+            # 48 kHz audio block cadence.  Not too spammy, frequent
+            # enough to see real-time changes.
+            if self._dbg_apf_call_count % 50 == 0:
+                in_max = float(np.max(np.abs(audio))) if audio.size else 0.0
+                in_rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2))) if audio.size else 0.0
+                print(
+                    f"[APF] enabled={self.enabled} "
+                    f"f0={self._f0:.0f}Hz bw={self._bw}Hz "
+                    f"gain={self._gain_db:.1f}dB "
+                    f"fs={self._fs} "
+                    f"audio.size={audio.size} "
+                    f"in_max={in_max:.4f} in_rms={in_rms:.4f} "
+                    f"b0={self._b[0]:.4f} a0=1.0000")
         if not self.enabled or audio.size == 0:
             return audio
         # Defensive: avoid filtering with degenerate coefficients
@@ -187,7 +212,23 @@ class AudioPeakFilter:
         # Persist the float32 view of the new state so the next call
         # consumes/produces float32 throughout.
         self._zi = self._zi.astype(np.float32, copy=False)
-        return out.astype(np.float32, copy=False)
+        out_f32 = out.astype(np.float32, copy=False)
+
+        # Continuation of the diagnostic — print output stats so we
+        # can compare in vs out and confirm the filter is producing
+        # the expected boost at the configured center frequency.
+        if _os.environ.get("LYRA_APF_DEBUG") and \
+                self._dbg_apf_call_count % 50 == 0:
+            out_max = float(np.max(np.abs(out_f32))) if out_f32.size else 0.0
+            out_rms = float(np.sqrt(np.mean(out_f32.astype(np.float64) ** 2))) if out_f32.size else 0.0
+            ratio_db = (
+                20.0 * np.log10(out_rms / max(in_rms, 1e-12))
+                if in_rms > 0 else 0.0)
+            print(
+                f"[APF]    -> out_max={out_max:.4f} out_rms={out_rms:.4f} "
+                f"out/in_ratio={ratio_db:+.2f}dB")
+
+        return out_f32
 
     def reset(self) -> None:
         """Drop the filter's in-flight state. Called on freq/mode
