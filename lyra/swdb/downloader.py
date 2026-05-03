@@ -81,7 +81,13 @@ def current_season(now: Optional[datetime] = None) -> str:
 def season_filename(season: Optional[str] = None,
                     now: Optional[datetime] = None) -> str:
     """Compute the EiBi season-file basename for a given moment.
-    'A' season + 2026 -> 'sked-A26.csv'."""
+    'A' season + 2026 -> 'sked-a26.csv'.
+
+    EiBi serves the files with **lowercase** season letter
+    (sked-a26.csv, sked-b26.csv).  This is case-sensitive on the
+    server -- using uppercase 'A' returns 404.  Operator-confirmed
+    URL form (2026-05-02): https://eibispace.de/dx/sked-a26.csv
+    """
     if now is None:
         now = datetime.now(timezone.utc)
     if season is None or season.upper() == "AUTO":
@@ -90,7 +96,12 @@ def season_filename(season: Optional[str] = None,
     if season not in ("A", "B"):
         raise ValueError(f"unknown season {season!r}")
     yy = now.year % 100
-    return f"sked-{season}{yy:02d}.csv"
+    # Lowercase the season letter for the filename (server
+    # case-sensitive; uppercase returns 404).  current_season()
+    # and the rest of the code treat 'A' / 'B' as canonical
+    # uppercase identifiers; only the URL filename portion needs
+    # to be lowercase.
+    return f"sked-{season.lower()}{yy:02d}.csv"
 
 
 class _DownloadWorker(QObject):

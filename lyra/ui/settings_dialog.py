@@ -4961,26 +4961,51 @@ class _SwDatabaseSubTab(QWidget):
             "(SSL errors, firewall, etc.), download the file "
             "manually:</p>"
             "<ol>"
-            "<li>Click <b>Open EiBi website</b> below to open "
-            "<code>https://eibispace.de/</code> in your browser.</li>"
-            "<li>Find and download the current season's "
+            "<li>Click <b>Open EiBi downloads page</b> below.  "
+            "<b>Note:</b> EiBi's site uses HTTP, not HTTPS -- "
+            "your browser may warn that the connection is "
+            "<i>not secure</i>.  That's safe to accept for this "
+            "site -- it's a free public broadcast schedule, no "
+            "passwords or personal data are exchanged.  In "
+            "Chrome / Edge: click <b>Advanced</b> &rarr; "
+            "<b>Continue to site</b>.  If you have HTTPS-only "
+            "mode on, temporarily disable it for this domain.</li>"
+            "<li>Find and right-click the current season's "
             "<code>sked-A##.csv</code> or "
-            "<code>sked-B##.csv</code> file (~3 MB).</li>"
+            "<code>sked-B##.csv</code> file -- choose "
+            "<b>Save link as…</b> -- save anywhere (~3 MB).</li>"
             "<li>Click <b>Load local CSV…</b> below and pick "
             "the file -- Lyra copies it into the right folder "
             "and loads it.</li>"
-            "</ol>")
+            "</ol>"
+            "<p style='color:#a0b0c0;'><i>If the URL is also "
+            "blocked by your network (not just TLS), use the "
+            "<b>Copy URL</b> button to grab the address and try "
+            "a different download tool.</i></p>")
         manual_hint.setWordWrap(True)
         manual_hint.setTextFormat(Qt.RichText)
         manual_layout.addWidget(manual_hint)
         manual_row = QHBoxLayout()
         self._open_eibi_btn = QPushButton(
-            "🌐  Open EiBi website")
+            "🌐  Open EiBi downloads page")
         self._open_eibi_btn.setToolTip(
-            "Opens https://eibispace.de/ in your default browser.")
+            "Opens http://www.eibispace.de/dx/ in your browser.\n"
+            "(EiBi's site is HTTP only -- browsers will say\n"
+            "'Not secure' but it's safe to accept; it's a free\n"
+            "public broadcast schedule, no auth.)")
         self._open_eibi_btn.clicked.connect(
             self._on_open_eibi_site_clicked)
         manual_row.addWidget(self._open_eibi_btn)
+        # Copy-URL button as a workaround when the browser
+        # outright refuses to load the page (HTTPS-only mode,
+        # corporate proxy, etc.) -- operator pastes into wget /
+        # curl / a different download client.
+        self._copy_url_btn = QPushButton("📋  Copy URL")
+        self._copy_url_btn.setToolTip(
+            "Copy http://www.eibispace.de/dx/ to your clipboard\n"
+            "so you can paste into wget / curl / another browser.")
+        self._copy_url_btn.clicked.connect(self._on_copy_url_clicked)
+        manual_row.addWidget(self._copy_url_btn)
         self._load_local_btn = QPushButton("📁  Load local CSV…")
         self._load_local_btn.setToolTip(
             "Pick a sked-XX.csv you've already downloaded.\n"
@@ -5211,17 +5236,36 @@ class _SwDatabaseSubTab(QWidget):
         self._update_btn.setEnabled(True)
         # Leave the error text visible; clears on next interaction.
 
+    EIBI_MANUAL_URL = "http://www.eibispace.de/dx/"
+
     def _on_open_eibi_site_clicked(self) -> None:
-        """Open the EiBi website in the operator's default browser
-        so they can download the CSV manually.  The site lists the
-        current season files (sked-A26.csv, sked-B26.csv) plus
-        archives of previous seasons.
+        """Open the EiBi downloads directory in the operator's
+        default browser so they can pick the season CSV they want.
+
+        Uses HTTP (not HTTPS) because EiBi's TLS cert chain is
+        broken (cert issued for the apex but the site canonical
+        is www); HTTP works around that.  Browsers flag the
+        connection as "Not secure" but the operator can click
+        through.  See the GroupBox hint text for the
+        operator-facing explanation.
         """
         from PySide6.QtCore import QUrl
         from PySide6.QtGui import QDesktopServices
-        # Use the apex domain (no www) -- matches the
-        # downloader's preferred URL.
-        QDesktopServices.openUrl(QUrl("https://eibispace.de/"))
+        QDesktopServices.openUrl(QUrl(self.EIBI_MANUAL_URL))
+
+    def _on_copy_url_clicked(self) -> None:
+        """Copy the EiBi downloads URL to the clipboard so the
+        operator can paste into wget / curl / another browser
+        if Lyra's open-in-default-browser is blocked."""
+        from PySide6.QtWidgets import QApplication
+        cb = QApplication.clipboard()
+        cb.setText(self.EIBI_MANUAL_URL)
+        try:
+            self.radio.status_message.emit(
+                f"Copied to clipboard: {self.EIBI_MANUAL_URL}",
+                3000)
+        except Exception:
+            pass
 
     def _on_load_local_clicked(self) -> None:
         """Operator-side fallback when network downloads fail.
