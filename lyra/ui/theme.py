@@ -104,9 +104,13 @@ QToolTip {{
     border: 1px solid {qss_color(BORDER_HI)};
     border-radius: 4px;
     padding: 8px 10px;
-    font-size: 11pt;
-    /* opacity is set as a separate Qt property attr in code if we
-       ever want translucent tooltips; default is fully opaque. */
+    font-size: 13pt;
+    /* v0.0.9 bump 11pt -> 13pt for readability.  Matched in
+       app.py via QToolTip.setFont() since QSS font-size on
+       QToolTip is honored unreliably on Windows native plugin.
+       opacity is set as a separate Qt property attr in code if
+       we ever want translucent tooltips; default is fully
+       opaque. */
 }}
 QLineEdit, QComboBox {{
     background: {qss_color(BG_CTRL)};

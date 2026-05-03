@@ -2607,10 +2607,13 @@ def main():
     # platform plugins (especially Windows native tooltips), so we
     # set the QFont directly. This is the authoritative source for
     # tooltip text size; the QSS rule is the fallback.
+    # v0.0.9 bump 11pt -> 13pt for readability per operator
+    # feedback during Step 3a flight test (the multi-line tooltips
+    # on TIME / GEN / Mem buttons were dense at 11pt).
     from PySide6.QtWidgets import QToolTip
     tooltip_font = QFont()
     tooltip_font.setFamilies([theme.FONT_FAMILY, "Segoe UI", "Arial"])
-    tooltip_font.setPointSize(11)
+    tooltip_font.setPointSize(13)
     QToolTip.setFont(tooltip_font)
 
     pal = QPalette()
