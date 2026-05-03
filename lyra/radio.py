@@ -750,25 +750,6 @@ class Radio(QObject):
         self._agc_hang_counter: int = 0
         self._agc_one_minus_alpha_per_sample: float = 1.0
         self._agc_hang_samples: int = 0
-        # AGC look-ahead delay line — v0.0.9.1 architectural fix.
-        # Standard look-ahead AGC / compressor pattern (Reiss &
-        # McPherson "Audio Effects" ch. 6 §6.3 "Look-ahead
-        # limiting"; Zölzer "DAFX" ch. 4 §4.3.5).  A small ring
-        # buffer delays the audio output by ATTACK_TIME ×
-        # sample_rate samples while the envelope detector inspects
-        # the FUTURE input.  When a transient appears at the input,
-        # the gain drops BEFORE the transient itself reaches the
-        # output.  4 ms (192 samples at 48 kHz) is the textbook
-        # value cited across audio-DSP literature for clean
-        # transient handling without audibly slow attack.
-        # Eliminates transient-induced clicks at the source --
-        # tanh saturation can no longer fire during attack ramps
-        # because the gain has already been reduced when the loud
-        # sample arrives at the multiplier.
-        self._AGC_LOOKAHEAD_SAMPLES = 192
-        self._agc_lookahead_buf = np.zeros(
-            self._AGC_LOOKAHEAD_SAMPLES, dtype=np.float32)
-        self._agc_lookahead_idx = 0
         # Rolling noise-floor estimate — lowest block peak over the
         # recent window. Used by "Auto Threshold" to calibrate the
         # AGC target above ambient noise (like the right-click →
@@ -5877,38 +5858,9 @@ class Radio(QObject):
         except Exception:
             pass
 
-        # ── AGC look-ahead delay line ─────────────────────────────
-        # v0.0.9.1 architectural fix: instead of multiplying the
-        # CURRENT input by the gain computed from the CURRENT peak
-        # (which produces tanh saturation when a transient arrives
-        # because the peak detector hasn't reduced gain yet), we
-        # multiply the DELAYED input by the CURRENT gain.  By the
-        # time a sample reaches the multiplier, the peak detector
-        # has had 192 samples (4 ms) to see the FUTURE of that
-        # sample and reduce gain accordingly.  No transient ever
-        # passes through AGC unattenuated.  Standard look-ahead
-        # compressor pattern -- see __init__ for textbook citations.
-        #
-        # Implementation: small ring buffer of input samples.  Each
-        # input sample is written to the ring; the corresponding
-        # output sample is read from 192 positions earlier.  Gain
-        # array is per-sample as before (computed from CURRENT
-        # input mag, applied to DELAYED audio).
-        n_la = self._AGC_LOOKAHEAD_SAMPLES
-        delayed_audio = np.empty(n, dtype=audio.dtype)
-        la_buf = self._agc_lookahead_buf
-        la_idx = self._agc_lookahead_idx
-        for i in range(n):
-            delayed_audio[i] = la_buf[la_idx]
-            la_buf[la_idx] = audio[i]
-            la_idx += 1
-            if la_idx >= n_la:
-                la_idx = 0
-        self._agc_lookahead_idx = la_idx
-
-        # Per-sample gain × volume applied to the DELAYED audio.
-        # Cast to audio's dtype so the multiply stays in float32.
-        audio = delayed_audio * gain_arr.astype(audio.dtype) * vol
+        # Per-sample gain × volume.  Cast to audio's dtype so the
+        # multiply stays in float32 (no allocation churn).
+        audio = audio * gain_arr.astype(audio.dtype) * vol
 
         # ── Audio-pop diagnostic (env-var gated) ──────────────────
         # Set LYRA_AUDIO_DEBUG=1 to enable.  Prints one line per

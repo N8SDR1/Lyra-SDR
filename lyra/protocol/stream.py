@@ -268,44 +268,8 @@ class HL2Stream:
         from collections import deque
         # 1 s buffer at 48 kHz — caps unbounded growth if the demod
         # produces faster than the EP2 builder consumes.
-        # ── TX audio queue (RX-audio-out path to AK4951) ──────────
-        # Architectural model — bounded producer/consumer queue with
-        # backpressure (v0.0.9.1 rewrite, clean-room implementation
-        # from textbook real-time-audio engineering: Reiss &
-        # McPherson "Audio Effects" ch. 6, Zölzer "DAFX" ch. 4):
-        #
-        #   * Bounded deque (max 4096 samples ≈ 85 ms at 48 kHz,
-        #     sized for ~2× the worker's block-cadence period).
-        #   * threading.Condition for blocking handoff:
-        #     - Producer (DSP worker thread) calls queue_tx_audio
-        #       → blocks (with timeout) when deque is full.  This
-        #       is the rate authority: worker can't outrun EP2
-        #       drain because EP2 cadence is locked to HL2's
-        #       gateware clock.
-        #     - Consumer (EP2 builder, runs inside _rx_loop) calls
-        #       _pack_audio_bytes → waits (with short timeout)
-        #       when deque is short.  On consumer timeout, fall
-        #       back to SAMPLE-AND-HOLD (re-emit last sample),
-        #       NOT zero-pad.  Sample-and-hold = DC continuity =
-        #       no step discontinuity = no audible click.
-        #
-        # Standard pattern: rate-locked producer/consumer with
-        # asymmetric blocking semantics (producer can block,
-        # consumer can wait briefly but not indefinitely lest the
-        # RX socket buffer overflow).  Capacity sized so the deque
-        # oscillates well inside its bounds during normal operation
-        # and only the rare sustained mismatch triggers the timeout
-        # paths.
-        self._tx_audio: deque = deque()
+        self._tx_audio: deque = deque(maxlen=48000)
         self._tx_audio_lock = threading.Lock()
-        self._tx_audio_cv = threading.Condition(self._tx_audio_lock)
-        self._tx_audio_max = 4096  # ~85 ms at 48 kHz
-        # Sample-and-hold state: last (L, R) sample observed by the
-        # consumer, repeated when the deque underflows.  Initialized
-        # to silence so startup before any audio arrives is silent
-        # (not random noise from uninitialised memory).
-        self._tx_audio_last: tuple[float, float] = (0.0, 0.0)
-
         # EP2 cadence throttle: increments every EP6 frame; keepalive
         # only fires when count % (sample_rate/48000) == 0.
         self._ep6_count = 0
@@ -313,13 +277,15 @@ class HL2Stream:
         # Opt-in: pack audio into EP2 frames. When False (default), the TX
         # audio slots are left at zero. Turn this on only for AK4951 output.
         self.inject_audio_tx = False
-        # AK4951 sink diagnostics — frame-level event counters surfaced
-        # in the UI status bar.  Underrun: EP2 builder timed out
-        # waiting for samples and used sample-and-hold.  Overrun:
-        # producer timed out waiting for consumer to drain and the
-        # incoming samples were dropped (rare with the bounded-deque
-        # backpressure architecture).  Healthy operation: both stay
-        # at 0.  v0.0.9.1+
+        # AK4951 sink diagnostics — each is a frame-level event counter.
+        # Underrun: EP2 frame builder asked for N audio samples and the
+        # tx_audio deque had fewer; we padded with zeros (= silent
+        # samples = audible click on AK4951 codec).  Overrun: tx_audio
+        # deque was already at maxlen=48000 when the producer pushed
+        # more; deque silently dropped the OLDEST samples (= sample
+        # discontinuity = audible click).  Both counters surfaced in
+        # the UI status bar so operators can correlate counter ticks
+        # with audible clicks.  v0.0.9.1+
         self.tx_audio_underruns: int = 0
         self.tx_audio_overruns: int = 0
 
@@ -358,59 +324,27 @@ class HL2Stream:
             # else: payload bytes stay zero (identical to pre-audio behavior)
         return bytes(frame)
 
-    # Consumer-side wait timeout for the EP2 builder.  EP2 fires at
-    # 380 Hz (one frame every ~2.6 ms); we can wait up to ~5 ms for
-    # the producer to deliver more samples without blocking the RX
-    # loop long enough to overflow the UDP buffer.  On timeout we
-    # fall back to SAMPLE-AND-HOLD (NOT zero-pad) -- DC continuity
-    # is inaudible where a step to zero is a click.  Python's
-    # GIL + GC make a finite timeout safer than an infinite block;
-    # if the worker stalls for longer than this the EP2 builder
-    # gracefully degrades to held-DC instead of dead-locking the
-    # RX loop.
-    _PACK_WAIT_TIMEOUT_S = 0.005
-
     def _pack_audio_bytes(self, n_samples: int) -> bytes:
-        """Pull n_samples from the TX queue and pack as HPSDR TX
-        stereo bytes.  Blocks (with a short timeout) when the queue
-        is short, then falls back to sample-and-hold rather than
-        zero-padding -- the v0.0.9.1 click fix.
+        """Dequeue up to n_samples, pad with zeros, pack as HPSDR TX stereo.
 
-        Queue items are (L, R) float tuples at 48 kHz audio rate.
-        Producer/consumer rendezvous on ``self._tx_audio_cv``.
+        Queue items are (L, R) float tuples at 48 kHz. EP2 frames are
+        rate-throttled at the call site so this function always sees
+        a 48 kHz cadence — every slot carries a real sample.
         """
         import numpy as np
-        import time as _time
-        pulled: list[tuple[float, float]] = []
-        with self._tx_audio_cv:
-            deadline = _time.monotonic() + self._PACK_WAIT_TIMEOUT_S
-            while len(self._tx_audio) < n_samples:
-                remaining = deadline - _time.monotonic()
-                if remaining <= 0:
-                    break
-                self._tx_audio_cv.wait(timeout=remaining)
-            # Pull whatever's available (could be < n_samples if we
-            # timed out -- handled below with sample-and-hold).
+        with self._tx_audio_lock:
             avail = min(len(self._tx_audio), n_samples)
-            for _ in range(avail):
-                pulled.append(self._tx_audio.popleft())
-            if pulled:
-                # Remember the most recent real sample for the
-                # sample-and-hold fallback on the NEXT underrun.
-                self._tx_audio_last = pulled[-1]
-            # Notify producer in case it was waiting on a full queue.
-            self._tx_audio_cv.notify()
+            pulled = [self._tx_audio.popleft() for _ in range(avail)]
         if avail < n_samples:
-            # Underrun — repeat the LAST sample seen instead of
-            # injecting zeros.  Sample-and-hold avoids the step
-            # discontinuity that zero-pad creates; the operator's
-            # ear hears at most a brief DC hold (subaudible) where
-            # zero-pad produced an audible click.  Each underrun
-            # event still increments the counter so the operator
-            # has visibility (status-bar "Audio: N under" indicator).
+            # Underrun — TX queue had less data than EP2 wants to send.
+            # Pad with zeros so the EP2 frame is always the right size,
+            # but COUNT the event so the operator can see it in the
+            # status bar.  Each underrun = silent samples injected into
+            # the AK4951 audio stream = audible click on the codec
+            # output.  Counter is read by the UI's 1 Hz status tick
+            # (lyra/ui/app.py::_tick_cpu).  v0.0.9.1+
             self.tx_audio_underruns += 1
-            pulled.extend(
-                [self._tx_audio_last] * (n_samples - avail))
+            pulled.extend([(0.0, 0.0)] * (n_samples - avail))
         # pulled is a list of (L, R) tuples — split into separate arrays.
         lr = np.asarray(pulled, dtype=np.float32)        # shape (N, 2)
         lr *= self.tx_audio_gain
@@ -459,48 +393,24 @@ class HL2Stream:
             # audio silently on an unexpected shape.
             flat = a.reshape(-1)
             pairs = list(zip(flat.tolist(), flat.tolist()))
-        # Producer-side backpressure: block (with timeout) if the
-        # deque is full.  This is the architectural rate-authority
-        # property -- the worker thread can't outrun the EP2 drain
-        # because the EP2 cadence is locked to HL2's gateware clock.
-        # On timeout (worker has been waiting > 50 ms with no drain
-        # progress -- shouldn't happen in normal operation), drop
-        # the new samples and count it as overrun.  The deque
-        # capacity (4096 samples ≈ 85 ms) is large enough to absorb
-        # any natural producer/consumer cadence mismatch.
-        import time as _time
-        with self._tx_audio_cv:
-            deadline = _time.monotonic() + 0.050
-            while len(self._tx_audio) + len(pairs) > self._tx_audio_max:
-                remaining = deadline - _time.monotonic()
-                if remaining <= 0:
-                    # Timeout — consumer hasn't drained.  Indicates
-                    # EP2 thread has stalled (e.g. UDP send blocked,
-                    # network unplugged).  Drop these samples; the
-                    # alternative is unbounded queue growth.
-                    self.tx_audio_overruns += len(pairs)
-                    return
-                if not self.inject_audio_tx:
-                    # Stream is shutting down — abort cleanly.
-                    return
-                self._tx_audio_cv.wait(timeout=remaining)
+        with self._tx_audio_lock:
+            # Detect overrun: when the deque is at maxlen and we
+            # extend, the oldest elements are silently DROPPED.  Count
+            # the would-be-dropped samples as overrun events so the
+            # operator can see queue saturation in the status bar.
+            # v0.0.9.1+ click investigation.
+            free_slots = self._tx_audio.maxlen - len(self._tx_audio)
+            if len(pairs) > free_slots:
+                self.tx_audio_overruns += len(pairs) - free_slots
             self._tx_audio.extend(pairs)
-            self._tx_audio_cv.notify()
 
     def clear_tx_audio(self):
         """Drain any pending samples from the TX audio queue. Called
         by AK4951Sink on init/close to prevent stale audio from a
         previous session leaking into a new session — the symptom
         was "digitized robotic" sound right after switching sinks."""
-        with self._tx_audio_cv:
+        with self._tx_audio_lock:
             self._tx_audio.clear()
-            # Reset sample-and-hold so a stale sample from the old
-            # session doesn't bleed into the new session.
-            self._tx_audio_last = (0.0, 0.0)
-            # Wake any waiting producer so it can either re-fill or
-            # exit cleanly (the producer sees inject_audio_tx=False
-            # on shutdown and returns).
-            self._tx_audio_cv.notify_all()
 
     def fade_and_replace_tx_audio(self, fade_ms: float = 5.0) -> int:
         """Replace the TX audio queue with a short fade-out tail.
@@ -529,7 +439,7 @@ class HL2Stream:
         (useful for the caller to compute the drain wait).
         """
         FADE_SAMPLES = max(1, int(fade_ms * 48.0))
-        with self._tx_audio_cv:
+        with self._tx_audio_lock:
             n = len(self._tx_audio)
             if n == 0:
                 # Nothing playing to fade out.  No click possible.
