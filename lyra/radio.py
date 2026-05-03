@@ -105,6 +105,10 @@ class Radio(QObject):
     # (save / delete).  Right-click menu rebuilds its 'Load preset'
     # submenu when this fires.  See save_notch_bank / delete_notch_bank.
     notch_banks_changed  = Signal()
+    # v0.0.9 Step 4: fires after the EiBi CSV is (re)loaded so
+    # the panadapter can refresh its label cache and the Settings
+    # tab can update its "loaded / X days old" status line.
+    eibi_store_changed   = Signal()
     audio_output_changed = Signal(str)
     pc_audio_device_changed = Signal(object)   # int index, or None for auto
     ip_changed           = Signal(str)
@@ -1682,6 +1686,85 @@ class Radio(QObject):
             if ll is not None:
                 return ll[0]
         return self._operator_lat_manual
+
+    # ── EiBi SW broadcaster overlay (v0.0.9 Step 4) ────────────────
+
+    @property
+    def eibi_store(self):
+        """Lazy-initialized singleton ``EibiStore`` shared across
+        the Settings tab and the panadapter overlay.
+
+        On first access, attempts to load any previously-downloaded
+        EiBi CSV from the Lyra app-data directory.  Returns the
+        store regardless -- ``store.loaded`` is False when no file
+        is present yet, so callers don't have to second-guess.
+
+        See ``docs/architecture/v0.0.9_memory_stations_design.md``
+        section 5.
+        """
+        store = getattr(self, "_eibi_store", None)
+        if store is None:
+            from lyra.swdb.store import EibiStore
+            store = EibiStore()
+            try:
+                path = self._eibi_default_path()
+                if path is not None and path.exists():
+                    store.load(path)
+            except Exception as e:
+                # Logged but non-fatal -- store stays "not loaded"
+                # and the Settings tab surfaces this state.
+                print(f"[Radio.eibi_store] initial load failed: {e}")
+            self._eibi_store = store
+        return store
+
+    def _eibi_default_path(self):
+        """Compute the operator-side default path for the EiBi
+        CSV.  Looks at QSettings first (so an operator-overridden
+        custom path wins), else falls back to
+        ``%APPDATA%/Lyra-SDR/swdb/sked-{season}.csv``.
+
+        Returns a ``Path`` or None when no candidate can be
+        resolved (e.g. no QStandardPaths writable location)."""
+        from pathlib import Path
+        from PySide6.QtCore import (
+            QSettings as _QS, QStandardPaths,
+        )
+        qs = _QS("N8SDR", "Lyra")
+        custom = str(qs.value("swdb/file_path", "") or "")
+        if custom:
+            return Path(custom)
+        appdata = QStandardPaths.writableLocation(
+            QStandardPaths.AppLocalDataLocation)
+        if not appdata:
+            return None
+        from lyra.swdb.downloader import season_filename
+        try:
+            fname = season_filename(season="auto")
+        except Exception:
+            fname = "sked-A26.csv"   # arbitrary fallback
+        return Path(appdata) / "swdb" / fname
+
+    def reload_eibi_store(self, path=None):
+        """Reload the EiBi store from disk.  Called by the
+        Settings tab after a successful download (or after the
+        operator manually drops a file in the swdb folder).
+
+        ``path`` overrides the default path.  When None, uses
+        the QSettings-configured custom path or the auto-named
+        seasonal file under AppLocalDataLocation.
+        """
+        from pathlib import Path
+        from lyra.swdb.store import EibiStore
+        store = getattr(self, "_eibi_store", None)
+        if store is None:
+            store = EibiStore()
+            self._eibi_store = store
+        if path is None:
+            path = self._eibi_default_path()
+        if path is not None and Path(path).exists():
+            store.load(Path(path))
+        # Notify any subscribers (panadapter, settings refresh).
+        self.eibi_store_changed.emit()
 
     @property
     def operator_country_iso(self) -> str:

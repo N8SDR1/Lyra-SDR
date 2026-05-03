@@ -4395,21 +4395,11 @@ class BandsSettingsTab(QWidget):
             "color: #5a7080; padding: 40px;")
         time_placeholder.setWordWrap(True)
         self._inner_tabs.addTab(time_placeholder, "Time Stations")
-        # SW Database placeholder for Step 4.
-        sw_placeholder = QLabel(
-            "SW Database (EiBi broadcaster overlay) — coming in "
-            "v0.0.9 Step 4.\n\nWill provide:\n"
-            "    • Download / update the EiBi schedule database\n"
-            "    • Master enable for the panadapter overlay\n"
-            "    • Power-class filter (likely receivable / strong only / etc.)\n"
-            "    • Auto-detection: overlay renders only outside\n"
-            "      the operator's region's amateur-band ranges."
-        )
-        sw_placeholder.setAlignment(Qt.AlignCenter)
-        sw_placeholder.setStyleSheet(
-            "color: #5a7080; padding: 40px;")
-        sw_placeholder.setWordWrap(True)
-        self._inner_tabs.addTab(sw_placeholder, "SW Database")
+        # SW Database sub-tab (v0.0.9 Step 4b).  Covers EiBi
+        # download, master enable, power filter, and overlay
+        # behavior.  Step 4c adds the panadapter rendering.
+        self._sw_subtab = _SwDatabaseSubTab(radio, self)
+        self._inner_tabs.addTab(self._sw_subtab, "SW Database")
         v.addWidget(self._inner_tabs)
 
     def show_memory_subtab(self) -> None:
@@ -4878,6 +4868,318 @@ class _MemorySubTab(QWidget):
         return MemoryPreset(
             name=new_name, freq_hz=new_freq, mode=new_mode,
             rx_bw_hz=new_bw, notes=new_notes)
+
+
+class _SwDatabaseSubTab(QWidget):
+    """Settings UI for the EiBi SW broadcaster overlay (v0.0.9
+    Step 4b).
+
+    Sections (top to bottom):
+      1. Master enable -- single checkbox that gates the overlay.
+      2. Database status -- file path, age, source label,
+         "Update database now" button driving EibiDownloader.
+      3. Display filters -- "show stations" power-level radios
+         (operator-friendly labels per design doc §3), the
+         "hide off-air" checkbox, the "show on amateur bands too"
+         force-on override.
+      4. Attribution + folder-open helper.
+    """
+
+    SETTING_MASTER_ENABLED = "swdb/overlay_master_enabled"
+    SETTING_HIDE_OFF_AIR = "swdb/hide_off_air"
+    SETTING_FORCE_ALL_BANDS = "swdb/overlay_force_all_bands"
+    SETTING_MIN_POWER = "swdb/min_power"
+
+    POWER_OPTIONS = [
+        (0, "All stations (most cluttered)"),
+        (1, "Likely receivable (recommended)"),
+        (2, "Strong stations only"),
+        (3, "Mega-stations only"),
+    ]
+
+    def __init__(self, radio, parent=None):
+        super().__init__(parent)
+        self.radio = radio
+        self._downloader = None  # lazy on first download
+        from PySide6.QtCore import QSettings as _QS
+        self._qs = _QS("N8SDR", "Lyra")
+
+        v = QVBoxLayout(self)
+        v.setSpacing(12)
+
+        # ── 1. Master enable ─────────────────────────────────
+        self._enable_cb = QCheckBox("Enable EiBi overlay")
+        self._enable_cb.setChecked(self._read_bool(
+            self.SETTING_MASTER_ENABLED, default=False))
+        self._enable_cb.toggled.connect(self._on_enable_toggled)
+        v.addWidget(self._enable_cb)
+        info = QLabel(
+            "<i>When enabled, broadcaster station labels appear on "
+            "the panadapter automatically whenever the VFO is "
+            "outside the amateur bands of your selected region "
+            "(Settings &rarr; Operator &rarr; Region).  Inside "
+            "amateur bands no labels are drawn -- EiBi covers "
+            "shortwave broadcasters, not amateur activity.</i>")
+        info.setWordWrap(True)
+        info.setTextFormat(Qt.RichText)
+        info.setStyleSheet(
+            "color: #80a0b0; font-size: 11px;")
+        v.addWidget(info)
+
+        # ── 2. Database status + Update button ───────────────
+        db_box = QGroupBox("Database")
+        db_layout = QVBoxLayout(db_box)
+        self._status_label = QLabel("")
+        self._status_label.setTextFormat(Qt.RichText)
+        self._status_label.setWordWrap(True)
+        db_layout.addWidget(self._status_label)
+        # Action row.
+        row = QHBoxLayout()
+        self._update_btn = QPushButton("Update database now")
+        self._update_btn.clicked.connect(self._on_update_clicked)
+        row.addWidget(self._update_btn)
+        self._open_folder_btn = QPushButton("Open database folder")
+        self._open_folder_btn.clicked.connect(
+            self._on_open_folder_clicked)
+        row.addWidget(self._open_folder_btn)
+        row.addStretch(1)
+        db_layout.addLayout(row)
+        # Progress label / bar (visible only during download).
+        from PySide6.QtWidgets import QProgressBar
+        self._progress = QProgressBar()
+        self._progress.setVisible(False)
+        self._progress.setRange(0, 0)  # indeterminate by default
+        db_layout.addWidget(self._progress)
+        self._progress_text = QLabel("")
+        self._progress_text.setVisible(False)
+        self._progress_text.setStyleSheet(
+            "color: #80a0b0; font-size: 11px;")
+        db_layout.addWidget(self._progress_text)
+        v.addWidget(db_box)
+
+        # ── 3. Display filters ───────────────────────────────
+        flt_box = QGroupBox("Show stations")
+        flt_layout = QVBoxLayout(flt_box)
+        self._power_group = QButtonGroup(self)
+        current_min_power = int(self._qs.value(
+            self.SETTING_MIN_POWER, 1) or 1)
+        for level, label in self.POWER_OPTIONS:
+            rb = QRadioButton(label)
+            self._power_group.addButton(rb, level)
+            if level == current_min_power:
+                rb.setChecked(True)
+            flt_layout.addWidget(rb)
+        self._power_group.idClicked.connect(self._on_power_changed)
+        v.addWidget(flt_box)
+
+        # Hide off-air + force-all checkboxes.
+        self._hide_off_air_cb = QCheckBox(
+            "Hide stations not currently on-air")
+        self._hide_off_air_cb.setChecked(self._read_bool(
+            self.SETTING_HIDE_OFF_AIR, default=True))
+        self._hide_off_air_cb.toggled.connect(
+            lambda c: self._qs.setValue(
+                self.SETTING_HIDE_OFF_AIR, bool(c)))
+        v.addWidget(self._hide_off_air_cb)
+
+        self._force_all_cb = QCheckBox(
+            "Show overlay on amateur bands too (advanced)")
+        self._force_all_cb.setChecked(self._read_bool(
+            self.SETTING_FORCE_ALL_BANDS, default=False))
+        self._force_all_cb.toggled.connect(
+            lambda c: self._qs.setValue(
+                self.SETTING_FORCE_ALL_BANDS, bool(c)))
+        force_hint = QLabel(
+            "<i>Bypass the band-plan auto-detect.  Useful for "
+            "identifying broadcast QRM bleeding into amateur "
+            "bands; off otherwise.</i>")
+        force_hint.setWordWrap(True)
+        force_hint.setTextFormat(Qt.RichText)
+        force_hint.setStyleSheet(
+            "color: #80a0b0; font-size: 11px; padding-left: 20px;")
+        v.addWidget(self._force_all_cb)
+        v.addWidget(force_hint)
+
+        # ── 4. Attribution ───────────────────────────────────
+        attribution = QLabel(
+            "<small>Data: <a href='https://www.eibispace.de/'>"
+            "EiBi (Eike Bierwirth)</a> &mdash; free for "
+            "non-commercial use, attribution required.  Lyra "
+            "does not redistribute the data; you download it "
+            "yourself via the button above.</small>")
+        attribution.setOpenExternalLinks(True)
+        attribution.setTextFormat(Qt.RichText)
+        attribution.setWordWrap(True)
+        attribution.setStyleSheet(
+            "color: #80a0b0; font-size: 11px; padding-top: 10px;")
+        v.addWidget(attribution)
+        v.addStretch(1)
+
+        self._refresh_status()
+
+    # ── Helpers ──────────────────────────────────────────────
+
+    def _read_bool(self, key: str, default: bool) -> bool:
+        val = self._qs.value(key, default)
+        if isinstance(val, bool):
+            return val
+        return str(val).lower() in ("true", "1", "yes")
+
+    def _refresh_status(self) -> None:
+        store = self.radio.eibi_store
+        if store.loaded:
+            from datetime import datetime, timezone
+            age_days = ""
+            if store.loaded_at is not None:
+                delta = (
+                    datetime.now(timezone.utc) - store.loaded_at)
+                if delta.days > 0:
+                    age_days = f", loaded {delta.days} day(s) ago"
+                else:
+                    hours = delta.seconds // 3600
+                    age_days = (
+                        f", loaded {hours} hour(s) ago"
+                        if hours else ", loaded just now")
+            label = store.source_label or "(unknown)"
+            entry_count = store.count
+            self._status_label.setText(
+                f"<p>Currently loaded: <b>{label}</b> "
+                f"({entry_count:,} entries{age_days})</p>"
+                f"<p style='color:#80a0b0; font-size:11px;'>"
+                f"File: <code>{store.source_path}</code></p>")
+            self._open_folder_btn.setEnabled(True)
+        else:
+            path = self.radio._eibi_default_path()
+            self._status_label.setText(
+                "<p><b>No database loaded yet.</b></p>"
+                "<p>Click <i>Update database now</i> to download "
+                f"the current season's CSV from "
+                "<code>https://www.eibispace.de/</code> (~3 MB).</p>"
+                f"<p style='color:#80a0b0; font-size:11px;'>"
+                f"Will save to: <code>{path}</code></p>")
+            # The folder might not exist yet, but we'll create
+            # it when the operator clicks Open.
+            self._open_folder_btn.setEnabled(True)
+
+    def _on_enable_toggled(self, checked: bool) -> None:
+        self._qs.setValue(self.SETTING_MASTER_ENABLED, bool(checked))
+        # Ping the radio so subscribers (the panadapter, when
+        # Step 4c lands) refresh their cached gate state.
+        try:
+            self.radio.eibi_store_changed.emit()
+        except Exception:
+            pass
+
+    def _on_power_changed(self, button_id: int) -> None:
+        self._qs.setValue(self.SETTING_MIN_POWER, int(button_id))
+        try:
+            self.radio.eibi_store_changed.emit()
+        except Exception:
+            pass
+
+    def _on_update_clicked(self) -> None:
+        """Kick off a background download of the current season's
+        EiBi CSV.  Disables the button while in flight; shows
+        progress."""
+        from pathlib import Path
+        from PySide6.QtCore import QStandardPaths
+        from PySide6.QtWidgets import QMessageBox
+        if (self._downloader is not None
+                and self._downloader.is_running()):
+            QMessageBox.information(
+                self, "Download in progress",
+                "A download is already in progress.")
+            return
+        appdata = QStandardPaths.writableLocation(
+            QStandardPaths.AppLocalDataLocation)
+        if not appdata:
+            QMessageBox.warning(
+                self, "No writable data location",
+                "Lyra couldn't determine a writable app-data "
+                "folder.  Set swdb/file_path in QSettings to a "
+                "location you can write to.")
+            return
+        dest_dir = Path(appdata) / "swdb"
+
+        from lyra.swdb.downloader import EibiDownloader
+        import lyra
+        if self._downloader is None:
+            self._downloader = EibiDownloader(
+                self,
+                user_agent_version=getattr(lyra, "__version__", ""))
+            self._downloader.progress.connect(self._on_download_progress)
+            self._downloader.finished_ok.connect(
+                self._on_download_ok)
+            self._downloader.finished_error.connect(
+                self._on_download_error)
+        # Show progress UI.
+        self._update_btn.setEnabled(False)
+        self._progress.setVisible(True)
+        self._progress.setRange(0, 0)
+        self._progress_text.setVisible(True)
+        self._progress_text.setText("Connecting to eibispace.de…")
+        self._downloader.fetch(dest_dir=dest_dir, season="auto")
+
+    def _on_download_progress(self, done: int, total: int) -> None:
+        if total > 0:
+            self._progress.setRange(0, total)
+            self._progress.setValue(done)
+            pct = int(done * 100 / total) if total else 0
+            self._progress_text.setText(
+                f"Downloading: {done:,} / {total:,} bytes "
+                f"({pct}%)")
+        else:
+            self._progress_text.setText(
+                f"Downloading: {done:,} bytes (size unknown)")
+
+    def _on_download_ok(self, path: str, byte_count: int) -> None:
+        from pathlib import Path
+        # Save the path to QSettings so future startups know
+        # which file to load.
+        self._qs.setValue("swdb/file_path", path)
+        # Reload the store from the new file.
+        try:
+            self.radio.reload_eibi_store(Path(path))
+            self._progress_text.setText(
+                f"Done -- {byte_count:,} bytes saved.  Loaded "
+                f"{self.radio.eibi_store.count:,} entries.")
+        except Exception as e:
+            self._progress_text.setText(
+                f"Downloaded but parse failed: {e}")
+        self._progress.setVisible(False)
+        self._update_btn.setEnabled(True)
+        self._refresh_status()
+        # Hide progress text after a short delay so the operator
+        # can read the success message.
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(
+            5000, lambda: self._progress_text.setVisible(False))
+
+    def _on_download_error(self, msg: str) -> None:
+        self._progress.setVisible(False)
+        self._progress_text.setText(f"Update failed: {msg}")
+        self._update_btn.setEnabled(True)
+        # Leave the error text visible; clears on next interaction.
+
+    def _on_open_folder_clicked(self) -> None:
+        """Open the operating-system file manager at the swdb
+        folder.  Creates the folder first if it doesn't exist
+        yet (so first-time use isn't a dead-end click)."""
+        from pathlib import Path
+        from PySide6.QtCore import (
+            QStandardPaths, QUrl,
+        )
+        from PySide6.QtGui import QDesktopServices
+        path = self.radio._eibi_default_path()
+        folder = path.parent if path is not None else None
+        if folder is None:
+            appdata = QStandardPaths.writableLocation(
+                QStandardPaths.AppLocalDataLocation)
+            folder = Path(appdata) / "swdb" if appdata else None
+        if folder is None:
+            return
+        folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
 
 class SettingsDialog(QDialog):
