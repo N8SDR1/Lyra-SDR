@@ -4933,7 +4933,7 @@ class _SwDatabaseSubTab(QWidget):
         self._status_label.setTextFormat(Qt.RichText)
         self._status_label.setWordWrap(True)
         db_layout.addWidget(self._status_label)
-        # Action row.
+        # Auto-download row.
         row = QHBoxLayout()
         self._update_btn = QPushButton("Update database now")
         self._update_btn.clicked.connect(self._on_update_clicked)
@@ -4942,21 +4942,56 @@ class _SwDatabaseSubTab(QWidget):
         self._open_folder_btn.clicked.connect(
             self._on_open_folder_clicked)
         row.addWidget(self._open_folder_btn)
-        # v0.0.9 4c hotfix: manual-install fallback for the rare
-        # case where every fallback URL fails (TLS cert mismatch,
-        # firewall, etc.).  Operator downloads in their browser,
-        # drops the file in the swdb folder, clicks this button
-        # to load it.
-        self._load_local_btn = QPushButton("Load local CSV…")
-        self._load_local_btn.setToolTip(
-            "Pick an EiBi CSV you've already downloaded "
-            "manually.\nUseful when network downloads fail "
-            "(firewall / cert / mirror issue).")
-        self._load_local_btn.clicked.connect(
-            self._on_load_local_clicked)
-        row.addWidget(self._load_local_btn)
         row.addStretch(1)
         db_layout.addLayout(row)
+
+        # v0.0.9 4c hotfix: prominent manual-install row for the
+        # cases where automatic downloads fail (TLS issues,
+        # firewall blocking outbound HTTPS to the eibispace.de
+        # mirrors, network policy, etc.).  Two buttons + a
+        # hyperlink hint -- operator opens the EiBi site in their
+        # browser, downloads the CSV manually, then points Lyra at
+        # the file.  This row is ALWAYS visible (not just on
+        # error) so operators can find the manual path even if
+        # they prefer it for any reason.
+        manual_box = QGroupBox("Manual install (when downloads fail)")
+        manual_layout = QVBoxLayout(manual_box)
+        manual_hint = QLabel(
+            "<p>If <b>Update database now</b> can't reach EiBi "
+            "(SSL errors, firewall, etc.), download the file "
+            "manually:</p>"
+            "<ol>"
+            "<li>Click <b>Open EiBi website</b> below to open "
+            "<code>https://eibispace.de/</code> in your browser.</li>"
+            "<li>Find and download the current season's "
+            "<code>sked-A##.csv</code> or "
+            "<code>sked-B##.csv</code> file (~3 MB).</li>"
+            "<li>Click <b>Load local CSV…</b> below and pick "
+            "the file -- Lyra copies it into the right folder "
+            "and loads it.</li>"
+            "</ol>")
+        manual_hint.setWordWrap(True)
+        manual_hint.setTextFormat(Qt.RichText)
+        manual_layout.addWidget(manual_hint)
+        manual_row = QHBoxLayout()
+        self._open_eibi_btn = QPushButton(
+            "🌐  Open EiBi website")
+        self._open_eibi_btn.setToolTip(
+            "Opens https://eibispace.de/ in your default browser.")
+        self._open_eibi_btn.clicked.connect(
+            self._on_open_eibi_site_clicked)
+        manual_row.addWidget(self._open_eibi_btn)
+        self._load_local_btn = QPushButton("📁  Load local CSV…")
+        self._load_local_btn.setToolTip(
+            "Pick a sked-XX.csv you've already downloaded.\n"
+            "Lyra validates it parses, copies it into the\n"
+            "standard swdb folder, and loads it.")
+        self._load_local_btn.clicked.connect(
+            self._on_load_local_clicked)
+        manual_row.addWidget(self._load_local_btn)
+        manual_row.addStretch(1)
+        manual_layout.addLayout(manual_row)
+        db_layout.addWidget(manual_box)
         # Progress label / bar (visible only during download).
         from PySide6.QtWidgets import QProgressBar
         self._progress = QProgressBar()
@@ -5175,6 +5210,18 @@ class _SwDatabaseSubTab(QWidget):
         self._progress_text.setText(f"Update failed: {msg}")
         self._update_btn.setEnabled(True)
         # Leave the error text visible; clears on next interaction.
+
+    def _on_open_eibi_site_clicked(self) -> None:
+        """Open the EiBi website in the operator's default browser
+        so they can download the CSV manually.  The site lists the
+        current season files (sked-A26.csv, sked-B26.csv) plus
+        archives of previous seasons.
+        """
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        # Use the apex domain (no www) -- matches the
+        # downloader's preferred URL.
+        QDesktopServices.openUrl(QUrl("https://eibispace.de/"))
 
     def _on_load_local_clicked(self) -> None:
         """Operator-side fallback when network downloads fail.
