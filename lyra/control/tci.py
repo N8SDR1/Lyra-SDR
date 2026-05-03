@@ -141,7 +141,7 @@ def _samples_to_bytes(
 
 
 def _iq_to_bytes(
-    iq: np.ndarray, sample_format: int,
+    iq: np.ndarray, sample_format: int, swap_iq: bool = False,
 ) -> bytes:
     """Convert a complex64 IQ block to TCI binary payload bytes.
 
@@ -149,14 +149,22 @@ def _iq_to_bytes(
     AUDIO_STREAM_CHANNELS doesn't apply to IQ.  Layout: I0, Q0, I1,
     Q1, ... format determined by ``sample_format``.
 
+    When ``swap_iq`` is True, layout becomes Q0, I0, Q1, I1, ... --
+    used when the receiving client expects swapped convention.
+
     Returns the packed sample bytes (no header).
     """
     if iq.size == 0:
         return b""
-    # Interleave I, Q as a single float32 array twice the length.
+    # Interleave I, Q (or Q, I if swap_iq) as a single float32 array
+    # twice the length.
     interleaved = np.empty(iq.size * 2, dtype=np.float32)
-    interleaved[0::2] = iq.real.astype(np.float32, copy=False)
-    interleaved[1::2] = iq.imag.astype(np.float32, copy=False)
+    if swap_iq:
+        interleaved[0::2] = iq.imag.astype(np.float32, copy=False)
+        interleaved[1::2] = iq.real.astype(np.float32, copy=False)
+    else:
+        interleaved[0::2] = iq.real.astype(np.float32, copy=False)
+        interleaved[1::2] = iq.imag.astype(np.float32, copy=False)
     np.clip(interleaved, -1.0, 1.0, out=interleaved)
     if sample_format == SAMPLE_FORMAT_FLOAT32:
         return interleaved.tobytes()
@@ -241,6 +249,49 @@ class TciServer(QObject):
         # behaviour: wait for the explicit start command).
         self.always_stream_audio: bool = False
         self.always_stream_iq: bool = False
+        # ── IQ stream channel swap ──────────────────────────────────
+        # Some TCI clients (and some legacy gateware variants) expect
+        # I and Q swapped relative to Lyra's native convention.
+        # When True, broadcast_iq() emits Q,I instead of I,Q in the
+        # interleaved stream payload.  Operator-configurable; default
+        # OFF.
+        self.swap_iq_on_stream: bool = False
+        # ── Mode-name mapping flags (spec-compatible defaults) ─────
+        # CWL/CWU outbound:  TCI's modulation enum has only "CW"
+        # (no L/U distinction).  When True, _to_tci_mode collapses
+        # CWL/CWU → CW.  When False, sends CWU/CWL verbatim (some
+        # newer clients prefer this for accurate sideband display).
+        # Default True per spec compatibility.
+        self.cwlcwu_becomes_cw_out: bool = True
+        # CW inbound: when a client sends "modulation:CW;", we have
+        # to pick CWU or CWL.  When this is True, freq >= 10 MHz
+        # selects CWU, freq < 10 MHz selects CWL (the standard ham
+        # convention).  When False, always CWU (the simple default).
+        self.cw_becomes_cwu_above_10mhz_in: bool = True
+        # ── Server identification (init line) ───────────────────────
+        # Some legacy TCI clients only recognize the ExpertSDR3
+        # protocol/device strings and refuse to connect to anything
+        # else.  When True, _send_init advertises ExpertSDR3 strings
+        # for compatibility.  When False (default), advertises Lyra +
+        # HermesLite2 honestly.
+        self.emulate_expertsdr3: bool = False
+        # ── Spot rendering options ──────────────────────────────────
+        # Country flags on spots (DXCC enrich is already plumbed via
+        # _dxcc_lookup in the SPOT command handler; this toggle just
+        # gates whether the enrich runs).
+        self.show_country_flags: bool = True
+        # Flash new spots when received.  UI-only effect (panadapter
+        # render path reads this).
+        self.flash_new_spots: bool = True
+        self.flash_spot_color: int = 0xFFFFD700   # ARGB, default gold
+        # CW Spot sideband forcing: when a TCI client sends a SPOT
+        # with mode "CW" (no U/L), this flag picks how Lyra renders
+        # it.  "default" = use CWU above 10 MHz / CWL below; "cwu" /
+        # "cwl" = always force.
+        self.cw_spot_sideband_force: str = "default"   # default / cwu / cwl
+        # Own-call appearance: spot color used when our own callsign
+        # appears on the cluster (e.g. someone spots us).
+        self.own_call_color: int = 0xFF1E90FF   # ARGB, default dodger blue
 
         self._server: QWebSocketServer | None = None
         self._clients: List[QWebSocket] = []
@@ -333,9 +384,20 @@ class TciServer(QObject):
         on connect. WSJT-X/log4OM rely on this sequence."""
         r = self.radio
         modulations = ",".join(m for m in r.ALL_MODES if m not in ("Tone", "Off"))
+        # Protocol / device identification: when the operator has
+        # the "Emulate ExpertSDR3" toggle enabled (Settings →
+        # Network/TCI), advertise the ExpertSDR3 strings legacy
+        # clients expect.  Otherwise advertise Lyra + HermesLite2
+        # honestly.
+        if self.emulate_expertsdr3:
+            protocol_line = "protocol:ExpertSDR3,1.9;"
+            device_line   = "device:SunSDR2DX;"
+        else:
+            protocol_line = "protocol:Lyra,1.9;"
+            device_line   = "device:HermesLite2;"
         init = [
-            "protocol:Lyra,1.9;",
-            "device:HermesLite2;",
+            protocol_line,
+            device_line,
             "receive_only:false;",
             "vfo_limits:10000,55000000;",
             f"if_limits:-{r.rate // 2},{r.rate // 2};",
@@ -521,18 +583,33 @@ class TciServer(QObject):
         # Unknown commands are silently ignored (per spec).
 
     # ── Mode name mapping ─────────────────────────────────────────────
-    @staticmethod
-    def _to_tci_mode(mode: str) -> str:
+    def _to_tci_mode(self, mode: str) -> str:
         """Our internal mode names → TCI mode names.
         TCI uses: AM, SAM, DSB, LSB, USB, CW, NFM, DIGL, DIGU, WFM, DRM.
-        """
-        return {"CWL": "CW", "CWU": "CW", "FM": "NFM"}.get(mode, mode)
 
-    @staticmethod
-    def _from_tci_mode(tci: str) -> str:
-        """TCI mode names → our internal names. CW maps to CWU by default."""
+        CWL/CWU collapse to CW per spec by default; the operator can
+        disable that via the cwlcwu_becomes_cw_out flag (Settings →
+        Network/TCI) so newer clients that accept CWU/CWL verbatim
+        get accurate sideband info.
+        """
+        if self.cwlcwu_becomes_cw_out:
+            return {"CWL": "CW", "CWU": "CW", "FM": "NFM"}.get(mode, mode)
+        return {"FM": "NFM"}.get(mode, mode)
+
+    def _from_tci_mode(self, tci: str) -> str:
+        """TCI mode names → our internal names.
+
+        CW: when cw_becomes_cwu_above_10mhz_in is True, freq ≥
+        10 MHz selects CWU and below selects CWL (the standard ham
+        convention).  When False, always CWU (simpler default).
+        """
         t = tci.strip().upper()
-        return {"CW": "CWU", "NFM": "FM", "WFM": "FM"}.get(t, t)
+        if t == "CW":
+            if (self.cw_becomes_cwu_above_10mhz_in and
+                    self.radio.freq_hz < 10_000_000):
+                return "CWL"
+            return "CWU"
+        return {"NFM": "FM", "WFM": "FM"}.get(t, t)
 
     # ── Broadcasting radio state changes to all clients ───────────────
     def _bind_radio_signals(self):
@@ -681,7 +758,8 @@ class TciServer(QObject):
             st = self._client_state[id(ws)]
             groups.setdefault(st.iq_format, []).append(ws)
         for fmt, ws_list in groups.items():
-            sample_bytes = _iq_to_bytes(iq, fmt)
+            sample_bytes = _iq_to_bytes(
+                iq, fmt, swap_iq=self.swap_iq_on_stream)
             header = _pack_stream_header(
                 receiver=0,
                 sample_rate=sample_rate,
