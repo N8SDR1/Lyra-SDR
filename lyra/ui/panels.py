@@ -4428,6 +4428,11 @@ class BandPanel(GlassPanel):
             g.name: "" for g in GEN_SLOTS
         }
         self._load_gen_memory()
+        # v0.0.9 Step 3a: operator memory presets (up to 20).
+        # Hydrated from QSettings; persists across sessions.
+        # See lyra/memory.py for the storage layer.
+        from lyra.memory import MemoryStore
+        self._memory = MemoryStore()
         self._active_gen: str | None = None   # when freq is outside all bands
 
         v = QVBoxLayout()
@@ -4538,6 +4543,25 @@ class BandPanel(GlassPanel):
             lambda pos: self._show_time_menu(time_btn, pos))
         self._time_button = time_btn
         row.addWidget(time_btn)
+        # ── Memory button (v0.0.9 Step 3a) ──────────────────────────
+        # Operator-named frequency memory bank.  Up to 20 entries.
+        # Plain left-click: dropdown menu listing all saved presets;
+        # click any to recall (tune to its freq + mode).
+        # Right-click: management menu (save current, delete, etc.).
+        # Sits right after TIME -- the design-doc-locked button order
+        # is GEN1 / GEN2 / GEN3 / TIME / Memory.
+        mem_btn = self._make_band_button("Mem")
+        mem_btn.setCheckable(False)
+        mem_btn.setFixedWidth(self.BUTTON_WIDTH + 12)
+        mem_btn.clicked.connect(
+            lambda: self._show_memory_recall_menu(mem_btn))
+        from PySide6.QtCore import Qt as _Qt
+        mem_btn.setContextMenuPolicy(_Qt.CustomContextMenu)
+        mem_btn.customContextMenuRequested.connect(
+            lambda pos: self._show_memory_manage_menu(mem_btn, pos))
+        self._memory_button = mem_btn
+        self._update_memory_tooltip()
+        row.addWidget(mem_btn)
         row.addStretch(1)
         return row
 
@@ -4873,6 +4897,240 @@ class BandPanel(GlassPanel):
                 f"{slot} reset to default "
                 f"({defaults.default_hz/1e6:.4f} MHz, "
                 f"{defaults.default_mode})", 2000)
+        except Exception:
+            pass
+
+    # ── Memory presets (v0.0.9 Step 3a) ───────────────────────────
+
+    def _update_memory_tooltip(self) -> None:
+        """Refresh the Mem button tooltip to reflect current bank
+        size."""
+        if not hasattr(self, "_memory_button"):
+            return
+        n = self._memory.count
+        cap = self._memory.MAX_PRESETS
+        lines = [f"Memory presets — {n} of {cap} saved"]
+        if n > 0:
+            lines.append("")
+            lines.append("Click: dropdown to recall a saved preset.")
+            lines.append(
+                "Right-click: save current, delete, manage.")
+        else:
+            lines.append("")
+            lines.append("Right-click to save the current freq+mode.")
+        self._memory_button.setToolTip("\n".join(lines))
+
+    def _show_memory_recall_menu(self, anchor) -> None:
+        """Plain-left-click handler: drop a popup menu listing the
+        operator's saved presets.  Click any to recall its freq +
+        mode.  An empty bank gets a hint pointing the operator at
+        the right-click save action."""
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        presets = self._memory.list()
+        if not presets:
+            empty = QAction(
+                "(no presets saved -- right-click to save current)",
+                menu)
+            empty.setEnabled(False)
+            menu.addAction(empty)
+        else:
+            for i, p in enumerate(presets):
+                txt = (f"{p.name}  —  {p.freq_hz/1e6:.4f} MHz  "
+                       f"{p.mode}")
+                act = QAction(txt, menu)
+                if p.notes:
+                    act.setToolTip(p.notes)
+                act.triggered.connect(
+                    lambda _c=False, idx=i:
+                        self._recall_memory(idx))
+                menu.addAction(act)
+        # Pop the menu just below the button so it feels like
+        # a real dropdown rather than a context menu.
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def _show_memory_manage_menu(self, anchor, pos) -> None:
+        """Right-click management menu.  Save current, recall
+        submenu, delete submenu, "manage..." entry pointing at
+        Settings (3b will enable that)."""
+        from PySide6.QtWidgets import QMenu
+        from lyra.memory import MemoryStore
+        menu = QMenu(self)
+        # Save current as new preset.
+        if self._memory.at_max:
+            save_text = (f"Save current as new preset  "
+                         f"(bank full — max {MemoryStore.MAX_PRESETS})")
+        else:
+            n = self._memory.count
+            save_text = (
+                f"Save current as new preset…  "
+                f"({n} / {MemoryStore.MAX_PRESETS} used)")
+        save_act = QAction(save_text, menu)
+        save_act.setEnabled(not self._memory.at_max)
+        save_act.triggered.connect(self._save_current_to_memory)
+        menu.addAction(save_act)
+        # Per-preset actions when bank is non-empty.
+        if self._memory.count > 0:
+            menu.addSeparator()
+            recall_sub = menu.addMenu("Recall preset")
+            del_sub = menu.addMenu("Delete preset")
+            for i, p in enumerate(self._memory.list()):
+                short = (f"{p.name}  ({p.freq_hz/1e6:.4f} MHz "
+                         f"{p.mode})")
+                act = QAction(short, recall_sub)
+                act.triggered.connect(
+                    lambda _c=False, idx=i:
+                        self._recall_memory(idx))
+                recall_sub.addAction(act)
+                # Delete entry uses just the name for compactness;
+                # hover shows the freq+mode.
+                del_act = QAction(p.name, del_sub)
+                del_act.setToolTip(short)
+                del_act.triggered.connect(
+                    lambda _c=False, idx=i:
+                        self._delete_memory_with_confirm(idx))
+                del_sub.addAction(del_act)
+        menu.addSeparator()
+        # Step 3b will wire this to open Settings → Bands →
+        # Memory tab.  For now it's a placeholder hint.
+        manage_act = QAction(
+            "Manage presets… (full table view coming in Step 3b)",
+            menu)
+        manage_act.setEnabled(False)
+        menu.addAction(manage_act)
+        menu.exec(anchor.mapToGlobal(pos))
+
+    def _recall_memory(self, idx: int) -> None:
+        """Recall a memory preset by index: tune to its freq + mode.
+        If an rx_bw_hz override is set, also pin the bandwidth."""
+        p = self._memory.get(idx)
+        if p is None:
+            return
+        self.radio.set_mode(p.mode)
+        self.radio.set_freq_hz(p.freq_hz)
+        if p.rx_bw_hz is not None:
+            try:
+                self.radio.set_rx_bw(p.mode, p.rx_bw_hz)
+            except Exception:
+                # Rare: mode might not have a settable BW path.
+                # Best-effort -- the freq + mode tune is the
+                # important part.
+                pass
+        self._active_gen = None
+        try:
+            notes = f' — {p.notes}' if p.notes else ""
+            self.radio.status_message.emit(
+                f"Recalled '{p.name}': {p.freq_hz/1e6:.4f} MHz "
+                f"{p.mode}{notes}", 2500)
+        except Exception:
+            pass
+
+    def _save_current_to_memory(self) -> None:
+        """Open a small dialog asking for a name + optional notes,
+        then save the current radio freq + mode under that name.
+        Name collision warns and offers overwrite."""
+        from PySide6.QtWidgets import (
+            QDialog, QDialogButtonBox, QLabel, QLineEdit,
+            QMessageBox, QVBoxLayout,
+        )
+        from lyra.memory import MemoryPreset, MemoryStore
+        if self._memory.at_max:
+            # Should be unreachable (menu greyed out), but defensive.
+            QMessageBox.information(
+                self, "Memory bank full",
+                f"Bank holds the maximum of {MemoryStore.MAX_PRESETS} "
+                "presets.  Delete an existing entry first.")
+            return
+        cur_freq = int(self.radio.freq_hz)
+        cur_mode = str(self.radio.mode)
+        # Build dialog inline.
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Save preset")
+        v = QVBoxLayout(dlg)
+        v.addWidget(QLabel(
+            f"<p>Saving:  <b>{cur_freq/1e6:.4f} MHz</b>, "
+            f"<b>{cur_mode}</b></p>"))
+        v.addWidget(QLabel(
+            f"Name (required, {MemoryStore.MAX_NAME_LEN} chars max):"))
+        name_edit = QLineEdit(dlg)
+        name_edit.setMaxLength(MemoryStore.MAX_NAME_LEN)
+        v.addWidget(name_edit)
+        v.addWidget(QLabel(
+            f"Notes (optional, "
+            f"{MemoryStore.MAX_NOTES_LEN} chars max):"))
+        notes_edit = QLineEdit(dlg)
+        notes_edit.setMaxLength(MemoryStore.MAX_NOTES_LEN)
+        v.addWidget(notes_edit)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel,
+            parent=dlg)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        v.addWidget(btns)
+        # Empty-name guard: keep Save greyed until non-empty.
+        save_btn = btns.button(QDialogButtonBox.Save)
+        save_btn.setEnabled(False)
+        name_edit.textChanged.connect(
+            lambda t: save_btn.setEnabled(bool(t.strip())))
+        if dlg.exec() != QDialog.Accepted:
+            return
+        name = name_edit.text().strip()
+        notes = notes_edit.text().strip()
+        if not name:
+            return
+        # Name-collision check.
+        existing_idx = self._memory.find_by_name(name)
+        if existing_idx is not None:
+            old = self._memory.get(existing_idx)
+            confirm = QMessageBox.question(
+                self, "Overwrite existing preset?",
+                f"A preset named '{old.name}' already exists "
+                f"({old.freq_hz/1e6:.4f} MHz, {old.mode}).\n\n"
+                "Overwrite with the current freq+mode?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if confirm != QMessageBox.Yes:
+                return
+            # Update in place rather than add+delete.
+            self._memory.update(
+                existing_idx,
+                MemoryPreset(name=name, freq_hz=cur_freq,
+                             mode=cur_mode, notes=notes))
+        else:
+            ok = self._memory.add(MemoryPreset(
+                name=name, freq_hz=cur_freq, mode=cur_mode,
+                notes=notes))
+            if not ok:
+                QMessageBox.warning(
+                    self, "Save failed",
+                    "Couldn't save (bank full or invalid input).")
+                return
+        self._update_memory_tooltip()
+        try:
+            self.radio.status_message.emit(
+                f"Preset '{name}' saved: "
+                f"{cur_freq/1e6:.4f} MHz {cur_mode}", 2500)
+        except Exception:
+            pass
+
+    def _delete_memory_with_confirm(self, idx: int) -> None:
+        """Delete a preset after operator confirmation."""
+        from PySide6.QtWidgets import QMessageBox
+        p = self._memory.get(idx)
+        if p is None:
+            return
+        confirm = QMessageBox.question(
+            self, "Delete preset?",
+            f"Delete '{p.name}' "
+            f"({p.freq_hz/1e6:.4f} MHz {p.mode})?\n\n"
+            "This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+        self._memory.delete(idx)
+        self._update_memory_tooltip()
+        try:
+            self.radio.status_message.emit(
+                f"Preset '{p.name}' deleted", 1500)
         except Exception:
             pass
 
