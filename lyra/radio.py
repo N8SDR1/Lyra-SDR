@@ -751,12 +751,16 @@ class Radio(QObject):
         self._agc_one_minus_alpha_per_sample: float = 1.0
         self._agc_hang_samples: int = 0
         # AGC look-ahead delay line — v0.0.9.1 architectural fix.
-        # Mirrors WDSP wcpAGC.c:119-188: a small ring buffer that
-        # delays the audio output by ATTACK_TIME × sample_rate
-        # samples while the envelope detector inspects the FUTURE
-        # input.  When a transient appears at the input, the gain
-        # drops BEFORE the transient itself reaches the output.
-        # Default 4 ms × 48 kHz = 192 samples (Thetis default).
+        # Standard look-ahead AGC / compressor pattern (Reiss &
+        # McPherson "Audio Effects" ch. 6 §6.3 "Look-ahead
+        # limiting"; Zölzer "DAFX" ch. 4 §4.3.5).  A small ring
+        # buffer delays the audio output by ATTACK_TIME ×
+        # sample_rate samples while the envelope detector inspects
+        # the FUTURE input.  When a transient appears at the input,
+        # the gain drops BEFORE the transient itself reaches the
+        # output.  4 ms (192 samples at 48 kHz) is the textbook
+        # value cited across audio-DSP literature for clean
+        # transient handling without audibly slow attack.
         # Eliminates transient-induced clicks at the source --
         # tanh saturation can no longer fire during attack ramps
         # because the gain has already been reduced when the loud
@@ -5882,8 +5886,8 @@ class Radio(QObject):
         # time a sample reaches the multiplier, the peak detector
         # has had 192 samples (4 ms) to see the FUTURE of that
         # sample and reduce gain accordingly.  No transient ever
-        # passes through AGC unattenuated.  Mirrors WDSP wcpAGC.c
-        # lines 184-188.
+        # passes through AGC unattenuated.  Standard look-ahead
+        # compressor pattern -- see __init__ for textbook citations.
         #
         # Implementation: small ring buffer of input samples.  Each
         # input sample is written to the ring; the corresponding

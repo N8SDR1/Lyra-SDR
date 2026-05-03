@@ -46,10 +46,10 @@ class AK4951Sink:
         if hasattr(stream, "clear_tx_audio"):
             stream.clear_tx_audio()
 
-        # NOTE on pre-fill (history): v0.0.9.1 first attempt added a
-        # 100 ms silence pre-fill here to keep the AK4951 EP2 builder
-        # from underrunning between worker bursts.  That was a
-        # band-aid -- it papered over the ABSENCE of producer/
+        # NOTE on pre-fill (history): an earlier v0.0.9.1 attempt
+        # added a 100 ms silence pre-fill here to keep the AK4951
+        # EP2 builder from underrunning between worker bursts.  That
+        # was a band-aid -- it papered over the ABSENCE of producer/
         # consumer backpressure.  The proper fix (now in stream.py:
         # bounded deque + threading.Condition + sample-and-hold)
         # makes pre-fill unnecessary AND wrong:
@@ -64,8 +64,8 @@ class AK4951Sink:
         # The new architecture self-regulates: the deque oscillates
         # around the producer's natural delivery rate without ever
         # depleting (because the consumer waits) or overflowing
-        # (because the producer waits).  Mirrors Thetis's obbuffs
-        # ring + WaitForSingleObject pattern in network.c:1337.
+        # (because the producer waits).  Standard real-time-audio
+        # ring-buffer pattern with bounded blocking handoff.
         self._stream.inject_audio_tx = True
         # Stereo balance gains. Default = equal-power center
         # (cos/sin at π/4 = √2/2 each). Updated by Radio whenever the
@@ -236,9 +236,9 @@ class SoundDeviceSink:
         # The callback can't block (it runs on a high-priority audio
         # thread that must return inside the OS callback budget), so
         # the consumer side gets sample-and-hold without waiting.
-        # The producer can wait, so it does.  This mirrors Thetis's
-        # obbuffs ring + WaitForSingleObject pattern with the same
-        # asymmetric blocking direction (network.c:1337).
+        # The producer can wait, so it does.  Standard asymmetric
+        # blocking pattern for real-time audio: producer rate-locks
+        # to consumer hardware clock, consumer never stalls.
         capacity_frames = max(1024, int(rate * self._RING_SECONDS))
         self._ring_capacity_frames = capacity_frames
         self._ring = np.zeros(

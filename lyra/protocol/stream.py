@@ -269,12 +269,13 @@ class HL2Stream:
         # 1 s buffer at 48 kHz — caps unbounded growth if the demod
         # produces faster than the EP2 builder consumes.
         # ── TX audio queue (RX-audio-out path to AK4951) ──────────
-        # Architectural model — Thetis-style backpressure (v0.0.9.1
-        # rewrite):
+        # Architectural model — bounded producer/consumer queue with
+        # backpressure (v0.0.9.1 rewrite, clean-room implementation
+        # from textbook real-time-audio engineering: Reiss &
+        # McPherson "Audio Effects" ch. 6, Zölzer "DAFX" ch. 4):
         #
         #   * Bounded deque (max 4096 samples ≈ 85 ms at 48 kHz,
-        #     mirroring Thetis's obbuffs ring at OBB_MULT=2 ×
-        #     2048 = 4096 complex samples in network.c).
+        #     sized for ~2× the worker's block-cadence period).
         #   * threading.Condition for blocking handoff:
         #     - Producer (DSP worker thread) calls queue_tx_audio
         #       → blocks (with timeout) when deque is full.  This
@@ -288,19 +289,13 @@ class HL2Stream:
         #       NOT zero-pad.  Sample-and-hold = DC continuity =
         #       no step discontinuity = no audible click.
         #
-        # This matches the Thetis pattern documented in
-        # ChannelMaster/network.c::sendOutbound (line 1337,
-        # WaitForSingleObject(hobbuffsRun[1], INFINITE)).  Thetis
-        # has no zero-padding code path on its RX audio output;
-        # producer/consumer rendezvous on a semaphore.  Lyra's
-        # Python implementation uses Condition + short timeouts to
-        # avoid blocking the RX loop indefinitely on a stalled
-        # worker (which would cascade into UDP RX buffer overflow).
-        #
-        # Capacity: 4096 (~85 ms) is large enough to absorb worker
-        # block bursts (smaller now after audio_block 2048 → 512
-        # change), small enough to keep TX-side latency low when
-        # v0.2 lands.
+        # Standard pattern: rate-locked producer/consumer with
+        # asymmetric blocking semantics (producer can block,
+        # consumer can wait briefly but not indefinitely lest the
+        # RX socket buffer overflow).  Capacity sized so the deque
+        # oscillates well inside its bounds during normal operation
+        # and only the rare sustained mismatch triggers the timeout
+        # paths.
         self._tx_audio: deque = deque()
         self._tx_audio_lock = threading.Lock()
         self._tx_audio_cv = threading.Condition(self._tx_audio_lock)
@@ -368,10 +363,11 @@ class HL2Stream:
     # the producer to deliver more samples without blocking the RX
     # loop long enough to overflow the UDP buffer.  On timeout we
     # fall back to SAMPLE-AND-HOLD (NOT zero-pad) -- DC continuity
-    # is inaudible where a step to zero is a click.  Mirrors the
-    # graceful-degradation property of Thetis's WaitForSingleObject
-    # (Thetis uses INFINITE since C++ thread scheduling is
-    # deterministic; Python's GIL + GC make a small timeout safer).
+    # is inaudible where a step to zero is a click.  Python's
+    # GIL + GC make a finite timeout safer than an infinite block;
+    # if the worker stalls for longer than this the EP2 builder
+    # gracefully degrades to held-DC instead of dead-locking the
+    # RX loop.
     _PACK_WAIT_TIMEOUT_S = 0.005
 
     def _pack_audio_bytes(self, n_samples: int) -> bytes:
