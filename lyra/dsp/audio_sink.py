@@ -23,80 +23,84 @@ class AudioSink(Protocol):
 
 
 class AK4951Sink:
-    """Route audio to the HL2's AK4951 line-level output via EP2 audio
-    slots.
+    """Route audio to the HL2's AK4951 line-level output via EP2 TX slots.
 
-    Producer side of the producer/consumer handshake with HL2Stream's
-    dedicated EP2 writer thread (v0.0.9.2 audio rebuild).  Each
-    write() splits the incoming audio into 126-sample stereo blocks
-    (one per EP2 frame at the codec's 380 Hz cadence) and submits
-    each block via stream.submit_audio_block.  That call is
-    backpressured: when the writer's small audio queue is full the
-    producer waits, naturally pacing the producer to consumer
-    cadence with no silent-drop and no zero-pad-on-underrun.
+    The AK4951 is a true STEREO codec: the EP2 audio slot has separate
+    16-bit Left + Right fields, and the gateware routes both to the
+    AK4951 DAC's L/R channels. So Balance is honored end-to-end — we
+    apply per-channel gains here and feed (N, 2) stereo into the EP2
+    queue, which packs L and R independently into the frame.
 
-    The AK4951 is a true stereo codec: separate 16-bit L and R
-    fields per EP2 audio slot, both routed to the codec DAC.
-    Balance is honored end-to-end via per-channel gains applied
-    here before submission.
+    Sink-swap cleanup: the underlying HL2Stream owns a TX audio
+    queue (deque) that's NOT per-sink — it's a long-lived buffer
+    shared across sink swaps. We clear it on both init AND close,
+    so swapping to/from this sink doesn't leak stale samples between
+    sessions ("digitized robotic" symptom: old samples + new samples
+    interleaved in the EP2 frames).
     """
 
     def __init__(self, stream):
         self._stream = stream
-        # Clear any stragglers from a previous session.  Notify-aware
-        # so any producer waiting at the queue-full gate from the
-        # previous sink wakes and exits cleanly.
-        if hasattr(stream, "clear_audio_queue"):
-            stream.clear_audio_queue()
-        elif hasattr(stream, "clear_tx_audio"):  # legacy alias
+        # Drain any leftover TX audio from a previous session before
+        # we start enqueuing fresh samples.
+        if hasattr(stream, "clear_tx_audio"):
             stream.clear_tx_audio()
-        # Enable EP2 audio injection.  The writer thread reads this
-        # flag; takes effect on its next cadence tick (within ~3 ms).
+
+        # Pre-fill the EP2 TX audio deque with 100 ms of silence
+        # BEFORE enabling EP2 audio injection.  This is the v0.0.9.1
+        # fix for the audio-click symptom -- operator-instrumented
+        # data showed ~3 underruns/second sustained, all at the
+        # producer/consumer interface.  Root cause: the worker
+        # thread produces audio in bursts of 2048 samples every
+        # ~43 ms (block_size at 48 kHz), but the EP2 frame builder
+        # polls the deque at 380 Hz (~2.6 ms cadence) asking for 126
+        # samples each call.  Between worker bursts, the deque
+        # drains to empty and EP2 pads zeros = audible click.
+        #
+        # 4800-sample pre-fill (100 ms at 48 kHz) gives the deque
+        # enough headroom that the burst-vs-steady cadence mismatch
+        # oscillates the deque level around 4800 samples WITHOUT
+        # ever hitting zero.  Cost: 100 ms of audio latency at the
+        # AK4951 codec output.  Acceptable for RX listening; will
+        # need re-evaluation when TX lands in v0.2 (PTT cadence).
+        # Maxlen of the deque is 48000 (1 second), so the pre-fill
+        # uses 10 % of capacity -- plenty of room for production
+        # bursts to grow the level temporarily without overrunning.
+        if hasattr(stream, "_tx_audio_lock") and hasattr(stream, "_tx_audio"):
+            PREFILL_MS = 100
+            n_silence = int(48000 * PREFILL_MS / 1000)
+            silence = [(0.0, 0.0)] * n_silence
+            with stream._tx_audio_lock:
+                stream._tx_audio.extend(silence)
+
         self._stream.inject_audio_tx = True
         # Stereo balance gains. Default = equal-power center
         # (cos/sin at π/4 = √2/2 each). Updated by Radio whenever the
-        # operator moves the Balance slider.
+        # operator moves the Balance slider, exactly like SoundDeviceSink.
         self._left_gain = 0.7071067811865476
         self._right_gain = 0.7071067811865476
 
     def write(self, audio: np.ndarray) -> None:
-        """Slice incoming audio into 126-sample stereo blocks and
-        submit each to the EP2 writer.  Submission may block briefly
-        on producer/consumer backpressure when the writer queue is
-        full -- this is healthy and bounds the audio latency to a
-        small multiple of the EP2 frame period.
-        """
         if audio.size == 0:
             return
         # Two input shapes are accepted:
         #   - mono (N,) — duplicated to L/R, then per-channel balance
-        #     applied.  Default audio chain produces this shape.
+        #     applied. Default audio chain produces this shape.
         #   - stereo (N, 2) — already L/R-distinct (e.g., BIN
-        #     pseudo-binaural).  Balance gains apply column-wise.
+        #     pseudo-binaural is on). Balance gains apply column-wise.
         if audio.ndim == 2 and audio.shape[1] == 2:
             stereo = audio.astype(np.float32, copy=False)
             stereo = stereo * np.array(
                 [self._left_gain, self._right_gain], dtype=np.float32)
         else:
             mono = audio.astype(np.float32).reshape(-1)
+            # When the operator hasn't touched Balance both gains are
+            # √2/2 ≈ 0.707, so the AK4951 hears the same audio in both
+            # ears as the legacy mono-duplicated path did.
             l = mono * self._left_gain
             r = mono * self._right_gain
-            stereo = np.stack((l, r), axis=1)
-        # Slice into 126-sample chunks.  The writer expects exactly
-        # 126 samples per submitted block (one EP2 frame's worth).
-        n = stereo.shape[0]
-        for i in range(0, n, 126):
-            chunk = stereo[i:i + 126]
-            if chunk.shape[0] < 126:
-                # Pad partial trailing chunk with silence so each
-                # submitted block is full-frame-sized.  A few zero
-                # samples at the very end of an audio write are
-                # inaudible.
-                pad = np.zeros((126 - chunk.shape[0], 2),
-                                dtype=np.float32)
-                chunk = np.concatenate((chunk, pad), axis=0)
-            # Submit (may briefly block on backpressure).
-            self._stream.submit_audio_block(chunk)
+            stereo = np.stack((l, r), axis=1)            # (N, 2)
+        self._stream.queue_tx_audio(stereo)
 
     def set_lr_gains(self, left: float, right: float) -> None:
         """Update the L/R channel gains. Called by Radio whenever the
@@ -107,18 +111,42 @@ class AK4951Sink:
         self._right_gain = float(right)
 
     def close(self) -> None:
-        # Disable audio injection FIRST.  The EP2 writer thread sees
-        # this flag on its next cadence tick and switches to C&C-only
-        # frames -- the codec receives one frame of silent audio
-        # bytes at the moment of swap, then steady C&C.  No click
-        # because the transition is sample-aligned (the writer never
-        # interleaves a partial audio frame).
+        # Quiet-pass v0.0.7.1 (audio_pops_audit P0.3): apply a brief
+        # fade-out before disabling EP2 audio injection.  Pre-fix this
+        # method flipped ``inject_audio_tx`` instantly, which made the
+        # AK4951's audio L/R bytes jump from real samples to zero in
+        # one EP2 frame (~2.6 ms cadence) — operator heard a click on
+        # every sink swap.
+        #
+        # Sequence:
+        #   1. Replace the queued audio with a 5 ms linear fade tail.
+        #      EP2 builder pulls these as the next samples while the
+        #      operator-perceived audio gracefully decays to zero.
+        #   2. Sleep ~7 ms so the EP2 thread has time to pull and
+        #      send the faded samples (at 380 Hz EP2 cadence × 126
+        #      samples/frame, 7 ms ≈ 2.7 frames = 336 audio samples,
+        #      comfortably more than 240 fade samples).
+        #   3. Disable injection — subsequent EP2 frames carry zero
+        #      audio bytes, but the AK4951 has just heard a clean
+        #      fade so there's nothing to click against.
+        #   4. Clear any stragglers (defensive — fade_and_replace_tx_
+        #      audio already dropped the long tail, but the EP2 thread
+        #      might have missed pulling a few samples if it was
+        #      busy when we slept).
+        FADE_MS = 5.0
+        DRAIN_BUFFER_MS = 2.0
+        if hasattr(self._stream, "fade_and_replace_tx_audio"):
+            queued = self._stream.fade_and_replace_tx_audio(
+                fade_ms=FADE_MS)
+            if queued > 0:
+                import time
+                time.sleep((FADE_MS + DRAIN_BUFFER_MS) / 1000.0)
         self._stream.inject_audio_tx = False
-        # Drain any pending blocks.  Notifies any producer still
-        # waiting on the queue-full gate so it exits cleanly.
-        if hasattr(self._stream, "clear_audio_queue"):
-            self._stream.clear_audio_queue()
-        elif hasattr(self._stream, "clear_tx_audio"):  # legacy alias
+        # Clear the queue on close so the NEXT sink (PC Soundcard
+        # or another AK4951 instance) starts from a known empty
+        # state. Without this, residual samples in the deque continue
+        # being pulled by EP2 framing for up to ~1 second.
+        if hasattr(self._stream, "clear_tx_audio"):
             self._stream.clear_tx_audio()
 
 

@@ -240,186 +240,89 @@ class HL2Stream:
         )
         self._send_lock = threading.Lock()
 
-        # ── EP2 writer architecture (v0.0.9.2 audio rebuild) ─────────
-        # A dedicated EP2 writer thread drives the host->radio frame
-        # send at the AK4951 codec's audio rate (~380 Hz = 48 kHz / 126
-        # samples per frame), independent of EP6 (radio->host) UDP
-        # arrival cadence.  This isolates the codec-facing frame
-        # cadence from upstream network burstiness and gives the
-        # writer thread its own scheduling priority slot (MMCSS Pro
-        # Audio class on Windows) for jitter immunity.
+        # TX audio queue. Demod pipeline pushes float samples [-1, 1] at
+        # 48 kHz. The AK4951 codec on the HL2+ is hard-locked at 48 kHz
+        # fs regardless of EP6 IQ rate. To keep the codec from being
+        # over-fed at higher IQ rates we throttle EP2 frame emission
+        # to a fixed 380 Hz cadence (= 48 kHz audio / 126 samples per
+        # frame), decoupled from EP6 cadence. See _rx_loop.
         #
-        # Producer/consumer coordination uses a small bounded queue of
-        # 126-sample stereo audio blocks (8 deep = ~21 ms buffer).
-        # Producer (DSP path -> AK4951Sink.write -> submit_audio_block)
-        # waits when the queue is full -- this is the backpressure
-        # half of the handshake and bounds memory + latency.  Consumer
-        # (the EP2 writer thread, draining one block per cadence tick)
-        # never waits on emptiness; if no audio is queued it sends a
-        # C&C-only frame to keep the HL2 watchdog satisfied.
-        #
-        # Counter semantics:
-        #   tx_audio_underruns  -- EP2 frame fired without audio while
-        #                          inject_audio_tx was True (= producer
-        #                          stalled past one cadence tick).
-        #                          Each one is an audible click on
-        #                          the AK4951 codec.
-        #   tx_audio_overruns   -- producer hit the queue-full gate
-        #                          and waited.  Healthy in steady
-        #                          state at ~95 Hz worker rate
-        #                          (producer pushes 4 blocks per
-        #                          worker iteration; queue holds them
-        #                          until writer drains).
-        #   tx_audio_high_water -- max queue depth (samples) observed
-        #                          since the last UI read.  Telemetry.
-        #   tx_audio_producer_waits -- count of waited submits.
+        # Phase 3.B B.7 — thread-safety audit (DSP worker mode).
+        # In single-thread mode the producer of this queue (demod
+        # writes via AK4951Sink.write → queue_tx_audio) is the Qt
+        # main thread.  In worker mode it's the DspWorker thread.
+        # The consumer (_pack_audio_bytes called from the EP2
+        # frame builder) is HL2Stream's TX thread in BOTH modes.
+        # All three call sites (queue_tx_audio, clear_tx_audio,
+        # _pack_audio_bytes) acquire ``_tx_audio_lock`` before
+        # touching ``_tx_audio``, so the producer-thread switch
+        # introduced by worker mode is safe — no additional locks
+        # needed.  The only non-locked field consumed cross-thread
+        # is ``inject_audio_tx`` (a plain bool used by the EP2
+        # frame builder to decide whether to call _pack_audio_bytes
+        # at all), which is GIL-safe for atomic load/store and
+        # tolerates a one-frame staleness on toggle (worst case:
+        # one EP2 frame of zeros instead of audio at the moment of
+        # sink swap, which is sub-3 ms and inaudible).
+        # AUDIT VERDICT: existing locking is sufficient.
         from collections import deque
-        EP2_QUEUE_DEPTH = 8   # 8 blocks * 126 = 1008 samples = 21 ms
-        self._ep2_audio_queue: deque = deque(maxlen=EP2_QUEUE_DEPTH)
-        self._ep2_audio_lock = threading.Lock()
-        self._ep2_audio_cond = threading.Condition(self._ep2_audio_lock)
-        self._ep2_writer_thread: Optional[threading.Thread] = None
+        # 1 s buffer at 48 kHz — caps unbounded growth if the demod
+        # produces faster than the EP2 builder consumes.
+        self._tx_audio: deque = deque(maxlen=48000)
+        self._tx_audio_lock = threading.Lock()
+        # EP2 cadence throttle: increments every EP6 frame; keepalive
+        # only fires when count % (sample_rate/48000) == 0.
+        self._ep6_count = 0
         self.tx_audio_gain = 0.5
-        # Opt-in: pack audio into EP2 frames. When False (default), the
-        # writer sends C&C-only frames (audio slots stay zero).  Turn
-        # this on only for AK4951 output.
+        # Opt-in: pack audio into EP2 frames. When False (default), the TX
+        # audio slots are left at zero. Turn this on only for AK4951 output.
         self.inject_audio_tx = False
-        # Diagnostics
+        # AK4951 sink diagnostics — each is a frame-level event counter.
+        # Underrun: EP2 frame builder asked for N audio samples and the
+        # tx_audio deque had fewer; we padded with zeros (= silent
+        # samples = audible click on AK4951 codec).  Overrun: tx_audio
+        # deque was already at maxlen=48000 when the producer pushed
+        # more; deque silently dropped the OLDEST samples (= sample
+        # discontinuity = audible click).  Both counters surfaced in
+        # the UI status bar so operators can correlate counter ticks
+        # with audible clicks.  v0.0.9.1+
         self.tx_audio_underruns: int = 0
         self.tx_audio_overruns: int = 0
+        # Deque high-water mark (v0.0.9.2 audio rebuild Commit 1).
+        # Tracks the maximum deque depth observed since the last UI
+        # read.  After v0.0.9.2 Commit 3 lands real backpressure,
+        # the high-water should hover near the operator's chosen
+        # block size; values approaching maxlen=48000 mean the
+        # producer is far ahead of the consumer (overrun risk) and
+        # values near zero mean the consumer is ahead of the
+        # producer (underrun risk).  UI reads via
+        # ``read_tx_audio_high_water()`` which atomically samples-
+        # and-resets so we get rolling-window data.
         self.tx_audio_high_water: int = 0
-        self.tx_audio_producer_waits: int = 0
 
     def read_tx_audio_high_water(self) -> int:
-        """Atomically read + reset the EP2 audio queue high-water mark
-        (in samples).  UI status tick reads this for telemetry."""
-        with self._ep2_audio_cond:
+        """Atomically read + reset the TX audio deque high-water mark.
+
+        Returns the maximum deque depth observed since the previous
+        call.  UI's 1 Hz status tick reads this to drive a "deque
+        depth: N" telemetry indicator during the v0.0.9.2 audio
+        rebuild pre-release phase.  Lock-protected so the read +
+        reset is atomic w.r.t. concurrent ``queue_tx_audio`` and
+        ``_pack_audio_bytes`` updates.
+        """
+        with self._tx_audio_lock:
             hw = self.tx_audio_high_water
-            self.tx_audio_high_water = len(self._ep2_audio_queue) * 126
+            self.tx_audio_high_water = len(self._tx_audio)
             return hw
 
-    # ── Producer-side: submit a 126-sample stereo audio block ──────────
-    def submit_audio_block(self, block_l_r):
-        """Producer-side: deposit one 126-sample stereo audio block
-        into the EP2 writer's queue.  Blocks (with bounded timeout)
-        when the queue is at capacity -- this is the producer-side of
-        the producer/consumer handshake and naturally paces the
-        producer down to consumer cadence (~380 Hz).
+    # -- control frame (EP2) for initial config -----------------------------
+    def _build_ep2_frame(self, c0: int, c1: int, c2: int, c3: int, c4: int) -> bytes:
+        """Build an EP2 control frame with one C&C write in each USB block,
+        plus up to 126 audio samples (63 per block) pulled from the TX queue.
 
-        Parameter:
-            block_l_r -- iterable of 126 (left, right) float pairs in
-                         range [-1, 1].
-
-        Behavior:
-            - If queue has room: append, notify, return immediately.
-            - If queue at maxlen: wait on the condition (50 ms
-              timeout) until the writer thread pops a block, then
-              append.  ``tx_audio_producer_waits`` increments.
-            - If the stream is shutting down: drop the block silently
-              and return (avoid pushing into a queue about to be
-              cleared).
-
-        The producer never silently drops audio -- a busy producer is
-        held at the gate until the writer drains.  This is the
-        critical difference from a maxlen=N deque-with-extend, which
-        would silently drop oldest samples on overflow and inject
-        sample-time discontinuities into the audio stream.
-        """
-        if self._stop_event.is_set():
-            return
-        # Convert to a list of float tuples once.  Cheap (126 items).
-        # Accept anything iterable of length-2 pairs; the AK4951 sink
-        # produces shape (126, 2) numpy arrays.
-        try:
-            pairs = [(float(l), float(r)) for l, r in block_l_r]
-        except (TypeError, ValueError):
-            return  # malformed input; drop block
-        if not pairs:
-            return
-        with self._ep2_audio_cond:
-            waited = False
-            while (len(self._ep2_audio_queue)
-                   >= self._ep2_audio_queue.maxlen
-                   and not self._stop_event.is_set()):
-                waited = True
-                self._ep2_audio_cond.wait(timeout=0.050)
-            if waited:
-                self.tx_audio_producer_waits += 1
-                self.tx_audio_overruns += 1
-            if self._stop_event.is_set():
-                return
-            self._ep2_audio_queue.append(pairs)
-            depth_samples = len(self._ep2_audio_queue) * 126
-            if depth_samples > self.tx_audio_high_water:
-                self.tx_audio_high_water = depth_samples
-            # Wake any other waiters (rare; only if multiple producer
-            # threads share this stream).
-            self._ep2_audio_cond.notify_all()
-
-    def clear_audio_queue(self):
-        """Drain any pending audio blocks.  Called by AK4951Sink on
-        init/close to prevent stale audio from a previous session
-        leaking into a new session.  Notifies producers so any waiter
-        wakes promptly."""
-        with self._ep2_audio_cond:
-            self._ep2_audio_queue.clear()
-            self._ep2_audio_cond.notify_all()
-
-    # Backward-compat aliases (old name kept so external callers don't
-    # break across the rebuild; both delegate to the new methods).
-    def clear_tx_audio(self):
-        self.clear_audio_queue()
-
-    def queue_tx_audio(self, audio):
-        """Legacy entry point: accepts mono (N,) or stereo (N, 2)
-        ndarrays of arbitrary length, slices into 126-sample blocks,
-        and submits each via ``submit_audio_block``.
-
-        Sinks should prefer to call ``submit_audio_block`` directly
-        with already-126-shaped blocks (cheaper, fewer allocations);
-        this wrapper exists so older code paths still work without
-        rewrites.
-        """
-        import numpy as np
-        a = np.asarray(audio, dtype=np.float32)
-        if a.ndim == 1:
-            stereo = np.stack((a, a), axis=1)
-        elif a.ndim == 2 and a.shape[1] == 2:
-            stereo = a
-        else:
-            stereo = np.stack((a.reshape(-1), a.reshape(-1)), axis=1)
-        n = stereo.shape[0]
-        for i in range(0, n, 126):
-            chunk = stereo[i:i + 126]
-            if chunk.shape[0] < 126:
-                # Pad partial trailing chunk with silence so the
-                # writer always sees a full 126-sample frame.  Cost:
-                # a few zero samples at the very end of an audio
-                # write; inaudible.
-                pad = np.zeros((126 - chunk.shape[0], 2),
-                                dtype=np.float32)
-                chunk = np.concatenate((chunk, pad), axis=0)
-            self.submit_audio_block(chunk)
-
-    # No-op stub for v0.0.9.1's fade-on-close path.  In the new
-    # design the writer thread sees inject_audio_tx=False after
-    # AK4951Sink.close() and stops emitting audio bytes within one
-    # cadence tick (2.6 ms).  No queue tail to fade; close path is
-    # simpler.  Stub returns 0 so any caller doing the post-fade
-    # sleep just sleeps for nothing.
-    def fade_and_replace_tx_audio(self, fade_ms: float = 5.0) -> int:
-        return 0
-
-    # -- EP2 frame builder + audio packer ---------------------------------
-    def _build_ep2_frame(self, c0: int, c1: int, c2: int, c3: int, c4: int,
-                          audio_bytes: Optional[bytes] = None) -> bytes:
-        """Build an EP2 frame: 8-byte header + 2 USB blocks (512 bytes each).
-
-        Each USB block carries the same C&C write (c0..c4) and 504 bytes
-        of LRIQ audio (63 8-byte tuples).  ``audio_bytes`` is 1008 bytes
-        of pre-packed LRIQ audio (126 samples * 8 bytes); split across
-        the two USB blocks.  When ``audio_bytes`` is None, the audio
-        slots stay zero (frame is C&C-only).
+        Sample layout per HPSDR P1: each 8-byte slot is
+        Left16(BE) + Right16(BE) + TX_I16(BE) + TX_Q16(BE). We place mono
+        audio in both Left and Right; TX_I/Q stays zero while not transmitting.
         """
         frame = bytearray(1032)
         frame[0] = 0xEF
@@ -428,6 +331,8 @@ class HL2Stream:
         frame[3] = 0x02  # EP2
         struct.pack_into(">I", frame, 4, self._tx_seq)
         self._tx_seq = (self._tx_seq + 1) & 0xFFFFFFFF
+
+        audio_bytes = self._pack_audio_bytes(126) if self.inject_audio_tx else None
 
         for block_idx, block_off in enumerate((8, 520)):
             frame[block_off + 0] = 0x7F
@@ -445,160 +350,153 @@ class HL2Stream:
             # else: payload bytes stay zero (identical to pre-audio behavior)
         return bytes(frame)
 
-    def _pack_audio_pairs(self, pairs) -> bytes:
-        """Convert a 126-element list of (L, R) float tuples to 1008 bytes
-        of LRIQ-packed audio for the EP2 audio slots.  TX I/Q stays zero
-        (RX-only)."""
+    def _pack_audio_bytes(self, n_samples: int) -> bytes:
+        """Dequeue up to n_samples, pad with zeros, pack as HPSDR TX stereo.
+
+        Queue items are (L, R) float tuples at 48 kHz. EP2 frames are
+        rate-throttled at the call site so this function always sees
+        a 48 kHz cadence — every slot carries a real sample.
+        """
         import numpy as np
-        lr = np.asarray(pairs, dtype=np.float32)        # (126, 2)
-        lr = lr * self.tx_audio_gain                     # apply final trim
+        with self._tx_audio_lock:
+            avail = min(len(self._tx_audio), n_samples)
+            pulled = [self._tx_audio.popleft() for _ in range(avail)]
+        if avail < n_samples:
+            # Underrun — TX queue had less data than EP2 wants to send.
+            # Pad with zeros so the EP2 frame is always the right size,
+            # but COUNT the event so the operator can see it in the
+            # status bar.  Each underrun = silent samples injected into
+            # the AK4951 audio stream = audible click on the codec
+            # output.  Counter is read by the UI's 1 Hz status tick
+            # (lyra/ui/app.py::_tick_cpu).  v0.0.9.1+
+            self.tx_audio_underruns += 1
+            pulled.extend([(0.0, 0.0)] * (n_samples - avail))
+        # pulled is a list of (L, R) tuples — split into separate arrays.
+        lr = np.asarray(pulled, dtype=np.float32)        # shape (N, 2)
+        lr *= self.tx_audio_gain
         np.clip(lr, -1.0, 1.0, out=lr)
-        int16 = (lr * 32767.0).astype(">i2")             # big-endian int16
+        int16 = (lr * 32767.0).astype(">i2")             # shape (N, 2) big-endian
         left_bytes  = int16[:, 0].tobytes()
         right_bytes = int16[:, 1].tobytes()
-        out = bytearray(126 * 8)
-        for i in range(126):
+        # Interleave L R I Q per sample (TX_I/TX_Q stay zero on RX).
+        out = bytearray(n_samples * 8)
+        for i in range(n_samples):
             out[i * 8 + 0:i * 8 + 2] = left_bytes [i * 2:i * 2 + 2]
             out[i * 8 + 2:i * 8 + 4] = right_bytes[i * 2:i * 2 + 2]
-            # bytes 4..7 stay zero (TX I/Q slots; not transmitting)
+            # bytes 4..7 already zero
         return bytes(out)
 
-    # ── EP2 writer thread + MMCSS priority helper ─────────────────────
-    @staticmethod
-    def _maybe_apply_mmcss_pro_audio(profile_name: str = "Pro Audio"):
-        """Elevate the calling thread to the MMCSS Pro Audio task class
-        on Windows.  No-op (and silently absorbs any error) on other
-        platforms or if the AVRT API is unavailable.
+    def queue_tx_audio(self, audio):
+        """Push float audio samples (range [-1, 1]) into the EP2 TX queue.
 
-        Real-time audio threads on Windows are scheduled by the Multi-
-        Media Class Scheduler Service (MMCSS) when registered via
-        ``AvSetMmThreadCharacteristicsW``.  This bumps thread
-        scheduling priority above default user-thread priority,
-        preventing UI thread / GC / generic background work from
-        starving the audio path during scheduling jitter events.
+        Accepts either:
+          - 1D mono ndarray  → duplicated to (L, R) for backward compat
+          - 2D stereo ndarray of shape (N, 2)  → stored as (L, R) tuples
+            so per-channel content (e.g. balance / pan output) survives
+            into the AK4951 codec L/R fields of the EP2 audio slot.
 
-        Safe failure mode: if the call fails we just run at default
-        priority -- one operator-perceptible result is occasional
-        scheduling-jitter audio glitches under heavy CPU load, which
-        is the pre-Commit-4 status quo anyway.
+        AK4951 OUTPUT IS DECOUPLED FROM IQ RATE
+        ---------------------------------------
+        Earlier versions tried to upsample audio to match the EP6 IQ
+        rate (96/192/384 k) on the assumption that EP2 frames drained
+        at the IQ rate. In practice this produced chopped / distorted
+        AK4951 audio at every rate above 48 k. Empirically the AK4951
+        codec on the HL2 plays at 48 kHz regardless of the EP6 RX
+        rate, so we always queue audio at 48 kHz and let the EP2
+        frame builder consume it at whatever cadence the gateware
+        expects. The spectrum/panadapter view stays at the operator's
+        chosen IQ rate; only the audio path is locked to 48 kHz.
         """
-        try:
-            import sys
-            if not sys.platform.startswith("win"):
-                return
-            import ctypes
-            avrt = ctypes.WinDLL("avrt", use_last_error=True)
-            AvSetMmThreadCharacteristicsW = avrt.AvSetMmThreadCharacteristicsW
-            AvSetMmThreadCharacteristicsW.restype = ctypes.c_void_p
-            AvSetMmThreadCharacteristicsW.argtypes = [
-                ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_ulong)]
-            AvSetMmThreadPriority = avrt.AvSetMmThreadPriority
-            AvSetMmThreadPriority.restype = ctypes.c_int
-            AvSetMmThreadPriority.argtypes = [
-                ctypes.c_void_p, ctypes.c_int]
-            task_index = ctypes.c_ulong(0)
-            handle = AvSetMmThreadCharacteristicsW(
-                profile_name, ctypes.byref(task_index))
-            if handle:
-                # AVRT_PRIORITY_CRITICAL = 2 (highest defined).
-                AvSetMmThreadPriority(handle, 2)
-                _log.info(
-                    "MMCSS '%s' priority elevated for thread %s",
-                    profile_name, threading.current_thread().name)
-            else:
-                _log.warning(
-                    "AvSetMmThreadCharacteristicsW returned NULL; "
-                    "thread will run at default priority")
-        except Exception as e:  # noqa: BLE001
-            _log.warning("MMCSS priority elevation failed: %s", e)
+        import numpy as np
+        a = np.asarray(audio, dtype=np.float32)
+        if a.ndim == 1:
+            # Mono → duplicate to both channels (legacy behavior).
+            pairs = list(zip(a.tolist(), a.tolist()))
+        elif a.ndim == 2 and a.shape[1] == 2:
+            pairs = [(float(l), float(r)) for l, r in a]
+        else:
+            # Defensive: flatten anything else as mono so we don't drop
+            # audio silently on an unexpected shape.
+            flat = a.reshape(-1)
+            pairs = list(zip(flat.tolist(), flat.tolist()))
+        with self._tx_audio_lock:
+            # Detect overrun: when the deque is at maxlen and we
+            # extend, the oldest elements are silently DROPPED.  Count
+            # the would-be-dropped samples as overrun events so the
+            # operator can see queue saturation in the status bar.
+            # v0.0.9.1+ click investigation.
+            # Track high-water mark BEFORE the extend so a producer
+            # burst that arrives while the deque is full is captured
+            # in the rolling-window observation.
+            depth_after = len(self._tx_audio) + len(pairs)
+            if depth_after > self.tx_audio_high_water:
+                self.tx_audio_high_water = min(
+                    depth_after, self._tx_audio.maxlen)
+            free_slots = self._tx_audio.maxlen - len(self._tx_audio)
+            if len(pairs) > free_slots:
+                self.tx_audio_overruns += len(pairs) - free_slots
+            self._tx_audio.extend(pairs)
 
-    def _ep2_writer_loop(self):
-        """Dedicated thread that drives EP2 frame send cadence at the
-        AK4951 audio rate (~380 Hz = 48 kHz / 126 samples per frame).
+    def clear_tx_audio(self):
+        """Drain any pending samples from the TX audio queue. Called
+        by AK4951Sink on init/close to prevent stale audio from a
+        previous session leaking into a new session — the symptom
+        was "digitized robotic" sound right after switching sinks."""
+        with self._tx_audio_lock:
+            self._tx_audio.clear()
 
-        Each iteration:
-          1. Sleeps to the next cadence tick (drift-corrected timer).
-          2. Pops the oldest 126-sample audio block from the producer
-             queue (if any; non-blocking).
-          3. Picks the next C&C round-robin register entry.
-          4. Builds the 1032-byte EP2 frame (control header + 2 USB
-             blocks each carrying C&C + audio).
-          5. Sends via UDP.
+    def fade_and_replace_tx_audio(self, fade_ms: float = 5.0) -> int:
+        """Replace the TX audio queue with a short fade-out tail.
 
-        Steady cadence isolates the codec-side framing from upstream
-        UDP burstiness (which the previous design inherited by sending
-        EP2 from inside ``_rx_loop``).  When ``inject_audio_tx`` is
-        False (PortAudio sink active) the writer keeps firing C&C-only
-        frames so HL2's keepalive watchdog stays satisfied.
+        Quiet-pass v0.0.7.1 (audio_pops_audit P0.3): on AK4951 sink
+        close the previous behaviour was to flip ``inject_audio_tx``
+        instantly, which caused the EP2 frame builder's audio L/R
+        bytes to jump from real samples to zero in one frame
+        (~2.6 ms cadence at 380 Hz EP2 rate).  At the AK4951 codec
+        this presented as a sample-domain step from steady-state
+        amplitude to silence — an audible click on every sink swap.
+
+        The fix: replace whatever is currently queued with a short
+        linearly-ramped fade-out of the FIRST ``fade_ms`` worth of
+        the existing queue.  After this returns, the queue contains
+        at most ``fade_ms × 48`` samples ramping from the current
+        amplitude down to zero.  Any samples beyond the fade window
+        are dropped (operator was closing the session anyway).
+
+        Caller is expected to sleep ``fade_ms + ~2`` ms (so the
+        EP2 builder pulls and sends the faded samples) BEFORE
+        flipping ``inject_audio_tx = False`` and calling
+        ``clear_tx_audio``.
+
+        Returns the number of samples queued in the fade tail
+        (useful for the caller to compute the drain wait).
         """
-        EP2_PERIOD = 126.0 / 48000.0  # 2.625 ms = 380.95 Hz
-
-        # Elevate scheduling priority on Windows.  Best-effort.
-        self._maybe_apply_mmcss_pro_audio("Pro Audio")
-
-        next_fire = time.monotonic() + EP2_PERIOD
-        while not self._stop_event.is_set():
-            # Wait until next cadence tick.  time.sleep is fine here
-            # since the cadence is steady; we do not need event-
-            # driven wakeup (producers don't accelerate the writer).
-            now = time.monotonic()
-            delay = next_fire - now
-            if delay > 0:
-                time.sleep(delay)
-            next_fire += EP2_PERIOD
-            # Resync if we fell badly behind (e.g. system suspend).
-            now = time.monotonic()
-            if next_fire < now:
-                next_fire = now + EP2_PERIOD
-
-            # Pull one audio block from producer queue (non-blocking).
-            audio_pairs = None
-            with self._ep2_audio_cond:
-                if self._ep2_audio_queue:
-                    audio_pairs = self._ep2_audio_queue.popleft()
-                    # Wake any producer waiting on a full queue.
-                    self._ep2_audio_cond.notify_all()
-
-            audio_bytes: Optional[bytes] = None
-            if audio_pairs is not None and self.inject_audio_tx:
-                try:
-                    audio_bytes = self._pack_audio_pairs(audio_pairs)
-                except Exception as e:  # noqa: BLE001
-                    _log.warning("EP2 audio packing error: %s", e)
-                    audio_bytes = None
-            elif self.inject_audio_tx:
-                # AK4951 active but producer didn't supply a block in
-                # time -> underrun.  Send a C&C-only frame; codec sees
-                # silence for one frame.
-                self.tx_audio_underruns += 1
-
-            # Pick C&C round-robin register entry.
-            try:
-                with self._cc_lock:
-                    if self._cc_registers:
-                        keys = sorted(self._cc_registers.keys())
-                        c0 = keys[self._cc_rr_idx % len(keys)]
-                        c1, c2, c3, c4 = self._cc_registers[c0]
-                        self._cc_rr_idx = (
-                            self._cc_rr_idx + 1) % len(keys)
-                    else:
-                        c0 = c1 = c2 = c3 = 0
-                        c4 = self._config_c4
-                frame = self._build_ep2_frame(
-                    c0, c1, c2, c3, c4, audio_bytes)
-                with self._send_lock:
-                    if self._sock is not None:
-                        self._sock.sendto(
-                            frame, (self.radio_ip, DISCOVERY_PORT))
-            except OSError:
-                # Socket likely closed by stop().  Exit cleanly.
-                break
-            except Exception as e:  # noqa: BLE001
-                _log.warning("EP2 writer iteration error: %s", e)
+        FADE_SAMPLES = max(1, int(fade_ms * 48.0))
+        with self._tx_audio_lock:
+            n = len(self._tx_audio)
+            if n == 0:
+                # Nothing playing to fade out.  No click possible.
+                return 0
+            # Pull all queued samples; we'll repush only the faded tail.
+            # Using the FIRST fade_n samples (head-of-queue) preserves
+            # signal continuity — those are the next samples that
+            # would have played anyway.  Tail samples (back-of-queue)
+            # would arrive later and are dropped on close.
+            all_pairs = [self._tx_audio.popleft() for _ in range(n)]
+            fade_n = min(FADE_SAMPLES, n)
+            for i in range(fade_n):
+                l, r = all_pairs[i]
+                # Linear ramp 1.0 -> 0.0 across the fade window.
+                # A cosine ramp would be smoother but linear is
+                # imperceptible at 5 ms — humans don't resolve
+                # envelope shape that fast.
+                ramp = 1.0 - (float(i) / float(fade_n))
+                self._tx_audio.append(
+                    (float(l) * ramp, float(r) * ramp))
+            return fade_n
 
     def _send_cc(self, c0: int, c1: int, c2: int, c3: int, c4: int):
-        """Send one C&C write via EP2 (one-shot, used by start/config
-        path before the writer thread is up).  Thread-safe."""
+        """Send one C&C write via EP2. Thread-safe."""
         if self._sock is None:
             return
         with self._send_lock:
@@ -660,20 +558,9 @@ class HL2Stream:
         self._sock.sendto(start_pkt, (self.radio_ip, DISCOVERY_PORT))
 
         self._thread = threading.Thread(
-            target=self._rx_loop, args=(on_samples,), daemon=True,
-            name="hl2-rx-loop",
+            target=self._rx_loop, args=(on_samples,), daemon=True
         )
         self._thread.start()
-
-        # Start the dedicated EP2 writer thread.  This thread owns the
-        # host->radio frame send cadence at the AK4951 audio rate,
-        # decoupled from the bursty UDP-arrival cadence the rx_loop
-        # sees.  See _ep2_writer_loop for the full design.
-        self._ep2_writer_thread = threading.Thread(
-            target=self._ep2_writer_loop, daemon=True,
-            name="hl2-ep2-writer",
-        )
-        self._ep2_writer_thread.start()
 
         # Give the radio a moment to begin streaming before we push config.
         time.sleep(0.05)
@@ -749,13 +636,6 @@ class HL2Stream:
 
     def stop(self):
         self._stop_event.set()
-        # Wake any producer held at the queue-full backpressure gate
-        # so they can exit promptly instead of timing out their wait.
-        try:
-            with self._ep2_audio_cond:
-                self._ep2_audio_cond.notify_all()
-        except Exception:  # noqa: BLE001
-            pass
         if self._sock is not None:
             try:
                 self._sock.sendto(
@@ -765,34 +645,13 @@ class HL2Stream:
                 pass
         if self._thread is not None:
             self._thread.join(timeout=2.0)
-        if self._ep2_writer_thread is not None:
-            # Writer thread is timer-driven so it self-exits within one
-            # cadence tick (~3 ms) of _stop_event being set.  Bounded
-            # join.
-            self._ep2_writer_thread.join(timeout=1.0)
-            self._ep2_writer_thread = None
         if self._sock is not None:
             self._sock.close()
             self._sock = None
 
     # -- internal -----------------------------------------------------------
     def _rx_loop(self, on_samples: Callable[[np.ndarray, FrameStats], None]):
-        """Pure RX loop: receive UDP datagrams, parse EP6 IQ frames,
-        decode telemetry, dispatch samples to the host.
-
-        EP2 (host->radio) frame send is owned by ``_ep2_writer_loop``
-        on its own thread now; rx_loop is RX-only.  This decouples
-        host->radio cadence from the bursty UDP-arrival cadence the
-        receive socket sees.
-        """
         assert self._sock is not None
-
-        # Best-effort priority elevation -- the RX loop is also a
-        # real-time path (UDP recv + IQ parse must keep up with HL2's
-        # ~5 kHz datagram rate at 192 kHz IQ to avoid kernel buffer
-        # backup -> seq_errors).
-        self._maybe_apply_mmcss_pro_audio("Pro Audio")
-
         while not self._stop_event.is_set():
             try:
                 data, _addr = self._sock.recvfrom(2048)
@@ -826,3 +685,38 @@ class HL2Stream:
             _decode_hl2_telemetry(cc1, self.stats)
 
             on_samples(samples, self.stats)
+
+            # EP2 cadence is decoupled from EP6 cadence and locked to
+            # 48 kHz audio rate. At 48 k IQ that's 1:1 with EP6; at
+            # 96/192/384 k we send EP2 every 2/4/8 EP6 frames so the
+            # AK4951 codec (hard-locked at 48 kHz fs) doesn't get
+            # over-fed and crackle. The TX thread is paced by audio
+            # rate independent of EP6 cadence. HL2 keepalive watchdog
+            # is plenty fast at 380 Hz so this doesn't trigger an
+            # underrun-halt.
+            n = max(1, self.sample_rate // 48000)
+            self._ep6_count = getattr(self, "_ep6_count", 0) + 1
+            if self._ep6_count % n != 0:
+                continue
+            # Round-robin C&C keepalive — pick the next register from
+            # the registered set so EVERY one (sample rate, RX1 freq,
+            # LNA, etc.) gets re-asserted cyclically. Standard HPSDR
+            # P1 host pattern: round-robin index wraps over all
+            # registers each frame. Single-register approach used to
+            # cause stuck-silence after big freq jumps because once
+            # _keepalive_cc held a freq command, sample-rate (C&C
+            # 0x00) stopped going out and HL2 EP6 IQ stream could
+            # stall.
+            try:
+                with self._cc_lock:
+                    if self._cc_registers:
+                        keys = sorted(self._cc_registers.keys())
+                        c0 = keys[self._cc_rr_idx % len(keys)]
+                        c1, c2, c3, c4 = self._cc_registers[c0]
+                        self._cc_rr_idx = (self._cc_rr_idx + 1) % len(keys)
+                    else:
+                        c0 = c1 = c2 = c3 = 0
+                        c4 = self._config_c4
+                self._send_cc(c0, c1, c2, c3, c4)
+            except OSError:
+                break
