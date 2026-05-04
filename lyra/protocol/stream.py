@@ -288,6 +288,32 @@ class HL2Stream:
         # with audible clicks.  v0.0.9.1+
         self.tx_audio_underruns: int = 0
         self.tx_audio_overruns: int = 0
+        # ── EP2 writer thread state (v0.0.9.2 Commit 4) ─────────────
+        # Dedicated EP2 writer thread runs the host->radio frame send
+        # at the codec's audio cadence (~380 Hz = 48 kHz / 126
+        # samples per frame), independent of UDP arrival cadence in
+        # ``_rx_loop``.  This decouples EP2 send timing from UDP
+        # burstiness, which is the root cause of AK4951 click/pop
+        # symptoms (gateware FIFO underrun at the AK4951 codec when
+        # EP2 frames arrive in irregular bursts).
+        #
+        # Sequence:
+        #   1. ``_rx_loop`` sets ``_first_ep6_event`` when it receives
+        #      its first valid EP6 datagram.  This avoids a startup
+        #      race where the writer fires EP2 traffic before the
+        #      gateware has finished its initialization handshake.
+        #   2. Writer thread blocks on ``_first_ep6_event`` (with a
+        #      5-second timeout for cases where the radio never
+        #      streams).
+        #   3. Writer enters its cadence loop, firing EP2 frames at
+        #      ~380 Hz with C&C round-robin and (when
+        #      ``inject_audio_tx`` is True) audio bytes drained from
+        #      ``_tx_audio``.
+        # On Windows, the writer thread elevates to MMCSS Pro Audio
+        # scheduling priority for jitter immunity (best-effort; no-op
+        # if API unavailable).
+        self._first_ep6_event = threading.Event()
+        self._ep2_writer_thread: Optional[threading.Thread] = None
         # Deque high-water mark (v0.0.9.2 audio rebuild Commit 1).
         # Tracks the maximum deque depth observed since the last UI
         # read.  After v0.0.9.2 Commit 3 lands real backpressure,
@@ -496,12 +522,236 @@ class HL2Stream:
             return fade_n
 
     def _send_cc(self, c0: int, c1: int, c2: int, c3: int, c4: int):
-        """Send one C&C write via EP2. Thread-safe."""
+        """Send one C&C write via EP2. Thread-safe.
+
+        Used for one-shot direct sends (e.g., initial config push,
+        immediate setter response).  The writer thread also acquires
+        ``_send_lock`` so the two never collide on the socket.
+        """
         if self._sock is None:
             return
         with self._send_lock:
             frame = self._build_ep2_frame(c0, c1, c2, c3, c4)
             self._sock.sendto(frame, (self.radio_ip, DISCOVERY_PORT))
+
+    @staticmethod
+    def _maybe_apply_mmcss_pro_audio(profile_name: str = "Pro Audio"):
+        """Best-effort thread priority elevation on Windows via MMCSS.
+
+        Audio writer threads benefit from priority elevation above
+        the default user-thread class so UI / GC / generic background
+        work can't starve the EP2 send cadence.  On Windows this is
+        done by registering the thread with the Multimedia Class
+        Scheduler Service via ``avrt.dll``.  No-op on other platforms
+        and silently absorbs any error -- worst-case the thread runs
+        at default priority, which is the pre-fix status quo.
+
+        Lyra-native ctypes wrapper; not derived from any external
+        codebase.  Mirrors a common Windows real-time-audio idiom.
+        """
+        try:
+            import sys
+            if not sys.platform.startswith("win"):
+                return
+            import ctypes
+            avrt = ctypes.WinDLL("avrt", use_last_error=True)
+            register = avrt.AvSetMmThreadCharacteristicsW
+            register.restype = ctypes.c_void_p
+            register.argtypes = [
+                ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_ulong)]
+            set_priority = avrt.AvSetMmThreadPriority
+            set_priority.restype = ctypes.c_int
+            set_priority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            task_index = ctypes.c_ulong(0)
+            handle = register(profile_name, ctypes.byref(task_index))
+            if handle:
+                # Priority constants: AVRT_PRIORITY_NORMAL=0,
+                # _HIGH=1, _CRITICAL=2.  We want CRITICAL.
+                set_priority(handle, 2)
+                _log.info(
+                    "MMCSS '%s' priority elevated for thread %s",
+                    profile_name, threading.current_thread().name)
+            else:
+                _log.warning(
+                    "MMCSS registration returned NULL; thread will "
+                    "run at default priority")
+        except Exception as e:  # noqa: BLE001
+            _log.warning("MMCSS priority elevation failed: %s", e)
+
+    def _ep2_writer_loop(self):
+        """Dedicated thread that drives EP2 frame send cadence at the
+        codec audio rate (~380 Hz = 48 kHz / 126 samples per frame).
+
+        Cadence rationale: the host->radio audio path on the HL2+ is
+        a networked codec -- audio samples arrive over UDP into the
+        gateware's audio FIFO, which the AK4951 codec drains at a
+        steady 48 kHz hardware clock.  Any UDP-arrival jitter on the
+        host side translates to FIFO underrun events at the codec
+        (audible as clicks, repeats, or motorboating depending on
+        gateware behavior).  Pre-Commit-4 Lyra fired EP2 inline with
+        EP6 receive in ``_rx_loop``, inheriting UDP burstiness.  This
+        thread fires EP2 on a steady wall-clock timer instead, so
+        UDP burstiness on the receive side no longer corrupts EP2
+        send timing.
+
+        Startup sequence:
+          1. Wait for ``_first_ep6_event``.  This avoids a startup
+             race where EP2 traffic arrives at the gateware before
+             it has finished its EP6 initialization handshake (which
+             can prevent the gateware from beginning to stream EP6).
+             Bounded 5 s timeout so a never-streaming radio doesn't
+             hang the thread forever.
+          2. Best-effort MMCSS Pro Audio priority elevation on
+             Windows (see ``_maybe_apply_mmcss_pro_audio``).
+          3. Enter the cadence loop: every ~2.625 ms, drain one
+             126-sample audio block from ``_tx_audio`` (zero-pad
+             with underrun count if short), pick the next C&C
+             round-robin entry, build a 1032-byte EP2 frame, send
+             via UDP.  When ``inject_audio_tx`` is False (PortAudio
+             sink active or pre-sink-init), the frame is C&C-only
+             with zero audio bytes.
+
+        Drift correction: ``next_fire`` accumulates the period and
+        we sleep just long enough each iteration to land on it.  If
+        the system suspends or the loop falls badly behind, we
+        resync by setting ``next_fire = now + period`` rather than
+        rapid-firing to catch up (which would burst-send EP2 and
+        defeat the cadence purpose).
+        """
+        # Wait for gateware to begin streaming EP6.  Bounded.
+        if not self._first_ep6_event.wait(timeout=5.0):
+            _log.warning(
+                "EP2 writer: no EP6 received within 5s; exiting "
+                "without firing EP2 traffic")
+            return
+
+        # Elevate scheduling priority on Windows.  Best-effort.
+        self._maybe_apply_mmcss_pro_audio("Pro Audio")
+
+        EP2_PERIOD = 126.0 / 48000.0  # 2.625 ms = 380.95 Hz
+        next_fire = time.monotonic() + EP2_PERIOD
+
+        while not self._stop_event.is_set():
+            # Sleep to next cadence tick (drift-corrected).
+            now = time.monotonic()
+            delay = next_fire - now
+            if delay > 0:
+                time.sleep(delay)
+            next_fire += EP2_PERIOD
+            # Resync if we fell badly behind (e.g., system suspend).
+            now = time.monotonic()
+            if next_fire < now:
+                next_fire = now + EP2_PERIOD
+
+            # Drain up to 126 samples from the audio queue.  The
+            # underrun counter increments when the queue is short
+            # AND audio injection is enabled (i.e., AK4951 sink is
+            # active).  When injection is disabled we send C&C-only
+            # frames; queue contents (if any from a stale sink) are
+            # left alone for the next sink to consume or clear.
+            audio_bytes: Optional[bytes] = None
+            if self.inject_audio_tx:
+                with self._tx_audio_lock:
+                    avail = min(len(self._tx_audio), 126)
+                    pulled = [self._tx_audio.popleft()
+                              for _ in range(avail)]
+                if avail < 126:
+                    self.tx_audio_underruns += 1
+                    pulled.extend([(0.0, 0.0)] * (126 - avail))
+                try:
+                    audio_bytes = self._pack_audio_bytes_pairs(pulled)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("EP2 audio packing error: %s", exc)
+                    audio_bytes = None
+
+            # Pick next C&C round-robin entry.
+            try:
+                with self._cc_lock:
+                    if self._cc_registers:
+                        keys = sorted(self._cc_registers.keys())
+                        c0 = keys[self._cc_rr_idx % len(keys)]
+                        c1, c2, c3, c4 = self._cc_registers[c0]
+                        self._cc_rr_idx = (
+                            self._cc_rr_idx + 1) % len(keys)
+                    else:
+                        c0 = c1 = c2 = c3 = 0
+                        c4 = self._config_c4
+                frame = self._build_ep2_frame_with_audio(
+                    c0, c1, c2, c3, c4, audio_bytes)
+                with self._send_lock:
+                    if self._sock is not None:
+                        self._sock.sendto(
+                            frame, (self.radio_ip, DISCOVERY_PORT))
+            except OSError:
+                # Socket likely closed during stop().  Exit cleanly.
+                break
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("EP2 writer iteration error: %s", exc)
+
+    def _build_ep2_frame_with_audio(
+        self, c0: int, c1: int, c2: int, c3: int, c4: int,
+        audio_bytes: Optional[bytes],
+    ) -> bytes:
+        """Build an EP2 frame with optional pre-packed audio bytes.
+
+        Wraps ``_build_ep2_frame`` (which calls ``_pack_audio_bytes``
+        internally if ``inject_audio_tx`` is True).  This variant
+        accepts already-packed audio bytes (1008 bytes = 126 samples
+        x 8 bytes) and bypasses the inline packer -- needed by the
+        EP2 writer thread which packs from a pre-pulled list of
+        sample pairs rather than re-pulling from the deque inside
+        the frame builder.
+
+        When ``audio_bytes`` is None, the frame's audio slots stay
+        zero (C&C-only frame).
+        """
+        frame = bytearray(1032)
+        frame[0] = 0xEF
+        frame[1] = 0xFE
+        frame[2] = 0x01
+        frame[3] = 0x02  # EP2
+        struct.pack_into(">I", frame, 4, self._tx_seq)
+        self._tx_seq = (self._tx_seq + 1) & 0xFFFFFFFF
+
+        for block_idx, block_off in enumerate((8, 520)):
+            frame[block_off + 0] = 0x7F
+            frame[block_off + 1] = 0x7F
+            frame[block_off + 2] = 0x7F
+            frame[block_off + 3] = c0 & 0xFE  # bit 0 = MOX (RX = 0)
+            frame[block_off + 4] = c1 & 0xFF
+            frame[block_off + 5] = c2 & 0xFF
+            frame[block_off + 6] = c3 & 0xFF
+            frame[block_off + 7] = c4 & 0xFF
+            if audio_bytes is not None:
+                slot_start = block_off + 8
+                src = audio_bytes[
+                    block_idx * 504:(block_idx + 1) * 504]
+                frame[slot_start:slot_start + 504] = src
+            # else: payload bytes stay zero (no audio injected)
+        return bytes(frame)
+
+    def _pack_audio_bytes_pairs(self, pairs) -> bytes:
+        """Pack a list of 126 (L, R) float tuples into 1008 bytes
+        of LRIQ-formatted audio bytes for the EP2 audio slots.
+
+        Layout per HPSDR P1: 8 bytes per sample = L_msb L_lsb R_msb
+        R_lsb I_msb I_lsb Q_msb Q_lsb (TX I/Q stays zero on RX).
+        L/R values are quantized from float32 [-1, 1] to big-endian
+        int16 with the configured ``tx_audio_gain`` applied.
+        """
+        import numpy as np
+        lr = np.asarray(pairs, dtype=np.float32)         # (126, 2)
+        lr = lr * self.tx_audio_gain
+        np.clip(lr, -1.0, 1.0, out=lr)
+        int16 = (lr * 32767.0).astype(">i2")             # BE int16
+        left_bytes = int16[:, 0].tobytes()
+        right_bytes = int16[:, 1].tobytes()
+        out = bytearray(126 * 8)
+        for i in range(126):
+            out[i * 8 + 0:i * 8 + 2] = left_bytes[i * 2:i * 2 + 2]
+            out[i * 8 + 2:i * 8 + 4] = right_bytes[i * 2:i * 2 + 2]
+            # bytes 4..7 stay zero (TX I/Q slots; not transmitting)
+        return bytes(out)
 
     def _send_config(self):
         rate_code = SAMPLE_RATES[self.sample_rate]
@@ -557,10 +807,31 @@ class HL2Stream:
         start_pkt = _build_start_stop_packet(START_IQ)
         self._sock.sendto(start_pkt, (self.radio_ip, DISCOVERY_PORT))
 
+        # Reset the first-EP6 gate before starting threads so a
+        # restart on the same HL2Stream instance gets a clean
+        # startup race (writer thread waits for the new first
+        # EP6, not the previous run's flag).
+        self._first_ep6_event.clear()
+
         self._thread = threading.Thread(
-            target=self._rx_loop, args=(on_samples,), daemon=True
+            target=self._rx_loop, args=(on_samples,), daemon=True,
+            name="hl2-rx-loop",
         )
         self._thread.start()
+
+        # Launch the dedicated EP2 writer thread (v0.0.9.2 Commit 4).
+        # This thread owns the host->radio EP2 frame send cadence,
+        # decoupling it from UDP arrival timing in _rx_loop.  The
+        # writer waits on _first_ep6_event before firing any EP2
+        # frames, so the gateware initialization handshake (which
+        # involves _send_config below pushing the initial sample-
+        # rate command and the radio sending back its first EP6
+        # datagram) completes uninterrupted.
+        self._ep2_writer_thread = threading.Thread(
+            target=self._ep2_writer_loop, daemon=True,
+            name="hl2-ep2-writer",
+        )
+        self._ep2_writer_thread.start()
 
         # Give the radio a moment to begin streaming before we push config.
         time.sleep(0.05)
@@ -636,6 +907,11 @@ class HL2Stream:
 
     def stop(self):
         self._stop_event.set()
+        # Wake the EP2 writer thread if it's blocked waiting for
+        # first EP6 (e.g., radio never streamed).  Setting the
+        # event here lets it observe _stop_event and exit cleanly
+        # rather than waiting out its 5 s timeout.
+        self._first_ep6_event.set()
         if self._sock is not None:
             try:
                 self._sock.sendto(
@@ -645,12 +921,29 @@ class HL2Stream:
                 pass
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+        if self._ep2_writer_thread is not None:
+            # Writer thread is timer-driven so it self-exits within
+            # one cadence tick (~3 ms) of _stop_event being set.
+            # Bounded join in case it's mid-sleep.
+            self._ep2_writer_thread.join(timeout=1.0)
+            self._ep2_writer_thread = None
         if self._sock is not None:
             self._sock.close()
             self._sock = None
 
     # -- internal -----------------------------------------------------------
     def _rx_loop(self, on_samples: Callable[[np.ndarray, FrameStats], None]):
+        """Pure RX loop (v0.0.9.2 Commit 4).
+
+        Reads EP6 datagrams, parses, decodes telemetry, dispatches
+        samples.  Does NOT send EP2 frames -- that work moved to
+        ``_ep2_writer_loop`` on its own thread to decouple EP2 send
+        cadence from bursty UDP arrival timing.
+
+        Sets ``_first_ep6_event`` on the first valid EP6 datagram
+        so the writer thread knows the gateware has finished its
+        initialization and is streaming.
+        """
         assert self._sock is not None
         while not self._stop_event.is_set():
             try:
@@ -664,6 +957,12 @@ class HL2Stream:
             if parsed is None:
                 continue
             seq, samples, cc0, cc1 = parsed
+
+            # First valid EP6 received -- release the writer thread
+            # to enter its cadence loop.  Idempotent (Event.set on
+            # an already-set event is a no-op).
+            if not self._first_ep6_event.is_set():
+                self._first_ep6_event.set()
 
             if self.stats.seq_expected == -1:
                 self.stats.seq_expected = (seq + 1) & 0xFFFFFFFF
@@ -685,38 +984,3 @@ class HL2Stream:
             _decode_hl2_telemetry(cc1, self.stats)
 
             on_samples(samples, self.stats)
-
-            # EP2 cadence is decoupled from EP6 cadence and locked to
-            # 48 kHz audio rate. At 48 k IQ that's 1:1 with EP6; at
-            # 96/192/384 k we send EP2 every 2/4/8 EP6 frames so the
-            # AK4951 codec (hard-locked at 48 kHz fs) doesn't get
-            # over-fed and crackle. The TX thread is paced by audio
-            # rate independent of EP6 cadence. HL2 keepalive watchdog
-            # is plenty fast at 380 Hz so this doesn't trigger an
-            # underrun-halt.
-            n = max(1, self.sample_rate // 48000)
-            self._ep6_count = getattr(self, "_ep6_count", 0) + 1
-            if self._ep6_count % n != 0:
-                continue
-            # Round-robin C&C keepalive — pick the next register from
-            # the registered set so EVERY one (sample rate, RX1 freq,
-            # LNA, etc.) gets re-asserted cyclically. Standard HPSDR
-            # P1 host pattern: round-robin index wraps over all
-            # registers each frame. Single-register approach used to
-            # cause stuck-silence after big freq jumps because once
-            # _keepalive_cc held a freq command, sample-rate (C&C
-            # 0x00) stopped going out and HL2 EP6 IQ stream could
-            # stall.
-            try:
-                with self._cc_lock:
-                    if self._cc_registers:
-                        keys = sorted(self._cc_registers.keys())
-                        c0 = keys[self._cc_rr_idx % len(keys)]
-                        c1, c2, c3, c4 = self._cc_registers[c0]
-                        self._cc_rr_idx = (self._cc_rr_idx + 1) % len(keys)
-                    else:
-                        c0 = c1 = c2 = c3 = 0
-                        c4 = self._config_c4
-                self._send_cc(c0, c1, c2, c3, c4)
-            except OSError:
-                break
