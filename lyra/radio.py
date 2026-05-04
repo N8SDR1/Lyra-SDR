@@ -5943,40 +5943,7 @@ class Radio(QObject):
         h = int(self._agc_hang_counter)
         one_minus_alpha = float(self._agc_one_minus_alpha_per_sample)
         hang_init = int(self._agc_hang_samples)
-        # Dynamic peak floor (v0.0.9.2): clamp the peak tracker's lower
-        # bound to a multiple of the rolling noise baseline.
-        #
-        # Why a static 1e-4 floor produced a continuous "scratchy /
-        # dirty record player" texture in the noise floor: with
-        # half-rectified post-demod audio and Gaussian noise
-        # statistics, every noise sample whose instantaneous magnitude
-        # exceeded the slowly-decaying peak triggered an "instant
-        # attack" gain reset.  Equilibrium peak sat at ~3.1σ of the
-        # noise distribution on the Med preset, producing roughly
-        # 100 attacks/sec on noise-only audio.  Each reset dropped
-        # gain ~8% (~0.7 dB) followed by a ~116 ms exponential
-        # recovery; the summed overlapping recoveries imprinted a
-        # Lorentzian-spectrum AM modulation on the noise floor that
-        # operators heard as continuous textural artifact distinct
-        # from the discrete underrun-driven clicks.  Co-investigated
-        # by N9BC + an external senior-engineering review using
-        # Wiener-spectrum analysis on the per-sample tracker
-        # (2026-05-04).
-        #
-        # Clamping the floor to K * noise_baseline holds peak above
-        # the noise envelope's typical max during noise-only
-        # listening, so noise samples no longer cross peak and
-        # trigger spurious attacks.  Real signals (>>1.5x noise)
-        # still cross peak normally and AGC reacts at full speed --
-        # CW dit edges and SSB consonant onsets are unaffected.
-        # Falsifiable: switching AGC profile from Med to Slow used
-        # to produce noticeably less scratchy noise (longer hang ->
-        # peak rises further -> fewer attack-eligible samples);
-        # post-fix Slow and Med should sound nearly identical on
-        # noise-only audio.
-        K_NOISE_FLOOR = 1.5
-        PEAK_FLOOR = max(1e-4,
-                         K_NOISE_FLOOR * float(self._noise_baseline))
+        PEAK_FLOOR = 1e-4
         for i in range(n):
             m = mag[i]
             if m > p:
