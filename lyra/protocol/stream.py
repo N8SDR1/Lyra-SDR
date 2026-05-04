@@ -301,11 +301,14 @@ class HL2Stream:
         self._tx_audio_lock = threading.Lock()
         self._tx_audio_cond = threading.Condition(self._tx_audio_lock)
         # Backpressure target depth.  Producer waits when len(_tx_audio)
-        # >= this value.  Operator-tunable in the future (Settings →
-        # Advanced → Audio buffer depth) if some rig benefits from a
-        # larger value; default sized for the common case at 48 kHz
-        # consumer cadence.
-        self.tx_audio_high_water_target: int = 504
+        # >= this value.  Sized at 2 producer batches (8 consumer
+        # frames at 126 samples each) so producer has 4 consumer
+        # cycles of jitter tolerance before the deque drains to zero.
+        # v0.0.9.2 Commit 3 fixup: was 504 (1 producer batch under
+        # Commit 2's 126-sample cadence-match design); raised to 1008
+        # to match Commit 3's 504-sample producer batches.  Steady-
+        # state deque depth oscillates 504-1008 = 10-21 ms latency.
+        self.tx_audio_high_water_target: int = 1008
         # Set to True when the stream is shutting down so any waiter
         # wakes and exits cleanly instead of blocking forever.
         self._tx_audio_shutdown: bool = False
