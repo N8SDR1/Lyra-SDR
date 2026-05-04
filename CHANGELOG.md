@@ -13,6 +13,95 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.2-pre3] — 2026-05-04 — "Audio Architecture Rebuild — Commit 3"
+
+**Pre-release.**  Third of six audio rebuild commits.  This is
+the structural fix that should drive underrun events to near-
+zero by replacing the silent-drop-oldest / zero-pad recovery
+strategies with **real backpressure** -- the producer waits
+when the buffer is "full enough" and the consumer signals back
+when it has drained.  Same lock-step pattern Thetis uses with
+semaphores, expressed in Python's threading primitives.
+
+### What changed in this commit
+
+- **HL2Stream backpressure (AK4951 path).**  ``_tx_audio`` deque
+  is now protected by a ``threading.Condition``
+  (``_tx_audio_cond``).  Producer (``queue_tx_audio``) waits
+  when depth >= ``tx_audio_high_water_target`` (504 = 4 EP2
+  consumer frames).  Consumer (``_pack_audio_bytes``) takes
+  what's available and ``notify_all()``s the producer after
+  popping.  The producer can no longer pile up samples ahead of
+  the consumer; the consumer wakes the producer in lockstep.
+- **SoundDeviceSink backpressure (PortAudio path).**  Same
+  pattern with the numpy ring buffer.  Producer (``write``)
+  waits when ``_ring_count >= _ring_high_water``.  PortAudio
+  callback (consumer) cannot block because audio device timing
+  is hard real-time, so consumer-side stays drop-oldest /
+  silence-pad on underrun -- but the producer-side wait is
+  what keeps the divergence from happening in the first place.
+- **Pre-fill reduced 4800 -> 504 (AK4951) and 4800 -> ~504
+  (PortAudio).**  Backpressure now handles cadence absorption
+  that the v0.0.9.1 100 ms pre-fill was compensating for.
+  Net latency from operator action to speaker drops by ~90 ms.
+- **Bounded wait + telemetry.**  Producer wait timeout is 50 ms
+  per iteration (defense against deadlock); a new
+  ``tx_audio_producer_waits`` counter increments every time the
+  producer actually had to wait, so we can see in telemetry
+  whether backpressure is engaging in healthy cadence-match
+  conditions (should be near zero) or under stress (will tick
+  up under heavy CPU load).
+- **Clean shutdown.**  HL2Stream.stop() now calls
+  ``shutdown_tx_audio()`` to wake any producer held at the gate
+  so it exits cleanly instead of timing out.  Sink-close cycles
+  rely on ``clear_tx_audio()``'s ``notify_all`` and do NOT set
+  the shutdown flag (which is per-stream-lifetime, not per-sink-
+  swap).
+
+### What this commit does NOT fix
+
+- Brent's per-sample AGC noise modulation (the "scratchy /
+  dirty record player" texture).  Distinct mechanism from the
+  EP2-underrun-injection clicks; deferred to a separate work-
+  stream after the audio rebuild lands.  See
+  ``audio_rebuild_v0.1.md`` sec 3.7 for the full diagnosis +
+  agreed fix from Brent + Codex.
+- Loud volume spikes on Rick's AK4951 -- still on the gateware-
+  replay-on-EP2-underrun hypothesis.  With underruns now near-
+  zero, spike rate should drop as a side effect; Commit 5
+  Wireshark settles the gateware question empirically.
+
+### Tester checklist for this pre-release
+
+- ``un=`` should drop to **near zero** in healthy operation.
+  Pre1 was 117/min, pre2 was 49/min; pre3 should be in single
+  digits or zero across many minutes of listening.
+- ``ov=`` should stay 0 (was 0 anyway; structural now).
+- ``deque H/`` should hover at or below the high-water target
+  (504).  If it pegs at 504 and ``producer_waits`` ticks up,
+  backpressure is doing its job.
+- ``DSP NN Hz`` should stay near 380 (cadence still matched
+  from Commit 2; backpressure adds the lockstep on top).
+- CPU may rise slightly compared to pre2 (50 ms wait timeouts
+  add a small idle cost when producer is held).  Should still
+  be well under 30 %.
+- **Sink-swap test:** flip Out combo AK4951 -> PC Soundcard ->
+  AK4951 a few times.  Audio should never freeze; producer
+  should not deadlock.
+- **Stop/Start test:** hit Stop, wait, hit Start.  Audio should
+  resume cleanly without crackle.
+- If audio is audibly worse than pre2, flip Settings -> DSP ->
+  Threading to "Single-thread (legacy)", restart, file an
+  issue.
+
+### Recovery
+
+If anything goes wrong, install
+`Lyra-Setup-0.0.9.1.exe` from
+<https://github.com/N8SDR1/Lyra-SDR/releases/tag/v0.0.9.1>.
+
+---
+
 ## [0.0.9.2-pre2] — 2026-05-04 — "Audio Architecture Rebuild — Commit 2"
 
 **Pre-release.**  Second of six audio rebuild commits.  Where

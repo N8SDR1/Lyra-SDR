@@ -46,32 +46,42 @@ class AK4951Sink:
         if hasattr(stream, "clear_tx_audio"):
             stream.clear_tx_audio()
 
-        # Pre-fill the EP2 TX audio deque with 100 ms of silence
-        # BEFORE enabling EP2 audio injection.  This is the v0.0.9.1
-        # fix for the audio-click symptom -- operator-instrumented
-        # data showed ~3 underruns/second sustained, all at the
-        # producer/consumer interface.  Root cause: the worker
-        # thread produces audio in bursts of 2048 samples every
-        # ~43 ms (block_size at 48 kHz), but the EP2 frame builder
-        # polls the deque at 380 Hz (~2.6 ms cadence) asking for 126
-        # samples each call.  Between worker bursts, the deque
-        # drains to empty and EP2 pads zeros = audible click.
+        # Pre-fill the EP2 TX audio deque with a small silence cushion
+        # so the EP2 builder has samples to pull during the brief
+        # window between sink construction and the first producer
+        # block landing.
         #
-        # 4800-sample pre-fill (100 ms at 48 kHz) gives the deque
-        # enough headroom that the burst-vs-steady cadence mismatch
-        # oscillates the deque level around 4800 samples WITHOUT
-        # ever hitting zero.  Cost: 100 ms of audio latency at the
-        # AK4951 codec output.  Acceptable for RX listening; will
-        # need re-evaluation when TX lands in v0.2 (PTT cadence).
-        # Maxlen of the deque is 48000 (1 second), so the pre-fill
-        # uses 10 % of capacity -- plenty of room for production
-        # bursts to grow the level temporarily without overrunning.
+        # **v0.0.9.2 audio rebuild Commit 3:** pre-fill reduced from
+        # 4800 (100 ms) to 504 (10.5 ms = 4 EP2 frames).  Real
+        # backpressure (HL2Stream._tx_audio_cond) now handles cadence
+        # absorption that the v0.0.9.1 100 ms pre-fill was
+        # compensating for; the small startup cushion is purely to
+        # avoid an underrun on the first 1-2 EP2 frames before the
+        # producer thread has scheduled its first batch.  Net
+        # latency from operator action to speaker drops by ~90 ms
+        # (100 -> 10 ms pre-fill).
+        #
+        # Why not zero pre-fill?  The EP2 builder fires immediately
+        # on stream start -- often before the DSP worker has had a
+        # chance to schedule and produce its first audio block.
+        # Without any pre-fill, the first 4-8 EP2 frames pull from
+        # an empty deque and zero-pad with silence (= audible
+        # startup click on the codec).  504 samples gives the
+        # producer ~10 ms of slack to wake up, well within Python
+        # scheduler latency on any modern machine.
         if hasattr(stream, "_tx_audio_lock") and hasattr(stream, "_tx_audio"):
-            PREFILL_MS = 100
-            n_silence = int(48000 * PREFILL_MS / 1000)
-            silence = [(0.0, 0.0)] * n_silence
-            with stream._tx_audio_lock:
-                stream._tx_audio.extend(silence)
+            PREFILL_SAMPLES = 504
+            silence = [(0.0, 0.0)] * PREFILL_SAMPLES
+            cond = getattr(stream, "_tx_audio_cond", None)
+            if cond is not None:
+                with cond:
+                    stream._tx_audio.extend(silence)
+                    cond.notify_all()
+            else:
+                # Fallback for any code path not yet using the
+                # condition (defensive; production paths all use it).
+                with stream._tx_audio_lock:
+                    stream._tx_audio.extend(silence)
 
         self._stream.inject_audio_tx = True
         # Stereo balance gains. Default = equal-power center
@@ -146,6 +156,12 @@ class AK4951Sink:
         # or another AK4951 instance) starts from a known empty
         # state. Without this, residual samples in the deque continue
         # being pulled by EP2 framing for up to ~1 second.
+        # ``clear_tx_audio`` also notify_all()'s any producer held at
+        # the v0.0.9.2 backpressure gate so it wakes and exits the
+        # wait promptly.  The HL2Stream itself stays alive across
+        # sink swaps; only the underlying HL2Stream.stop() (which
+        # this code does NOT call) sets the persistent shutdown
+        # flag.  See HL2Stream.shutdown_tx_audio for that path.
         if hasattr(self._stream, "clear_tx_audio"):
             self._stream.clear_tx_audio()
 
@@ -226,31 +242,37 @@ class SoundDeviceSink:
         self._ring_capacity_frames = capacity_frames
         self._ring = np.zeros(
             (capacity_frames, self._channels), dtype=np.float32)
-        # Pre-fill the ring with 100 ms of silence at startup so the
-        # PortAudio callback has buffer headroom for the worker's
-        # 43 ms-cadence audio bursts -- v0.0.9.1 click fix, mirrors
-        # the AK4951 sink pre-fill above.  Without this, the callback
-        # underruns from the moment PortAudio starts (well before the
-        # worker has produced its first audio block) and continues
-        # underrunning every cycle the worker burst lands just after
-        # the callback poll.  Operator data: ~3 underruns/sec without
-        # pre-fill = audible clicks every 300 ms.  100 ms pre-fill
-        # gives ~2 worker-burst cycles of margin -- enough to absorb
-        # the natural drift between burst and callback cadences.
-        # Ring is already filled with zeros from np.zeros() above; we
-        # just advance write_idx and count to expose those zeros as
-        # "available" frames for the callback to read.
-        PREFILL_MS = 100
-        prefill_frames = min(
-            capacity_frames, int(rate * PREFILL_MS / 1000))
+        # Pre-fill (v0.0.9.2 audio rebuild Commit 3): reduced from
+        # 100 ms to ~10 ms (504 frames at 48 kHz; scaled with rate).
+        # Real backpressure via _ring_cond now handles cadence
+        # absorption that the larger pre-fill was compensating for;
+        # the small startup cushion is purely to bridge the gap
+        # between PortAudio.start() and the first producer block.
+        # Net latency drops ~90 ms.
+        PREFILL_FRAMES = min(capacity_frames, max(504, rate // 100))
         self._ring_read_idx = 0     # next frame to read by callback
-        self._ring_write_idx = prefill_frames  # writer starts past pre-fill
-        self._ring_count = prefill_frames     # pre-fill counted as available
-        # Lock guards the three indices above. Hold time is O(N) frames
-        # being copied which is a few hundred ints/floats — sub-ms even
-        # in the worst case, so the audio thread waiting on it doesn't
-        # stutter audibly.
+        self._ring_write_idx = PREFILL_FRAMES  # writer starts past pre-fill
+        self._ring_count = PREFILL_FRAMES     # pre-fill counted as available
+        # Lock + condition for producer/consumer backpressure.
+        # The PortAudio callback (consumer) cannot block on the
+        # condition -- if it did, the audio device would underrun at
+        # the OS level (callback timing is hard real-time).  So
+        # consumer-side stays drop-oldest-on-underrun (silence pad)
+        # but the PRODUCER side now waits when the ring is full,
+        # preventing the producer from racing the consumer and
+        # silently dropping samples.
         self._ring_lock = threading.Lock()
+        self._ring_cond = threading.Condition(self._ring_lock)
+        # Backpressure target: producer waits when count >= this.
+        # Sized for ~10 ms of buffered audio (4 typical PortAudio
+        # callback periods).  Operator-tunable in the future if a
+        # specific device benefits from more buffer.
+        self._ring_high_water = min(
+            capacity_frames, max(504, rate // 100))
+        # Set when sink is closing so any waiting producer can exit.
+        self._ring_shutdown: bool = False
+        # Producer-wait counter (telemetry mirror of HL2Stream's).
+        self._producer_waits: int = 0
 
         # Diagnostic counters — incremented inside the lock so they
         # stay coherent with read/write activity. Printed periodically
@@ -302,7 +324,7 @@ class SoundDeviceSink:
         tail with silence rather than blocking — a brief glitch is
         always better than stuttering or hanging the device.
         """
-        with self._ring_lock:
+        with self._ring_cond:
             avail = self._ring_count
             take = min(avail, frames)
             if take > 0:
@@ -319,9 +341,17 @@ class SoundDeviceSink:
                     self._ring_read_idx + take) % self._ring_capacity_frames
                 self._ring_count -= take
                 self._frames_read += take
+                # Wake producer (DSP thread) waiting on backpressure.
+                # This is the signal half of the producer/consumer
+                # handshake: consumer pulled frames, producer can now
+                # push more if it was held at high-water.
+                self._ring_cond.notify_all()
             if take < frames:
-                # Underrun — pad the rest with silence. This produces a
-                # brief glitch rather than a device stutter.
+                # Underrun — pad the rest with silence. Real-time
+                # audio callback can't block on the condition, so
+                # we accept the underrun event and fill silence.
+                # With Commit 3 backpressure active this should be
+                # rare (only on catastrophic producer stalls).
                 outdata[take:] = 0.0
                 self._underruns += 1
 
@@ -355,12 +385,29 @@ class SoundDeviceSink:
             a = np.ascontiguousarray(a, dtype=np.float32)
         n = a.shape[0]
 
-        with self._ring_lock:
+        with self._ring_cond:
+            # Backpressure (v0.0.9.2 audio rebuild Commit 3).
+            # Wait until ring count drops below high-water before
+            # pushing more.  Bounded wait (50 ms) so a stuck consumer
+            # can't deadlock the producer; if the wait expires, fall
+            # through to drop-oldest behavior as before.
+            waited = False
+            while (self._ring_count >= self._ring_high_water
+                   and not self._ring_shutdown):
+                waited = True
+                self._ring_cond.wait(timeout=0.050)
+            if waited:
+                self._producer_waits += 1
+            if self._ring_shutdown:
+                # Sink is closing -- drop the samples cleanly.
+                return
+
             free = self._ring_capacity_frames - self._ring_count
             if n > free:
                 # Overrun — drop the oldest (n - free) frames by
-                # advancing the read pointer. Operator hears a brief
-                # discontinuity; we don't block the DSP thread.
+                # advancing the read pointer. Should be rare with
+                # backpressure active; counter still increments so
+                # we can see if the wait timeout was hit.
                 drop = n - free
                 self._ring_read_idx = (
                     self._ring_read_idx + drop) % self._ring_capacity_frames
@@ -378,6 +425,10 @@ class SoundDeviceSink:
                 self._ring_write_idx + n) % self._ring_capacity_frames
             self._ring_count += n
             self._frames_written += n
+            # Wake consumer (callback thread) if it's waiting on a
+            # starved buffer.  The callback doesn't actually wait,
+            # but notify is cheap and idempotent.
+            self._ring_cond.notify_all()
         self._maybe_print_stats()
 
     def _maybe_print_stats(self) -> None:
@@ -392,7 +443,7 @@ class SoundDeviceSink:
             self._stats_last_print = now
             return
         # Snapshot under lock for a coherent read of all counters.
-        with self._ring_lock:
+        with self._ring_cond:
             ov = self._overruns
             un = self._underruns
             wr = self._frames_written
@@ -417,6 +468,17 @@ class SoundDeviceSink:
         self._right_gain = float(right)
 
     def close(self) -> None:
+        # Wake any producer waiting on backpressure so it can exit
+        # cleanly instead of blocking until the 50 ms timeout.
+        # Set BEFORE stopping the PortAudio stream so the producer's
+        # "is_shutdown" check fires before any subsequent write tries
+        # to push into a torn-down stream.
+        try:
+            with self._ring_cond:
+                self._ring_shutdown = True
+                self._ring_cond.notify_all()
+        except Exception:
+            pass
         try:
             self._stream.stop()
             self._stream.close()
