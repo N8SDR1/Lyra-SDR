@@ -162,11 +162,17 @@ class DspWorker(QObject):
     transitions. Settings → DSP can show the worker's current state."""
 
     # ── Configuration ───────────────────────────────────────────
-    INPUT_QUEUE_DEPTH = 10
-    """Bounded input-queue depth in batches. At the typical 2048-
-    sample IQ batch, 10 deep ≈ 1 second of buffered IQ at 48 kHz —
-    plenty for transient main-thread stalls (UI repaints, GC pauses)
-    without unbounded memory growth.  Drop-oldest beyond this."""
+    INPUT_QUEUE_DEPTH = 40
+    """Bounded input-queue depth in batches.  Sized for ~100 ms of
+    buffered IQ at the v0.0.9.2 cadence-matched batch rate (380 Hz)
+    -- enough to absorb a transient stall (Python GC pause, OS
+    scheduling hiccup) without dropping batches.  Drop-oldest beyond
+    this.  Pre-v0.0.9.2 this was 10, sized for the old 23 Hz batch
+    cadence (~1 s); at the new 380 Hz cadence 10 was only 26 ms,
+    too tight for real-world jitter.  Real backpressure (Commit 3)
+    will replace drop-oldest with producer-blocks-on-full and the
+    depth becomes less critical, but the larger value is the right
+    default during the rebuild phase."""
 
     RUN_LOOP_TIMEOUT_S = 0.1
     """Block briefly on the input queue so the loop can exit

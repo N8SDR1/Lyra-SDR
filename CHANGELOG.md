@@ -13,6 +13,84 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.2-pre2] — 2026-05-04 — "Audio Architecture Rebuild — Commit 2"
+
+**Pre-release.**  Second of six audio rebuild commits.  Where
+Commit 1 isolated the DSP worker from the Qt main thread, this
+commit aligns the producer/consumer cadence at the deque
+interface so the underrun mechanism that produces clicks
+becomes structurally improbable rather than common.
+
+### What changed in this commit
+
+- **Cadence-matched IQ batching.**  ``Radio._rx_batch_size`` is
+  now rate-aware (`_compute_rx_batch_size`): sized so each batch
+  produces exactly **126 audio samples** after decimation, at any
+  IQ rate.  Cadence at the deque interface goes from "bursty 23
+  Hz at 48k IQ" or "bursty 94 Hz at 192k IQ" to a steady
+  **381 Hz at every supported rate** -- exactly matching the EP2
+  consumer's 380 Hz pull rate, one push to one pull.
+  ```
+  IQ rate   decim   rx_batch   audio/batch   batch Hz
+   48 kHz    1        126         126         381
+   96 kHz    2        252         126         381
+  192 kHz    4        504         126         381
+  384 kHz    8       1008         126         381
+  ```
+- **Channel block_size 512 → 126.**  ``Radio._audio_block`` and
+  ``PythonRxChannel.__init__`` default both move to 126.  Aligns
+  the channel's internal DSP-loop block size with the EP2
+  consumer's pull size, so producer per-block work matches
+  consumer per-frame work.  Verified 2026-05-04 against every
+  shipped DSP module (NR1, NR2, ANF, LMS, Squelch, all six
+  demods) -- length-preserving contracts honored at the new
+  block size.
+- **DspWorker queue depth 10 → 40.**  At the new 381 Hz batch
+  cadence the previous 10-deep queue was only ~26 ms of headroom
+  for transient stalls (GC pauses, OS scheduling hiccups).  40
+  gives ~100 ms.  Will become less critical once Commit 3's
+  real backpressure replaces drop-oldest with producer-blocks-
+  on-full.
+- **Rate-change refresh.**  ``Radio.set_rate()`` now recomputes
+  ``_rx_batch_size`` and drops any partial batch atomically so
+  cadence stays matched across operator-driven rate changes.
+
+### What this commit does NOT yet fix
+
+- Producer-side backpressure -- a producer running ahead of the
+  consumer can still pile up samples in the deque (drop-oldest
+  on overflow).  Commit 3 (`threading.Condition` backpressure)
+  is the structural fix.
+- Loud volume spikes on Rick's AK4951 -- still on the gateware-
+  replay-on-EP2-underrun hypothesis, falsifiable in Commit 5
+  Wireshark.  Commit 2 should make EP2 underruns rare enough
+  that the spike rate drops as a side effect.
+
+### Tester checklist for this pre-release
+
+- Watch the audio telemetry indicator: ``un=`` should drop
+  significantly compared to v0.0.9.2-pre1.  ``deque H/`` high-
+  water should hover near the consumer block size (126) rather
+  than near 0 or near the 4800 pre-fill.
+- ``DSP NN Hz`` should now read **~380 Hz** at all IQ rates
+  (was rate-dependent before -- 23 at 48k, 94 at 192k).  This
+  is the visible signature that cadence is matched.
+- CPU may rise modestly (more invocations per second; same
+  total work).  Acceptable: from 2.9 % observed in pre1 to
+  perhaps 6-8 % in pre2.  If CPU goes >30 % please file an
+  issue.
+- If audio is audibly worse than v0.0.9.2-pre1 in any way,
+  flip Settings → DSP → Threading to "Single-thread (legacy)",
+  restart, file an issue.
+
+### Recovery
+
+If anything goes wrong, install
+`Lyra-Setup-0.0.9.1.exe` from
+<https://github.com/N8SDR1/Lyra-SDR/releases/tag/v0.0.9.1>.
+
+---
+
 ## [0.0.9.2-pre1] — 2026-05-04 — "Audio Architecture Rebuild — Commit 1"
 
 **Pre-release.**  First of six pre-releases that incrementally

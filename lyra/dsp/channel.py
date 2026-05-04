@@ -173,7 +173,7 @@ class PythonRxChannel(DspChannel):
     one it has.
     """
 
-    def __init__(self, in_rate: int, block_size: int = 1024):
+    def __init__(self, in_rate: int, block_size: int = 126):
         super().__init__(in_rate)
         self._block_size: int = int(block_size)
         self._mode: str = "USB"

@@ -656,30 +656,32 @@ class Radio(QObject):
         # ── Runtime ───────────────────────────────────────────────────
         self._stream: Optional[HL2Stream] = None
         self._audio_sink = NullSink()
-        # Audio block size — channel.process produces audio in chunks
-        # of this many samples per inner-loop iteration.  v0.0.9.1
-        # reduced this from 2048 to 512 to fix audio-sink underrun
-        # symptoms.  Operator data: with block_size=2048, worker
-        # produces 43 ms bursts, deque oscillates by ±2050 samples
-        # between bursts -- the AK4951 EP2 builder polls every 2.6 ms
-        # and consumes 2050 samples in that 43 ms gap.  Any small
-        # producer jitter (worker scheduling, FFT compute, GC) tipped
-        # the deque into empty -> zero-padding -> click.  Operator
-        # measured ~1.5 underruns/sec sustained even with 100 ms
-        # pre-fill in v0.0.9.1.
+        # Audio block size (v0.0.9.2 audio rebuild Commit 2): 126 samples.
+        # The EP2 consumer pulls 126 audio samples per frame at 380 Hz.
+        # Setting the channel's internal block_size to exactly 126
+        # makes the producer's per-block DSP work align with the
+        # consumer's per-frame pull -- no more under/oversize chunks,
+        # no more remainder samples carried across batches when the
+        # cadences mis-align.
         #
-        # block_size=512 -> 10.7 ms bursts -> deque oscillates by
-        # ±500 samples (small fraction of the 4800-sample pre-fill).
-        # Worker has plenty of margin for any jitter up to ~85 ms
-        # before approaching empty.  Cost: ~4× more inner-loop
-        # iterations per second (4× worker overhead, but 2.6 % CPU
-        # base on the operator's machine -> projected <12 % under
-        # load -- well within budget).  Latency: 2048 -> 512 reduces
-        # audio-block latency from 43 ms to 11 ms.  Net latency to
-        # speaker drops slightly.  No DSP module depends on a
-        # specific block_size (NR FFTs use their own internal frame
-        # size; demods are length-agnostic).
-        self._audio_block = 512
+        # **This alone doesn't match producer-CADENCE to consumer-
+        # cadence at the deque interface** -- that needs _rx_batch_size
+        # below to scale with IQ rate so each rx_batch produces ~126
+        # audio samples after decimation.  Together they make every
+        # sink.write be exactly 126 samples at 380 Hz, matching the
+        # EP2 builder's pull rate one-to-one.  Real backpressure
+        # (Commit 3) then ensures producer can't pile up faster than
+        # consumer drains, mirroring Thetis's blocking-handshake design.
+        #
+        # History: pre-v0.0.9.1 was 2048 (43 ms bursts, frequent under-
+        # runs).  v0.0.9.1 reduced to 512 (11 ms bursts, fewer but
+        # still present underruns).  v0.0.9.2 -> 126 (2.625 ms bursts,
+        # cadence-matched to consumer, structural fix).  No DSP module
+        # depends on a specific block_size (NR1/NR2 FFTs use their own
+        # internal frame size; demods are length-agnostic) -- verified
+        # 2026-05-04 by feeding zeros at 126 / 1024 through every DSP
+        # module; all returned correct-length output.
+        self._audio_block = 126
         self._tone_phase = 0.0
 
         # Stream-gap tracking — every audio block compares stream's
@@ -1225,11 +1227,35 @@ class Radio(QObject):
         self._rx_channel.set_mode(self._mode)
 
         # ── Thread bridge ─────────────────────────────────────────────
-        # Batch samples in the RX thread before bridging to reduce Qt
-        # event-loop pressure (was emitting at ~381 Hz; now ~23 Hz at 48k).
-        # Reduces audio pops caused by main-thread paint blocking.
+        # Batch IQ samples in the RX thread before dispatching to the
+        # DSP path (worker queue or main-thread bridge).
+        #
+        # **rx_batch_size is rate-aware (v0.0.9.2 audio rebuild Commit
+        # 2).**  Each batch is sized so post-decimation it produces
+        # exactly 126 audio samples -- the EP2 consumer's per-frame
+        # pull size.  At 380 Hz consumer cadence:
+        #
+        #   IQ rate    decim   rx_batch_size   audio per batch   batch Hz
+        #   ---------  ------  --------------  ----------------  --------
+        #     48 kHz     1            126            126           380
+        #     96 kHz     2            252            126           380
+        #    192 kHz     4            504            126           380
+        #    384 kHz     8           1008            126           380
+        #
+        # Result: producer pushes 126 audio samples to the deque every
+        # 2.625 ms, exactly matching the consumer's 126-sample pull
+        # every 2.625 ms.  No bursts, no idle gaps.
+        #
+        # Pre-v0.0.9.2 history: rx_batch_size was hard-coded 2048,
+        # making the producer push huge bursts at 23 Hz (48k IQ) or
+        # 94 Hz (192k IQ) regardless of consumer rate.  Any scheduling
+        # jitter on the producer side could drain the deque faster
+        # than it refilled -> underrun -> zero-pad -> audible click.
+        #
+        # Updated by ``_recompute_rx_batch_size()`` whenever the IQ
+        # rate changes (set_rate hook).
         self._rx_batch: list = []
-        self._rx_batch_size = 2048
+        self._rx_batch_size = self._compute_rx_batch_size(self._rate)
         self._rx_batch_lock = threading.Lock()
         self._bridge = _SampleBridge()
         self._bridge.samples_ready.connect(self._on_samples_main_thread)
@@ -1377,11 +1403,45 @@ class Radio(QObject):
         self._check_in_band()
         self.freq_changed.emit(hz)
 
+    @staticmethod
+    def _compute_rx_batch_size(rate: int) -> int:
+        """Size the IQ batch so post-decimation it produces ~126 audio
+        samples -- the EP2 consumer's per-frame pull size.
+
+        v0.0.9.2 audio rebuild Commit 2.  Delivers cadence-matched
+        producer/consumer at the deque interface: at every supported
+        IQ rate the batch fires at 380 Hz, exactly matching the EP2
+        consumer's 380 Hz pull rate.
+
+        Math: audio_rate is fixed at 48 kHz; decimation ratio is
+        rate/48000; each batch produces (rx_batch_size / decim) audio
+        samples.  Solve for batch size = 126 audio: rx_batch_size =
+        126 * decim = 126 * rate / 48000.
+
+        Floor at 126 so the batch is never below one consumer frame
+        (even if some future low-rate path is added).
+        """
+        decim = max(1, rate // 48000)
+        return max(126, 126 * decim)
+
     def set_rate(self, rate: int):
         if rate not in SAMPLE_RATES or rate == self._rate:
             return
         prev_rate = self._rate
         self._rate = rate
+        # Re-size the IQ batch to keep producer cadence matched to
+        # the EP2 consumer at the new rate.  See _compute_rx_batch_size
+        # for the math.  Take the lock so we don't tear a partially-
+        # accumulated batch across the resize.
+        new_batch = self._compute_rx_batch_size(rate)
+        with self._rx_batch_lock:
+            # Drop any partial batch -- with a different rate it would
+            # be processed at the wrong decim ratio and produce a
+            # garbage decimator state for the next batch.  One batch
+            # of audio (~2.6 ms) is below human-audible-glitch
+            # threshold; cleaner than carrying mismatched samples.
+            self._rx_batch = []
+            self._rx_batch_size = new_batch
         with self._ring_lock:
             self._sample_ring.clear()
         # Reset the waterfall tick counter so the divider check
