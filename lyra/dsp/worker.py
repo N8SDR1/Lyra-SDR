@@ -398,11 +398,33 @@ class DspWorker(QObject):
         Blocks briefly on the input queue, then calls ``process_block``
         on each batch.  Exits when ``request_stop()`` is set.
 
+        **Qt event-loop pumping (v0.0.9.2 audio rebuild Commit 1
+        fixup):** every iteration we call
+        ``QCoreApplication.processEvents()`` so QueuedConnection
+        slots delivered to this worker (sink swap, AGC profile
+        change, BIN config change) actually run.  Without this
+        pump, run_loop hogs the worker thread's event loop and
+        signals queue up indefinitely — meaning the sink-swap
+        signal that hands the real audio sink to the worker on
+        ``Radio.start()`` never delivers, the worker keeps writing
+        to the initial NullSink seed, and the operator gets
+        silence.  Latent since Phase 3.B B.5 (sink ownership
+        migration); never observed because the QSettings ordering
+        bug fixed earlier in Commit 1 prevented worker mode from
+        actually running.
+
         SHELL ONLY in B.1 — ``process_block`` is a no-op stub.
         Subsequent sub-tasks (B.3 onwards) wire up actual DSP."""
+        from PySide6.QtCore import QCoreApplication
         self.state_changed.emit("running")
         try:
             while not self._stop_requested:
+                # Pump queued slot deliveries from main thread BEFORE
+                # processing the next block, so any pending sink-swap
+                # / config-update signals take effect on this iteration
+                # rather than the next one.  Cheap when no events are
+                # queued (returns immediately).
+                QCoreApplication.processEvents()
                 try:
                     samples = self._input_queue.get(
                         timeout=self.RUN_LOOP_TIMEOUT_S)
