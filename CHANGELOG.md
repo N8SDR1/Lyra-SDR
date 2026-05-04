@@ -13,6 +13,125 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.2-pre4] — 2026-05-04 — "Audio Architecture Rebuild — Dedicated EP2 writer + AGC"
+
+**Pre-release.**  Major architectural rewrite that supersedes the
+abandoned Commit 3 / Commit 3-fixup attempts.  Two distinct click
+sources fixed in one drop because they're orthogonal:
+
+- **Discrete clicks/pops** -- caused by EP2 audio underruns when
+  the host->radio frame send was tied to bursty UDP arrival in
+  ``_rx_loop``, plus a producer/consumer queue that silently
+  dropped on overrun and zero-padded on underrun.  Replaced
+  with a **dedicated EP2 writer thread** running at the codec's
+  steady audio rate (~380 Hz) on its own scheduling priority slot.
+- **Continuous "scratchy / dirty record player" texture in the
+  noise floor** -- caused by Lyra's per-sample AGC peak tracker
+  triggering ~100 attacks/sec on Gaussian noise with a static
+  PEAK_FLOOR.  Replaced with a **dynamic PEAK_FLOOR clamped to
+  K*noise_baseline** so noise samples no longer cross peak.
+  Co-investigated by N9BC + external senior-engineering review.
+
+### EP2 writer architecture rewrite
+
+In ``lyra/protocol/stream.py``:
+
+- **New dedicated thread ``_ep2_writer_loop``** owns host->radio
+  EP2 frame send.  Drift-corrected timer cadence at 2.625 ms /
+  380.95 Hz (= 48 kHz audio / 126 samples per frame), independent
+  of UDP arrival cadence.  Each iteration: pull one 126-sample
+  audio block from producer queue (non-blocking), pick next C&C
+  round-robin register, build EP2 frame, send via UDP.  When no
+  audio is queued, sends a C&C-only frame to keep the HL2
+  watchdog satisfied.
+- **MMCSS Pro Audio priority** elevation on Windows (ctypes -> avrt.dll)
+  for both the EP2 writer and the RX loop threads.  Best-effort;
+  silently no-op on other platforms or if the API is unavailable.
+  Bumps thread priority above default user-thread class so audio
+  isn't starved by UI / GC / generic background work during
+  scheduling jitter events.
+- **Producer/consumer handshake** via a small bounded queue
+  (``_ep2_audio_queue``, 8 blocks deep = 21 ms buffer) protected
+  by ``_ep2_audio_cond``.  Producer (``submit_audio_block``)
+  waits with bounded timeout when queue is full; consumer
+  (writer thread) ``notify_all``'s after every pop so the
+  producer is naturally paced to consumer cadence.  No silent-
+  drop, no zero-pad-on-underrun.
+- **EP2 send removed from ``_rx_loop``.**  RX loop now only
+  receives UDP datagrams, parses EP6 frames, decodes telemetry,
+  dispatches samples to the host -- no longer responsible for
+  C&C round-robin or audio cadence.
+
+In ``lyra/dsp/audio_sink.py``:
+
+- **AK4951Sink simplified.**  ``write()`` slices incoming audio
+  into 126-sample blocks and submits each via
+  ``stream.submit_audio_block``.  No more 100 ms pre-fill, no
+  more fade-on-close ceremony -- the writer thread sees the
+  ``inject_audio_tx`` flag flip and switches to C&C-only frames
+  on its next cadence tick (within ~3 ms), which the codec
+  experiences as a sample-aligned silence transition (no click).
+  Net latency from operator action to speaker drops by ~95 ms.
+
+### AGC dynamic peak floor
+
+In ``lyra/radio.py::_apply_agc_and_volume``:
+
+- **Replaced static ``PEAK_FLOOR = 1e-4``** with
+  ``max(1e-4, K * self._noise_baseline)`` where K = 1.5.
+  Noise samples can no longer cross peak during noise-only
+  listening, eliminating the spurious-attack-driven AM modulation
+  of the noise floor.  Real signals (>>1.5x noise) still cross
+  peak and trigger AGC at full speed; CW dit edges and SSB
+  consonant onsets unaffected.
+
+### What this commit does NOT yet fix
+
+- Loud volume bursts on the AK4951 path (Rick-only) -- still on
+  the gateware-replay-on-EP2-underrun hypothesis.  With EP2
+  underruns now structurally rare (steady writer cadence +
+  backpressure), bursts should drop dramatically as a side
+  effect.  Wireshark capture during deliberate UI stress is the
+  empirical confirmation; deferred to its own commit.
+- v0.0.9.1's "always-applied" gap-fade bug in
+  ``_apply_agc_and_volume`` -- separate small fix; deferred.
+
+### What was reverted from earlier rebuild attempts
+
+- Commit 3 (``threading.Condition`` backpressure on the
+  ``_tx_audio`` deque) -- reverted via two ``git revert`` commits
+  before this rewrite.  Tuning across two iterations made
+  underruns worse than Commit 2 alone (49/min -> 66/min ->
+  93/min equivalent).  Diagnosis: bolting backpressure onto a
+  deque-between-producer-and-rx-loop architecture didn't address
+  the actual problem (UDP arrival burstiness driving consumer
+  cadence).  This commit replaces the architecture entirely
+  rather than tuning the wrong design.
+
+### Tester checklist
+
+- ``un=`` should drop dramatically -- target near zero in
+  multi-minute runs.  EP2 underruns are now structurally rare
+  (writer thread always has audio in queue except on
+  catastrophic producer stall).
+- ``ov=`` will tick up modestly when the producer pushes faster
+  than the writer drains (= producer being naturally paced
+  down by backpressure).  This is healthy and not a click.
+- ``DSP`` heartbeat in telemetry should still sit near 95 Hz
+  at all IQ rates (worker rate; unchanged from Commit 2).
+- The continuous "scratchy" noise-floor texture should be
+  noticeably reduced or gone.  Slow vs Med AGC presets should
+  now sound nearly identical on noise-only audio (the dynamic
+  peak floor brings them into line).
+
+### Recovery
+
+If anything goes wrong, install
+``Lyra-Setup-0.0.9.1.exe`` from
+<https://github.com/N8SDR1/Lyra-SDR/releases/tag/v0.0.9.1>.
+
+---
+
 ## [0.0.9.2-pre2] — 2026-05-04 — "Audio Architecture Rebuild — Commit 2"
 
 **Pre-release.**  Second of six audio rebuild commits.  Where

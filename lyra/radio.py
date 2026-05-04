@@ -5943,7 +5943,36 @@ class Radio(QObject):
         h = int(self._agc_hang_counter)
         one_minus_alpha = float(self._agc_one_minus_alpha_per_sample)
         hang_init = int(self._agc_hang_samples)
-        PEAK_FLOOR = 1e-4
+        # Dynamic PEAK_FLOOR (v0.0.9.2 audio rebuild).  Clamps the peak
+        # tracker's lower bound to a multiple of the rolling noise
+        # baseline.
+        #
+        # Why a static 1e-4 floor caused trouble: with half-rectified
+        # post-demod audio and Gaussian noise statistics, every noise
+        # sample whose instantaneous magnitude exceeded the slowly
+        # decaying peak triggered an "instant attack" gain reset.  At
+        # roughly 100 attacks/sec on noise-only audio (Med preset
+        # equilibrium analysis at peak ~3.1σ of the noise distribution),
+        # each reset dropped gain ~8% (~0.7 dB) and was followed by a
+        # ~116 ms exponential recovery.  The summed overlapping
+        # recoveries imprinted a Lorentzian-spectrum AM modulation on
+        # the noise floor, audible as a continuous "scratchy / dirty
+        # record player" texture distinct from the discrete EP2-
+        # underrun-driven clicks the writer-thread rewrite addresses.
+        # Wiener-spectrum analysis + co-investigation by N9BC and an
+        # external senior-engineering review (2026-05-04).
+        #
+        # Clamping the floor to K * noise_baseline holds the peak
+        # above the noise envelope's typical max during noise-only
+        # listening, so noise samples no longer cross peak and trigger
+        # spurious attacks.  Real signals (>>1.5x noise) still cross
+        # peak normally and AGC reacts at full speed -- CW dit edges
+        # and SSB consonant onsets unaffected.  K=1.5 chosen as a
+        # conservative starting value; if any operator reports weak-
+        # signal compression issues, K can be lowered to ~1.2.
+        K_NOISE_FLOOR = 1.5
+        PEAK_FLOOR = max(1e-4,
+                         K_NOISE_FLOOR * float(self._noise_baseline))
         for i in range(n):
             m = mag[i]
             if m > p:
