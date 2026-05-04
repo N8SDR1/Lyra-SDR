@@ -1403,53 +1403,26 @@ class Radio(QObject):
         self._check_in_band()
         self.freq_changed.emit(hz)
 
-    # Audio samples per producer batch.  v0.0.9.2 Commit 3 fixup:
-    # Commit 2 set this to 126 (matching consumer frame size 1:1)
-    # under the assumption that Python could sustain a 381 Hz
-    # producer rate.  In practice per-call overhead (Qt event pump,
-    # queue.get, numpy setup, lock acquisition) ate too much of the
-    # 2.625 ms budget per call, leaving the producer ~0.4% slower
-    # than the consumer (heartbeat 379.4 Hz vs 381 target).  When
-    # producer < consumer rate, backpressure can't help -- the
-    # deque just drains and underruns continue.
-    #
-    # Raised to 504 (4 consumer frames) so each worker iteration
-    # has ~10.5 ms of budget -- 4x more headroom.  Producer is
-    # naturally bursty; backpressure (Commit 3) paces it down to
-    # consumer rate when buffer is full.  Same pattern Thetis
-    # uses: produce in chunks, consume in pulls, backpressure
-    # handles cadence-mismatch absorption.  Cost: ~10 ms more
-    # latency than the ideal 1:1 cadence-match.  Acceptable.
-    AUDIO_PER_PRODUCER_BATCH = 504
-
     @staticmethod
     def _compute_rx_batch_size(rate: int) -> int:
-        """Size the IQ batch so post-decimation it produces
-        ``AUDIO_PER_PRODUCER_BATCH`` audio samples -- 4 EP2 consumer
-        frames at 126 samples each.
+        """Size the IQ batch so post-decimation it produces ~126 audio
+        samples -- the EP2 consumer's per-frame pull size.
 
-        v0.0.9.2 Commit 3 fixup: tightened the rationale (was
-        Commit 2's cadence-match-1:1 design).  See
-        AUDIO_PER_PRODUCER_BATCH class constant for why the change.
+        v0.0.9.2 audio rebuild Commit 2.  Delivers cadence-matched
+        producer/consumer at the deque interface: at every supported
+        IQ rate the batch fires at 380 Hz, exactly matching the EP2
+        consumer's 380 Hz pull rate.
 
         Math: audio_rate is fixed at 48 kHz; decimation ratio is
         rate/48000; each batch produces (rx_batch_size / decim) audio
-        samples.  Solve for batch size = 504 audio:
-        rx_batch_size = 504 * decim.
+        samples.  Solve for batch size = 126 audio: rx_batch_size =
+        126 * decim = 126 * rate / 48000.
 
-        Per-rate values (audio_per_batch always 504 = 4 frames):
-          IQ rate    decim   rx_batch_size   audio/batch   batch Hz
-            48 kHz     1            504           504           95.2
-            96 kHz     2           1008           504           95.2
-           192 kHz     4           2016           504           95.2
-           384 kHz     8           4032           504           95.2
-
-        Floor at 504 so the batch is never below one producer batch
-        even at unusual rates.
+        Floor at 126 so the batch is never below one consumer frame
+        (even if some future low-rate path is added).
         """
         decim = max(1, rate // 48000)
-        target = Radio.AUDIO_PER_PRODUCER_BATCH
-        return max(target, target * decim)
+        return max(126, 126 * decim)
 
     def set_rate(self, rate: int):
         if rate not in SAMPLE_RATES or rate == self._rate:

@@ -70,12 +70,7 @@ class AK4951Sink:
         # producer ~10 ms of slack to wake up, well within Python
         # scheduler latency on any modern machine.
         if hasattr(stream, "_tx_audio_lock") and hasattr(stream, "_tx_audio"):
-            # Pre-fill = 1008 = 2 producer batches = same as
-            # backpressure high-water.  Producer's first push lands
-            # the deque at ~1008+ → backpressure engages immediately
-            # → producer paced to consumer rate from frame zero.
-            # ~21 ms startup latency.  v0.0.9.2 Commit 3 fixup.
-            PREFILL_SAMPLES = 1008
+            PREFILL_SAMPLES = 504
             silence = [(0.0, 0.0)] * PREFILL_SAMPLES
             cond = getattr(stream, "_tx_audio_cond", None)
             if cond is not None:
@@ -247,13 +242,14 @@ class SoundDeviceSink:
         self._ring_capacity_frames = capacity_frames
         self._ring = np.zeros(
             (capacity_frames, self._channels), dtype=np.float32)
-        # Pre-fill = 1008 frames at 48 kHz (~21 ms) = same as
-        # backpressure high-water.  Producer immediately sees a
-        # full buffer and engages backpressure from frame zero.
-        # v0.0.9.2 Commit 3 fixup (was 504 = 1 producer batch in
-        # initial Commit 3; raised to 2 producer batches to match
-        # the high-water bump).
-        PREFILL_FRAMES = min(capacity_frames, max(1008, rate // 50))
+        # Pre-fill (v0.0.9.2 audio rebuild Commit 3): reduced from
+        # 100 ms to ~10 ms (504 frames at 48 kHz; scaled with rate).
+        # Real backpressure via _ring_cond now handles cadence
+        # absorption that the larger pre-fill was compensating for;
+        # the small startup cushion is purely to bridge the gap
+        # between PortAudio.start() and the first producer block.
+        # Net latency drops ~90 ms.
+        PREFILL_FRAMES = min(capacity_frames, max(504, rate // 100))
         self._ring_read_idx = 0     # next frame to read by callback
         self._ring_write_idx = PREFILL_FRAMES  # writer starts past pre-fill
         self._ring_count = PREFILL_FRAMES     # pre-fill counted as available
@@ -268,12 +264,11 @@ class SoundDeviceSink:
         self._ring_lock = threading.Lock()
         self._ring_cond = threading.Condition(self._ring_lock)
         # Backpressure target: producer waits when count >= this.
-        # Sized at 2 producer batches (1008 frames at 48 kHz =
-        # ~21 ms) so producer has jitter tolerance before the
-        # ring drains.  v0.0.9.2 Commit 3 fixup: was 504; raised
-        # to 1008 to match the new producer batch size of 504.
+        # Sized for ~10 ms of buffered audio (4 typical PortAudio
+        # callback periods).  Operator-tunable in the future if a
+        # specific device benefits from more buffer.
         self._ring_high_water = min(
-            capacity_frames, max(1008, rate // 50))
+            capacity_frames, max(504, rate // 100))
         # Set when sink is closing so any waiting producer can exit.
         self._ring_shutdown: bool = False
         # Producer-wait counter (telemetry mirror of HL2Stream's).

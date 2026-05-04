@@ -13,55 +13,6 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
-## [0.0.9.2-pre3a] — 2026-05-04 — "Commit 3 fixup: larger producer batches"
-
-**Pre-release fixup.**  First flight test of pre3 showed
-underrun rate INCREASED slightly (1.1/sec vs pre2's 0.82/sec)
-despite backpressure engaging continuously (deque pegged at
-high-water 504).  Diagnosis:
-
-Commit 2's tight 126-sample cadence-match made each worker
-iteration too short for Python to sustain reliably.  At 381 Hz
-producer rate, per-call overhead (Qt event pump, queue.get,
-numpy setup, lock acquisition) ate too much of the 2.625 ms
-budget.  Heartbeat stuck at 379.4 Hz vs target 381 = producer
-~0.4% slower than consumer.  Backpressure can only pace
-producer DOWN, not speed it UP -- when producer is structurally
-slower than consumer, BP doesn't help and the deque drains.
-
-Fixup: larger producer batches (504 audio samples = 4 consumer
-frames per push instead of 126 = 1 frame).  Worker iteration
-budget grows from 2.6 ms to 10.5 ms = 4x more headroom.
-Backpressure handles the resulting burstiness exactly as Thetis
-does: produce in chunks, consume in pulls, BP paces.
-
-- ``Radio.AUDIO_PER_PRODUCER_BATCH`` = 504 (was 126).
-- ``_compute_rx_batch_size``: now 504 * decim (was 126 * decim).
-- ``HL2Stream.tx_audio_high_water_target`` = 1008 (was 504; 2
-  producer batches).
-- ``SoundDeviceSink._ring_high_water`` = 1008 (was 504).
-- AK4951 + PortAudio pre-fill = 1008 (was 504; matches new
-  high-water so backpressure engages from frame zero).
-
-Steady-state behavior post-fixup:
-- Producer pushes 504 audio samples every ~10.5 ms.
-- Consumer drains 126 every ~2.6 ms.
-- Deque oscillates 504 → 1008 → 504 (4 consumer pulls per
-  producer push).  Average 756 = ~16 ms latency.
-- Producer slip tolerance: 4 consumer cycles before underrun.
-  Was 0 cycles in pre3 initial design.
-
-Per-rate batch table:
-```
-IQ rate    decim   rx_batch_size   audio/batch   batch Hz
-  48 kHz     1            504           504           95.2
-  96 kHz     2           1008           504           95.2
- 192 kHz     4           2016           504           95.2
- 384 kHz     8           4032           504           95.2
-```
-
----
-
 ## [0.0.9.2-pre3] — 2026-05-04 — "Audio Architecture Rebuild — Commit 3"
 
 **Pre-release.**  Third of six audio rebuild commits.  This is
