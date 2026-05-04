@@ -5360,14 +5360,30 @@ class Radio(QObject):
           empty); CPU cost while no stream is active is negligible
 
         Pattern: QObject + moveToThread (modern Qt-recommended over
-        QThread.run override).  Worker is parented to Radio so it
-        gets cleaned up if Radio is destroyed without an explicit
-        shutdown_dsp_worker call.
+        QThread.run override).
+
+        **Parent=None is REQUIRED** — Qt refuses to move a QObject
+        that has a parent ("QObject::moveToThread: Cannot move
+        objects with a parent" warning, then the move silently
+        fails and the worker stays on the source thread).  When
+        run_loop then runs on the main thread instead of the
+        worker thread, its blocking ``queue.get(timeout=...)`` call
+        hangs the UI.  This was a latent bug all the way back to
+        Phase 3.B B.1 (the worker-mode shell) -- never observed in
+        production because the QSettings ordering bug fixed in
+        Commit 1 prevented worker mode from actually being entered.
+
+        Cleanup is still handled: ``Radio.close()`` is wired to
+        ``QApplication.aboutToQuit``, calls ``shutdown_dsp_worker``,
+        which joins the worker thread cleanly.  The earlier "parent
+        for cleanup" defense was redundant with the explicit
+        teardown path.
         """
         from PySide6.QtCore import QThread
         from lyra.dsp.worker import DspWorker
-        # Construct worker on main thread, then migrate ownership.
-        self._dsp_worker = DspWorker(parent=self)
+        # Construct worker WITHOUT a parent so moveToThread below
+        # can actually move it.  See docstring for why.
+        self._dsp_worker = DspWorker(parent=None)
         self._dsp_worker.attach_to_radio(self)
         # Seed the worker's config from Radio's current state so the
         # worker has correct AGC / AF / Vol / Mute / BIN values from
