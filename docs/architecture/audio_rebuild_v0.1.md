@@ -494,6 +494,251 @@ or the plan shifts.*
 
 ---
 
+## 10. Post-mortem: 2026-05-04 audio rebuild attempt
+
+This section captures everything learned during the audio rebuild
+attempt of 2026-05-04, including what was attempted, what failed,
+why, and what the converged senior-engineering analysis says
+should happen next.  None of the implementations from this
+session are merged; everything sits on side-branches with named
+recovery points.
+
+### 10.1 What was attempted (in order)
+
+1. **Commit 1** — DSP worker thread default + telemetry indicator
+   + QSettings ordering bug fix + `DspWorker(parent=None)` fix +
+   `processEvents` in `run_loop` (3 commits: 479bb02, 698af33,
+   89f69cc).  **Result: SUCCESS.**  Worker mode actually engages
+   (was structurally broken before today).  Heartbeat steady at
+   ~89.7 Hz under UI stress (drag windows, mash buttons -- DSP
+   doesn't drop).  NR2 unaffected.  This is the day's keeper.
+   Now lives at the head of `feature/audio-architecture-v2`.
+
+2. **Commit 2** — Cadence-matched IQ batching (rx_batch_size =
+   126*decim, audio_block = 126; commit 39b043e).  **Result:
+   PARTIAL but BROKE NR2.**  Click rate dropped from 117/min to
+   49/min (58 % reduction).  But the smaller block size broke
+   NR2 quality (Ephraim-Malah's noise estimator gets miscalibrated
+   when input arrives in 8x smaller frames than it was designed
+   for at 1024 FFT / 512 hop).  Reverted.  Lesson: any change
+   to channel.process input block size needs explicit per-DSP-
+   module re-validation with audible quality testing, not just
+   length-preservation tests.
+
+3. **Commit 3** — Backpressure via `threading.Condition` on the
+   `_tx_audio` deque (commits 787e3fe + 5b3e8da).  **Result:
+   FAILURE.**  Underrun rate went UP not down.  Root cause: at
+   381 Hz producer rate, Python's per-call overhead (Qt event
+   pump, queue.get, numpy setup, lock acquisition) eats too much
+   of the 2.625 ms budget; producer ends up ~0.4 % slower than
+   consumer; backpressure can only pace producer DOWN, not speed
+   it UP, so it doesn't help.  Worse: smaller pre-fill (504 vs
+   v0.0.9.1's 4800) gave less buffer headroom.  Reverted both
+   the original Commit 3 and its larger-batch fixup.
+
+4. **Big rewrite** — Dedicated EP2 writer thread + MMCSS Pro
+   Audio + AGC dynamic peak floor (commit 2f9812d).  **Result:
+   CATASTROPHIC -- DSP heartbeat went to zero.**  Worker thread
+   stopped processing IQ batches entirely.  Most likely cause
+   (untested): the EP2 writer thread firing at 380 Hz immediately
+   on stream start, before the HL2+ gateware finished EP6
+   initialization, prevented HL2 from beginning to stream EP6.
+   Without EP6 arrival, rx_loop's `recvfrom` timed out forever,
+   no IQ batches arrived at the worker queue, worker idle.
+   Reverted.  Lesson: any EP2 writer thread that fires on its
+   own clock must wait for first EP6 arrival before starting
+   its cadence loop (gateware initialization sequence is
+   protocol-relevant).
+
+5. **AGC dynamic peak floor (first attempt)** — `PEAK_FLOOR =
+   max(1e-4, K * noise_baseline)` (commit b560bee).  **Result:
+   FAILURE -- audio silent unless AGC off.**  Closed-loop
+   instability: `PEAK_FLOOR` clamps `peak_arr`, so
+   `min(peak_arr) >= PEAK_FLOOR`; therefore `noise_baseline >=
+   PEAK_FLOOR`; therefore next iteration `PEAK_FLOOR = K * noise_
+   baseline >= K * old PEAK_FLOOR`.  Exponential 1.5x growth per
+   block, saturates at 1.0 in ~10 blocks, gain drops to ~0.03,
+   silence.  Reverted.  Lesson: any dynamic floor / threshold
+   derived from a tracker output that is itself bounded by that
+   floor creates a positive feedback loop.  Must derive the
+   estimator from RAW input (`mag` directly), never from the
+   tracker output.
+
+6. **AGC noise-aware attack gate (consensus design from two
+   independent senior-engineering reviews)** — gate the attack
+   condition `if m > p and m > attack_gate:` rather than
+   modifying the floor (commit 2a77044).  **Result: FAILURE --
+   gain pumped audibly up and down on noise.**  Both reviewers
+   missed that the 109 attacks/sec on noise weren't just causing
+   the AM modulation; they were ALSO the mechanism that kept the
+   peak (and therefore the gain) STABLE near a steady equilibrium.
+   Removing them caused peak to decay toward `PEAK_FLOOR = 1e-4`
+   between rare gate-passing samples; gain rose to ~316x; then
+   one rare attack reset peak to ~3.85σ and gain dropped 30-50
+   dB instantly.  Audible pumping cycle.  Reverted.  Lesson:
+   an envelope tracker's behavior on continuous noise input is
+   load-bearing for stability, not just for noise-modulation
+   spectrum.
+
+7. **Worker mode preserved** — Reset integration branch back to
+   89f69cc (Commit 1 + 2 fixups, no Commit 2, no Commit 3, no
+   AGC fixes).  Final state of the day.
+
+### 10.2 The converged senior-engineering diagnosis
+
+Three independent investigations converged on the same root-cause
+analysis for the AK4951 click/pop/burst problem:
+
+1. **Lyra's EP2 send is driven by UDP arrival cadence inside
+   `_rx_loop`.**  When an EP6 datagram arrives, the modulo
+   throttle (`_ep6_count % n != 0: continue`) decides whether to
+   fire EP2.  UDP delivery on Windows is bursty -- datagrams
+   bunch up, then quiet periods follow.  EP2 send-cadence
+   inherits that jitter.
+
+2. **Thetis's EP2 send is driven by audio-producer cadence.**
+   Audio producer signals via semaphore when 126 samples are
+   queued; writer thread waits, packs frame, sends via UDP,
+   releases producer.  Mutual blocking handshake.  Producer
+   cadence is the wire cadence.  No timer, no UDP-arrival
+   coupling.
+
+3. **The HL2+ AK4951 is a networked codec.**  Audio samples
+   arrive over UDP into the gateware's EP2 audio FIFO; codec
+   clocks them out at 48 kHz.  Steady cadence is required at
+   the FIFO; jitter manifests as one of three audible artifacts
+   depending on what the specific gateware version does on
+   underrun:
+   - Silence-pad on underrun → click
+   - Repeat last samples on underrun → volume burst (if last
+     samples contained a peak)
+   - Extended underrun → motorboating (slow oscillation)
+
+4. **PortAudio doesn't have this problem.**  PortAudio's audio
+   thread is hardware-clocked at the soundcard's crystal rate;
+   ring buffer absorbs producer-side jitter; consumer drains
+   steadily regardless of UDP arrival pattern.
+
+### 10.3 Confirmed: NOT the bug
+
+These hypotheses were investigated and ruled out:
+
+- **AK4951 detection / gateware-version probe in Thetis** — none
+  exists.  Thetis treats HL2 and HL2+ identically (`HermesLite =
+  6` board ID, no hardware-version probe, no AK4951 enable bit).
+  HL2+ gateware autonomously routes EP2 audio to the codec.
+- **Audio rate scaling with IQ rate** — Thetis pins audio output
+  to 48 kHz regardless of IQ rate.  Author's comment in
+  `cmaster.c:510`: "this is fixed at 48K by the protocol."
+  Lyra's hardcoded 48 kHz is correct.
+- **Per-sample AGC noise-modulation alone is the click cause**
+  (Brent's diagnosis).  The mechanism is real and produces a
+  textural artifact, but it's **distinct** from the EP2-underrun
+  clicks.  The two are independent and both contribute; fixing
+  one doesn't fix the other.
+
+### 10.4 The right next-step plan (when you come back to it)
+
+In strict order:
+
+**Step 1: Implement the EP2-cadence fix correctly.**  Single
+isolated commit.  Spec:
+- Dedicated EP2 writer thread that fires audio-paced via
+  `threading.Event` from the audio producer (worker thread or
+  AK4951Sink.write).
+- Wait for the first EP6 datagram (signaled from `_rx_loop` via
+  another Event) before entering its cadence loop -- avoids the
+  Big-Rewrite startup-timing failure.
+- Optional: MMCSS Pro Audio priority on Windows (one-line
+  ctypes call; safe failure mode is "default priority").
+- Producer pushes 126-sample blocks via `submit_audio_block`;
+  writer pops, packs, sends EP2, signals producer to push next.
+- Validate via `un=` counter dropping to near zero and `deque H/`
+  staying small.
+
+**Step 2: AGC noise modulation fix (separate workstream).**
+N9BC owns this.  Concept (gate the attack condition rather than
+the floor) is right; implementation needs careful modeling of
+the noise-attack equilibrium so gain stability isn't destroyed.
+Consensus implementation requires either:
+(a) Look-ahead delay buffer (3-5 ms latency, structurally clean).
+(b) Gain-domain smoothing on `target/peak_arr`.
+(c) Hybrid floor + gate that preserves equilibrium peak position
+    on continuous noise input.
+The 2026-05-04 attempt at (c) failed because both reviewers
+missed the equilibrium-stability dependency.  Re-derive carefully
+before any implementation.
+
+**Step 3: v0.2 TX prerequisite -- mic input from EP6.**  When TX
+work begins, Lyra needs a "mic source = HL2 EP6 mic bytes" path.
+Thetis labels this "HERMES" or "Radio" in the source picker.
+Empirically test what EP6 mic bytes contain when an actual mic
+is plugged into the HL2+'s front-panel jack.  CLAUDE.md §10 #1
+already flags this as open empirical question.
+
+### 10.5 Methodology for the next attempt
+
+To avoid repeating today's mistakes:
+
+1. **One change per commit, tested in isolation.**  The Big
+   Rewrite (2f9812d) bundled EP2-writer + MMCSS + AGC in one
+   commit.  When it broke, no way to tell which part.
+2. **Telemetry before subjective test.**  Status-bar `un=`/`ov=`/
+   `deque H/` counters give objective data; ear is the final
+   judge but not the first.
+3. **Math review for any closed-loop change.**  The AGC dynamic
+   peak floor was rejected on closed-loop-stability grounds in
+   review BUT that review missed the equilibrium-pump-stability
+   problem.  Closed-loop math review must check ALL stable
+   states, not just the divergence case.
+4. **Test on continuous noise input, not just signal.**  Both
+   AGC fix attempts looked correct on signal but broke on
+   pure-noise listening.
+5. **Explicit recovery points before any code change.**  Today's
+   workflow used annotated tags `safety/2026-05-04-end-of-day`
+   and `safety/2026-05-04-worker-mode-working`.  Continue this.
+
+### 10.6 Recovery points (preserved across this session)
+
+- `main` = v0.0.9.1 published release (untouched)
+- Tag `v0.0.9.1` (annotated, on `main`)
+- GitHub Release v0.0.9.1 with installer .exe attached
+- Tag `safety/2026-05-04-end-of-day` (last night's state, before
+  today's audio work)
+- Branch `backup/2026-05-04-end-of-day` (same)
+- Tag `safety/2026-05-04-worker-mode-working` (the day's keeper:
+  Commit 1 + 2 fixups; worker mode actually working; NR2
+  unaffected)
+- Branch `backup/2026-05-04-worker-mode-working` (same)
+
+Five independent layers of recovery.  v0.0.9.1 itself is
+unmovable.
+
+### 10.7 Net result for the day
+
+- ✅ Worker mode default actually working (real architectural
+  improvement; was structurally broken before)
+- ✅ DSP truly isolated from Qt main thread (UI activity no
+  longer steals time from audio)
+- ✅ Three latent bugs fixed (QSettings ordering, parent=None,
+  processEvents)
+- ✅ Telemetry indicator gives objective audio-path observability
+- ✅ Comprehensive Thetis architecture research documented
+- ✅ AK4951 click/pop/burst root cause definitively localized to
+  EP2 cadence model
+- ✅ AGC noise-modulation diagnosis preserved with implementation
+  pitfalls documented
+- ❌ AK4951 click/pop/burst NOT fixed (specs ready for next
+  session; implementation deferred)
+- ❌ AGC noise-modulation NOT fixed (specs ready; implementation
+  needs more careful math review)
+
+The two unfixed items now have validated implementation specs
+with full math, code citations, and senior-engineering review
+notes including the 2026-05-04 failure modes to avoid.
+
+---
+
 ## 9. Risk management + fallback plan
 
 This section is the answer to "what's our backup if the rebuild
