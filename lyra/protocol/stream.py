@@ -535,6 +535,55 @@ class HL2Stream:
             self._sock.sendto(frame, (self.radio_ip, DISCOVERY_PORT))
 
     @staticmethod
+    def _maybe_set_windows_timer_resolution(period_ms: int = 1):
+        """Windows: bump the system timer resolution to ``period_ms``.
+
+        Default Windows scheduler tick is ~15.6 ms (64 Hz).  Standard
+        ``time.sleep()`` on Python honors that tick, meaning a request
+        for ``sleep(0.0026)`` (2.6 ms) actually sleeps up to 15.6 ms.
+        That's catastrophic for audio cadence -- a writer thread
+        targeting 380 Hz can end up firing at 60-200 Hz, draining the
+        EP2 audio queue too slowly and producing pulsing / garbled
+        audio at the AK4951 codec.
+
+        ``timeBeginPeriod(1)`` from winmm.dll requests the system to
+        run at 1 ms tick, which lets ``time.sleep()`` honor sub-ms
+        sleeps reliably.  This is the standard idiom for real-time-
+        audio applications on Windows.
+
+        Process-global; ``timeEndPeriod`` should be called at process
+        exit but we don't bother -- Windows resets it when the process
+        exits.  Idempotent if called multiple times.
+
+        No-op (and silently absorbs any error) on non-Windows
+        platforms or if winmm.dll is unavailable.  Failure is logged
+        but non-fatal -- the writer just runs at the default coarser
+        granularity, which is the pre-fix status quo.
+        """
+        try:
+            import sys
+            if not sys.platform.startswith("win"):
+                return
+            import ctypes
+            winmm = ctypes.WinDLL("winmm", use_last_error=True)
+            time_begin_period = winmm.timeBeginPeriod
+            time_begin_period.restype = ctypes.c_uint
+            time_begin_period.argtypes = [ctypes.c_uint]
+            result = time_begin_period(int(period_ms))
+            if result == 0:  # TIMERR_NOERROR
+                # Use print so operator sees this regardless of
+                # logging config -- one-shot startup diagnostic.
+                print(f"[HL2Stream] Windows timer resolution "
+                      f"bumped to {period_ms} ms")
+            else:
+                print(f"[HL2Stream] timeBeginPeriod({period_ms}) "
+                      f"returned non-zero: {result} "
+                      f"(timer resolution unchanged)")
+        except Exception as e:  # noqa: BLE001
+            print(f"[HL2Stream] Windows timer resolution "
+                  f"bump failed: {e}")
+
+    @staticmethod
     def _maybe_apply_mmcss_pro_audio(profile_name: str = "Pro Audio"):
         """Best-effort thread priority elevation on Windows via MMCSS.
 
@@ -568,15 +617,17 @@ class HL2Stream:
                 # Priority constants: AVRT_PRIORITY_NORMAL=0,
                 # _HIGH=1, _CRITICAL=2.  We want CRITICAL.
                 set_priority(handle, 2)
-                _log.info(
-                    "MMCSS '%s' priority elevated for thread %s",
-                    profile_name, threading.current_thread().name)
+                # Use print so operator sees this regardless of
+                # logging config -- one-shot startup diagnostic.
+                print(f"[HL2Stream] MMCSS '{profile_name}' priority "
+                      f"elevated for thread "
+                      f"{threading.current_thread().name}")
             else:
-                _log.warning(
-                    "MMCSS registration returned NULL; thread will "
-                    "run at default priority")
+                print(f"[HL2Stream] MMCSS registration returned "
+                      f"NULL; thread will run at default priority")
         except Exception as e:  # noqa: BLE001
-            _log.warning("MMCSS priority elevation failed: %s", e)
+            print(f"[HL2Stream] MMCSS priority elevation "
+                  f"failed: {e}")
 
     def _ep2_writer_loop(self):
         """Dedicated thread that drives EP2 frame send cadence at the
@@ -624,6 +675,16 @@ class HL2Stream:
                 "EP2 writer: no EP6 received within 5s; exiting "
                 "without firing EP2 traffic")
             return
+
+        # Bump Windows system timer resolution to 1 ms so
+        # ``time.sleep()`` can honor sub-ms sleeps and the cadence
+        # loop below actually fires at ~380 Hz (vs the 60-200 Hz
+        # we'd get at the default 15.6 ms scheduler tick).  Critical
+        # for audio cadence -- without this, the writer fires too
+        # slowly, the EP2 audio queue overflows, and the codec
+        # hears pulsing / garbled audio with dropped samples.
+        # Process-global; safe to call multiple times.
+        self._maybe_set_windows_timer_resolution(1)
 
         # Elevate scheduling priority on Windows.  Best-effort.
         self._maybe_apply_mmcss_pro_audio("Pro Audio")
