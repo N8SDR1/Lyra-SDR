@@ -24,6 +24,7 @@ C&C write register selectors (host -> radio in EP2, for later use):
 """
 from __future__ import annotations
 
+import ctypes
 import logging
 import socket
 import struct
