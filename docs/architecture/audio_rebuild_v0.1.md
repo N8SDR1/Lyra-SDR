@@ -458,7 +458,7 @@ These are deliberate non-goals.  Discuss before changing.
 
 ---
 
-## 7. Rollback plan
+## 7. Rollback plan (high-level — see §9 for full detail)
 
 If any commit produces a regression that the next two commits
 don't resolve, we revert that commit and re-evaluate.  Branches:
@@ -471,6 +471,11 @@ don't resolve, we revert that commit and re-evaluate.  Branches:
 Pre-releases each phase mean we always have a known-good build
 to fall back to for testers who don't want to ride the dev
 branch.
+
+§9 below covers the full risk-management plan: recovery points,
+per-commit safety nets, settings escape hatches, operator
+downgrade procedure, failure-detection telemetry, decision
+criteria, and data-preservation guarantees.
 
 ---
 
@@ -486,3 +491,271 @@ Lyra-native.
 
 *Last updated: 2026-05-04.  Update this doc when commits land
 or the plan shifts.*
+
+---
+
+## 9. Risk management + fallback plan
+
+This section is the answer to "what's our backup if the rebuild
+breaks something?"  It covers recovery points (where we can
+roll back TO), per-commit safety nets (how we prevent regressions
+from compounding), operator escape hatches (how an operator
+recovers without our help), and decision criteria (when do we
+revert vs forward-fix).
+
+### 9.1 Recovery points — what's known-good
+
+**Source-tree recovery point:** annotated tag `v0.0.9.1` at
+commit `4484326` on `main`.  This is the last shipped, validated
+state.  Operator + Brent both confirmed v0.0.9.1 audio is no
+worse than prior releases (clicks present but tolerable; spikes
+on Rick's rig only).  Recovery is `git checkout v0.0.9.1` for
+source or branching off it for a hotfix.
+
+**Binary recovery point:** GitHub Release v0.0.9.1 at
+<https://github.com/N8SDR1/Lyra-SDR/releases/tag/v0.0.9.1>
+with `Lyra-Setup-0.0.9.1.exe` attached.  Any operator can
+download this and reinstall.  Re-installation does NOT touch
+QSettings or `~/.config/lyra/` (operator data preserved — see
+§9.7).
+
+**Branch state at start of rebuild:**
+
+```
+main                    = v0.0.9.1  (4484326)
+feature/threaded-dsp    = dev trunk; ahead of main by:
+                            b23b1bb  update-check 4-component fix
+                            b95453c  audio_rebuild_v0.1.md
+                            (this commit) §9 risk plan
+feature/audio-architecture-v2  = TO BE CREATED off feature/threaded-dsp
+                                  before Commit 1 starts
+```
+
+**Branch invariant during rebuild:** `main` does NOT move until
+the rebuild lands fully and both testers sign off.  Operators
+on `main` continue to see v0.0.9.1 as the latest release.
+
+### 9.2 Per-commit safety net
+
+Each of Commits 1–6 lands on its own short-lived intermediate
+branch off `feature/audio-architecture-v2`, fast-forward merged
+back when it passes flight-test.  This gives us:
+
+- **Single-commit revertibility.**  `git revert <sha>` cleanly
+  backs out one commit without disturbing the others.  No
+  rebases, no history rewrites.
+- **Bisectable regressions.**  If a regression shows up
+  somewhere between Commit 2 and Commit 4, `git bisect` lands
+  on the offender in two steps.
+- **Per-commit pre-release on GitHub.**  Each Commit ships as
+  `v0.0.9.2-preN` marked as pre-release.  Testers opt in.
+  Public release feed shows v0.0.9.1 as the latest **stable**
+  until the rebuild completes — non-tester operators don't see
+  pre-releases unless they explicitly look.
+
+**Branch hygiene during rebuild:**
+
+```
+feature/audio-architecture-v2          ← integration branch
+  ├─ feature/audio-c1-worker-default   ← Commit 1 staging
+  ├─ feature/audio-c2-block-size       ← Commit 2 staging
+  ├─ feature/audio-c3-backpressure     ← Commit 3 staging
+  ├─ feature/audio-c4-mmcss            ← Commit 4 staging
+  ├─ feature/audio-c5-wireshark-doc    ← Commit 5 staging (doc only)
+  └─ feature/audio-c6-gap-fade-fix     ← Commit 6 staging
+```
+
+A failed Commit-N branch can be deleted without affecting
+Commits 1..N-1 already merged into the integration branch.
+
+### 9.3 Operator escape hatches (settings-controlled, no rebuild needed)
+
+Every architectural change must remain operator-toggleable from
+the running app.  An operator hitting a regression should be
+able to flip a switch and recover without a code change or
+reinstall.  Concretely:
+
+- **Commit 1 (worker default):** `DSP_THREADING_SINGLE` stays
+  fully supported.  Settings → Advanced → "DSP threading mode"
+  combo offers both choices.  Operator who hates worker mode
+  flips back, restarts, problem gone.
+- **Commit 2 (block size):** if 126 produces audible
+  artifacts on some module, expose `audio_block_size` as a
+  Settings → Advanced numeric field with allowed values 126 /
+  252 / 504 / 1024.  Default 126; operator can revert per-rig.
+- **Commit 3 (backpressure):** add a Settings → Advanced kill
+  switch to fall back to drop-oldest behavior if the new
+  backpressure ever deadlocks in the wild.  Default ON
+  (backpressure active).
+- **Commit 4 (MMCSS):** failure mode of the MMCSS API call is
+  already "fall back to default priority + log warning."
+  Already operator-safe.  Add Settings → Advanced "Disable
+  MMCSS priority elevation" checkbox so operators can turn it
+  off if a Windows version misbehaves.
+- **Commit 5 (doc only):** no escape hatch needed — no code
+  changes.
+- **Commit 6 (gap-fade fix):** trivial; if it regresses for
+  any reason, revert is a one-line edit.
+
+**Defensive design rule:** every architectural change in this
+rebuild ships with a Settings → Advanced toggle to disable it,
+defaulting to ON (new behavior).  Once the rebuild has
+flight-tested for a month, the dead toggles can be removed in
+v0.1.x cleanup.
+
+### 9.4 Operator downgrade procedure
+
+If an operator on a v0.0.9.2-preN pre-release hits an issue
+they can't work around with §9.3 toggles, the recovery is:
+
+1. Open **Help → About** to confirm running version.
+2. Visit <https://github.com/N8SDR1/Lyra-SDR/releases/tag/v0.0.9.1>.
+3. Download `Lyra-Setup-0.0.9.1.exe`.
+4. Run the installer (overwrites the v0.0.9.2-preN install).
+5. Launch Lyra.  All settings preserved (see §9.7).
+
+Document this procedure in the v0.0.9.2-preN release notes.
+Brent can also help any tester directly via the issue tracker.
+
+### 9.5 Failure detection telemetry
+
+We need numbers, not vibes, to call a regression.  Telemetry
+already in place + new additions for the rebuild phase:
+
+**Already shipped (some hidden from UI in v0.0.9.1):**
+- `tx_audio_underruns` counter on `HL2Stream` — increments
+  every time the EP2 packer zero-pads silence into a frame.
+- `tx_audio_overruns` counter on `HL2Stream` — increments
+  every time `queue_tx_audio` saturates the 48 kHz deque.
+- SoundDeviceSink ring `_overruns` / `_underruns` counters
+  printed periodically to console (see `audio_sink.py` line
+  383–409).
+- `LYRA_AUDIO_DEBUG=1` env var — `Radio._diagnose_audio_step`
+  prints rate-limited log lines for post-AGC sample-to-sample
+  steps >0.05 amplitude (CLAUDE.md §9.6).
+
+**New for rebuild phase (Commit 1 lands these):**
+- **Re-expose** the underrun/overrun counters in the UI status
+  bar during pre-release builds.  Hide them again in v0.0.9.2
+  full release once they're confirmed steady at zero.
+- **Worker-thread heartbeat** — count of blocks processed by
+  the DSP worker thread, sampled at 1 Hz.  If it stops
+  incrementing while audio is playing, the worker has stalled.
+  Surfaced as a "DSP worker: N Hz" readout in the same area.
+- **Deque high-water mark** — running max of the deque depth
+  observed during the last 10 seconds.  Tells us if backpressure
+  is actually engaging.
+
+These give us objective regression detection — if Commit N
+ships and the underrun counter stays at zero across an hour of
+listening on both rigs, that's evidence the architectural fix
+holds.  If the counter ticks up, we have a number to show.
+
+### 9.6 Rollback decision criteria
+
+Numbered tripwires.  If any of these hits, halt and re-evaluate
+before continuing:
+
+1. **Hard tripwire — any rebuild commit makes audio audibly
+   worse than v0.0.9.1.**  Immediate revert.  Re-investigate
+   before next attempt.  This is the line we do NOT cross.
+2. **Soft tripwire — underrun counter > 1 per minute on either
+   rig at the end of a rebuild commit's flight-test.**  Don't
+   merge.  Diagnose before next commit.
+3. **Soft tripwire — DSP worker heartbeat drops below 30 Hz
+   sustained.**  Indicates worker is stalling.  Diagnose before
+   next commit.
+4. **Halt-rebuild tripwire — three consecutive commits fail
+   their flight-test.**  Stop the rebuild.  The diagnosis is
+   probably wrong; re-do the audit before resuming.
+5. **Hard halt — any rebuild commit produces a deadlock,
+   crash, or data corruption.**  Immediate revert + post-mortem
+   doc before resuming.
+
+**Forward-fix vs revert calls:**
+- A new bug introduced by Commit N that's clearly bounded and
+  fixable in Commit N+1 → forward-fix.
+- A new bug whose scope is unclear or whose fix is non-trivial
+  → revert Commit N, treat as a re-design.
+
+### 9.7 Data preservation guarantees
+
+Operator data MUST survive any rebuild commit, downgrade, or
+upgrade in this cycle.  No schema bumps in the rebuild.
+
+**Persistent data locations (Windows):**
+
+```
+%APPDATA%\N8SDR1\Lyra.ini                      ← QSettings
+%LOCALAPPDATA%\Programs\Lyra\                  ← installed binaries
+%USERPROFILE%\.config\lyra\noise_profiles\     ← captured noise profiles
+%USERPROFILE%\.config\lyra\memory_bank.csv     ← memory bank entries
+%USERPROFILE%\.config\lyra\ps_corrections\     ← PS coefficients (v0.3+)
+```
+
+**Guarantees the rebuild MUST preserve:**
+- QSettings keys: no renames, no removals, no type changes.
+  New keys may be added; old keys remain readable.  Specifically
+  the existing `update_check/*`, `tci/*`, `audio/*`, `dsp/*`
+  trees stay schema-stable.
+- Noise profile files: format unchanged.  Operator-curated;
+  loss = real loss.
+- Memory bank CSV: format unchanged.
+- Captured profiles, memory entries, station data: all
+  untouched by the rebuild.
+
+If any rebuild commit needs a new QSettings key, it gets a
+default value that produces v0.0.9.1-equivalent behavior, and
+the schema migration (if any) is one-way only — old install
+reads new keys with defaults.
+
+### 9.8 Communication plan to testers
+
+For each pre-release, the GitHub release notes must include:
+
+1. **What changed** — concrete list of behavioral changes.
+2. **What to test** — specific things we want eyes on.
+3. **Known issues** — anything we already know is regressed.
+4. **Recovery procedure** — link to §9.4 if anything goes
+   wrong.
+5. **Tracker link** — where to file an issue.
+
+Pre-release tag format: `v0.0.9.2-preN` where N = commit number.
+Marked as **pre-release** on GitHub so the auto-update silent
+checker (post-fix) flags it for opted-in testers but not
+random downloaders.
+
+### 9.9 Hard non-negotiables
+
+These are commitments we make BEFORE the rebuild starts and
+hold through to ship:
+
+1. `main` does NOT move from v0.0.9.1 until the full rebuild
+   passes flight-test from BOTH operators.
+2. The v0.0.9.1 GitHub Release is NEVER deleted, edited, or
+   marked pre-release.  It is the permanent fallback binary.
+3. No operator data is lost in any commit, ever.  Schema bumps
+   are forbidden in this rebuild scope.
+4. Every architectural change ships with an operator-toggleable
+   off-switch via Settings → Advanced.
+5. If the diagnosis is proven wrong by Commit 1 data, we STOP
+   and re-investigate before continuing.  Sunk cost is not a
+   reason to continue.
+
+### 9.10 What we'll know at each milestone
+
+| After this commit | We will know |
+|---|---|
+| Commit 1 lands + 1 week test | Whether moving DSP off Qt main thread alone reduces clicks measurably.  Tells us if cadence-mismatch hypothesis is right. |
+| Commit 2 lands + 1 week test | Whether matching producer/consumer block sizes eliminates underruns at zero load.  Tells us if cadence is the only producer-side issue. |
+| Commit 3 lands + 1 week test | Whether real backpressure handles UI-load and stress conditions.  Tells us the design is robust. |
+| Commit 4 lands + 1 week test | Whether MMCSS priority closes the last jitter source on Windows.  Tells us about scheduler interactions. |
+| Commit 5 (Wireshark doc) | Whether HL2 gateware replays last buffer on EP2 underrun.  Resolves Bug #2 hypothesis empirically. |
+| Commit 6 (gap-fade fix) | One-line cleanup; mostly cosmetic. |
+| All 6 + 2 weeks total test | Whether v0.0.9.2 is ship-ready or needs another iteration. |
+
+If we get to "all 6 + 2 weeks" and the audio is still problematic,
+we revert `feature/audio-architecture-v2` entirely, return to
+v0.0.9.1 as `main`, and re-do the audit from scratch with the
+data we collected.  That's a worst-case outcome of three weeks
+of work and is bounded — not an open-ended risk.
