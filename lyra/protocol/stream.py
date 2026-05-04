@@ -917,32 +917,13 @@ class HL2Stream:
         # tolerance is at least hundreds of ms, but we don't want
         # to push it).
         EP2_KEEPALIVE_MAX_GAP = 0.050  # 50 ms
-        # Path C.4: writer-side rate cap.  Path C's producer-paced
-        # semaphore makes the writer fire as fast as the producer
-        # signals.  At 192 k IQ rate that's a tolerable burst (~4
-        # frames in <1 ms then 10 ms gap), but at lower rates the
-        # burst grows linearly: at 48 k each DSP block produces
-        # 16 EP2 frames' worth of audio at once, so 16 frames go
-        # out in <1 ms then 42 ms of silence.  The HL2's gateware
-        # FIFO can't absorb a 16-frame burst cleanly -- operator
-        # hears clicks/pops and occasional volume bursts at 48 k,
-        # less at 96 k, clean at 192 k.  Fix: cap the writer to
-        # the codec's true cadence (380.95 Hz = 48000 / 126).
-        # ``next_fire_t`` carries forward across iterations so a
-        # burst of N pending signals drains at N * 2.625 ms total,
-        # not N microseconds.  ``max(..., now)`` on the schedule
-        # prevents burst-catchup after a long gap (keepalive
-        # resume, sink swap, etc.).
-        EP2_FRAME_INTERVAL = 1.0 / 380.95  # ~2.625 ms
         print(f"[HL2Stream] EP2 cadence: producer-paced via "
               f"semaphore (Thetis-style); "
               f"{EP2_HEARTBEAT_TIMEOUT*1000:.0f} ms heartbeat "
               f"timeout, {EP2_KEEPALIVE_MAX_GAP*1000:.0f} ms "
-              f"keepalive fence, "
-              f"{EP2_FRAME_INTERVAL*1000:.2f} ms rate cap")
+              f"keepalive fence")
 
         last_ep2_send_t = time.monotonic()
-        next_fire_t = time.monotonic()
         try:
             while not self._stop_event.is_set():
                 # ── Wait for audio-ready signal OR heartbeat tick ──
@@ -978,22 +959,6 @@ class HL2Stream:
                             < EP2_KEEPALIVE_MAX_GAP):
                         continue
                     # else: long gap, fall through to send keepalive
-
-                # ── Path C.4: rate-cap to codec cadence ────────────
-                # We've decided to send a frame.  Sleep here so the
-                # frame goes out at the next allowed slot, NOT
-                # whenever the producer happened to release the sem.
-                # When the producer dumps a burst (e.g., 16 signals
-                # at once at 48 k), this sleep distributes the sends
-                # evenly at 2.625 ms intervals instead of <1 ms
-                # bursts that overwhelm the codec FIFO.  When we're
-                # already past next_fire_t (resume after idle, or
-                # at startup) the delay is non-positive and we fire
-                # immediately -- the max() in the schedule update
-                # below prevents burst-catchup.
-                now = time.monotonic()
-                if now < next_fire_t:
-                    time.sleep(next_fire_t - now)
 
                 # ── Drain audio + build + send EP2 frame ───────────
                 # If we got an audio signal AND injection is enabled,
@@ -1058,15 +1023,6 @@ class HL2Stream:
                     # Path C.3: stamp the send so the keepalive
                     # fence above can measure gap-since-last-send.
                     last_ep2_send_t = time.monotonic()
-                    # Path C.4: schedule the next allowed fire.
-                    # ``+ INTERVAL`` keeps a steady cadence when
-                    # we're firing on time; ``max(..., last_send)``
-                    # collapses arbitrary backlog (next_fire_t was
-                    # stale because we just resumed from a long
-                    # idle) so we don't burst-fire to catch up.
-                    next_fire_t = max(
-                        next_fire_t + EP2_FRAME_INTERVAL,
-                        last_ep2_send_t)
                 except OSError:
                     # Socket likely closed during stop().  Exit
                     # cleanly.
