@@ -890,11 +890,32 @@ class HL2Stream:
                 signaled = self._ep2_send_sem.acquire(
                     timeout=EP2_HEARTBEAT_TIMEOUT)
 
+                # ── Path C bug fix (Path C.1): heartbeat is C&C only
+                # When ``inject_audio_tx`` is True, the heartbeat
+                # timeout MUST NOT fire an EP2 frame.  Reason:
+                # firing on heartbeat means sending an EP2 frame
+                # with zero audio bytes, which the AK4951 codec
+                # interprets as 2.625 ms of silence inserted into
+                # the audio stream.  At a typical 90 Hz DSP block
+                # rate (~11 ms gap between producer bursts) the
+                # 10 ms heartbeat timeout will fire DURING the gap
+                # roughly once per DSP cycle, injecting a silence
+                # frame between every burst of real-audio frames.
+                # Operator-perceived as severe distortion / volume
+                # swing / popping.  Solution: when injecting audio,
+                # ONLY fire on a real signal.  When NOT injecting
+                # (PC Soundcard mode etc.), the heartbeat is the
+                # right behavior -- send C&C-only frames to keep
+                # register state propagating to the radio.
+                if not signaled and self.inject_audio_tx:
+                    continue
+
                 # ── Drain audio + build + send EP2 frame ───────────
                 # If we got an audio signal AND injection is enabled,
                 # drain 126 samples and send an audio frame.
-                # Otherwise (timeout or injection disabled) send a
-                # C&C-only frame to keep state in sync with the radio.
+                # Otherwise (heartbeat-fired with injection disabled)
+                # send a C&C-only frame so register state still
+                # propagates to the radio.
                 audio_bytes: Optional[bytes] = None
                 if signaled and self.inject_audio_tx:
                     with self._tx_audio_lock:
