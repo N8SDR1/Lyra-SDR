@@ -898,37 +898,67 @@ class HL2Stream:
         # when audio stops, we still emit C&C-only frames at
         # ~100 Hz so register state changes (frequency, AGC, etc.)
         # propagate to the radio promptly.
-        EP2_HEARTBEAT_TIMEOUT = 0.010  # 10 ms = 100 Hz min cadence
+        EP2_HEARTBEAT_TIMEOUT = 0.010  # 10 ms = sem.acquire timeout
+        # Path C.3: keepalive fence.  When injecting audio, Path C.1
+        # made us skip the heartbeat to avoid silence-frame insertion
+        # during the normal ~11 ms inter-DSP-block gap.  But when
+        # the producer stops for a longer stretch -- band change
+        # triggers DSP reset (100-200 ms), or DSP worker stalls --
+        # silently skipping kept the EP2 line completely quiet,
+        # which violated the HL2's mandatory EP2-keepalive contract
+        # and caused EP6 streaming to halt (operator-visible as
+        # "display freezes on band change, only Stop/Start fixes").
+        # Fix: only skip the heartbeat while we've sent a frame
+        # recently.  Past EP2_KEEPALIVE_MAX_GAP since the last send,
+        # let the heartbeat fire C&C-only frames so the HL2 stays
+        # connected.  50 ms threshold = comfortably past one DSP
+        # block (~11 ms) but well under any plausible HL2 keepalive
+        # timeout (HL2 spec doesn't pin a number; field-tested
+        # tolerance is at least hundreds of ms, but we don't want
+        # to push it).
+        EP2_KEEPALIVE_MAX_GAP = 0.050  # 50 ms
         print(f"[HL2Stream] EP2 cadence: producer-paced via "
               f"semaphore (Thetis-style); "
-              f"{EP2_HEARTBEAT_TIMEOUT*1000:.0f} ms C&C heartbeat "
-              f"fallback")
+              f"{EP2_HEARTBEAT_TIMEOUT*1000:.0f} ms heartbeat "
+              f"timeout, {EP2_KEEPALIVE_MAX_GAP*1000:.0f} ms "
+              f"keepalive fence")
 
+        last_ep2_send_t = time.monotonic()
         try:
             while not self._stop_event.is_set():
                 # ── Wait for audio-ready signal OR heartbeat tick ──
                 signaled = self._ep2_send_sem.acquire(
                     timeout=EP2_HEARTBEAT_TIMEOUT)
 
-                # ── Path C bug fix (Path C.1): heartbeat is C&C only
-                # When ``inject_audio_tx`` is True, the heartbeat
-                # timeout MUST NOT fire an EP2 frame.  Reason:
-                # firing on heartbeat means sending an EP2 frame
-                # with zero audio bytes, which the AK4951 codec
-                # interprets as 2.625 ms of silence inserted into
-                # the audio stream.  At a typical 90 Hz DSP block
-                # rate (~11 ms gap between producer bursts) the
-                # 10 ms heartbeat timeout will fire DURING the gap
-                # roughly once per DSP cycle, injecting a silence
-                # frame between every burst of real-audio frames.
-                # Operator-perceived as severe distortion / volume
-                # swing / popping.  Solution: when injecting audio,
-                # ONLY fire on a real signal.  When NOT injecting
-                # (PC Soundcard mode etc.), the heartbeat is the
-                # right behavior -- send C&C-only frames to keep
-                # register state propagating to the radio.
+                # ── Path C.1 / C.3: heartbeat handling under inject
+                # When ``inject_audio_tx`` is True and the heartbeat
+                # fired (no signal arrived within
+                # EP2_HEARTBEAT_TIMEOUT), we have two cases:
+                #
+                # (a) Recent send (gap < KEEPALIVE_MAX_GAP):
+                #     Normal DSP inter-block gap.  Skip the iteration
+                #     -- firing a C&C-only frame here would insert
+                #     2.625 ms of silence between real-audio frames
+                #     and the AK4951 hears it as a click.  This is
+                #     the original Path C.1 fix.
+                #
+                # (b) Long gap (>= KEEPALIVE_MAX_GAP):
+                #     Producer is stalled (band change DSP reset,
+                #     worker hiccup, etc.).  Fall through to the
+                #     send branch and emit a C&C-only frame.  HL2
+                #     needs EP2 keepalive to keep streaming EP6;
+                #     the audio is already silent so a few zero-
+                #     audio frames don't add a click.  This is the
+                #     Path C.3 fix.
+                #
+                # When ``inject_audio_tx`` is False (PC Soundcard
+                # mode), heartbeat always fires C&C-only frames --
+                # there's no audio to click.
                 if not signaled and self.inject_audio_tx:
-                    continue
+                    if (time.monotonic() - last_ep2_send_t
+                            < EP2_KEEPALIVE_MAX_GAP):
+                        continue
+                    # else: long gap, fall through to send keepalive
 
                 # ── Drain audio + build + send EP2 frame ───────────
                 # If we got an audio signal AND injection is enabled,
@@ -990,6 +1020,9 @@ class HL2Stream:
                             self._sock.sendto(
                                 frame,
                                 (self.radio_ip, DISCOVERY_PORT))
+                    # Path C.3: stamp the send so the keepalive
+                    # fence above can measure gap-since-last-send.
+                    last_ep2_send_t = time.monotonic()
                 except OSError:
                     # Socket likely closed during stop().  Exit
                     # cleanly.
