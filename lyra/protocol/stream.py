@@ -266,56 +266,10 @@ class HL2Stream:
         # sink swap, which is sub-3 ms and inaudible).
         # AUDIT VERDICT: existing locking is sufficient.
         from collections import deque
-        # TX audio deque + producer/consumer coordination.
-        #
-        # **v0.0.9.2 audio rebuild Commit 3 (real backpressure).**
-        # Pre-Commit 3 the deque was unbounded-on-the-consumer-side
-        # (silently dropping oldest on producer overrun) and zero-
-        # padded on the consumer side (silently injecting silence on
-        # consumer underrun).  Both produced audible clicks at the
-        # AK4951 codec.
-        #
-        # Now: the deque is protected by ``_tx_audio_cond`` (a
-        # ``threading.Condition`` wrapping ``_tx_audio_lock``).  The
-        # producer (``queue_tx_audio``) WAITS when depth >= HIGH_WATER
-        # so it can't pile up samples ahead of the consumer.  The
-        # consumer (``_pack_audio_bytes``) takes what's available and
-        # only zero-pads if a stall has truly drained the buffer
-        # (catastrophic case; rare with cadence-matched producer).
-        # Both sides ``notify_all()`` after their critical section so
-        # the other side wakes promptly.
-        #
-        # Rationale: this mirrors Thetis's blocking-handshake design
-        # in spirit -- producer can never run away from the consumer,
-        # consumer never silently injects silence under normal jitter
-        # because producer is held in lockstep.
-        #
-        # HIGH_WATER = 504 = 4 EP2 consumer frames at 126 samples/frame.
-        # With Commit 2's cadence-matched 381 Hz producer/consumer
-        # rate, depth in steady state oscillates 0-126; HIGH_WATER=504
-        # leaves 4x jitter headroom before producer is forced to wait.
-        # Capped maxlen retained as a defense-in-depth safety bound
-        # (deque CAN grow past HIGH_WATER if notify timing slips, but
-        # never past maxlen which is the absolute safety net).
+        # 1 s buffer at 48 kHz — caps unbounded growth if the demod
+        # produces faster than the EP2 builder consumes.
         self._tx_audio: deque = deque(maxlen=48000)
         self._tx_audio_lock = threading.Lock()
-        self._tx_audio_cond = threading.Condition(self._tx_audio_lock)
-        # Backpressure target depth.  Producer waits when len(_tx_audio)
-        # >= this value.  Operator-tunable in the future (Settings →
-        # Advanced → Audio buffer depth) if some rig benefits from a
-        # larger value; default sized for the common case at 48 kHz
-        # consumer cadence.
-        self.tx_audio_high_water_target: int = 504
-        # Set to True when the stream is shutting down so any waiter
-        # wakes and exits cleanly instead of blocking forever.
-        self._tx_audio_shutdown: bool = False
-        # Producer wait counter — increments every time queue_tx_audio
-        # actually had to wait for the consumer to drain.  In a
-        # healthy cadence-matched system this should be near zero;
-        # high values mean producer is consistently outpacing consumer
-        # (which is fine -- backpressure is doing its job -- but the
-        # number is useful telemetry).
-        self.tx_audio_producer_waits: int = 0
         # EP2 cadence throttle: increments every EP6 frame; keepalive
         # only fires when count % (sample_rate/48000) == 0.
         self._ep6_count = 0
@@ -356,7 +310,7 @@ class HL2Stream:
         reset is atomic w.r.t. concurrent ``queue_tx_audio`` and
         ``_pack_audio_bytes`` updates.
         """
-        with self._tx_audio_cond:
+        with self._tx_audio_lock:
             hw = self.tx_audio_high_water
             self.tx_audio_high_water = len(self._tx_audio)
             return hw
@@ -404,13 +358,9 @@ class HL2Stream:
         a 48 kHz cadence — every slot carries a real sample.
         """
         import numpy as np
-        with self._tx_audio_cond:
+        with self._tx_audio_lock:
             avail = min(len(self._tx_audio), n_samples)
             pulled = [self._tx_audio.popleft() for _ in range(avail)]
-            # Wake any producer waiting for the deque to drain
-            # below high-water.  This is the signal half of the
-            # backpressure handshake.
-            self._tx_audio_cond.notify_all()
         if avail < n_samples:
             # Underrun — TX queue had less data than EP2 wants to send.
             # Pad with zeros so the EP2 frame is always the right size,
@@ -469,27 +419,12 @@ class HL2Stream:
             # audio silently on an unexpected shape.
             flat = a.reshape(-1)
             pairs = list(zip(flat.tolist(), flat.tolist()))
-        with self._tx_audio_cond:
-            # Backpressure (v0.0.9.2 audio rebuild Commit 3).
-            # Wait until depth is below the high-water target so the
-            # producer can never pile up samples ahead of the
-            # consumer.  Bounded wait (50 ms timeout) so a stuck
-            # consumer can't deadlock the producer indefinitely --
-            # the counter still increments and the operator sees
-            # buffer-full conditions in the telemetry.
-            waited = False
-            while (len(self._tx_audio) >= self.tx_audio_high_water_target
-                   and not self._tx_audio_shutdown):
-                waited = True
-                self._tx_audio_cond.wait(timeout=0.050)
-            if waited:
-                self.tx_audio_producer_waits += 1
-            if self._tx_audio_shutdown:
-                # Stream shutting down -- drop the samples cleanly
-                # rather than push them into a deque that's about to
-                # be cleared.  Sink close path will drain.
-                return
-
+        with self._tx_audio_lock:
+            # Detect overrun: when the deque is at maxlen and we
+            # extend, the oldest elements are silently DROPPED.  Count
+            # the would-be-dropped samples as overrun events so the
+            # operator can see queue saturation in the status bar.
+            # v0.0.9.1+ click investigation.
             # Track high-water mark BEFORE the extend so a producer
             # burst that arrives while the deque is full is captured
             # in the rolling-window observation.
@@ -497,43 +432,18 @@ class HL2Stream:
             if depth_after > self.tx_audio_high_water:
                 self.tx_audio_high_water = min(
                     depth_after, self._tx_audio.maxlen)
-            # Overrun counter: with backpressure active the producer
-            # waits for the consumer instead of silently dropping
-            # oldest, so this should stay 0 in healthy operation.
-            # The maxlen is a defense-in-depth safety net: if some
-            # bug causes notify_all not to fire and the producer's
-            # 50 ms wait expires while still over high-water, the
-            # extend can still happen and overrun the maxlen.  In
-            # that case deque-extend silently drops oldest as before.
             free_slots = self._tx_audio.maxlen - len(self._tx_audio)
             if len(pairs) > free_slots:
                 self.tx_audio_overruns += len(pairs) - free_slots
             self._tx_audio.extend(pairs)
-            # Wake the consumer in case it was waiting on a starved
-            # buffer (e.g. just after stream startup before producer
-            # cadence is established).
-            self._tx_audio_cond.notify_all()
 
     def clear_tx_audio(self):
         """Drain any pending samples from the TX audio queue. Called
         by AK4951Sink on init/close to prevent stale audio from a
         previous session leaking into a new session — the symptom
-        was "digitized robotic" sound right after switching sinks.
-        Notifies any waiting producer so it doesn't deadlock if the
-        clear happens while the producer is held at high-water."""
-        with self._tx_audio_cond:
+        was "digitized robotic" sound right after switching sinks."""
+        with self._tx_audio_lock:
             self._tx_audio.clear()
-            self._tx_audio_cond.notify_all()
-
-    def shutdown_tx_audio(self):
-        """Wake any waiting producer cleanly so it can exit without
-        a deadlock.  Called by HL2Stream.stop() before the underlying
-        socket closes -- without this, a producer held in
-        ``queue_tx_audio``'s backpressure wait would block forever
-        when the consumer side dies.  Idempotent."""
-        with self._tx_audio_cond:
-            self._tx_audio_shutdown = True
-            self._tx_audio_cond.notify_all()
 
     def fade_and_replace_tx_audio(self, fade_ms: float = 5.0) -> int:
         """Replace the TX audio queue with a short fade-out tail.
@@ -562,7 +472,7 @@ class HL2Stream:
         (useful for the caller to compute the drain wait).
         """
         FADE_SAMPLES = max(1, int(fade_ms * 48.0))
-        with self._tx_audio_cond:
+        with self._tx_audio_lock:
             n = len(self._tx_audio)
             if n == 0:
                 # Nothing playing to fade out.  No click possible.
@@ -725,14 +635,6 @@ class HL2Stream:
         self._keepalive_cc = (0x14, 0, 0, 0, c4)
 
     def stop(self):
-        # Wake any producer held at the backpressure gate so it can
-        # exit its wait cleanly when the stream itself is going away
-        # (v0.0.9.2 audio rebuild Commit 3).  Sink-close cycles use
-        # clear_tx_audio's notify_all instead -- shutdown_tx_audio
-        # sets a persistent flag that prevents future producer
-        # activity, which is correct for stream shutdown but wrong
-        # for sink swaps.
-        self.shutdown_tx_audio()
         self._stop_event.set()
         if self._sock is not None:
             try:
