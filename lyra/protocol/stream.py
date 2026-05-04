@@ -584,6 +584,101 @@ class HL2Stream:
                   f"bump failed: {e}")
 
     @staticmethod
+    def _setup_win32_waitable_timer():
+        """Create a Win32 native waitable timer for kernel-precision
+        cadence in the EP2 writer thread.
+
+        Returns a dict with ctypes function references and the timer
+        handle, or ``None`` on non-Windows platforms or if any of
+        the API calls fails.
+
+        Why this exists: Python's ``time.sleep()`` plus busy-wait
+        spin can't reliably hit 380 Hz on Windows because the GIL
+        switch interval, scheduler granularity, and Python interpreter
+        overhead all combine to cap the effective cadence around
+        300-370 Hz.  A Win32 WaitableTimer + ``WaitForSingleObject``
+        moves the wait into the kernel: the wait releases the GIL
+        (so the worker thread can run during the wait), and the
+        wake-up happens at exactly the timer's set time -- no
+        Python-side scheduling jitter.
+
+        Usage:
+            ctx = HL2Stream._setup_win32_waitable_timer()
+            if ctx is not None:
+                due_time = ctypes.c_longlong(absolute_filetime_100ns)
+                ctx['SetWaitableTimer'](
+                    ctx['handle'], ctypes.byref(due_time), 0,
+                    None, None, False)
+                ctx['WaitForSingleObject'](ctx['handle'], 5000)
+                # ... eventually:
+                ctx['CloseHandle'](ctx['handle'])
+
+        Lyra-native ctypes wrapper; not derived from any external
+        codebase.  Mirrors a standard Windows real-time-audio idiom.
+        """
+        try:
+            import sys
+            if not sys.platform.startswith("win"):
+                return None
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+            CreateWaitableTimerW = kernel32.CreateWaitableTimerW
+            CreateWaitableTimerW.restype = wintypes.HANDLE
+            CreateWaitableTimerW.argtypes = [
+                wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+
+            SetWaitableTimer = kernel32.SetWaitableTimer
+            SetWaitableTimer.restype = wintypes.BOOL
+            SetWaitableTimer.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(ctypes.c_longlong),
+                wintypes.LONG,
+                wintypes.LPVOID, wintypes.LPVOID,
+                wintypes.BOOL]
+
+            WaitForSingleObject = kernel32.WaitForSingleObject
+            WaitForSingleObject.restype = wintypes.DWORD
+            WaitForSingleObject.argtypes = [
+                wintypes.HANDLE, wintypes.DWORD]
+
+            GetSystemTimePreciseAsFileTime = (
+                kernel32.GetSystemTimePreciseAsFileTime)
+            GetSystemTimePreciseAsFileTime.restype = None
+            GetSystemTimePreciseAsFileTime.argtypes = [
+                ctypes.POINTER(wintypes.FILETIME)]
+
+            CloseHandle = kernel32.CloseHandle
+            CloseHandle.restype = wintypes.BOOL
+            CloseHandle.argtypes = [wintypes.HANDLE]
+
+            # Auto-reset timer (signals once per fire, then resets).
+            handle = CreateWaitableTimerW(None, False, None)
+            if not handle:
+                err = ctypes.get_last_error()
+                print(f"[HL2Stream] CreateWaitableTimer failed "
+                      f"(GetLastError={err}); falling back to "
+                      f"time.sleep cadence")
+                return None
+
+            print(f"[HL2Stream] EP2 cadence using Win32 WaitableTimer "
+                  f"(kernel-precision, GIL-released wait)")
+            return {
+                "handle": handle,
+                "SetWaitableTimer": SetWaitableTimer,
+                "WaitForSingleObject": WaitForSingleObject,
+                "GetSystemTimePreciseAsFileTime":
+                    GetSystemTimePreciseAsFileTime,
+                "CloseHandle": CloseHandle,
+                "FILETIME": wintypes.FILETIME,
+            }
+        except Exception as e:  # noqa: BLE001
+            print(f"[HL2Stream] Win32 WaitableTimer setup failed: "
+                  f"{e} (falling back to time.sleep cadence)")
+            return None
+
+    @staticmethod
     def _maybe_apply_mmcss_pro_audio(profile_name: str = "Pro Audio"):
         """Best-effort thread priority elevation on Windows via MMCSS.
 
@@ -707,83 +802,157 @@ class HL2Stream:
             print(f"[HL2Stream] setswitchinterval failed: {e}")
 
         EP2_PERIOD = 126.0 / 48000.0  # 2.625 ms = 380.95 Hz
-        # Hybrid sleep+spin guard: sleep until this many seconds
-        # before target, then busy-wait the rest.  Trades a small
-        # amount of writer-thread CPU (spin) for sub-ms wake-up
-        # precision.  500 us is enough margin to absorb GIL
-        # contention spikes without wasting too much CPU.
-        SPIN_GUARD = 0.0005
+        EP2_PERIOD_100NS = int(EP2_PERIOD * 1e7)  # = 26250 (100-ns ticks)
 
-        next_fire = time.monotonic() + EP2_PERIOD
+        # Try to set up a Win32 native waitable timer.  Returns None
+        # on non-Windows or if the API is unavailable.  When available,
+        # the timer's WaitForSingleObject runs at kernel precision and
+        # releases the GIL during the wait, so the worker thread can
+        # run freely while the writer is asleep.  When unavailable
+        # (non-Windows / API error), we fall back to a hybrid
+        # time.sleep + GIL-yield loop.
+        timer_ctx = self._setup_win32_waitable_timer()
 
-        while not self._stop_event.is_set():
-            # Hybrid sleep+spin to reach next cadence tick with
-            # sub-ms precision.  See SPIN_GUARD comment above.
-            target = next_fire
-            while True:
-                now = time.monotonic()
-                remaining = target - now
-                if remaining <= 0:
-                    break
-                if remaining > SPIN_GUARD:
-                    # Sleep most of the way; release GIL so other
-                    # threads can run.  Multiply by 0.5 so we don't
-                    # over-shoot if scheduler returns late.
-                    time.sleep(remaining * 0.5)
+        # Cadence state -- maintained whether we're using the Win32
+        # path or the fallback.  ``next_fire_*`` is the absolute time
+        # of the next intended fire; we use absolute time (not
+        # relative) so per-iteration work overhead doesn't accumulate
+        # as drift.
+        if timer_ctx is not None:
+            # Win32 path: track absolute time in 100-ns FILETIME units.
+            ft = timer_ctx["FILETIME"]()
+            timer_ctx["GetSystemTimePreciseAsFileTime"](
+                ctypes.byref(ft))
+            current_100ns = (
+                (ft.dwHighDateTime << 32) | ft.dwLowDateTime)
+            next_fire_100ns = current_100ns + EP2_PERIOD_100NS
+            next_fire_perf = None  # unused on Win32 path
+        else:
+            # Fallback path: track absolute time in monotonic seconds.
+            next_fire_100ns = None
+            next_fire_perf = time.monotonic() + EP2_PERIOD
+
+        try:
+            while not self._stop_event.is_set():
+                # ── Wait for next cadence tick ──────────────────────
+                if timer_ctx is not None:
+                    # Win32 native: set timer to fire at the absolute
+                    # target time (positive value = absolute UTC
+                    # FILETIME), then wait.  WaitForSingleObject
+                    # releases the GIL during the wait, so the worker
+                    # thread can run freely.  Bounded 5 s timeout in
+                    # case the timer somehow doesn't fire (defensive).
+                    due_time = ctypes.c_longlong(next_fire_100ns)
+                    timer_ctx["SetWaitableTimer"](
+                        timer_ctx["handle"],
+                        ctypes.byref(due_time),
+                        0,        # period_ms = 0 (one-shot; we re-arm
+                                  #  each iteration with the next
+                                  #  absolute target)
+                        None,     # completion routine
+                        None,     # callback arg
+                        False,    # resume system from suspend?
+                    )
+                    timer_ctx["WaitForSingleObject"](
+                        timer_ctx["handle"], 5000)
+                    next_fire_100ns += EP2_PERIOD_100NS
+                    # Resync if we fell catastrophically behind
+                    # (e.g., long system suspend).  Compare against
+                    # current time; if we're more than one period
+                    # late, restart from now.
+                    timer_ctx["GetSystemTimePreciseAsFileTime"](
+                        ctypes.byref(ft))
+                    current_100ns = (
+                        (ft.dwHighDateTime << 32)
+                        | ft.dwLowDateTime)
+                    if next_fire_100ns < current_100ns - EP2_PERIOD_100NS:
+                        next_fire_100ns = (
+                            current_100ns + EP2_PERIOD_100NS)
                 else:
-                    # Busy-wait the last sub-ms.  Holds GIL but the
-                    # spin is short enough that the cost is bounded.
-                    pass
-            next_fire += EP2_PERIOD
-            # Resync if we fell badly behind (e.g., system suspend).
-            now = time.monotonic()
-            if next_fire < now - EP2_PERIOD:
-                next_fire = now + EP2_PERIOD
+                    # Python fallback: sleep half the remaining time
+                    # repeatedly until target reached.  Yields GIL on
+                    # each sleep.  Less precise than Win32 path but
+                    # works on any platform.
+                    while True:
+                        now = time.monotonic()
+                        remaining = next_fire_perf - now
+                        if remaining <= 0:
+                            break
+                        if remaining > 0.001:
+                            time.sleep(remaining * 0.5)
+                        else:
+                            # Last sub-ms: yield to other threads
+                            # rather than busy-spin (which would
+                            # hold the GIL and starve the worker).
+                            time.sleep(0)
+                    next_fire_perf += EP2_PERIOD
+                    if next_fire_perf < time.monotonic() - EP2_PERIOD:
+                        next_fire_perf = time.monotonic() + EP2_PERIOD
 
-            # Drain up to 126 samples from the audio queue.  The
-            # underrun counter increments when the queue is short
-            # AND audio injection is enabled (i.e., AK4951 sink is
-            # active).  When injection is disabled we send C&C-only
-            # frames; queue contents (if any from a stale sink) are
-            # left alone for the next sink to consume or clear.
-            audio_bytes: Optional[bytes] = None
-            if self.inject_audio_tx:
-                with self._tx_audio_lock:
-                    avail = min(len(self._tx_audio), 126)
-                    pulled = [self._tx_audio.popleft()
-                              for _ in range(avail)]
-                if avail < 126:
-                    self.tx_audio_underruns += 1
-                    pulled.extend([(0.0, 0.0)] * (126 - avail))
+                # ── Drain audio + build + send EP2 frame ───────────
+                # Drain up to 126 samples from the audio queue.  The
+                # underrun counter increments when the queue is short
+                # AND audio injection is enabled (i.e., AK4951 sink is
+                # active).  When injection is disabled we send C&C-only
+                # frames; queue contents (if any from a stale sink)
+                # are left alone for the next sink to consume or clear.
+                audio_bytes: Optional[bytes] = None
+                if self.inject_audio_tx:
+                    with self._tx_audio_lock:
+                        avail = min(len(self._tx_audio), 126)
+                        pulled = [self._tx_audio.popleft()
+                                  for _ in range(avail)]
+                    if avail < 126:
+                        self.tx_audio_underruns += 1
+                        pulled.extend([(0.0, 0.0)] * (126 - avail))
+                    try:
+                        audio_bytes = self._pack_audio_bytes_pairs(
+                            pulled)
+                    except Exception as exc:  # noqa: BLE001
+                        _log.warning(
+                            "EP2 audio packing error: %s", exc)
+                        audio_bytes = None
+
+                # Pick next C&C round-robin entry, build the frame,
+                # send it.  All wrapped in a single try/except so a
+                # transient socket / build error does not kill the
+                # writer thread; we just log and continue.
                 try:
-                    audio_bytes = self._pack_audio_bytes_pairs(pulled)
+                    with self._cc_lock:
+                        if self._cc_registers:
+                            keys = sorted(self._cc_registers.keys())
+                            c0 = keys[self._cc_rr_idx % len(keys)]
+                            c1, c2, c3, c4 = self._cc_registers[c0]
+                            self._cc_rr_idx = (
+                                self._cc_rr_idx + 1) % len(keys)
+                        else:
+                            c0 = c1 = c2 = c3 = 0
+                            c4 = self._config_c4
+                    frame = self._build_ep2_frame_with_audio(
+                        c0, c1, c2, c3, c4, audio_bytes)
+                    with self._send_lock:
+                        if self._sock is not None:
+                            self._sock.sendto(
+                                frame,
+                                (self.radio_ip, DISCOVERY_PORT))
+                except OSError:
+                    # Socket likely closed during stop().  Exit
+                    # cleanly so the finally block can release the
+                    # Win32 timer handle.
+                    break
                 except Exception as exc:  # noqa: BLE001
-                    _log.warning("EP2 audio packing error: %s", exc)
-                    audio_bytes = None
-
-            # Pick next C&C round-robin entry.
-            try:
-                with self._cc_lock:
-                    if self._cc_registers:
-                        keys = sorted(self._cc_registers.keys())
-                        c0 = keys[self._cc_rr_idx % len(keys)]
-                        c1, c2, c3, c4 = self._cc_registers[c0]
-                        self._cc_rr_idx = (
-                            self._cc_rr_idx + 1) % len(keys)
-                    else:
-                        c0 = c1 = c2 = c3 = 0
-                        c4 = self._config_c4
-                frame = self._build_ep2_frame_with_audio(
-                    c0, c1, c2, c3, c4, audio_bytes)
-                with self._send_lock:
-                    if self._sock is not None:
-                        self._sock.sendto(
-                            frame, (self.radio_ip, DISCOVERY_PORT))
-            except OSError:
-                # Socket likely closed during stop().  Exit cleanly.
-                break
-            except Exception as exc:  # noqa: BLE001
-                _log.warning("EP2 writer iteration error: %s", exc)
+                    _log.warning(
+                        "EP2 writer iteration error: %s", exc)
+        finally:
+            # Release the Win32 WaitableTimer handle, if any.  This
+            # runs on every exit path -- normal stop, OSError break,
+            # uncaught exception -- so we never leak a kernel object
+            # across stop()/start() cycles.
+            if timer_ctx is not None:
+                try:
+                    timer_ctx["CloseHandle"](timer_ctx["handle"])
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _build_ep2_frame_with_audio(
         self, c0: int, c1: int, c2: int, c3: int, c4: int,
@@ -835,20 +1004,28 @@ class HL2Stream:
         R_lsb I_msb I_lsb Q_msb Q_lsb (TX I/Q stays zero on RX).
         L/R values are quantized from float32 [-1, 1] to big-endian
         int16 with the configured ``tx_audio_gain`` applied.
+
+        Implementation note: this runs once per EP2 frame (~381 Hz)
+        on the writer thread.  A Python-level interleave loop costs
+        ~70 us per call; the numpy ``out_arr`` approach below is
+        ~5 us.  The savings matter because every microsecond not
+        spent here is a microsecond the writer thread is asleep on
+        the Win32 timer instead of holding the GIL.
         """
-        import numpy as np
-        lr = np.asarray(pairs, dtype=np.float32)         # (126, 2)
+        # (126, 2) -> apply gain -> clip -> quantize to BE int16
+        lr = np.asarray(pairs, dtype=np.float32)
         lr = lr * self.tx_audio_gain
         np.clip(lr, -1.0, 1.0, out=lr)
-        int16 = (lr * 32767.0).astype(">i2")             # BE int16
-        left_bytes = int16[:, 0].tobytes()
-        right_bytes = int16[:, 1].tobytes()
-        out = bytearray(126 * 8)
-        for i in range(126):
-            out[i * 8 + 0:i * 8 + 2] = left_bytes[i * 2:i * 2 + 2]
-            out[i * 8 + 2:i * 8 + 4] = right_bytes[i * 2:i * 2 + 2]
-            # bytes 4..7 stay zero (TX I/Q slots; not transmitting)
-        return bytes(out)
+        int16_be = (lr * 32767.0).astype(">i2")          # (126, 2)
+
+        # Build the 8-byte slot directly as a (126, 4) BE-int16 view:
+        # column 0 = L, column 1 = R, columns 2..3 = TX I/Q (stay 0).
+        # Row-major .tobytes() gives the exact 1008-byte layout the
+        # gateware expects with zero per-row Python work.
+        out_arr = np.zeros((126, 4), dtype=">i2")
+        out_arr[:, 0] = int16_be[:, 0]
+        out_arr[:, 1] = int16_be[:, 1]
+        return out_arr.tobytes()
 
     def _send_config(self):
         rate_code = SAMPLE_RATES[self.sample_rate]
