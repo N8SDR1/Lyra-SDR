@@ -315,6 +315,30 @@ class HL2Stream:
         # if API unavailable).
         self._first_ep6_event = threading.Event()
         self._ep2_writer_thread: Optional[threading.Thread] = None
+
+        # ── EP2 producer-paced cadence (v0.0.9.2 Path C) ────────────
+        # Modeled directly on Thetis's `Sem_BuffReady` -> `hsendLRSem`
+        # -> `sendProtocol1Samples` chain (see networkproto1.c:1220
+        # and obbuffs.c:163-169).  Every time the DSP worker pushes
+        # 126 audio samples into ``_tx_audio``, ``queue_tx_audio``
+        # releases ``_ep2_send_sem`` once.  The EP2 writer loop
+        # blocks on this semaphore, so the writer's wake-up cadence
+        # is locked to the DSP's *audio output rate*, which in turn
+        # is locked to the EP6 input rate, which is locked to the
+        # HL2's own codec crystal.  Result: no PC-vs-HL2 clock drift,
+        # no producer overrun, no consumer underrun.
+        #
+        # ``_unsignaled_audio_samples`` carries the < 126-sample
+        # remainder between calls so a producer that pushes 500
+        # samples in one call signals the writer 3 times (3 * 126 =
+        # 378) and stashes the leftover 122 for next call.
+        #
+        # The semaphore is drained on ``clear_tx_audio`` /
+        # ``fade_and_replace_tx_audio`` so a sink swap doesn't leave
+        # stale signals that would cause the writer to spin against
+        # an empty deque.
+        self._ep2_send_sem = threading.Semaphore(0)
+        self._unsignaled_audio_samples: int = 0
         # Deque high-water mark (v0.0.9.2 audio rebuild Commit 1).
         # Tracks the maximum deque depth observed since the last UI
         # read.  After v0.0.9.2 Commit 3 lands real backpressure,
@@ -464,6 +488,21 @@ class HL2Stream:
                 self.tx_audio_overruns += len(pairs) - free_slots
             self._tx_audio.extend(pairs)
 
+            # Producer-paced EP2 cadence (Path C).  Release one
+            # semaphore signal per 126-sample EP2 frame's worth of
+            # audio that just became available.  Carry the < 126
+            # remainder forward in ``_unsignaled_audio_samples`` so
+            # bursty producers (DSP block of 512 samples = 4 EP2
+            # frames + 8 leftover) signal the writer the right number
+            # of times overall.  Both counters are protected by
+            # ``_tx_audio_lock`` (already held here).
+            self._unsignaled_audio_samples += len(pairs)
+            n_signals = self._unsignaled_audio_samples // 126
+            if n_signals > 0:
+                self._unsignaled_audio_samples -= n_signals * 126
+                for _ in range(n_signals):
+                    self._ep2_send_sem.release()
+
     def clear_tx_audio(self):
         """Drain any pending samples from the TX audio queue. Called
         by AK4951Sink on init/close to prevent stale audio from a
@@ -471,6 +510,13 @@ class HL2Stream:
         was "digitized robotic" sound right after switching sinks."""
         with self._tx_audio_lock:
             self._tx_audio.clear()
+            # Path C: also reset the producer-paced cadence state.
+            # If we leave stale signals in the semaphore, the writer
+            # would wake N extra times against an empty deque,
+            # under-running every iteration until the signals drain.
+            self._unsignaled_audio_samples = 0
+            while self._ep2_send_sem.acquire(blocking=False):
+                pass
 
     def fade_and_replace_tx_audio(self, fade_ms: float = 5.0) -> int:
         """Replace the TX audio queue with a short fade-out tail.
@@ -520,6 +566,19 @@ class HL2Stream:
                 ramp = 1.0 - (float(i) / float(fade_n))
                 self._tx_audio.append(
                     (float(l) * ramp, float(r) * ramp))
+
+            # Path C: reset producer-paced cadence state and re-signal
+            # the writer for the fade tail.  Drain whatever stale
+            # signals were sitting in the semaphore from the discarded
+            # tail, then re-signal once per 126-sample chunk of the
+            # fade itself.
+            self._unsignaled_audio_samples = 0
+            while self._ep2_send_sem.acquire(blocking=False):
+                pass
+            n_signals = fade_n // 126
+            self._unsignaled_audio_samples = fade_n - n_signals * 126
+            for _ in range(n_signals):
+                self._ep2_send_sem.release()
             return fade_n
 
     def _send_cc(self, c0: int, c1: int, c2: int, c3: int, c4: int):
@@ -802,108 +861,52 @@ class HL2Stream:
         except Exception as e:  # noqa: BLE001
             print(f"[HL2Stream] setswitchinterval failed: {e}")
 
-        EP2_PERIOD = 126.0 / 48000.0  # 2.625 ms = 380.95 Hz
-        EP2_PERIOD_100NS = int(EP2_PERIOD * 1e7)  # = 26250 (100-ns ticks)
-
-        # Try to set up a Win32 native waitable timer.  Returns None
-        # on non-Windows or if the API is unavailable.  When available,
-        # the timer's WaitForSingleObject runs at kernel precision and
-        # releases the GIL during the wait, so the worker thread can
-        # run freely while the writer is asleep.  When unavailable
-        # (non-Windows / API error), we fall back to a hybrid
-        # time.sleep + GIL-yield loop.
-        timer_ctx = self._setup_win32_waitable_timer()
-
-        # Cadence state -- maintained whether we're using the Win32
-        # path or the fallback.  ``next_fire_*`` is the absolute time
-        # of the next intended fire; we use absolute time (not
-        # relative) so per-iteration work overhead doesn't accumulate
-        # as drift.
-        if timer_ctx is not None:
-            # Win32 path: track absolute time in 100-ns FILETIME units.
-            ft = timer_ctx["FILETIME"]()
-            timer_ctx["GetSystemTimePreciseAsFileTime"](
-                ctypes.byref(ft))
-            current_100ns = (
-                (ft.dwHighDateTime << 32) | ft.dwLowDateTime)
-            next_fire_100ns = current_100ns + EP2_PERIOD_100NS
-            next_fire_perf = None  # unused on Win32 path
-        else:
-            # Fallback path: track absolute time in monotonic seconds.
-            next_fire_100ns = None
-            next_fire_perf = time.monotonic() + EP2_PERIOD
+        # ── Path C: producer-paced cadence ─────────────────────────
+        # Modeled on Thetis's hsendLRSem chain.  The writer blocks on
+        # ``_ep2_send_sem`` which is released once per 126 audio
+        # samples queued by the producer (DSP worker -> AK4951Sink ->
+        # queue_tx_audio).  The DSP runs at exactly 48 kHz audio out
+        # (locked to EP6 input rate, locked to HL2 codec crystal),
+        # so the writer fires at exactly 380.95 Hz EP2 cadence -- in
+        # phase with the HL2's own clock.  No PC clock involvement,
+        # zero drift, zero possibility of producer overrun.
+        #
+        # The acquire() timeout is the C&C heartbeat fallback for the
+        # case where audio is not being injected (e.g., PC Soundcard
+        # mode) or DSP has stalled.  When audio is flowing the
+        # semaphore signals at 380 Hz so the timeout never trips;
+        # when audio stops, we still emit C&C-only frames at
+        # ~100 Hz so register state changes (frequency, AGC, etc.)
+        # propagate to the radio promptly.
+        EP2_HEARTBEAT_TIMEOUT = 0.010  # 10 ms = 100 Hz min cadence
+        print(f"[HL2Stream] EP2 cadence: producer-paced via "
+              f"semaphore (Thetis-style); "
+              f"{EP2_HEARTBEAT_TIMEOUT*1000:.0f} ms C&C heartbeat "
+              f"fallback")
 
         try:
             while not self._stop_event.is_set():
-                # ── Wait for next cadence tick ──────────────────────
-                if timer_ctx is not None:
-                    # Win32 native: set timer to fire at the absolute
-                    # target time (positive value = absolute UTC
-                    # FILETIME), then wait.  WaitForSingleObject
-                    # releases the GIL during the wait, so the worker
-                    # thread can run freely.  Bounded 5 s timeout in
-                    # case the timer somehow doesn't fire (defensive).
-                    due_time = ctypes.c_longlong(next_fire_100ns)
-                    timer_ctx["SetWaitableTimer"](
-                        timer_ctx["handle"],
-                        ctypes.byref(due_time),
-                        0,        # period_ms = 0 (one-shot; we re-arm
-                                  #  each iteration with the next
-                                  #  absolute target)
-                        None,     # completion routine
-                        None,     # callback arg
-                        False,    # resume system from suspend?
-                    )
-                    timer_ctx["WaitForSingleObject"](
-                        timer_ctx["handle"], 5000)
-                    next_fire_100ns += EP2_PERIOD_100NS
-                    # Resync if we fell catastrophically behind
-                    # (e.g., long system suspend).  Compare against
-                    # current time; if we're more than one period
-                    # late, restart from now.
-                    timer_ctx["GetSystemTimePreciseAsFileTime"](
-                        ctypes.byref(ft))
-                    current_100ns = (
-                        (ft.dwHighDateTime << 32)
-                        | ft.dwLowDateTime)
-                    if next_fire_100ns < current_100ns - EP2_PERIOD_100NS:
-                        next_fire_100ns = (
-                            current_100ns + EP2_PERIOD_100NS)
-                else:
-                    # Python fallback: sleep half the remaining time
-                    # repeatedly until target reached.  Yields GIL on
-                    # each sleep.  Less precise than Win32 path but
-                    # works on any platform.
-                    while True:
-                        now = time.monotonic()
-                        remaining = next_fire_perf - now
-                        if remaining <= 0:
-                            break
-                        if remaining > 0.001:
-                            time.sleep(remaining * 0.5)
-                        else:
-                            # Last sub-ms: yield to other threads
-                            # rather than busy-spin (which would
-                            # hold the GIL and starve the worker).
-                            time.sleep(0)
-                    next_fire_perf += EP2_PERIOD
-                    if next_fire_perf < time.monotonic() - EP2_PERIOD:
-                        next_fire_perf = time.monotonic() + EP2_PERIOD
+                # ── Wait for audio-ready signal OR heartbeat tick ──
+                signaled = self._ep2_send_sem.acquire(
+                    timeout=EP2_HEARTBEAT_TIMEOUT)
 
                 # ── Drain audio + build + send EP2 frame ───────────
-                # Drain up to 126 samples from the audio queue.  The
-                # underrun counter increments when the queue is short
-                # AND audio injection is enabled (i.e., AK4951 sink is
-                # active).  When injection is disabled we send C&C-only
-                # frames; queue contents (if any from a stale sink)
-                # are left alone for the next sink to consume or clear.
+                # If we got an audio signal AND injection is enabled,
+                # drain 126 samples and send an audio frame.
+                # Otherwise (timeout or injection disabled) send a
+                # C&C-only frame to keep state in sync with the radio.
                 audio_bytes: Optional[bytes] = None
-                if self.inject_audio_tx:
+                if signaled and self.inject_audio_tx:
                     with self._tx_audio_lock:
                         avail = min(len(self._tx_audio), 126)
                         pulled = [self._tx_audio.popleft()
                                   for _ in range(avail)]
                     if avail < 126:
+                        # Should be impossible under Path C semantics
+                        # (semaphore signaled => >=126 samples were
+                        # queued); count it as a diagnostic if it
+                        # ever happens (e.g., clear_tx_audio raced
+                        # with a signal that wasn't drained).
                         self.tx_audio_underruns += 1
                         pulled.extend([(0.0, 0.0)] * (126 - avail))
                     try:
@@ -938,22 +941,18 @@ class HL2Stream:
                                 (self.radio_ip, DISCOVERY_PORT))
                 except OSError:
                     # Socket likely closed during stop().  Exit
-                    # cleanly so the finally block can release the
-                    # Win32 timer handle.
+                    # cleanly.
                     break
                 except Exception as exc:  # noqa: BLE001
                     _log.warning(
                         "EP2 writer iteration error: %s", exc)
         finally:
-            # Release the Win32 WaitableTimer handle, if any.  This
-            # runs on every exit path -- normal stop, OSError break,
-            # uncaught exception -- so we never leak a kernel object
-            # across stop()/start() cycles.
-            if timer_ctx is not None:
-                try:
-                    timer_ctx["CloseHandle"](timer_ctx["handle"])
-                except Exception:  # noqa: BLE001
-                    pass
+            # Drain any leftover semaphore signals so a subsequent
+            # start() begins from a clean count.  No kernel resources
+            # to release under Path C (Win32 WaitableTimer was
+            # removed -- semaphore is a pure Python primitive).
+            while self._ep2_send_sem.acquire(blocking=False):
+                pass
 
     def _build_ep2_frame_with_audio(
         self, c0: int, c1: int, c2: int, c3: int, c4: int,

@@ -46,32 +46,23 @@ class AK4951Sink:
         if hasattr(stream, "clear_tx_audio"):
             stream.clear_tx_audio()
 
-        # Pre-fill the EP2 TX audio deque with 100 ms of silence
-        # BEFORE enabling EP2 audio injection.  This is the v0.0.9.1
-        # fix for the audio-click symptom -- operator-instrumented
-        # data showed ~3 underruns/second sustained, all at the
-        # producer/consumer interface.  Root cause: the worker
-        # thread produces audio in bursts of 2048 samples every
-        # ~43 ms (block_size at 48 kHz), but the EP2 frame builder
-        # polls the deque at 380 Hz (~2.6 ms cadence) asking for 126
-        # samples each call.  Between worker bursts, the deque
-        # drains to empty and EP2 pads zeros = audible click.
-        #
-        # 4800-sample pre-fill (100 ms at 48 kHz) gives the deque
-        # enough headroom that the burst-vs-steady cadence mismatch
-        # oscillates the deque level around 4800 samples WITHOUT
-        # ever hitting zero.  Cost: 100 ms of audio latency at the
-        # AK4951 codec output.  Acceptable for RX listening; will
-        # need re-evaluation when TX lands in v0.2 (PTT cadence).
-        # Maxlen of the deque is 48000 (1 second), so the pre-fill
-        # uses 10 % of capacity -- plenty of room for production
-        # bursts to grow the level temporarily without overrunning.
-        if hasattr(stream, "_tx_audio_lock") and hasattr(stream, "_tx_audio"):
-            PREFILL_MS = 100
-            n_silence = int(48000 * PREFILL_MS / 1000)
-            silence = [(0.0, 0.0)] * n_silence
-            with stream._tx_audio_lock:
-                stream._tx_audio.extend(silence)
+        # NOTE (Path C, v0.0.9.2): silence pre-fill REMOVED.
+        # Earlier (timer-paced) revisions pre-filled 100 ms of
+        # silence so the EP2 frame builder never woke to find an
+        # empty deque between DSP worker bursts.  Path C replaces
+        # the timer-paced wait with a semaphore-paced wait
+        # (HL2Stream._ep2_send_sem, signaled by queue_tx_audio
+        # once per 126 samples produced), which makes pre-fill
+        # unnecessary BY CONSTRUCTION -- the writer cannot wake
+        # unless 126 samples are already queued.  Removing the
+        # pre-fill saves 100 ms of audio latency at the AK4951
+        # codec output, which is otherwise stuck at the front of
+        # the deque forever (drain rate == fill rate at steady
+        # state, so the head never catches up).
+        # If a regression appears (sustained underruns visible
+        # in the status bar), revisit -- but the right fix would
+        # be a smaller pre-fill (e.g. 252 samples = 5 ms = 2 EP2
+        # frames), not the original 4800.
 
         self._stream.inject_audio_tx = True
         # Stereo balance gains. Default = equal-power center
