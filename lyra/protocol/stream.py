@@ -677,31 +677,67 @@ class HL2Stream:
             return
 
         # Bump Windows system timer resolution to 1 ms so
-        # ``time.sleep()`` can honor sub-ms sleeps and the cadence
-        # loop below actually fires at ~380 Hz (vs the 60-200 Hz
-        # we'd get at the default 15.6 ms scheduler tick).  Critical
-        # for audio cadence -- without this, the writer fires too
-        # slowly, the EP2 audio queue overflows, and the codec
-        # hears pulsing / garbled audio with dropped samples.
-        # Process-global; safe to call multiple times.
+        # ``time.sleep()`` can honor sub-ms sleeps.  Critical for
+        # audio cadence -- without this the writer fires at the
+        # default 15.6 ms scheduler tick.  Process-global; safe
+        # to call multiple times.
         self._maybe_set_windows_timer_resolution(1)
 
         # Elevate scheduling priority on Windows.  Best-effort.
         self._maybe_apply_mmcss_pro_audio("Pro Audio")
 
+        # Reduce Python's GIL switch interval from the default 5 ms
+        # to 1 ms.  Even with ``time.sleep()`` honoring 1 ms and the
+        # writer thread at MMCSS Critical priority, after sleep
+        # returns the writer needs the GIL to continue -- and the
+        # worker thread (running DSP) only yields the GIL every
+        # ``switchinterval`` seconds.  At 5 ms default, writer
+        # wake-up was capped at ~130 Hz cadence, draining the EP2
+        # queue too slowly and producing pulsing / garbled audio.
+        # 1 ms switchinterval lets the writer reliably fire at
+        # ~380 Hz.  Process-global side effect; minimal impact on
+        # other threads at the cost of more frequent thread context
+        # switches (CPython schedules these efficiently).
+        try:
+            import sys as _sys
+            _sys.setswitchinterval(0.001)
+            print(f"[HL2Stream] Python GIL switchinterval bumped "
+                  f"to 1 ms")
+        except Exception as e:  # noqa: BLE001
+            print(f"[HL2Stream] setswitchinterval failed: {e}")
+
         EP2_PERIOD = 126.0 / 48000.0  # 2.625 ms = 380.95 Hz
+        # Hybrid sleep+spin guard: sleep until this many seconds
+        # before target, then busy-wait the rest.  Trades a small
+        # amount of writer-thread CPU (spin) for sub-ms wake-up
+        # precision.  500 us is enough margin to absorb GIL
+        # contention spikes without wasting too much CPU.
+        SPIN_GUARD = 0.0005
+
         next_fire = time.monotonic() + EP2_PERIOD
 
         while not self._stop_event.is_set():
-            # Sleep to next cadence tick (drift-corrected).
-            now = time.monotonic()
-            delay = next_fire - now
-            if delay > 0:
-                time.sleep(delay)
+            # Hybrid sleep+spin to reach next cadence tick with
+            # sub-ms precision.  See SPIN_GUARD comment above.
+            target = next_fire
+            while True:
+                now = time.monotonic()
+                remaining = target - now
+                if remaining <= 0:
+                    break
+                if remaining > SPIN_GUARD:
+                    # Sleep most of the way; release GIL so other
+                    # threads can run.  Multiply by 0.5 so we don't
+                    # over-shoot if scheduler returns late.
+                    time.sleep(remaining * 0.5)
+                else:
+                    # Busy-wait the last sub-ms.  Holds GIL but the
+                    # spin is short enough that the cost is bounded.
+                    pass
             next_fire += EP2_PERIOD
             # Resync if we fell badly behind (e.g., system suspend).
             now = time.monotonic()
-            if next_fire < now:
+            if next_fire < now - EP2_PERIOD:
                 next_fire = now + EP2_PERIOD
 
             # Drain up to 126 samples from the audio queue.  The
