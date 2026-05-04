@@ -243,13 +243,60 @@ class MainWindow(QMainWindow):
             "padding: 0 8px;")
         self.statusBar().addPermanentWidget(self._stream_status_label)
 
-        # Audio-sink underrun/overrun counters live on
-        # HL2Stream.tx_audio_underruns / tx_audio_overruns and on
-        # SoundDeviceSink._underruns / _overruns.  Operator-facing
-        # status indicator was removed in v0.0.9.1 (showing a
-        # climbing counter that operators can't act on creates
-        # unnecessary anxiety; the underlying counters stay
-        # available for developer-side diagnosis).
+        # Audio telemetry indicator (v0.0.9.2 audio rebuild Commit 1).
+        # Re-exposed during the pre-release phase so we and the
+        # testers (Brent + Rick) can see objective rebuild progress:
+        #
+        #   "DSP 46 Hz | deque 0/4800 | un=0 ov=0"
+        #
+        # - DSP Hz   = worker thread heartbeat rate (blocks
+        #              processed in the last second).  Drops to 0
+        #              if the worker has stalled.
+        # - deque    = TX audio queue depth high-water-mark
+        #              observed in the last second / current
+        #              backpressure target.  Approaching the cap
+        #              means producer is racing the consumer.
+        # - un / ov  = TX audio underrun / overrun counters
+        #              accumulated since stream start.  Each tick
+        #              correlates with an audible click.
+        #
+        # Color cues:
+        #   green   = all healthy (heartbeat steady, counters at 0)
+        #   amber   = un > 0 or ov > 0 (clicks happening)
+        #   red     = heartbeat at 0 while stream is running
+        #             (worker stalled — operator should report)
+        #
+        # Removed again in v0.0.9.2 full release once both testers
+        # confirm zero counter ticks across a week of normal use.
+        # See audio_rebuild_v0.1.md sec 9.5 for the full telemetry
+        # plan.
+        self._audio_telem_label = _QLabel("DSP --")
+        self._audio_telem_label.setToolTip(
+            "Audio path telemetry (v0.0.9.2 audio rebuild phase).\n\n"
+            "DSP Hz  -- worker thread heartbeat: blocks processed\n"
+            "          per second.  Should hover at the IQ rate /\n"
+            "          batch size (e.g. 23 Hz at 48k IQ + 2048\n"
+            "          batch).  Drops to 0 if the worker has\n"
+            "          stalled (real bug -- screenshot please).\n\n"
+            "deque   -- TX audio queue high-water mark vs cap.\n"
+            "          Healthy after Commit 3 backpressure: stays\n"
+            "          near the operator's chosen block size.\n"
+            "          Pre-Commit 3: oscillates between ~0 and\n"
+            "          ~5000 samples (the 100 ms pre-fill).\n\n"
+            "un / ov -- TX audio underrun / overrun counts since\n"
+            "          stream start.  Each tick correlates with\n"
+            "          an audible click.  Healthy: both stay 0.\n"
+            "          Pre-Commit 3: small numbers expected;\n"
+            "          post-Commit 3: should stay 0.")
+        self._audio_telem_label.setStyleSheet(
+            "color: #4a8a4a; font-family: Consolas, monospace; "
+            "padding: 0 8px;")
+        self.statusBar().addPermanentWidget(self._audio_telem_label)
+        # Heartbeat sampling state — last-seen blocks_processed +
+        # wallclock so we can compute Hz between status ticks.
+        import time as _time
+        self._audio_telem_last_blocks: int = 0
+        self._audio_telem_last_t: float = _time.monotonic()
 
         self._load_settings()
 
@@ -1109,11 +1156,58 @@ class MainWindow(QMainWindow):
                 "color: #d8a040; font-family: Consolas, monospace; "
                 "padding: 0 8px;")
 
-        # Audio-sink under/overrun status indicator was removed in
-        # v0.0.9.1 (operator UX call -- climbing counter that
-        # operators couldn't act on created unnecessary anxiety).
-        # Counters still increment on the underlying objects for
-        # developer-side diagnosis.
+        # Audio telemetry refresh (v0.0.9.2 audio rebuild Commit 1).
+        # Re-exposed for the rebuild pre-release phase so operators
+        # + we can see objective progress per audio_rebuild_v0.1.md
+        # sec 9.5.  Format: "DSP NN Hz | deque H/MAX | un=X ov=Y".
+        # Drops back to "DSP --" when the radio isn't streaming.
+        try:
+            r = self.radio
+            stream = getattr(r, "_stream", None)
+            worker = getattr(r, "_dsp_worker", None)
+            running = stream is not None
+            # Heartbeat Hz from worker (worker mode) or "single" tag
+            # (legacy single-thread mode).
+            import time as _time
+            now = _time.monotonic()
+            if worker is not None:
+                cur_blocks = int(worker.blocks_processed)
+                dt = max(now - self._audio_telem_last_t, 1e-3)
+                hz = (cur_blocks - self._audio_telem_last_blocks) / dt
+                self._audio_telem_last_blocks = cur_blocks
+                self._audio_telem_last_t = now
+                hz_str = f"DSP {hz:4.1f} Hz"
+            else:
+                hz_str = "DSP single"
+                hz = -1.0  # sentinel: heartbeat not applicable
+            # Deque depth + counters (AK4951 path) or PortAudio
+            # ring counters.  Both trees are safe to peek at if
+            # the stream is live.
+            deque_str = ""
+            un = ov = 0
+            if running:
+                if hasattr(stream, "read_tx_audio_high_water"):
+                    hw = int(stream.read_tx_audio_high_water())
+                    cap = int(getattr(stream._tx_audio, "maxlen", 48000))
+                    deque_str = f" | deque {hw}/{cap}"
+                un = int(getattr(stream, "tx_audio_underruns", 0))
+                ov = int(getattr(stream, "tx_audio_overruns", 0))
+            ctr_str = f" | un={un} ov={ov}"
+            self._audio_telem_label.setText(hz_str + deque_str + ctr_str)
+            # Color: red if heartbeat is 0 while running, amber if
+            # any counter is non-zero, green otherwise.
+            if running and worker is not None and hz < 1.0:
+                color = "#ff4040"
+            elif un > 0 or ov > 0:
+                color = "#d8a040"
+            else:
+                color = "#4a8a4a"
+            self._audio_telem_label.setStyleSheet(
+                f"color: {color}; font-family: Consolas, monospace; "
+                "padding: 0 8px;")
+        except Exception:
+            # Never let a telemetry update crash the UI tick.
+            pass
 
     # _tick_gpu and the GPU label widget were removed — see git
     # history for the NVML / PDH polling implementation if it ever
@@ -2383,16 +2477,19 @@ class MainWindow(QMainWindow):
         if s.contains("bin/enabled"):
             r.set_bin_enabled(
                 s.value("bin/enabled", False, type=bool))
-        # DSP threading mode (Phase 3.B+, restart-required to apply).
-        # Loaded BEFORE Radio's own startup-mode capture so that the
-        # restored preference becomes both the current selection AND
-        # the "what's running this session" snapshot. (Currently a
-        # no-op preference until B.3+ wires the worker audio path.)
-        if s.contains("dsp/threading_mode"):
-            mode = str(s.value("dsp/threading_mode") or "").strip().lower()
-            if mode in r.DSP_THREADING_MODES:
-                r._dsp_threading_mode = mode
-                r._dsp_threading_mode_at_startup = mode
+        # DSP threading mode — INTENTIONALLY NOT loaded here.
+        # As of v0.0.9.2 (audio rebuild Commit 1) Radio.__init__
+        # reads ``dsp/threading_mode`` from QSettings DIRECTLY,
+        # before deciding whether to construct the worker thread.
+        # The previous app.py override happened AFTER Radio init
+        # and silently broke worker-mode opt-in: it set the mode
+        # flag but never started the worker (Radio init had
+        # already taken the SINGLE branch).  Removing the override
+        # entirely is safer than re-loading here -- the value is
+        # already in Radio's hands by the time we reach this
+        # function.  See lyra/radio.py around the
+        # _dsp_threading_mode_at_startup assignment for the
+        # current load logic.
         # Noise-floor marker on the spectrum (default on)
         if s.contains("visuals/noise_floor_marker"):
             r.set_noise_floor_enabled(

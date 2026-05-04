@@ -288,6 +288,32 @@ class HL2Stream:
         # with audible clicks.  v0.0.9.1+
         self.tx_audio_underruns: int = 0
         self.tx_audio_overruns: int = 0
+        # Deque high-water mark (v0.0.9.2 audio rebuild Commit 1).
+        # Tracks the maximum deque depth observed since the last UI
+        # read.  After v0.0.9.2 Commit 3 lands real backpressure,
+        # the high-water should hover near the operator's chosen
+        # block size; values approaching maxlen=48000 mean the
+        # producer is far ahead of the consumer (overrun risk) and
+        # values near zero mean the consumer is ahead of the
+        # producer (underrun risk).  UI reads via
+        # ``read_tx_audio_high_water()`` which atomically samples-
+        # and-resets so we get rolling-window data.
+        self.tx_audio_high_water: int = 0
+
+    def read_tx_audio_high_water(self) -> int:
+        """Atomically read + reset the TX audio deque high-water mark.
+
+        Returns the maximum deque depth observed since the previous
+        call.  UI's 1 Hz status tick reads this to drive a "deque
+        depth: N" telemetry indicator during the v0.0.9.2 audio
+        rebuild pre-release phase.  Lock-protected so the read +
+        reset is atomic w.r.t. concurrent ``queue_tx_audio`` and
+        ``_pack_audio_bytes`` updates.
+        """
+        with self._tx_audio_lock:
+            hw = self.tx_audio_high_water
+            self.tx_audio_high_water = len(self._tx_audio)
+            return hw
 
     # -- control frame (EP2) for initial config -----------------------------
     def _build_ep2_frame(self, c0: int, c1: int, c2: int, c3: int, c4: int) -> bytes:
@@ -399,6 +425,13 @@ class HL2Stream:
             # the would-be-dropped samples as overrun events so the
             # operator can see queue saturation in the status bar.
             # v0.0.9.1+ click investigation.
+            # Track high-water mark BEFORE the extend so a producer
+            # burst that arrives while the deque is full is captured
+            # in the rolling-window observation.
+            depth_after = len(self._tx_audio) + len(pairs)
+            if depth_after > self.tx_audio_high_water:
+                self.tx_audio_high_water = min(
+                    depth_after, self._tx_audio.maxlen)
             free_slots = self._tx_audio.maxlen - len(self._tx_audio)
             if len(pairs) > free_slots:
                 self.tx_audio_overruns += len(pairs) - free_slots

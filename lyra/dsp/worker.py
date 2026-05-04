@@ -218,6 +218,16 @@ class DspWorker(QObject):
         # operator's FPS preference (re-evaluated each block so FPS
         # / rate changes take effect immediately).
         self._fft_block_counter: int = 0
+        # Heartbeat counter (v0.0.9.2 audio rebuild Commit 1) —
+        # monotonic count of IQ blocks the worker has processed
+        # since startup.  Read by the UI's 1 Hz status tick to
+        # display "DSP worker: N Hz" in the status bar.  If the
+        # number stops incrementing while audio is supposed to be
+        # playing, the worker has stalled and audio is dead.
+        # Plain int; GIL-protected for atomic single-attribute
+        # read/write between worker thread and UI thread.  No lock
+        # needed.
+        self._blocks_processed: int = 0
 
     # ── Public API: producer-side (rx thread, main thread) ─────
 
@@ -286,6 +296,15 @@ class DspWorker(QObject):
         mutation — main thread should fire setter signals to update
         the worker's config rather than poking the dataclass."""
         return self._config
+
+    @property
+    def blocks_processed(self) -> int:
+        """Monotonic count of IQ batches the worker has processed
+        since startup (v0.0.9.2 audio rebuild Commit 1).  Read by
+        the main-thread UI tick to derive a "DSP worker Hz" readout
+        from the delta between successive samples.  GIL-protected
+        for cross-thread atomic read; no lock required."""
+        return self._blocks_processed
 
     # ── Config update slots (called via Qt.QueuedConnection) ──
     # These slots run on the WORKER thread because of the queued
@@ -445,6 +464,12 @@ class DspWorker(QObject):
         thread — operator hears a single block of silence at worst,
         and the next block proceeds normally.
         """
+        # Heartbeat — increment FIRST so a process_block error
+        # later still shows "we tried" to the UI.  If the worker
+        # has truly stalled (deadlock, infinite loop), this counter
+        # stops; the status-bar readout drops to 0 Hz and the
+        # operator sees something is wrong.
+        self._blocks_processed += 1
         radio = self._radio
         if radio is None:
             # Not yet attached — nothing to do.  This shouldn't

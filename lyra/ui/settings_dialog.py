@@ -1403,22 +1403,31 @@ class DspSettingsTab(QWidget):
         grp_eq.setEnabled(False)
         v.addWidget(grp_eq)
 
-        # ── DSP Threading (Phase 3.B+, BETA) ─────────────────────────
+        # ── DSP Threading (v0.0.9.2 audio rebuild Commit 1) ──────────
         # Operator-selectable backend for where DSP runs:
-        #   "single" — Qt main thread (v0.0.5 behavior, default)
-        #   "worker" — dedicated DspWorker thread (BETA, opt-in)
+        #   "worker" — dedicated DspWorker thread (DEFAULT as of
+        #              v0.0.9.2; isolates DSP from UI activity to
+        #              eliminate the click-pop class of bugs)
+        #   "single" — Qt main thread (legacy fallback for any
+        #              operator who hits a regression in worker
+        #              mode and needs a known-good escape hatch)
         # Switching requires Lyra restart.  The value here is the
         # PREFERENCE (persisted, applied next restart); a hint shows
         # when it differs from what's currently running this session.
+        # See docs/architecture/audio_rebuild_v0.1.md sec 3.1 + 9.3.
         grp_thr = QGroupBox("DSP Threading (advanced)")
         gthr = QVBoxLayout(grp_thr)
 
         thr_intro = QLabel(
-            "Where Lyra's DSP audio chain runs.  Default is single-"
-            "thread (Qt main thread) — same as v0.0.5.  Worker mode "
-            "moves DSP to a dedicated thread, freeing the main thread "
-            "for UI rendering.  Worker mode is BETA — opt in if you "
-            "want to help test it.\n\n"
+            "Where Lyra's DSP audio chain runs.  Default as of "
+            "v0.0.9.2 is the dedicated DSP worker thread — this "
+            "isolates audio production from UI activity (paint "
+            "events, mouse handling) and is part of the audio "
+            "click-pop fix.\n\n"
+            "Single-thread is the legacy mode (Qt main thread runs "
+            "both UI and DSP).  Available as a fallback if you "
+            "hit a regression in worker mode — flip back, restart, "
+            "and please report what you saw.\n\n"
             "Changes take effect on the next Lyra restart.")
         thr_intro.setWordWrap(True)
         thr_intro.setStyleSheet("color: #8a9aac;")
@@ -1428,8 +1437,11 @@ class DspSettingsTab(QWidget):
         thr_row = QHBoxLayout()
         thr_row.addWidget(QLabel("Threading:"))
         self.threading_combo = QComboBox()
-        self.threading_combo.addItem("Single-thread (current)", "single")
-        self.threading_combo.addItem("Worker thread (BETA)", "worker")
+        # Worker first (default); single-thread second (legacy).
+        # itemData stays the same string keys so QSettings round-
+        # trips unchanged.
+        self.threading_combo.addItem("Worker thread (default)", "worker")
+        self.threading_combo.addItem("Single-thread (legacy)", "single")
         # Select the current persisted preference
         cur_mode = radio.dsp_threading_mode
         idx = next((i for i in range(self.threading_combo.count())
@@ -1438,11 +1450,11 @@ class DspSettingsTab(QWidget):
         self.threading_combo.setToolTip(
             "DSP threading mode preference.  Persisted via QSettings; "
             "takes effect on the next Lyra restart.\n\n"
-            "Single-thread: DSP runs on the Qt main thread (current "
-            "behavior).  Stable, well-tested.\n"
-            "Worker thread (BETA): DSP runs on a dedicated thread, "
-            "freeing the main thread for UI.  Field-test only — "
-            "report any audio glitches or unexpected behavior.")
+            "Worker thread (default): DSP runs on a dedicated thread, "
+            "isolated from UI rendering.  Eliminates the producer-side "
+            "jitter that caused click-pop bugs in v0.0.9.1 and earlier.\n"
+            "Single-thread (legacy): DSP runs on the Qt main thread.  "
+            "Available as a fallback if worker mode regresses for you.")
         self.threading_combo.currentIndexChanged.connect(
             self._on_threading_combo)
         thr_row.addWidget(self.threading_combo, 1)

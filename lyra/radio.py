@@ -1085,15 +1085,28 @@ class Radio(QObject):
             depth=self._bin_depth,
         )
 
-        # ── DSP threading mode (Phase 3.B+) ───────────────────────────
+        # ── DSP threading mode (v0.0.9.2 audio rebuild Commit 1) ─────
         # Operator preference for whether DSP runs on the Qt main
-        # thread ("single", current default) or a dedicated worker
-        # thread ("worker", BETA, opt-in via Settings → DSP →
-        # Threading). Changes are persisted via QSettings but only
-        # take effect on Lyra restart — the worker thread is set up
-        # once at Radio construction.
+        # thread ("single", legacy fallback) or a dedicated worker
+        # thread ("worker", default as of v0.0.9.2).  Changes are
+        # persisted via QSettings under ``dsp/threading_mode`` and
+        # only take effect on Lyra restart — the worker thread is
+        # set up once at Radio construction.
         #
-        # Two values are tracked:
+        # **Why the default flipped (audio_rebuild_v0.1.md sec 3.1):**
+        # the Qt main thread runs paint events, mouse handling, and
+        # signal dispatch.  Co-locating the audio DSP chain on it
+        # caused producer-side jitter that drained the EP2 / sound-
+        # device ring buffers and produced clicks.  Worker mode
+        # isolates DSP from UI activity.
+        #
+        # **Operator escape hatch:**
+        # Settings → DSP → Threading combo offers "Single-thread
+        # (legacy)" + "Worker (default)".  If a regression appears
+        # on any rig the operator can flip back without a rebuild.
+        # See audio_rebuild_v0.1.md sec 9.3.
+        #
+        # Two values tracked:
         #   _dsp_threading_mode_at_startup  — what was loaded when
         #     Radio was constructed; the mode currently RUNNING
         #   _dsp_threading_mode             — operator's currently
@@ -1101,8 +1114,25 @@ class Radio(QObject):
         #     be RUNNING after the next restart
         # When the two differ, the Settings dialog displays a
         # "restart required" hint to the operator.
-        self._dsp_threading_mode_at_startup: str = self.DSP_THREADING_SINGLE
-        self._dsp_threading_mode: str = self.DSP_THREADING_SINGLE
+        #
+        # **QSettings ordering note:** prior to Commit 1 the load
+        # happened in ``app.py::_load_settings()`` AFTER Radio init,
+        # which meant operator opt-in to worker mode set the flag
+        # but never started the worker thread (Radio init had
+        # already taken the SINGLE branch by the time the override
+        # ran).  Read it here, BEFORE the worker-construction
+        # decision below, so the persisted preference actually
+        # takes effect.
+        from PySide6.QtCore import QSettings as _QS
+        _persisted = _QS("N8SDR", "Lyra").value("dsp/threading_mode", None)
+        if _persisted is not None:
+            _mode = str(_persisted).strip().lower()
+            if _mode not in self.DSP_THREADING_MODES:
+                _mode = self.DSP_THREADING_WORKER
+        else:
+            _mode = self.DSP_THREADING_WORKER  # v0.0.9.2 default
+        self._dsp_threading_mode_at_startup: str = _mode
+        self._dsp_threading_mode: str = _mode
         print(f"[Radio] DSP threading mode: "
               f"{self._dsp_threading_mode_at_startup}")
         # Worker thread + DspWorker — constructed only when worker

@@ -13,6 +13,81 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.2-pre1] — 2026-05-04 — "Audio Architecture Rebuild — Commit 1"
+
+**Pre-release.**  First of six pre-releases that incrementally
+rebuild Lyra's audio production architecture per the senior-
+engineering audit in `docs/architecture/audio_rebuild_v0.1.md`.
+Each pre-release is independently flight-testable; if any one
+regresses, it can be reverted without disturbing the others.
+`main` stays at v0.0.9.1 throughout the rebuild — the v0.0.9.1
+installer remains the published stable release until both Rick
+and Brent sign off on the full rebuild.
+
+### What changed in this commit
+
+- **DSP worker thread is now the default mode** (was: opt-in
+  BETA).  Audio DSP no longer competes with UI paint events,
+  mouse handling, and signal/slot dispatch on the Qt main
+  thread.  This is part 1 of fixing the universal click-pop
+  bug documented in v0.0.9.1's "residual clicks parked" note.
+- **Operator escape hatch:** Settings → DSP → Threading combo
+  now offers "Worker thread (default)" and "Single-thread
+  (legacy)".  If the new default regresses on any rig, flip
+  back to legacy, restart Lyra, and please file an issue with
+  what you observed.
+- **QSettings ordering bug fixed.**  Previously the persisted
+  `dsp/threading_mode` preference was loaded AFTER Radio
+  initialization, so opting into worker mode set the flag but
+  never started the worker thread.  Loaded earlier now, before
+  the worker-construction decision.  Operators who had opted
+  into worker mode in earlier versions and saw no change
+  should now see the worker actually running.
+- **Audio telemetry indicator** added to the status bar
+  showing `DSP NN Hz | deque H/MAX | un=X ov=Y`.  Lets
+  operators (and us) see objective rebuild progress vs vibes.
+  Color-coded: green when healthy, amber when underrun /
+  overrun counters tick, red if the DSP worker stalls
+  outright.  Removed in v0.0.9.2 full release once the
+  rebuild lands clean.
+- **DSP worker heartbeat counter** (`DspWorker.blocks_processed`)
+  + **TX audio deque high-water tracker** (`HL2Stream.read_tx_audio_high_water`)
+  added to support the telemetry above.  Both are read-only
+  diagnostic surfaces; no operator-facing knobs.
+
+### Known issues / what this commit does NOT fix
+
+- Click-pop frequency is expected to **decrease** but not
+  vanish in this commit.  The full fix needs Commit 2 (block
+  size match) + Commit 3 (real backpressure).  Use the
+  underrun/overrun counters in the status bar to see whether
+  the rate has actually moved.
+- Loud volume spikes on AK4951 (Rick-only) hypothesis untested
+  yet — gated on Commit 5 Wireshark capture.
+
+### Tester checklist for this pre-release
+
+- Run for 30+ minutes on RX, normal listening.
+- Watch the audio telemetry indicator in the status bar.
+  Heartbeat (DSP NN Hz) should tick steadily.  un + ov counters
+  should stay at lower numbers than v0.0.9.1.
+- If audio is audibly worse than v0.0.9.1 in any way: open
+  Settings → DSP → Threading, flip to "Single-thread (legacy)",
+  restart Lyra, and file an issue with details.
+- Confirm Settings → DSP → Threading shows "Worker thread
+  (default)" as currently selected on first launch after
+  upgrade.
+
+### Recovery
+
+If anything goes wrong, install
+`Lyra-Setup-0.0.9.1.exe` from
+<https://github.com/N8SDR1/Lyra-SDR/releases/tag/v0.0.9.1>.
+Operator data (settings, memory bank, noise profiles) is
+preserved across the downgrade.
+
+---
+
 ## [0.0.9.1] — 2026-05-03 — "Memory & Stations"
 
 Bug-fix + feature patch on top of v0.0.9.  Two headline items:
