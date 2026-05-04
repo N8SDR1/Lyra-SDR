@@ -779,6 +779,66 @@ class Radio(QObject):
         self._noise_baseline = 0.01
         self._noise_history: list[float] = []
         self._noise_history_max = 70     # ~3 seconds at 43 ms/block
+
+        # ── AGC noise-aware attack gate (v0.0.9.2) ──────────────────
+        # Asymmetric IIR estimator on np.mean(np.abs(audio)) per block.
+        # Drives an "attack gate" applied to the per-sample peak
+        # tracker's attack condition: a sample only counts as an
+        # attack if it exceeds BOTH the current peak AND
+        # K_GATE * noise_envelope.  This suppresses the spurious
+        # noise-driven attacks that produced the continuous
+        # "scratchy" AM modulation on the noise floor; real signals
+        # (>>K times noise envelope) still trigger attacks normally
+        # so AGC weak-signal behavior is preserved.
+        #
+        # Decoupled from the peak tracker by construction: estimator
+        # input is mean(|audio_in|), not min(peak_arr) — no closed
+        # loop.  PEAK_FLOOR stays static at 1e-4 (no longer dynamic).
+        #
+        # Asymmetric time constants: fast latch DOWN to noise floor
+        # (~50 ms) so the gate relatches quickly during signal
+        # pauses; slow rise UP (~1 s) so transient signals don't
+        # capture the estimator and raise the gate against
+        # subsequent weak signals.
+        #
+        # K_GATE = 4.5 places the attack gate at ~3.59σ of the
+        # underlying Gaussian noise distribution (since mean(|x|) =
+        # σ·√(2/π) ≈ 0.798σ, so K * mean(mag) ≈ 4.5 * 0.798σ ≈ 3.59σ).
+        # The natural per-sample peak equilibrium without gate sits
+        # at ~3.05σ, so the gate must be ABOVE 3.05σ to bind --
+        # K=4.5 is the smallest value that meaningfully suppresses
+        # noise-driven attacks.  Predicted attack rate on noise-only
+        # audio: 2*(1-Φ(3.59))*48000 ≈ 16/sec, down from ~109/sec
+        # without gate.  Real signals (peaks >> 3.59σ above noise)
+        # still trigger attacks normally, so weak-signal AGC behavior
+        # is preserved.  Tunable via instance attribute.
+        self._agc_gate_k: float = 4.5
+        # Block-rate alpha coefficients (block period ≈ 2.6 ms at
+        # 126 samples / 48 kHz audio):
+        #   alpha_down = 0.01  →  τ ≈ 260 ms (latch DOWN to track
+        #     noise floor when signal stops; long enough to ride
+        #     through brief SSB pauses without dropping into noise,
+        #     short enough to relatch within a few seconds of band
+        #     truly going quiet).
+        #   alpha_up = 0.0013  →  τ ≈ 2.0 s (rise UP slowly so
+        #     transient signals don't capture the estimator and
+        #     raise the gate against subsequent weak signals).
+        self._agc_gate_alpha_down: float = 0.01
+        self._agc_gate_alpha_up: float = 0.0013
+        # Lower clamp on noise envelope to prevent K*noise dropping
+        # below PEAK_FLOOR in deep digital silence (where mean(mag)
+        # could go to zero).  One decade below PEAK_FLOOR.
+        self._agc_gate_noise_floor: float = 1e-5
+        # Running noise envelope estimate.  None sentinel means
+        # bootstrap from the first block's mean(|audio|) -- avoids a
+        # transient attack burst at startup that would happen if we
+        # initialized too low.
+        self._agc_noise_env: Optional[float] = None
+        # Diagnostic: count of attacks fired this block, exposed via
+        # an attribute the UI / debug hooks can sample.  Resets per
+        # block.  Cheap (~1 increment per attack).
+        self._agc_attacks_this_block: int = 0
+
         self._apply_agc_preset(self._agc_profile)
 
         # Auto-tracking timer: only runs while profile == "auto". Owned by
@@ -5944,9 +6004,44 @@ class Radio(QObject):
         one_minus_alpha = float(self._agc_one_minus_alpha_per_sample)
         hang_init = int(self._agc_hang_samples)
         PEAK_FLOOR = 1e-4
+
+        # ── Update the noise envelope estimator (v0.0.9.2) ───────────
+        # Asymmetric IIR on mean(|audio|): fast-latch when block mean
+        # falls below current envelope (track noise floor), slow-rise
+        # when it exceeds current envelope (resist signal capture).
+        # NaN/Inf-safe: skip update on non-finite block_mean.  See
+        # _agc_gate_* attributes for tuning constants.
+        block_mean = float(np.mean(mag))
+        if not (block_mean == block_mean) or block_mean == float("inf"):
+            block_mean = self._agc_noise_env or self._agc_gate_noise_floor
+        if self._agc_noise_env is None:
+            # Cold start -- bootstrap from first block to avoid an
+            # initial attack burst before the EMA converges.
+            noise_env = block_mean
+        else:
+            noise_env = float(self._agc_noise_env)
+            if block_mean < noise_env:
+                a = self._agc_gate_alpha_down
+            else:
+                a = self._agc_gate_alpha_up
+            noise_env = (1.0 - a) * noise_env + a * block_mean
+        if noise_env < self._agc_gate_noise_floor:
+            noise_env = self._agc_gate_noise_floor
+        self._agc_noise_env = noise_env
+
+        # Attack gate: a sample only counts as an "attack" if it
+        # exceeds K * noise envelope, suppressing the spurious noise-
+        # driven attacks that imprint AM modulation on the noise
+        # floor.  Constant within a block (cheap; no per-sample
+        # recompute).
+        attack_gate = float(self._agc_gate_k) * noise_env
+
+        # Reset the per-block attack counter (diagnostic).
+        attacks_count = 0
+
         for i in range(n):
             m = mag[i]
-            if m > p:
+            if m > p and m > attack_gate:
                 # Instant attack -- the peak detector instantly tracks
                 # the new maximum so the gain (= target / peak) is
                 # immediately correct for the new amplitude.  This
@@ -5966,6 +6061,7 @@ class Radio(QObject):
                 # which is the v0.0.7.1 quiet-pass design.
                 p = m
                 h = hang_init            # rearm hang
+                attacks_count += 1
             elif h > 0:
                 h -= 1                   # hold during hang
             else:
@@ -5977,6 +6073,10 @@ class Radio(QObject):
         # where this one left off — no block-boundary discontinuity.
         self._agc_peak = p
         self._agc_hang_counter = h
+        # Diagnostic: per-block attack count.  At the new block rate
+        # (126 samples / 380 Hz) and target ~30 attacks/sec on noise-
+        # only audio, this should average <0.1 per block.
+        self._agc_attacks_this_block = attacks_count
 
         # Rolling noise-floor baseline.  Use the per-sample MIN of the
         # tracked peak envelope as the block's "quietest level seen"
