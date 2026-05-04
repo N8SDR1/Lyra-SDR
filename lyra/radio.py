@@ -1382,6 +1382,17 @@ class Radio(QObject):
             return
         prev_rate = self._rate
         self._rate = rate
+        # Keep the cached config-register c1 byte in sync with the
+        # current rate.  ``_send_full_config`` (band change with
+        # filter board enabled, OC bit changes) recomposes register
+        # 0x00 from this field; if it's stale, the band change writes
+        # the OLD rate code into _cc_registers and the round-robin
+        # propagates it to the HL2, dropping the IQ rate back to
+        # whatever ``_config_c1`` was last set to (= 48 k from
+        # __init__'s default).  Operator-visible as DSP throttling
+        # to ~23 Hz + audio dragging after band change.  See
+        # ``_send_full_config`` for the matching defensive fix.
+        self._config_c1 = SAMPLE_RATES[rate]
         with self._ring_lock:
             self._sample_ring.clear()
         # Reset the waterfall tick counter so the divider check
@@ -4205,12 +4216,31 @@ class Radio(QObject):
         """Send the current composed C0=0x00 config register to the radio.
 
         HL2 registers are sticky — one write persists until explicitly
-        changed. No need to add this to the stream keepalive rotation;
-        a single fire-and-forget send is enough."""
+        changed. With the stream's round-robin C&C cycling, this
+        single write becomes part of the rotation (the stream's
+        ``_send_cc`` updates ``_cc_registers[0x00]``) and gets
+        re-emitted automatically.
+
+        Path C.2 followup (band-change rate-flip fix): c1 is composed
+        FRESH from ``self._rate`` here, not read from the cached
+        ``self._config_c1``.  Reason: ``_config_c1`` is initialized
+        in ``__init__`` from the constructor default rate (48 k) and
+        ``set_rate`` did not update it -- so any later band change
+        would write the stale 48 k rate code into register 0x00,
+        which (under round-robin) drops the radio's IQ rate from
+        whatever the operator actually selected back down to 48 k.
+        Operator-visible: display throttles to ~23 Hz and audio
+        drags after every band change with the filter board
+        enabled.  Reading from ``self._rate`` here is defensive --
+        we also sync ``_config_c1`` in ``set_rate`` -- but reading
+        fresh ensures the bug can't recur if any future code path
+        writes a stale ``_config_c1``.
+        """
         if self._stream is None:
             return
         try:
-            self._stream._send_cc(0x00, self._config_c1, self._config_c2,  # noqa: SLF001
+            c1 = SAMPLE_RATES[self._rate]
+            self._stream._send_cc(0x00, c1, self._config_c2,  # noqa: SLF001
                                   self._config_c3, self._config_c4)
         except Exception as e:
             self.status_message.emit(f"OC write failed: {e}", 3000)
