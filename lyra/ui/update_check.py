@@ -52,23 +52,38 @@ RELEASES_PAGE_URL = (
 
 
 # ── Version comparison helpers ─────────────────────────────────────────
-_TAG_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
+# Match major.minor.patch with an OPTIONAL 4th micro-patch component.
+# Lyra's version scheme is 4-component for hot-fix patch releases
+# (e.g. 0.0.7.1, 0.0.8.1, 0.0.9.1) and 3-component for feature drops
+# (0.0.7, 0.0.8, 0.0.9).  An earlier version of this regex captured
+# only 3 components which silently ate the .micro suffix -- result:
+# `is_newer("v0.0.9.1", "0.0.9")` returned False because both parsed
+# to (0,0,9), so the startup silent-check never raised the toast /
+# header indicator for any 4-component patch release.  Fixed
+# 2026-05-03 (Brent Crier reported it during v0.0.9.1 testing).
+_TAG_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?")
 
 
-def _parse_version(s: str) -> Optional[tuple[int, int, int]]:
-    """Parse '0.0.3' or 'v0.0.3' → (0, 0, 3). Returns None if the
-    string doesn't match the major.minor.patch pattern; the caller
-    treats that as 'unknown, can't compare.'"""
+def _parse_version(s: str) -> Optional[tuple[int, int, int, int]]:
+    """Parse '0.0.3' / 'v0.0.3' / '0.0.9.1' / 'v0.0.9.1' →
+    (major, minor, patch, micro), padding the micro slot with 0 when
+    a 3-component tag is given.  Returns None if the string doesn't
+    match the major.minor.patch[.micro] pattern; the caller treats
+    that as 'unknown, can't compare.'"""
     m = _TAG_RE.match(s.strip())
     if not m:
         return None
-    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    micro = int(m.group(4)) if m.group(4) is not None else 0
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), micro)
 
 
 def is_newer(remote_tag: str, local_version: str) -> bool:
     """True if the remote tag represents a NEWER release than the
     locally-running version. Both strings are run through _parse_version
-    first; unparseable inputs return False (no nag on bad data)."""
+    first; unparseable inputs return False (no nag on bad data).
+
+    4-component compare matters: (0,0,9,0) < (0,0,9,1) so a v0.0.9.1
+    pre-release correctly flags as newer than a running v0.0.9."""
     r = _parse_version(remote_tag)
     l = _parse_version(local_version)
     if r is None or l is None:
