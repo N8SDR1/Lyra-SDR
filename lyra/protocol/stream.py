@@ -598,8 +598,28 @@ class HL2Stream:
         Used for one-shot direct sends (e.g., initial config push,
         immediate setter response).  The writer thread also acquires
         ``_send_lock`` so the two never collide on the socket.
+
+        Path C.2 (audio-pop fix): when ``inject_audio_tx`` is True,
+        the legacy ``_build_ep2_frame`` path drains 126 audio
+        samples from ``_tx_audio`` without consuming a semaphore
+        signal -- the writer thread then under-runs on its next
+        signal-driven drain and clicks the AK4951.  Skip the
+        immediate emit in that case and rely on the writer's
+        round-robin (which re-emits every register every few ms)
+        to propagate the new value.  Always update
+        ``_cc_registers`` so the round-robin sees the change.
         """
         if self._sock is None:
+            return
+        # Always update the register table so the writer thread's
+        # round-robin picks up the new value on the next iteration.
+        with self._cc_lock:
+            self._cc_registers[c0] = (c1, c2, c3, c4)
+        # Only do the immediate UDP emit when audio injection is
+        # OFF (startup before any AK4951Sink is attached, or
+        # PC Soundcard mode).  In that mode ``_build_ep2_frame``
+        # doesn't drain audio so it's safe.
+        if self.inject_audio_tx:
             return
         with self._send_lock:
             frame = self._build_ep2_frame(c0, c1, c2, c3, c4)
@@ -1183,7 +1203,15 @@ class HL2Stream:
         c2 = (hz >> 16) & 0xFF
         c3 = (hz >> 8) & 0xFF
         c4 = hz & 0xFF
-        self._send_cc(c0, c1, c2, c3, c4)
+        # Path C.2 (audio-pop fix): NO direct _send_cc here.  The
+        # legacy _send_cc -> _build_ep2_frame path drains 126 audio
+        # samples from _tx_audio without consuming a semaphore
+        # signal, which the writer thread then under-runs on its
+        # next signal-driven drain (audible click on AK4951).  The
+        # register-table update below is enough -- the EP2 writer
+        # thread re-emits every register in round-robin within a
+        # handful of milliseconds, so the new freq propagates to
+        # the gateware imperceptibly fast.
         with self._cc_lock:
             self._cc_registers[c0] = (c1, c2, c3, c4)
         self._keepalive_cc = (c0, c1, c2, c3, c4)
@@ -1200,7 +1228,10 @@ class HL2Stream:
         # 48 k would carry stale counter modulo state.
         self._ep6_count = 0
         rate_code = SAMPLE_RATES[rate]
-        self._send_cc(0x00, rate_code, 0x00, 0x00, self._config_c4)
+        # Path C.2 (audio-pop fix): NO direct _send_cc here -- it
+        # would drain 126 audio samples without consuming a
+        # semaphore signal and click the AK4951.  See _set_rx1_freq
+        # for the full rationale.
         with self._cc_lock:
             self._cc_registers[0x00] = (rate_code, 0x00, 0x00, self._config_c4)
         self._keepalive_cc = (0x00, rate_code, 0x00, 0x00, self._config_c4)
@@ -1223,7 +1254,13 @@ class HL2Stream:
         if self._sock is None:
             raise RuntimeError("stream not started")
         c4 = 0x40 | ((gain_db + 12) & 0x3F)
-        self._send_cc(0x14, 0, 0, 0, c4)
+        # Path C.2 (audio-pop fix): NO direct _send_cc here -- it
+        # would drain 126 audio samples without consuming a
+        # semaphore signal and click the AK4951.  Auto-LNA fires
+        # set_lna_gain_db roughly 1-2x per second under normal
+        # band-noise variation, so this is the dominant pop source
+        # we observed before the fix.  See _set_rx1_freq for full
+        # rationale.
         with self._cc_lock:
             self._cc_registers[0x14] = (0, 0, 0, c4)
         self._keepalive_cc = (0x14, 0, 0, 0, c4)
