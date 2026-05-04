@@ -289,17 +289,6 @@ class HL2Stream:
         # with audible clicks.  v0.0.9.1+
         self.tx_audio_underruns: int = 0
         self.tx_audio_overruns: int = 0
-        # Underrun-rate diagnostic (Path C.1 follow-up): timestamp of
-        # the last underrun event so the writer thread can print a
-        # delta-time per occurrence.  This tells us whether un=N
-        # accumulated over a session is sink-swap noise (single
-        # events at sink open/close, multi-second deltas) or a
-        # steady-rate click source (sub-second deltas, audible as
-        # popping/crackling).  Python ``threading.Semaphore`` does
-        # not expose its internal count so we can't log signal
-        # backlog; the avail value already tells us how empty the
-        # deque was when the consumer arrived.
-        self._un_last_log_t: Optional[float] = None
         # ── EP2 writer thread state (v0.0.9.2 Commit 4) ─────────────
         # Dedicated EP2 writer thread runs the host->radio frame send
         # at the codec's audio cadence (~380 Hz = 48 kHz / 126
@@ -954,30 +943,23 @@ class HL2Stream:
                         pulled = [self._tx_audio.popleft()
                                   for _ in range(avail)]
                     if avail < 126:
-                        # Should be impossible under Path C semantics
-                        # (semaphore signaled => >=126 samples were
-                        # queued); count it as a diagnostic if it
-                        # ever happens (e.g., clear_tx_audio raced
-                        # with a signal that wasn't drained).
+                        # Should be impossible under Path C/C.1/C.2
+                        # semantics (semaphore signaled => >= 126
+                        # samples were queued, no _send_cc drain
+                        # path active during injection).  Count it
+                        # as a diagnostic if it ever happens (e.g.,
+                        # clear_tx_audio raced with a signal that
+                        # wasn't drained, or a future code path
+                        # introduces a regression).  The Path C.2
+                        # diagnostic added in bc5713f -- which
+                        # printed each event with a delta-timestamp
+                        # so we could measure the underrun rate --
+                        # is removed now that we're back to ov=0
+                        # un=0 in steady state.  Restore it from
+                        # commit bc5713f if a future regression
+                        # ever puts un back on the meter.
                         self.tx_audio_underruns += 1
                         pulled.extend([(0.0, 0.0)] * (126 - avail))
-                        # Per-event log so we can see the RATE.
-                        # Greppable line; prints to console.  Format:
-                        #   [TX-UN] +<delta>s avail=<N>/126 total=<count>
-                        # delta = time since previous underrun (-- on
-                        # first event of session).  avail = how many
-                        # samples WE GOT before the deque was empty
-                        # (0 = totally drained, N = partial drain).
-                        now = time.monotonic()
-                        if self._un_last_log_t is None:
-                            delta_str = "  --  "
-                        else:
-                            delta_str = f"{now - self._un_last_log_t:6.3f}s"
-                        self._un_last_log_t = now
-                        print(
-                            f"[TX-UN] +{delta_str} avail={avail:3d}/126 "
-                            f"total={self.tx_audio_underruns}",
-                            flush=True)
                     try:
                         audio_bytes = self._pack_audio_bytes_pairs(
                             pulled)
