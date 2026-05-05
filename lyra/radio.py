@@ -5928,6 +5928,18 @@ class Radio(QObject):
         if (self._wdsp_agc is not None
                 and self._agc_profile != "off"
                 and audio.size > 0):
+            # First-fire confirmation — prints once when audio
+            # actually reaches the WDSP path, so the operator can
+            # confirm flow (not just construction).  Self-clears
+            # the flag after the first print to avoid spam.
+            if not getattr(self, "_wdsp_first_fire_logged", False):
+                print(
+                    f"[Radio] WDSP AGC processing audio: "
+                    f"profile='{self._agc_profile}', "
+                    f"buffer_size={audio.size}, "
+                    f"input_rms={float(np.sqrt(np.mean(audio.astype(np.float64) ** 2))):.5f}"
+                )
+                self._wdsp_first_fire_logged = True
             audio = self._wdsp_agc.process(audio)
             # Report AGC action gain to the meter (matches the
             # legacy emit cadence -- one update per buffer).
