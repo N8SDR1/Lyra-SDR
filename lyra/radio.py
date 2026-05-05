@@ -6155,8 +6155,15 @@ class Radio(QObject):
                 mode_int = MODE_BY_NAME.get(
                     name, MODE_BY_NAME["med"])
                 self._wdsp_agc.set_mode(mode_int)
-            except Exception:  # noqa: BLE001
-                pass
+                print(
+                    f"[Radio] WDSP AGC mode → '{name}' "
+                    f"(mode_int={mode_int}, "
+                    f"tau_decay={self._wdsp_agc.tau_decay*1000:.0f}ms, "
+                    f"hangtime={self._wdsp_agc.hangtime*1000:.0f}ms, "
+                    f"hang_thresh={self._wdsp_agc.hang_thresh:.2f})"
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Radio] WDSP AGC mode sync FAILED: {exc}")
         # Auto-track the threshold only in "auto" profile; everything else
         # leaves the threshold where the user put it.
         if name == "auto":
