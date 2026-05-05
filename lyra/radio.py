@@ -786,6 +786,42 @@ class Radio(QObject):
         self._noise_history_max = 70     # ~3 seconds at 43 ms/block
         self._apply_agc_preset(self._agc_profile)
 
+        # ── WDSP AGC opt-in (env var, feature/agc-wdsp-port) ────────
+        # When ``LYRA_AGC_WDSP=1`` is set in the environment at
+        # process start, the audio chain routes through the WDSP-
+        # pattern AGC (lyra/dsp/agc_wdsp.py) instead of the legacy
+        # per-sample peak tracker.  Operator-facing presets and
+        # threshold map through; auto-threshold tracking is a no-op
+        # in WDSP mode for this first cut (operator uses manual
+        # presets to flight-test).  When the env var is unset,
+        # ``self._wdsp_agc`` stays None and the legacy path runs --
+        # zero behavioural change vs v0.0.9.2.  Restart-required
+        # to A/B compare; this is intentional for the first
+        # validation cycle (a runtime toggle is the v0.0.9.4 step
+        # if WDSP proves out).
+        self._wdsp_agc = None
+        if _os.environ.get("LYRA_AGC_WDSP", "0") == "1":
+            try:
+                from lyra.dsp.agc_wdsp import WdspAgc, MODE_BY_NAME
+                self._wdsp_agc = WdspAgc(sample_rate=48000)
+                # Sync initial mode to match the persisted profile.
+                mode_int = MODE_BY_NAME.get(
+                    self._agc_profile, MODE_BY_NAME["med"])
+                self._wdsp_agc.set_mode(mode_int)
+                print(
+                    "[Radio] AGC engine: WDSP-pattern (look-ahead, "
+                    "5-state, soft-knee).  LYRA_AGC_WDSP=1 in env."
+                )
+            except Exception as e:  # noqa: BLE001
+                # Don't let an AGC-construction failure prevent
+                # Lyra from starting.  Fall back to legacy with a
+                # warning so the operator knows what happened.
+                print(
+                    f"[Radio] WDSP AGC construction failed ({e}); "
+                    f"falling back to legacy AGC engine"
+                )
+                self._wdsp_agc = None
+
         # Auto-tracking timer: only runs while profile == "auto". Owned by
         # Radio (not UI) so tracking continues even if the panel is hidden.
         from PySide6.QtCore import QTimer as _QTimer
@@ -5879,6 +5915,47 @@ class Radio(QObject):
         af = self.af_gain_linear
         # Apply AF Gain first — same for both AGC paths.
         audio = audio * af
+
+        # ── WDSP AGC opt-in path ───────────────────────────────────
+        # When LYRA_AGC_WDSP=1 was set at launch and the operator
+        # didn't pick "off", route through the look-ahead WDSP
+        # engine instead of the legacy per-sample tracker.  The
+        # WdspAgc.process() call returns audio at the WDSP target
+        # level; we apply Volume + leveler + stream-gap fade + tanh
+        # in the common chain below to match legacy behaviour.
+        # "off" still falls through to the legacy AGC_OFF makeup
+        # path so operator-tuned digital-mode loudness is preserved.
+        if (self._wdsp_agc is not None
+                and self._agc_profile != "off"
+                and audio.size > 0):
+            audio = self._wdsp_agc.process(audio)
+            # Report AGC action gain to the meter (matches the
+            # legacy emit cadence -- one update per buffer).
+            try:
+                gain_lin = max(self._wdsp_agc.gain, 1e-6)
+                action_db = 20.0 * np.log10(gain_lin)
+                self.agc_action_db.emit(float(action_db))
+            except Exception:  # noqa: BLE001
+                pass
+            audio = audio * vol
+            # Common chain: leveler → stream-gap fade → tanh.
+            # Inlined here (instead of falling through) because the
+            # legacy path below assumes the per-sample tracker has
+            # populated mag/peak_arr/gain_arr for the audio-debug
+            # diagnostic, which we don't compute in WDSP mode.
+            audio = self._leveler.process(audio)
+            if self._stream is not None:
+                current_seq_errors = self._stream.stats.seq_errors
+                if current_seq_errors > self._last_seen_seq_errors:
+                    self._last_seen_seq_errors = current_seq_errors
+                    if audio.size > 0:
+                        n_fade = min(self._gap_fade_samples, audio.size)
+                        ramp = np.linspace(
+                            0.0, 1.0, n_fade, dtype=audio.dtype)
+                        audio = audio.copy()
+                        audio[:n_fade] *= ramp
+            return np.tanh(audio).astype(np.float32)
+
         if self._agc_profile == "off":
             # AGC disabled — AF Gain + Volume scale the raw demod
             # output. Critical for digital modes (FT8/FT4/RTTY)
@@ -6057,6 +6134,17 @@ class Radio(QObject):
         self._agc_profile = name
         if name != "custom":
             self._apply_agc_preset(name)
+        # Sync the WDSP engine's mode if it's active.  MODE_BY_NAME
+        # handles "auto" → MODE_MEDIUM (auto-threshold tracking is
+        # a no-op in WDSP mode for the first cut).
+        if self._wdsp_agc is not None:
+            try:
+                from lyra.dsp.agc_wdsp import MODE_BY_NAME
+                mode_int = MODE_BY_NAME.get(
+                    name, MODE_BY_NAME["med"])
+                self._wdsp_agc.set_mode(mode_int)
+            except Exception:  # noqa: BLE001
+                pass
         # Auto-track the threshold only in "auto" profile; everything else
         # leaves the threshold where the user put it.
         if name == "auto":
