@@ -8,13 +8,20 @@ session.  Keep it concise — long-form research lives in
 
 When in doubt, consult:
 - `docs/architecture/implementation_playbook.md` — current authoritative
-  spec for RX2 / TX / PureSignal (v0.0.9 / v0.1 / v0.2).  **Start here**
-  for any RX2/TX/PS implementation question.
-- `docs/architecture/v0.0.9_rx2_plan.md` — phase plan, operator decisions.
+  spec for RX2 / TX / PureSignal (v0.0.9 / v0.1 / v0.2).
+- **`docs/architecture/v0.1_rx2_consensus_plan.md`** — AUTHORITATIVE
+  consensus plan from the 2026-05-05 three-engineer review (protocol,
+  DSP, UI) with two rounds of cross-validation.  **Open this FIRST**
+  for any v0.1 / v0.2 / v0.3 implementation question.  Supersedes
+  `v0.0.9_rx2_plan.md` and `rx2_research_notes.md`.  Contains: locked
+  channel ID convention, phase-by-phase plan, mandatory bench-test
+  gates for v0.3 PS, errors corrected from round 1 to round 2,
+  patterns Lyra adopts vs deliberate Thetis divergences.
+- `docs/architecture/v0.0.9_rx2_plan.md` — superseded.  Historical.
 - `docs/architecture/hl2_puresignal_audio_research.md` — HL2-specific
   PureSignal + audio chain research.
-- `docs/architecture/rx2_research_notes.md` — first-pass Thetis
-  research (some content superseded by the playbook; cross-reference).
+- `docs/architecture/rx2_research_notes.md` — superseded by the
+  consensus plan above.  Historical first-pass research.
 
 **Version-numbering note (2026-05-03):** version numbering has
 shifted twice during the v0.0.7 → v0.0.9 cycle.  Current state:
