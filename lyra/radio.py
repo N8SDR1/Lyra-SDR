@@ -5883,6 +5883,16 @@ class Radio(QObject):
             # by ~14 dB to get the previous (uncompensated) level.
             AGC_OFF_MAKEUP = 5.0119   # 10 ** (14/20) — +14 dB linear
             out = audio * AGC_OFF_MAKEUP * vol
+            # APF (CW only) — runs in AGC-OFF path too so operators
+            # who run digital modes with AGC off (FT8/FT4 don't use
+            # APF) and CW operators who prefer AGC off both get
+            # consistent APF behavior.  See main AGC-ON path below
+            # for the rationale comment block.
+            if (self._mode in ("CWU", "CWL")
+                    and getattr(self._rx_channel, "_apf", None) is not None
+                    and self._rx_channel._apf.enabled
+                    and out.size > 0):
+                out = self._rx_channel._apf.process(out)
             # Audio leveler — soft-knee compressor for taming
             # transient bursts.  Bypass-fast when profile == off.
             out = self._leveler.process(out)
