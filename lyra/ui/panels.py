@@ -129,9 +129,9 @@ from lyra.ui.led_freq import FrequencyDisplay
 # step changes the visual feel substantially) and coarser jumps at the
 # high end (where 50 vs 55 fps is indistinguishable).
 #
-# Reference: Thetis SDR ships with 40 Hz default, 60 Hz with averaging
-# enabled is the "optimized" recommendation per Apache Labs guidance.
-# Lyra's default is 40 fps to match.
+# Reference: 40 Hz is a common SDR-client default; 60 Hz with
+# spectrum averaging enabled is the smoothness/cost sweet spot for
+# most operator hardware.  Lyra's default is 40 fps.
 SPECTRUM_FPS_STEPS: tuple[int, ...] = (
     5, 10, 15, 20, 25, 30, 40, 50, 60, 75, 90, 120,
 )

@@ -38,7 +38,7 @@ Algorithm
    release) to avoid clicks.
 
 Lyra GPL v3+ (since v0.0.6).  This module is original to Lyra —
-no algorithmic content is taken from WDSP/Thetis.  Architectural
+no algorithmic content is taken from WDSP.  Architectural
 inspiration only (chain placement, attack/release timing, the
 existence of an "all-mode" squelch concept).
 """

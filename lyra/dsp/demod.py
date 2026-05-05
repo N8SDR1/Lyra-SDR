@@ -60,8 +60,8 @@ class SSBDemod:
 class CWDemod:
     """CW — narrow complex bandpass CENTERED on ±cw_pitch from carrier.
 
-    Standard amateur-radio CW architecture, matching Thetis / PowerSDR /
-    SmartSDR / FT-991 / IC-7300:
+    Standard amateur-radio CW architecture, matching common HPSDR-class
+    clients and rigs (SmartSDR / FT-991 / IC-7300):
 
     - The filter sits at +pitch (CWU) or -pitch (CWL) baseband, with
       width = BW.

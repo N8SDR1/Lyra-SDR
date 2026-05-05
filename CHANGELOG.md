@@ -13,78 +13,118 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
-## [0.0.9.2-pre1] — 2026-05-04 — "Audio Architecture Rebuild — Commit 1"
+## [0.0.9.2] — 2026-05-04 — "Audio Rebuild"
 
-**Pre-release.**  First of six pre-releases that incrementally
-rebuild Lyra's audio production architecture per the senior-
-engineering audit in `docs/architecture/audio_rebuild_v0.1.md`.
-Each pre-release is independently flight-testable; if any one
-regresses, it can be reverted without disturbing the others.
-`main` stays at v0.0.9.1 throughout the rebuild — the v0.0.9.1
-installer remains the published stable release until both Rick
-and Brent sign off on the full rebuild.
+A focused bug-fix release that rewrites the host → radio audio
+cadence on the EP2 path and resolves several long-standing
+symptoms: the universal click-pop, the deque-saturation
+"wobbling" audio, and band-change display freezes.  Operator
+flight-tested across 96 k / 192 k / 384 k IQ rates plus AK4951
+codec output and PC Soundcard output.
 
-### What changed in this commit
+### Audio cadence rewrite
 
-- **DSP worker thread is now the default mode** (was: opt-in
-  BETA).  Audio DSP no longer competes with UI paint events,
-  mouse handling, and signal/slot dispatch on the Qt main
-  thread.  This is part 1 of fixing the universal click-pop
-  bug documented in v0.0.9.1's "residual clicks parked" note.
-- **Operator escape hatch:** Settings → DSP → Threading combo
-  now offers "Worker thread (default)" and "Single-thread
-  (legacy)".  If the new default regresses on any rig, flip
-  back to legacy, restart Lyra, and please file an issue with
-  what you observed.
-- **QSettings ordering bug fixed.**  Previously the persisted
-  `dsp/threading_mode` preference was loaded AFTER Radio
-  initialization, so opting into worker mode set the flag but
-  never started the worker thread.  Loaded earlier now, before
-  the worker-construction decision.  Operators who had opted
-  into worker mode in earlier versions and saw no change
-  should now see the worker actually running.
-- **Audio telemetry indicator** added to the status bar
-  showing `DSP NN Hz | deque H/MAX | un=X ov=Y`.  Lets
-  operators (and us) see objective rebuild progress vs vibes.
-  Color-coded: green when healthy, amber when underrun /
-  overrun counters tick, red if the DSP worker stalls
-  outright.  Removed in v0.0.9.2 full release once the
-  rebuild lands clean.
-- **DSP worker heartbeat counter** (`DspWorker.blocks_processed`)
-  + **TX audio deque high-water tracker** (`HL2Stream.read_tx_audio_high_water`)
-  added to support the telemetry above.  Both are read-only
-  diagnostic surfaces; no operator-facing knobs.
+- **Producer-paced EP2 cadence.**  The host-side EP2 frame
+  writer is now driven by the codec's actual sample rate (via a
+  counting semaphore released once per 126 audio samples
+  produced) instead of a host-clock timer.  The writer's
+  wake-up cadence is locked to the DSP audio output rate, which
+  is locked to the EP6 input rate, which is locked to the HL2's
+  own codec crystal — eliminating PC-vs-codec clock drift and
+  the "deque slowly saturates over minutes" symptom that drove
+  most pre-fix click/pop reports.
 
-### Known issues / what this commit does NOT fix
+- **Heartbeat / keepalive split.**  The writer's `acquire()`
+  timeout is now a dual-mode fallback:
+  * Recent send (<50 ms gap): skip the iteration to avoid
+    inserting silent C&C-only frames between real audio frames
+    (each silent frame was one click on the AK4951 codec).
+  * Long gap (≥50 ms): emit a C&C-only keepalive frame.
+    Required because the HL2 expects continuous EP2 traffic;
+    going silent during a long DSP reset (band change,
+    mode change, sink swap) caused the radio to halt EP6
+    streaming.
 
-- Click-pop frequency is expected to **decrease** but not
-  vanish in this commit.  The full fix needs Commit 2 (block
-  size match) + Commit 3 (real backpressure).  Use the
-  underrun/overrun counters in the status bar to see whether
-  the rate has actually moved.
-- Loud volume spikes on AK4951 (Rick-only) hypothesis untested
-  yet — gated on Commit 5 Wireshark capture.
+- **Stop register writes from stealing audio.**  The legacy
+  immediate-emit path for register writes (`_send_cc`) was
+  draining 126 audio samples from the EP2 queue per call
+  without coordinating with the writer thread.  Auto-LNA
+  pull-ups firing 1-2× per second under normal band-noise
+  variation were the dominant pop source pre-fix.  Three
+  runtime setters (`_set_rx1_freq`, `set_sample_rate`,
+  `set_lna_gain_db`) now update the round-robin C&C register
+  table only; `_send_cc` itself is inject-aware and skips the
+  immediate UDP emit when audio is flowing.
 
-### Tester checklist for this pre-release
+### Band-change fixes
 
-- Run for 30+ minutes on RX, normal listening.
-- Watch the audio telemetry indicator in the status bar.
-  Heartbeat (DSP NN Hz) should tick steadily.  un + ov counters
-  should stay at lower numbers than v0.0.9.1.
-- If audio is audibly worse than v0.0.9.1 in any way: open
-  Settings → DSP → Threading, flip to "Single-thread (legacy)",
-  restart Lyra, and file an issue with details.
-- Confirm Settings → DSP → Threading shows "Worker thread
-  (default)" as currently selected on first launch after
-  upgrade.
+- **Stop band changes from secretly dropping the radio to 48 k
+  IQ.**  `Radio._config_c1` was initialized from the
+  constructor default sample rate and never updated by
+  `set_rate`.  Any band change with the filter board enabled
+  recomposed register 0x00 with this stale 48 k rate code,
+  which the round-robin then propagated to the HL2.  The radio
+  silently dropped to 48 k while the rate selector still
+  showed the operator's choice, manifesting as a 4× DSP
+  throttle, narrow panadapter span, and audio drag.  Fix:
+  read `self._rate` fresh in `_send_full_config`, and keep
+  `_config_c1` synced in `set_rate` for defense-in-depth.
+
+### 48 k IQ rate dropped from operator-selectable options
+
+At 48 k each DSP block produces a full ~43 ms of audio per
+producer call (1:1 IQ-to-audio mapping, no decimation), causing
+16 EP2 frames to burst out in <1 ms followed by a 42 ms gap.
+The HL2 gateware FIFO can't absorb that pattern cleanly —
+audible clicks/pops and occasional volume bursts.  Higher rates
+produce smaller bursts (8 frames at 96 k, 4 at 192 k) that the
+FIFO tolerates.  Rather than maintain a known-bad option, 48 k
+is removed from `SAMPLE_RATES` and the rate combo.  The HL2
+codec's 48 kHz **audio** output rate is unchanged (different
+concept — codec output is hardware-fixed at 48 kHz regardless
+of IQ rate).  Operators who had 48 k saved in QSettings get
+auto-migrated to 96 k on first launch with a one-line console
+notice.  96 k is the new minimum; 192 k is the recommended
+mode; 384 k stays available for operators with the CPU
+headroom.
+
+### Tester checklist
+
+- Run for 30+ minutes on RX at 96 k, 192 k, and 384 k.
+- Watch the status bar — `un` and `ov` counters should stay at
+  0 in steady state.  A small bump on sink swap (Out: AK4951
+  ↔ PC Soundcard) is normal and harmless.
+- Switch bands repeatedly — display should stay live, no
+  4× throttle, no need to Stop/Start to recover.
+- Confirm rate combo offers `96 k`, `192 k`, `384 k` only.
+- If you previously had 48 k saved, watch the launch console
+  for the migration message.
+- Audio output should be audibly cleaner than v0.0.9.1,
+  particularly during Auto-LNA pull-up events.
 
 ### Recovery
 
-If anything goes wrong, install
-`Lyra-Setup-0.0.9.1.exe` from
+If anything goes wrong, install `Lyra-Setup-0.0.9.1.exe` from
 <https://github.com/N8SDR1/Lyra-SDR/releases/tag/v0.0.9.1>.
 Operator data (settings, memory bank, noise profiles) is
-preserved across the downgrade.
+preserved across the downgrade.  The 48 k rate option will
+return on downgrade (if you actually need it for some reason);
+this is fine.
+
+---
+
+## [0.0.9.2-pre1] — 2026-05-04 — "Audio Architecture Rebuild — Commit 1"
+
+**Pre-release.**  Superseded by the full v0.0.9.2 release above.
+Originally the first of six planned pre-releases that
+incrementally rebuilt Lyra's audio production architecture per
+the senior-engineering audit in
+`docs/architecture/audio_rebuild_v0.1.md`.  In practice the
+full rebuild landed in the single v0.0.9.2 release rather than
+the planned six pre-release sequence.  The pre1 changes (DSP
+worker thread default, Settings → DSP → Threading combo,
+QSettings ordering fix, audio telemetry status bar indicator)
+all carried forward into v0.0.9.2.
 
 ---
 

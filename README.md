@@ -1,6 +1,6 @@
 # Lyra — Qt6 SDR Transceiver for Hermes Lite 2 / 2+
 
-**Current version: 0.0.9 — "Memory & Stations"**
+**Current version: 0.0.9.2 — "Audio Rebuild"**
 
 Modern PySide6 desktop SDR for Steve Haynal's Hermes Lite 2 and HL2+.
 Native Python HPSDR Protocol 1, TCI v1.9 server, glassy UI with
@@ -34,9 +34,33 @@ display surface follows automatically.
 
 ## Latest release — see [CHANGELOG.md](./CHANGELOG.md)
 
-The current release is **0.0.9 — "Memory & Stations"**
-(2026-05-02), a pre-RX2 polish release that operators asked for.
-Four feature batches:
+The current release is **0.0.9.2 — "Audio Rebuild"** (2026-05-04).
+A focused bug-fix release that rewrites the host → radio audio
+cadence on the EP2 path:
+
+- **Producer-paced EP2 cadence** — the host-side EP2 frame writer
+  is now driven by the codec's actual sample rate (via a counting
+  semaphore released once per 126 audio samples produced) instead
+  of a host-clock timer.  Eliminates PC-vs-codec clock drift,
+  which was the root cause of the long-standing "deque saturation"
+  symptom and most of the audible clicks / pops.
+- **Audio-pop fix on register writes** — frequency change, LNA
+  change, and OC bit changes no longer steal audio samples from
+  the EP2 queue.  Auto-LNA pull-up firing 1-2× per second was the
+  dominant pop source pre-fix.
+- **Band changes no longer freeze the display** — fixed a stale
+  cached rate code that quietly forced the radio to 48 k IQ rate
+  on every band change with the filter board enabled.  Plus a
+  keepalive fence that emits C&C-only frames during long DSP
+  resets so the HL2 doesn't think the host has gone silent.
+- **48 k IQ rate dropped from operator-selectable options** — at
+  48 k the producer-paced burst pattern overwhelms the codec
+  FIFO; cleaner to drop the rate than ship a half-broken option.
+  96 k is the new minimum.  Pre-existing 48 k preferences in
+  QSettings auto-migrate to 96 k on first launch.
+
+For the previous v0.0.9 / v0.0.9.1 batch (Memory & Stations,
+TIME button, EiBi overlay, etc.):
 
 - **TIME button (HF time-station cycle).**  Press TIME on the BANDS
   panel to jump to WWV / WWVH / CHU.  Press again to step through

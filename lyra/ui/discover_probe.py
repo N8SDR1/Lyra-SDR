@@ -19,7 +19,7 @@ Common discovery failure modes (and what the probe shows):
        out with the unicast probe (enter HL2 IP directly → if it
        still doesn't reply, the HL2 itself isn't reachable).
 
-  4. HL2 already busy with another client (Thetis, SparkSDR).
+  4. HL2 already busy with another HPSDR-protocol SDR client.
      → Probe shows reply with status byte 0x03 (busy) instead of
        0x02 (idle); the parsed entry will say "busy=True".
 
@@ -251,7 +251,7 @@ class NetworkDiscoveryProbeDialog(QDialog):
                 "     list above with HL2 LCD or web UI IP)?\n"
                 "  3. Windows Defender Firewall blocking inbound UDP\n"
                 "     1024 for python.exe / Lyra.exe? Allow it.\n"
-                "  4. Another SDR client (Thetis / SparkSDR) already\n"
+                "  4. Another HPSDR-protocol SDR client already\n"
                 "     connected to the HL2? Close it first.\n"
                 "  5. If you know the HL2 IP, try the unicast button —\n"
                 "     bypasses broadcast entirely.\n")

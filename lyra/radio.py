@@ -924,7 +924,7 @@ class Radio(QObject):
         # divider lets the operator slow the scrolling heatmap without
         # affecting spectrum refresh rate (e.g. 3x divider = waterfall
         # scrolls at 10 rows/sec while spectrum stays at 30 fps).
-        self._fft_interval_ms = 25   # 40 Hz default — matches Thetis
+        self._fft_interval_ms = 25   # 40 Hz default — common SDR convention
         self._waterfall_divider = 1
         self._waterfall_tick_counter = 0
 

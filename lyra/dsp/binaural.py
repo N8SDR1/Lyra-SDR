@@ -5,7 +5,7 @@ the in-phase signal and the other is its 90°-shifted (Hilbert)
 counterpart, mixed by a depth parameter. The brain perceives this
 as a wider soundstage — weak CW lifts out of the noise more easily,
 and SSB voice gains a sense of space ("inside-the-head" effect that
-ham operators recognize from PowerSDR / Thetis-class clients).
+ham operators recognize from other HPSDR-class clients).
 
 DSP form
 --------

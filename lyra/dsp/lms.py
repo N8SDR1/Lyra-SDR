@@ -70,7 +70,7 @@ when the signal is steady (preserving lock on a stable CW tone).
 The empirical constants (lidx_min=120, lidx_max=200, den_mult=
 6.25e-10, lincr=1.0, ldecr=3.0) come from Pratt's reference
 implementation and have been operator-validated across the
-Thetis / openHPSDR community for over a decade.
+openHPSDR community for over a decade.
 
 Operator surface
 ----------------
@@ -98,7 +98,7 @@ defaults — follows Pratt's reference implementation directly.
 Lyra-SDR is GPL v3+ (since v0.0.6) which is license-compatible
 with WDSP's GPL v2+.
 
-WDSP source: openHPSDR Thetis distribution
+WDSP source: openHPSDR project
 Original author contact: warren@wpratt.com
 """
 # Lyra-SDR — LMS adaptive line enhancer
@@ -132,8 +132,8 @@ class LineEnhancerLMS:
     DLINE_SIZE: int = 2048
 
     # ── Default tunings (Pratt's WDSP defaults; 48 kHz baseline) ──
-    # These produce the classic "ANR ON" sound on Thetis and have
-    # been operator-validated for over a decade across the openHPSDR
+    # These produce the classic WDSP ANR sound and have been
+    # operator-validated for over a decade across the openHPSDR
     # community.  At strength 0.5 the slider lands on these.
     DEFAULT_TAPS: int = 64
     DEFAULT_DELAY: int = 16              # decorrelation lag (samples)

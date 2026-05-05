@@ -14,7 +14,7 @@ wraps Lyra's existing scipy-based custom demods (SSB / CW / AM / DSB
 will call `wdsp.dll`'s `fexchange0()` instead — and no other code
 outside this module will need to change.
 
-Architectural intent (mirrors Thetis / WDSP RXA, 100% clean-room):
+Architectural intent (mirrors WDSP RXA, 100% clean-room):
   - Channel owns ALL its DSP state internally: decimator, demods,
     audio buffer, NR, notch chain.
   - Radio configures the channel via setters; the channel never

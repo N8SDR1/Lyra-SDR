@@ -23,9 +23,9 @@
 ;     launch under HKEY_CURRENT_USER\Software\N8SDR\Lyra
 ;   - Run any service / scheduled task / startup hook
 
-#define LyraVersion       "0.0.9.1"
-#define LyraVersionName   "Memory & Stations"
-#define LyraBuildDate     "2026-05-02"
+#define LyraVersion       "0.0.9.2"
+#define LyraVersionName   "Audio Rebuild"
+#define LyraBuildDate     "2026-05-04"
 #define LyraPublisher     "Rick Langford (N8SDR)"
 #define LyraURL           "https://github.com/N8SDR1/Lyra-SDR"
 #define LyraExeName       "Lyra.exe"

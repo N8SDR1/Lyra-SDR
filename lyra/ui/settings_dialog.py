@@ -78,7 +78,7 @@ class TciSettingsTab(QWidget):
         # v0.0.9.1 layout rewrite — three side-by-side columns to fit
         # all the TCI server / streaming / spot controls without a
         # multi-screen-tall stack.  Operator-requested layout based
-        # on the canonical Thetis TCI Settings panel, minus items
+        # on the canonical TCI Settings panel layout, minus items
         # that depend on RX2 (v0.1) or TX (v0.2) which stay parked
         # in the placeholder groups below.
 
@@ -105,7 +105,7 @@ class TciSettingsTab(QWidget):
 
         srv.addWidget(QLabel("Rate Limit (ms)"), srv_row, 0)
         self.rate_spin = QSpinBox()
-        # Per Thetis convention: minimum interval between same-key
+        # Per TCI convention: minimum interval between same-key
         # broadcast messages, in milliseconds.  Internal storage is
         # rate_limit_hz (msg/sec), converted on read/write.
         self.rate_spin.setRange(1, 1000)
@@ -2739,7 +2739,7 @@ class VisualsSettingsTab(QWidget):
         self.fps_slider.setToolTip(
             "How fast the spectrum repaints. Lower = less CPU / GPU "
             "load, laggier trace. Higher = smoother but more work. "
-            "40 fps is the default (matches Thetis convention). At 60 "
+            "40 fps is the default (a common SDR-client convention). At 60 "
             "fps and above, enable 'Smooth spectrum trace' below for "
             "the cleanest look.")
         gr.addWidget(self.fps_slider, 1, 1)

@@ -332,16 +332,15 @@ class HL2Stream:
         self._ep2_writer_thread: Optional[threading.Thread] = None
 
         # ── EP2 producer-paced cadence (v0.0.9.2 Path C) ────────────
-        # Modeled directly on Thetis's `Sem_BuffReady` -> `hsendLRSem`
-        # -> `sendProtocol1Samples` chain (see networkproto1.c:1220
-        # and obbuffs.c:163-169).  Every time the DSP worker pushes
-        # 126 audio samples into ``_tx_audio``, ``queue_tx_audio``
-        # releases ``_ep2_send_sem`` once.  The EP2 writer loop
-        # blocks on this semaphore, so the writer's wake-up cadence
-        # is locked to the DSP's *audio output rate*, which in turn
-        # is locked to the EP6 input rate, which is locked to the
-        # HL2's own codec crystal.  Result: no PC-vs-HL2 clock drift,
-        # no producer overrun, no consumer underrun.
+        # HPSDR P1 producer-paced cadence pattern.  Every time the
+        # DSP worker pushes 126 audio samples into ``_tx_audio``,
+        # ``queue_tx_audio`` releases ``_ep2_send_sem`` once.  The
+        # EP2 writer loop blocks on this semaphore, so the writer's
+        # wake-up cadence is locked to the DSP's *audio output
+        # rate*, which in turn is locked to the EP6 input rate,
+        # which is locked to the HL2's own codec crystal.  Result:
+        # no PC-vs-HL2 clock drift, no producer overrun, no
+        # consumer underrun.
         #
         # ``_unsignaled_audio_samples`` carries the < 126-sample
         # remainder between calls so a producer that pushes 500
@@ -897,8 +896,8 @@ class HL2Stream:
             print(f"[HL2Stream] setswitchinterval failed: {e}")
 
         # ── Path C: producer-paced cadence ─────────────────────────
-        # Modeled on Thetis's hsendLRSem chain.  The writer blocks on
-        # ``_ep2_send_sem`` which is released once per 126 audio
+        # HPSDR P1 producer-paced cadence pattern.  The writer blocks
+        # on ``_ep2_send_sem`` which is released once per 126 audio
         # samples queued by the producer (DSP worker -> AK4951Sink ->
         # queue_tx_audio).  The DSP runs at exactly 48 kHz audio out
         # (locked to EP6 input rate, locked to HL2 codec crystal),
@@ -933,7 +932,7 @@ class HL2Stream:
         # to push it).
         EP2_KEEPALIVE_MAX_GAP = 0.050  # 50 ms
         print(f"[HL2Stream] EP2 cadence: producer-paced via "
-              f"semaphore (Thetis-style); "
+              f"semaphore; "
               f"{EP2_HEARTBEAT_TIMEOUT*1000:.0f} ms heartbeat "
               f"timeout, {EP2_KEEPALIVE_MAX_GAP*1000:.0f} ms "
               f"keepalive fence")
