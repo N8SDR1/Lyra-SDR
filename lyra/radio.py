@@ -5917,6 +5917,47 @@ class Radio(QObject):
         # allocations on the multiply.
         audio = (audio * vol).astype(audio.dtype, copy=False)
 
+        # ── APF — Audio Peaking Filter (CW only) ────────────────────
+        # Moved POST-AGC in v0.0.9.3.  When APF lived inside
+        # Channel.process() (pre-AGC), the AGC compensated the +18 dB
+        # tone-boost back to target -- operator perceived only a
+        # subtle change in tone-vs-noise contrast, not the
+        # dramatic "louder tone" they expected.  Post-AGC placement
+        # gives the operator-facing boost matching expectation: APF
+        # on = literally louder CW tone, leveler + tanh catch any
+        # excursion above headroom.  The APF object still lives on
+        # Channel (so its center freq tracks CW pitch
+        # automatically); only the .process() call site moved.
+        if (self._mode in ("CWU", "CWL")
+                and getattr(self._rx_channel, "_apf", None) is not None
+                and self._rx_channel._apf.enabled
+                and audio.size > 0):
+            # Diagnostic (v0.0.9.3 investigation): log one
+            # in/out sample per ~200 blocks so the operator can see
+            # APF actually boosting audio.  Strips in v0.0.9.4 once
+            # post-AGC placement is field-verified.
+            _apf_dbg_n = getattr(self, "_apf_dbg_block_counter", 0) + 1
+            self._apf_dbg_block_counter = _apf_dbg_n
+            log_this_block = (_apf_dbg_n % 200) == 0
+            if log_this_block:
+                in_rms = float(np.sqrt(
+                    np.mean(audio.astype(np.float64) ** 2)))
+                in_peak = float(np.max(np.abs(audio)))
+            audio = self._rx_channel._apf.process(audio)
+            if log_this_block:
+                out_rms = float(np.sqrt(np.mean(
+                    audio.astype(np.float64) ** 2)))
+                out_peak = float(np.max(np.abs(audio)))
+                apf = self._rx_channel._apf
+                print(
+                    f"[APF post-AGC] in_rms={in_rms:.5f} "
+                    f"out_rms={out_rms:.5f} "
+                    f"boost_dB={20.0 * np.log10(max(out_rms, 1e-12) / max(in_rms, 1e-12)):+5.2f} "
+                    f"in_peak={in_peak:.4f} out_peak={out_peak:.4f} "
+                    f"mode={self._mode} center={apf.center_hz:.0f}Hz "
+                    f"bw={apf.bw_hz}Hz gain={apf.gain_db:.0f}dB"
+                )
+
         # Audio leveler — soft-knee compressor for taming transient
         # bursts.  Sits BEFORE tanh so its smooth gain reduction
         # can prevent the tanh limiter from clipping; tanh stays

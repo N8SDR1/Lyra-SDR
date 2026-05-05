@@ -910,39 +910,14 @@ class PythonRxChannel(DspChannel):
                     audio = self._nr2.process(audio)
                 else:
                     audio = self._nr.process(audio)
-                # APF — only useful in CW. The operator's enable
-                # state is preserved across mode switches (button
-                # stays "on"), but the filter only runs when there's
-                # actually CW content to boost.
-                if is_cw and self._apf.enabled:
-                    # Diagnostic (v0.0.9.3 APF investigation): log
-                    # one in, out RMS sample per N=200 blocks (~2 sec
-                    # at 90 Hz) so the operator can see APF actually
-                    # boosting audio at the call site.  Self-strips
-                    # in v0.0.9.4 once the filter is verified live.
-                    _apf_dbg_n = getattr(
-                        self, "_apf_dbg_block_counter", 0) + 1
-                    self._apf_dbg_block_counter = _apf_dbg_n
-                    if (_apf_dbg_n % 200) == 0 and audio.size > 0:
-                        in_rms = float(np.sqrt(
-                            np.mean(audio.astype(np.float64) ** 2)))
-                        in_peak = float(np.max(np.abs(audio)))
-                    else:
-                        in_rms = None
-                    audio_after = self._apf.process(audio)
-                    if in_rms is not None and audio_after.size > 0:
-                        out_rms = float(np.sqrt(np.mean(
-                            audio_after.astype(np.float64) ** 2)))
-                        out_peak = float(np.max(np.abs(audio_after)))
-                        print(
-                            f"[APF] in_rms={in_rms:.5f} "
-                            f"out_rms={out_rms:.5f} "
-                            f"boost_dB={20.0 * np.log10(max(out_rms, 1e-12) / max(in_rms, 1e-12)):+5.2f} "
-                            f"in_peak={in_peak:.4f} out_peak={out_peak:.4f} "
-                            f"mode={mode} apf_center={self._apf.center_hz:.0f}Hz "
-                            f"bw={self._apf.bw_hz}Hz gain={self._apf.gain_db:.0f}dB"
-                        )
-                    audio = audio_after
+                # APF call moved POST-AGC in v0.0.9.3 -- runs in
+                # Radio._apply_agc_and_volume after AGC+Vol so the
+                # operator's +18 dB boost is a literal audible boost
+                # on the CW tone, not something the AGC compensates
+                # for.  The APF object still lives on the Channel
+                # (so set_apf_* / set_center_hz live here and follow
+                # the CW pitch automatically), but its .process()
+                # call site moved out.
                 out_chunks.append(audio)
             except Exception as e:
                 print(f"[channel] demod error: {e}")
