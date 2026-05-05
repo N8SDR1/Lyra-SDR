@@ -45,7 +45,22 @@ START_IQ = 0x01
 START_IQ_BANDSCOPE = 0x03
 
 # Sample rate codes for C0=0x00, C1[1:0]
-SAMPLE_RATES = {48000: 0, 96000: 1, 192000: 2, 384000: 3}
+#
+# NOTE: 48 k IQ rate is intentionally OMITTED from operator-
+# selectable rates (was {48000: 0, 96000: 1, 192000: 2, 384000: 3}).
+# Reason: at 48 k IQ rate the DSP block produces ~43 ms of audio
+# per producer call (16 EP2 frames' worth, since IQ rate equals
+# audio rate 1:1 instead of being decimated).  Path C's producer-
+# paced semaphore drains all 16 frames in <1 ms and then waits
+# 42 ms for the next burst -- the HL2 gateware FIFO can't absorb
+# that without audible clicks/pops.  Higher IQ rates produce
+# smaller bursts (8 frames at 96 k, 4 at 192 k) that the FIFO
+# tolerates cleanly.  Rather than maintain a known-bad option,
+# we drop it and start the operator-selectable range at 96 k.
+# The HL2 gateware's rate code 0 (= 48 k IQ) is therefore not a
+# rate Lyra ever requests; the codec's 48 k AUDIO rate is
+# unaffected (different concept -- always 48 k regardless of IQ).
+SAMPLE_RATES = {96000: 1, 192000: 2, 384000: 3}
 
 
 @dataclass
@@ -193,13 +208,13 @@ class HL2Stream:
     """Open a P1 stream to an HL2, run an RX loop in a background thread.
 
     Typical use:
-        s = HL2Stream("10.10.30.100", sample_rate=48000)
+        s = HL2Stream("10.10.30.100", sample_rate=96000)
         s.start(on_samples=lambda samples, stats: ...)
         ...
         s.stop()
     """
 
-    def __init__(self, radio_ip: str, sample_rate: int = 48000):
+    def __init__(self, radio_ip: str, sample_rate: int = 96000):
         if sample_rate not in SAMPLE_RATES:
             raise ValueError(f"sample_rate must be one of {list(SAMPLE_RATES)}")
         self.radio_ip = radio_ip

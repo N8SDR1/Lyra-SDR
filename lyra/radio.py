@@ -504,7 +504,14 @@ class Radio(QObject):
         # ── Persistent-ish state ──────────────────────────────────────
         self._ip = "10.10.30.100"
         self._freq_hz = 7074000
-        self._rate = 48000
+        # 96 k is the default IQ rate (was 48 k).  48 k was dropped
+        # from operator-selectable rates because at 48 k the DSP
+        # block produces 16 EP2 frames' worth of audio per producer
+        # call (1:1 IQ-to-audio mapping, no decimation), which the
+        # HL2 gateware FIFO can't absorb cleanly under Path C's
+        # producer-paced semaphore.  See SAMPLE_RATES comment in
+        # stream.py for the full rationale.
+        self._rate = 96000
         self._mode = "USB"
         self._gain_db = 19
         # CW pitch (Hz) — operator-adjustable via Settings → DSP.

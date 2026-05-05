@@ -2246,7 +2246,20 @@ class MainWindow(QMainWindow):
             try: r.set_freq_hz(int(s.value("freq_hz")))
             except (TypeError, ValueError): pass
         if s.contains("rate"):
-            try: r.set_rate(int(s.value("rate")))
+            try:
+                _persisted_rate = int(s.value("rate"))
+                # 48 k IQ rate was dropped as a selectable option
+                # (caused codec FIFO bursts under Path C).  Migrate
+                # any pre-existing 48 k preference up to 96 k so the
+                # operator gets a working rate instead of silent
+                # fallback to the constructor default.  Write the
+                # new value back so this only runs once.
+                if _persisted_rate == 48000:
+                    _persisted_rate = 96000
+                    s.setValue("rate", 96000)
+                    print("[Lyra] Migrated saved IQ rate "
+                          "48 k -> 96 k (48 k no longer offered)")
+                r.set_rate(_persisted_rate)
             except (TypeError, ValueError): pass
         if s.contains("mode"):          r.set_mode(str(s.value("mode")))
         if s.contains("gain"):
