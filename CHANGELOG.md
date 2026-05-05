@@ -13,6 +13,148 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.3] — 2026-05-05 — "WDSP AGC"
+
+The audio-quality follow-up to v0.0.9.2's host-side cadence
+rebuild.  v0.0.9.2 fixed the EP2 cadence + band-change issues at
+the protocol level; v0.0.9.3 fixes the AGC + APF audio-chain
+issues operators interact with directly.  Operator-flight-tested
+across CW (zero-beat tone tracking), SSB ragchews, and AM
+broadcast on Hermes Lite 2+.
+
+### WDSP AGC engine — full port + swap
+
+- **Legacy single-state peak tracker is retired.**  Lyra's AGC is
+  now a Python port of Warren Pratt NR0V's WDSP **wcpAGC** —
+  the same look-ahead, state-machine, soft-knee design used by
+  every serious openHPSDR-class SDR client (Thetis, PowerSDR
+  mRX-PS).  Lives at ``lyra/dsp/agc_wdsp.py`` with full GPL
+  v2+ → GPL v3+ attribution chain documented per
+  ``docs/architecture/wdsp_integration.md``.
+
+- **Architectural changes operators will hear:**
+  - **Look-ahead ring buffer** (4 ms at default attack tau)
+    delays output so attack ramps complete BEFORE a loud sample
+    reaches the speaker.  No more transient distortion or
+    post-impulse audio mute on lightning crashes / impulse
+    interference.
+  - **5-state machine** (NORMAL / FAST_DECAY / HANG / DECAY /
+    HANG_DECAY) separates the gain regimes the legacy single-
+    state tracker conflated.  Pop-detection (state 1) gives
+    fast recovery after transients without making the operator-
+    facing decay constant overly aggressive.
+  - **Soft-knee log-domain compression curve** replaces the
+    legacy hard-threshold ``gain = target / peak``.  Smooth
+    around the threshold — no AGC pumping on signals riding
+    the knee (typical SSB voice envelopes, slow-QSB DX).
+  - **Hang threshold gating** means hang state engages only on
+    real signals above background.  Noise alone never triggers
+    hang — the noise floor stays smooth.  This eliminates the
+    "scratchy / dirty record player" texture some operators
+    diagnosed in v0.0.9.x.
+
+- **Two prior surgical-fix attempts on the legacy engine had
+  failed** for documented mathematical reasons (see
+  ``docs/architecture/audio_rebuild_v0.1.md`` §10.1, attempts 5
+  and 6).  Lesson: the legacy engine had hidden invariants between
+  PEAK_FLOOR / noise tracking / attack rate that emerged from
+  interaction; any modification broke one of them and surfaced as
+  a different audible regression.  Surgical patching was
+  structurally inadequate.  WDSP's invariants are explicit by
+  construction — the port resolves all three failure modes at
+  once.
+
+- **Operator-facing API unchanged.**  AGC profile names
+  (Off / Fast / Med / Slow / Auto / Custom) and the right-click
+  menu work identically; time constants come straight from
+  Pratt's SetRXAAGCMode reference (Fast=50ms decay, Med=250ms,
+  Slow=500ms with 1s hang).  The "Auto" profile's noise-floor
+  threshold tracking is currently a no-op (it behaves like
+  Medium); will return as a Settings-controlled WDSP hang_thresh
+  slider in a future release.
+
+- **Custom profile** is also currently a UI-state holdover —
+  Release / Hang sliders persist in QSettings but don't reach
+  the WDSP engine for now.  Future Settings panel will expose
+  WDSP's canonical operator knobs (Attack ms / Decay ms / Hang ms
+  / Hang threshold) which gives Custom its full range back.
+
+### APF moved post-AGC, default bandwidth widened
+
+- **APF call-site moved.**  Previously APF ran inside Channel
+  (post-NR but pre-AGC), so the +18 dB tone boost was applied
+  first and then AGC compensated by reducing gain to keep the
+  output at target.  Operators perceived only a subtle SNR
+  improvement — overall loudness was unchanged.
+
+- **New chain:** ``demod → LMS → ANF → SQ → NR → AF → AGC → Vol →
+  APF → leveler → tanh``.  Post-AGC placement gives the operator-
+  facing boost matching expectation: APF on = literally louder
+  CW tone, leveler + tanh catch any excursion above headroom.
+  Matches how PowerSDR / modern Thetis place the equivalent CW
+  peaking filter.
+
+- **Default bandwidth bumped 80 → 100 Hz** (Q ≈ 6.5 at 650 Hz
+  pitch).  At the legacy default of 80 Hz / Q ≈ 7.5, the boost
+  band missed the signal if the operator was even ±50 Hz off-
+  zero-beat.  100 Hz is forgiving enough that the boost lands on
+  the signal even with a few dozen Hz of mistuning.  Operators
+  who want razor-sharp filtering can manually drop to 30-60 Hz;
+  operators on messy bands can widen up to 200 Hz.  Range and
+  right-click presets unchanged.
+
+- **APF object still lives on Channel** (so its center frequency
+  continues to follow the operator's CW pitch automatically); only
+  the ``.process()`` call site moved to ``Radio._apply_agc_and_volume``.
+  Wired into both the AGC-ON and AGC-OFF paths so operators
+  running CW with AGC off get consistent APF behavior.
+
+### Audio-chain visibility diagnostic
+
+- **SoundDeviceSink logs device + host API + negotiated sample
+  rate** at PC Soundcard sink open.  When operators report ring-
+  buffer overruns on PC Soundcard mode, this line tells us whether
+  Windows is doing shared-mode resampling silently, whether
+  PortAudio picked the wrong default device (Bluetooth, virtual
+  cable), or whether the device genuinely supports 48 kHz.
+
+  ```
+  [Lyra audio] SoundDeviceSink: device=[Speakers (Realtek)]
+    host=Windows WASAPI requested_rate=48000 actual_rate=48000
+    latency=21.3ms channels=2
+  ```
+
+  If actual_rate ≠ requested_rate, a warning prints below it
+  pointing at WASAPI shared-mode resampling as the likely cause.
+
+### What this release does NOT change
+
+- HL2 codec audio output rate stays 48 kHz (hardware-fixed).
+- HPSDR Protocol 1 wire format unchanged.
+- Operator's QSettings (memory bank, captured noise profiles,
+  band memory, etc.) carry forward unchanged.
+- AGC / APF profile presets persist across the upgrade.
+
+### Tester checklist
+
+- Run for 30+ minutes on RX across CW, SSB, AM modes.
+- AGC: switch Fast / Med / Slow / Long profiles on real signals.
+  Expect smoother noise floor on Slow than v0.0.9.2; expect fast
+  recovery (≤25 ms) after lightning crashes / impulse hits.
+- APF (CW only): toggle on/off on a known weak CW signal; the
+  on-state should produce a noticeably louder tone than off,
+  not just an SNR improvement.
+- PC Soundcard mode: watch the console for the device-info
+  diagnostic line; report it if the actual rate ≠ requested.
+
+### Recovery
+
+If anything regresses, install ``Lyra-Setup-0.0.9.2.exe`` from
+<https://github.com/N8SDR1/Lyra-SDR/releases/tag/v0.0.9.2>.
+Operator data is preserved across the downgrade.
+
+---
+
 ## [0.0.9.2] — 2026-05-04 — "Audio Rebuild"
 
 A focused bug-fix release that rewrites the host → radio audio

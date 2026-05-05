@@ -43,28 +43,42 @@ APF controls:
 | Control | Range | Default | Notes |
 |---|---|---|---|
 | Enable | on/off | off | Master toggle |
-| BW (-3 dB) | 30 – 200 Hz | 80 Hz | Lower = sharper peak |
+| BW (-3 dB) | 30 – 200 Hz | 100 Hz | Lower = sharper peak |
 | Gain | 0 – 18 dB | +12 dB | Boost amount at the pitch |
 
 Center frequency follows your **CW Pitch** automatically — you don't
 set it separately. When you change pitch, APF retunes with you.
 
+The 100 Hz default (Q ≈ 6.5 at a 650 Hz pitch) is wide enough to
+catch a CW signal even if you're slightly off zero-beat — about
+±50 Hz of mistuning still lands inside the boost band. Operators
+who want razor-sharp tone selection can drop BW to 40-60 Hz once
+they're zero-beat; operators on messy bands can widen up to 200 Hz.
+
 ## How it sounds (and how to tune it)
 
-**Start with defaults** (80 Hz BW, +12 dB). On a known weak signal,
-toggle APF on/off. The signal should sound louder and clearer; the
-rest of the passband should still be there but quieter relative.
+**Start with defaults** (100 Hz BW, +12 dB). On a known weak signal,
+toggle APF on/off. The signal should sound noticeably louder; the
+rest of the passband stays audible but quieter relative.
 
-**Too much ring on dits?** Widen BW (try 100–150 Hz). Below ~30 Hz
+**Too much ring on dits?** Widen BW (try 120–150 Hz). Below ~30 Hz
 the filter starts to act like a resonator and dits develop a tail.
 
-**Not enough boost?** Raise Gain. Above ~14 dB you may notice AGC
-pumping — the filter raises the signal level above where AGC can
-clamp it neatly. Back off gain or switch to AGC Slow to settle it.
+**Not enough boost?** Raise Gain. Up to +18 dB. The boost is now
+applied AFTER AGC, so it's a literal increase in tone loudness at
+the speaker (not just an SNR change AGC compensates for).
 
 **Boost too aggressive on already-strong stations?** Toggle APF off
 when the station is loud enough without it — APF earns its keep on
-the weak end.
+the weak end. Strong signals plus high APF gain can saturate the
+output limiter (Lyra's tanh safety net), which can sound clamped or
+flat. Drop Gain or turn APF off for those situations.
+
+**Not on zero-beat and APF feels weak?** Either widen BW (up to
+150 Hz) so the boost band catches your slightly-off signal, or
+fine-tune your radio frequency a few Hz at a time — there's a sweet
+spot where the tone "pops" out. The narrower your BW setting, the
+more critical zero-beat becomes.
 
 ## Why APF doesn't ring like a narrow filter
 
@@ -81,16 +95,19 @@ sit.
 ## Where APF sits in the audio chain
 
 ```
-IQ → demod → notches → NR → APF → AGC → AF Gain → Volume → output
-                            ▲
-                            CW-only stage (your enable + pitch + BW + gain)
+IQ → demod → notches → LMS → ANF → SQ → NR → AF Gain → AGC → Vol → APF → leveler → output
+                                                                   ▲
+                                                                   CW-only stage
 ```
 
-APF runs **before AGC**, on purpose. With APF first, the CW tone
-becomes the loudest thing in the AGC window — AGC chases it, and
-the operator hears the boosted signal at AGC target level. If APF
-ran after AGC, the boost would just get clamped back down (defeating
-the point).
+APF runs **after AGC + Volume** in v0.0.9.3 (relocated from the
+earlier pre-AGC position).  When APF was upstream of AGC, the AGC
+saw the boosted CW tone and reduced gain to keep overall output at
+target — the boost was felt as a subtle improvement in tone-vs-noise
+contrast but the overall loudness didn't change, which most operators
+perceived as "APF doesn't do much."  Post-AGC placement gives the
++18 dB max boost as a literal audible loudness boost on the CW tone.
+The leveler + tanh safety net catches any overshoot above headroom.
 
 ## Tips
 

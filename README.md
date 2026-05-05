@@ -1,6 +1,6 @@
 # Lyra — Qt6 SDR Transceiver for Hermes Lite 2 / 2+
 
-**Current version: 0.0.9.2 — "Audio Rebuild"**
+**Current version: 0.0.9.3 — "WDSP AGC"**
 
 Modern PySide6 desktop SDR for Steve Haynal's Hermes Lite 2 and HL2+.
 Native Python HPSDR Protocol 1, TCI v1.9 server, glassy UI with
@@ -34,33 +34,42 @@ display surface follows automatically.
 
 ## Latest release — see [CHANGELOG.md](./CHANGELOG.md)
 
-The current release is **0.0.9.2 — "Audio Rebuild"** (2026-05-04).
-A focused bug-fix release that rewrites the host → radio audio
-cadence on the EP2 path:
+The current release is **0.0.9.3 — "WDSP AGC"** (2026-05-05).
+The audio-quality follow-up to v0.0.9.2's host-side cadence rebuild,
+focused on the AGC + APF chain operators interact with directly.
 
-- **Producer-paced EP2 cadence** — the host-side EP2 frame writer
-  is now driven by the codec's actual sample rate (via a counting
-  semaphore released once per 126 audio samples produced) instead
-  of a host-clock timer.  Eliminates PC-vs-codec clock drift,
-  which was the root cause of the long-standing "deque saturation"
-  symptom and most of the audible clicks / pops.
-- **Audio-pop fix on register writes** — frequency change, LNA
-  change, and OC bit changes no longer steal audio samples from
-  the EP2 queue.  Auto-LNA pull-up firing 1-2× per second was the
-  dominant pop source pre-fix.
-- **Band changes no longer freeze the display** — fixed a stale
-  cached rate code that quietly forced the radio to 48 k IQ rate
-  on every band change with the filter board enabled.  Plus a
-  keepalive fence that emits C&C-only frames during long DSP
-  resets so the HL2 doesn't think the host has gone silent.
-- **48 k IQ rate dropped from operator-selectable options** — at
-  48 k the producer-paced burst pattern overwhelms the codec
-  FIFO; cleaner to drop the rate than ship a half-broken option.
-  96 k is the new minimum.  Pre-existing 48 k preferences in
-  QSettings auto-migrate to 96 k on first launch.
+- **WDSP-pattern AGC engine** — Lyra's legacy single-state peak
+  tracker is retired in favor of a Python port of Warren Pratt's
+  WDSP wcpAGC.  Look-ahead ring buffer, 5-state machine, soft-knee
+  compression curve, hang threshold gating.  Smoother noise floor,
+  fast recovery after transients (~25 ms vs ~500 ms in legacy),
+  no scratchy modulation, no post-attack volume surges.  Operator-
+  facing presets (Off / Fast / Med / Slow / Auto) are unchanged
+  in name; the audio character is consistent with what operators
+  hear on Thetis and PowerSDR-class clients.
+- **APF moved post-AGC** — the Audio Peaking Filter (CW only) now
+  applies its boost AFTER AGC + Volume, so the +18 dB max gain
+  produces a literal audible loudness boost on the CW tone instead
+  of being absorbed by AGC compensation.  Default bandwidth bumped
+  from 80 → 100 Hz so the boost catches signals even when slightly
+  off-zero-beat.  Right-click the APF button to pick BW / Gain
+  presets; the operator-tunable range (30-200 Hz, 0-18 dB) is
+  unchanged.
+- **SoundDeviceSink device-info diagnostic** — when an operator
+  switches Out: combo to PC Soundcard, the console now logs the
+  device PortAudio actually picked, host API in use, and the
+  negotiated sample rate vs requested.  Added to diagnose ring-
+  overrun reports from PortAudio chains where Windows is doing
+  shared-mode resampling silently.
+- **Workflow housekeeping** — version bumps, CHANGELOG, install
+  guide refresh, and the WDSP integration attribution chain
+  (Pratt's GPL v2+ → Lyra's GPL v3+) is fully documented for the
+  ported AGC engine.
 
-For the previous v0.0.9 / v0.0.9.1 batch (Memory & Stations,
-TIME button, EiBi overlay, etc.):
+For the previous v0.0.9.2 release (host → radio EP2 cadence
+rewrite, band-change fixes, 48 k IQ rate retirement) and the
+v0.0.9 / v0.0.9.1 batch (Memory & Stations, TIME button, EiBi
+overlay, etc.):
 
 - **TIME button (HF time-station cycle).**  Press TIME on the BANDS
   panel to jump to WWV / WWVH / CHU.  Press again to step through

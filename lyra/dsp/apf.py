@@ -74,8 +74,15 @@ class AudioPeakFilter:
     GAIN_MIN_DB: float = 0.0
     GAIN_MAX_DB: float = 18.0
 
-    # Defaults — modest BW, modest boost. Field-test starting point.
-    BW_DEFAULT_HZ: int = 80
+    # Defaults — modest BW, modest boost.  Field-test result
+    # (v0.0.9.3): bumped BW_DEFAULT_HZ from 80 → 100 to be more
+    # forgiving of off-pitch tuning.  At pitch=650 Hz this yields
+    # Q≈6.5 -- the boost still feels selective, but ±50 Hz of
+    # mistuning still lands inside the boost band.  Operators who
+    # want razor-sharp filtering can right-click APF → Bandwidth
+    # and pick 30 or 40 Hz; operators who run messy bands can go
+    # up to 200 Hz.
+    BW_DEFAULT_HZ: int = 100
     GAIN_DEFAULT_DB: float = 12.0
 
     def __init__(
