@@ -449,17 +449,10 @@ class Radio(QObject):
     NOTCH_CASCADE_MIN: int = 1
     NOTCH_CASCADE_MAX: int = 4
 
-    # Block size assumed by the AGC_PRESETS release / hang values.
-    # The presets above are stated in "per block" units historically
-    # tuned for a 1024-sample channel block at 48 kHz audio rate.  The
-    # per-sample envelope tracker in _apply_agc_and_volume translates
-    # these to per-sample alpha / hang counts via
-    # _refresh_agc_per_sample_constants() so the perceived time
-    # constants stay identical to what operators are used to.
-    # Quiet-pass v0.0.7.1: introduced when AGC moved from block-scalar
-    # to true per-sample envelope tracking — see
-    # docs/architecture/audio_pops_audit.md §3 P0.1.
-    _AGC_LEGACY_BLOCK_N: int = 1024
+    # (v0.0.9.3) Removed _AGC_LEGACY_BLOCK_N -- it was the per-block
+    # sample count the legacy AGC's per-sample-constant translator
+    # consumed.  WDSP works in canonical seconds-form parameters
+    # internally and doesn't need this.
 
     # ── External filter board (N2ADR etc.) ─────────────────────────────
     oc_bits_changed      = Signal(int, str)     # raw_bits, human-readable
@@ -734,93 +727,46 @@ class Radio(QObject):
         # (or one captured before this metadata was tracked).
         self._active_captured_profile_meta: Optional[dict] = None
 
-        # AGC: peak-track with hang time. Profile presets select
-        # (release rate, hang blocks); Custom exposes the parameters
-        # directly. "off" disables AGC entirely — volume scales the
-        # raw demod output.
-        self._agc_peak = 0.01
-        # AGC target 0.0316 linear = -30 dBFS peak. Progression:
-        #   0.3  (-10 dBFS)  pre-AF-Gain-split — too hot, AGC had to
-        #                    do all the work, stacked with AF caused
-        #                    clipping/tanh saturation
-        #   0.1  (-20 dBFS)  AF-split era — still too hot, on/off
-        #                    delta was ~17 dB (noticeable)
-        #   0.0316(-30 dBFS) current — matches the typical reference-
-        #                    client target; AGC does less aggressive
-        #                    work, preserves dynamic range better,
-        #                    on/off delta drops to ~8-10 dB (the
-        #                    "slight feel" operators expect)
-        # Trade-off: requires slightly higher Vol slider for same
-        # loudness, but the user gains more expressive dynamic range
-        # on signals and much less AGC pumping on digital modes.
-        self._agc_target = 0.0316
+        # AGC operator-facing state.  The actual envelope tracking +
+        # gain calculation is done by the WDSP engine (constructed
+        # below).  These fields are kept for UI bindings (custom-
+        # AGC sliders, threshold display, profile persistence) and
+        # for the "auto threshold" feature.  The legacy per-sample
+        # peak tracker that consumed _agc_release / _agc_hang_blocks
+        # / _agc_target directly was retired in v0.0.9.3 -- those
+        # fields are now informational only on the audio path; the
+        # WDSP engine derives its time constants from operator-
+        # facing presets via WdspAgc.set_mode().
+        self._agc_target = 0.0316        # -30 dBFS, UI-displayed
         self._agc_profile = "med"        # off / fast / med / slow / custom
-        self._agc_release = 0.003
-        self._agc_hang_blocks = 23
-        # Audio-pop diagnostic gate.  Lit by env var LYRA_AUDIO_DEBUG=1
-        # at process start; can also be flipped at runtime via
-        # set_lyra_audio_debug() for live A/B testing.  Zero-cost when
-        # off (single attribute check inside the audio hot path).
-        # See _diagnose_audio_step for what it prints.
-        import os as _os
-        self._lyra_audio_debug: bool = (
-            _os.environ.get("LYRA_AUDIO_DEBUG", "0") == "1")
-        self._lyra_audio_debug_count: int = 0  # rate-limit log spam
-        self._lyra_audio_debug_t0: float = 0.0
-        # Per-sample envelope tracker state.  _agc_peak (above) is the
-        # PER-SAMPLE peak carried across audio blocks.  _agc_hang_counter
-        # is in samples (not blocks) — counts down inside the per-sample
-        # state machine.  Cached per-sample translations of release /
-        # hang are filled by _refresh_agc_per_sample_constants() any
-        # time the operator changes profile or sliders.
-        # See _apply_agc_and_volume for the full envelope tracker.
-        self._agc_hang_counter: int = 0
-        self._agc_one_minus_alpha_per_sample: float = 1.0
-        self._agc_hang_samples: int = 0
-        # Rolling noise-floor estimate — lowest block peak over the
-        # recent window. Used by "Auto Threshold" to calibrate the
-        # AGC target above ambient noise (like the right-click →
-        # "automatic AGC threshold" option).
-        self._noise_baseline = 0.01
-        self._noise_history: list[float] = []
-        self._noise_history_max = 70     # ~3 seconds at 43 ms/block
-        self._apply_agc_preset(self._agc_profile)
+        self._agc_release = 0.003        # custom-slider value, UI only
+        self._agc_hang_blocks = 23       # custom-slider value, UI only
+        # Rolling noise-floor estimate -- legacy field, kept for
+        # auto_set_agc_threshold's "calibrate above ambient noise"
+        # behavior.  No longer updated automatically (the legacy
+        # tracker that wrote to _noise_history is gone); auto-AGC
+        # uses whatever value is here, defaulting to 1e-4 (-80
+        # dBFS) on cold start.  Returns as a Settings-controlled
+        # WDSP hang_thresh slider in a future release.
+        self._noise_baseline = 1e-4
 
-        # ── WDSP AGC opt-in (env var, feature/agc-wdsp-port) ────────
-        # When ``LYRA_AGC_WDSP=1`` is set in the environment at
-        # process start, the audio chain routes through the WDSP-
-        # pattern AGC (lyra/dsp/agc_wdsp.py) instead of the legacy
-        # per-sample peak tracker.  Operator-facing presets and
-        # threshold map through; auto-threshold tracking is a no-op
-        # in WDSP mode for this first cut (operator uses manual
-        # presets to flight-test).  When the env var is unset,
-        # ``self._wdsp_agc`` stays None and the legacy path runs --
-        # zero behavioural change vs v0.0.9.2.  Restart-required
-        # to A/B compare; this is intentional for the first
-        # validation cycle (a runtime toggle is the v0.0.9.4 step
-        # if WDSP proves out).
-        self._wdsp_agc = None
-        if _os.environ.get("LYRA_AGC_WDSP", "0") == "1":
-            try:
-                from lyra.dsp.agc_wdsp import WdspAgc, MODE_BY_NAME
-                self._wdsp_agc = WdspAgc(sample_rate=48000)
-                # Sync initial mode to match the persisted profile.
-                mode_int = MODE_BY_NAME.get(
-                    self._agc_profile, MODE_BY_NAME["med"])
-                self._wdsp_agc.set_mode(mode_int)
-                print(
-                    "[Radio] AGC engine: WDSP-pattern (look-ahead, "
-                    "5-state, soft-knee).  LYRA_AGC_WDSP=1 in env."
-                )
-            except Exception as e:  # noqa: BLE001
-                # Don't let an AGC-construction failure prevent
-                # Lyra from starting.  Fall back to legacy with a
-                # warning so the operator knows what happened.
-                print(
-                    f"[Radio] WDSP AGC construction failed ({e}); "
-                    f"falling back to legacy AGC engine"
-                )
-                self._wdsp_agc = None
+        # ── WDSP AGC engine (v0.0.9.3) ───────────────────────────────
+        # Lyra's AGC is a Python port of Warren Pratt's WDSP wcpAGC
+        # (look-ahead ring buffer + 5-state machine + soft-knee
+        # compression curve).  Replaced the legacy single-state
+        # per-sample tracker in v0.0.9.3 because the legacy tracker
+        # had three structural defects (no look-ahead, no state
+        # machine, hard-threshold gain) that surgical fixes couldn't
+        # address without introducing other regressions.  Engine
+        # lives in lyra/dsp/agc_wdsp.py with full GPL chain
+        # attribution to Warren Pratt NR0V.  Mode is synced from
+        # the persisted profile here; subsequent profile changes
+        # call set_agc_profile which keeps the engine in step.
+        from lyra.dsp.agc_wdsp import WdspAgc, MODE_BY_NAME
+        self._wdsp_agc = WdspAgc(sample_rate=48000)
+        self._wdsp_agc.set_mode(
+            MODE_BY_NAME.get(self._agc_profile, MODE_BY_NAME["med"])
+        )
 
         # Auto-tracking timer: only runs while profile == "auto". Owned by
         # Radio (not UI) so tracking continues even if the panel is hidden.
@@ -1524,8 +1470,8 @@ class Radio(QObject):
         # vs CW pitched tone), so a peak captured under the old
         # mode would mis-clamp gain under the new one until it
         # decayed. Same field-test motivation as set_freq_hz.
-        self._agc_peak = 1e-4
-        self._agc_hang_counter = 0
+        if self._wdsp_agc is not None:
+            self._wdsp_agc.reset()
         self._smeter_avg_lin = 0.0
         # Leveler envelope follower (_env_db) — without this reset,
         # switching from a loud LSB signal to a weak CW one leaves
@@ -5459,12 +5405,13 @@ class Radio(QObject):
         self._dsp_worker = DspWorker(parent=None)
         self._dsp_worker.attach_to_radio(self)
         # Seed the worker's config from Radio's current state so the
-        # worker has correct AGC / AF / Vol / Mute / BIN values from
-        # frame zero.
+        # worker has correct AF / Vol / Mute / BIN values from frame
+        # zero.  AGC config is no longer synced to the worker because
+        # the worker's process_block calls radio._apply_agc_and_volume
+        # via back-reference, which uses Radio's WDSP engine
+        # directly -- the worker's local AGC config slots are
+        # vestigial from the legacy architecture.
         self._dsp_worker.set_agc_profile(self._agc_profile)
-        self._dsp_worker.set_agc_release(self._agc_release)
-        self._dsp_worker.set_agc_target(self._agc_target)
-        self._dsp_worker.set_agc_hang_blocks(self._agc_hang_blocks)
         self._dsp_worker.set_af_gain_db(self._af_gain_db)
         self._dsp_worker.set_volume(self._volume)
         self._dsp_worker.set_muted(self._muted)
@@ -5586,8 +5533,8 @@ class Radio(QObject):
             return
         # Single-thread path — synchronous reset on main.
         self._rx_channel.reset()
-        self._agc_peak = 1e-4
-        self._agc_hang_counter = 0
+        if self._wdsp_agc is not None:
+            self._wdsp_agc.reset()
         self._smeter_avg_lin = 0.0
         self._binaural.reset()
         # Leveler envelope follower (_env_db) — without this reset,
@@ -5916,58 +5863,6 @@ class Radio(QObject):
         # Apply AF Gain first — same for both AGC paths.
         audio = audio * af
 
-        # ── WDSP AGC opt-in path ───────────────────────────────────
-        # When LYRA_AGC_WDSP=1 was set at launch and the operator
-        # didn't pick "off", route through the look-ahead WDSP
-        # engine instead of the legacy per-sample tracker.  The
-        # WdspAgc.process() call returns audio at the WDSP target
-        # level; we apply Volume + leveler + stream-gap fade + tanh
-        # in the common chain below to match legacy behaviour.
-        # "off" still falls through to the legacy AGC_OFF makeup
-        # path so operator-tuned digital-mode loudness is preserved.
-        if (self._wdsp_agc is not None
-                and self._agc_profile != "off"
-                and audio.size > 0):
-            # First-fire confirmation — prints once when audio
-            # actually reaches the WDSP path, so the operator can
-            # confirm flow (not just construction).  Self-clears
-            # the flag after the first print to avoid spam.
-            if not getattr(self, "_wdsp_first_fire_logged", False):
-                print(
-                    f"[Radio] WDSP AGC processing audio: "
-                    f"profile='{self._agc_profile}', "
-                    f"buffer_size={audio.size}, "
-                    f"input_rms={float(np.sqrt(np.mean(audio.astype(np.float64) ** 2))):.5f}"
-                )
-                self._wdsp_first_fire_logged = True
-            audio = self._wdsp_agc.process(audio)
-            # Report AGC action gain to the meter (matches the
-            # legacy emit cadence -- one update per buffer).
-            try:
-                gain_lin = max(self._wdsp_agc.gain, 1e-6)
-                action_db = 20.0 * np.log10(gain_lin)
-                self.agc_action_db.emit(float(action_db))
-            except Exception:  # noqa: BLE001
-                pass
-            audio = audio * vol
-            # Common chain: leveler → stream-gap fade → tanh.
-            # Inlined here (instead of falling through) because the
-            # legacy path below assumes the per-sample tracker has
-            # populated mag/peak_arr/gain_arr for the audio-debug
-            # diagnostic, which we don't compute in WDSP mode.
-            audio = self._leveler.process(audio)
-            if self._stream is not None:
-                current_seq_errors = self._stream.stats.seq_errors
-                if current_seq_errors > self._last_seen_seq_errors:
-                    self._last_seen_seq_errors = current_seq_errors
-                    if audio.size > 0:
-                        n_fade = min(self._gap_fade_samples, audio.size)
-                        ramp = np.linspace(
-                            0.0, 1.0, n_fade, dtype=audio.dtype)
-                        audio = audio.copy()
-                        audio[:n_fade] *= ramp
-            return np.tanh(audio).astype(np.float32)
-
         if self._agc_profile == "off":
             # AGC disabled — AF Gain + Volume scale the raw demod
             # output. Critical for digital modes (FT8/FT4/RTTY)
@@ -5993,112 +5888,39 @@ class Radio(QObject):
             out = self._leveler.process(out)
             return np.tanh(out).astype(np.float32)
 
-        n = audio.size
-        if n == 0:
+        if audio.size == 0:
             return audio.astype(np.float32, copy=False)
 
-        # ── Per-sample envelope tracker ──────────────────────────────
-        # Inner loop is sequential (instant-attack / hang / release
-        # transitions are state-dependent) but the per-iteration work
-        # is trivial.  Pure-Python at 1024 iters / block ≈ 100 µs.
-        # Numba / Cython could shave that to ~5 µs, but at <1% of the
-        # block budget it isn't worth the build-time complexity yet.
-        mag = np.abs(audio).astype(np.float64)
-        peak_arr = np.empty(n, dtype=np.float64)
-        p = float(self._agc_peak)
-        h = int(self._agc_hang_counter)
-        one_minus_alpha = float(self._agc_one_minus_alpha_per_sample)
-        hang_init = int(self._agc_hang_samples)
-        PEAK_FLOOR = 1e-4
-        for i in range(n):
-            m = mag[i]
-            if m > p:
-                # Instant attack -- the peak detector instantly tracks
-                # the new maximum so the gain (= target / peak) is
-                # immediately correct for the new amplitude.  This
-                # guarantees that audio[i] * gain[i] stays at target
-                # level at the rising edge of any transient, with NO
-                # over-target burst that tanh would saturate.
-                #
-                # v0.0.9.1 history: an attempt at smooth attack
-                # (§A.5, reverted) tried to ramp the peak over ~2.5
-                # ms.  That created a 2.5 ms window where peak LAGGED
-                # the input, gain stayed HIGH while input was LARGE,
-                # and output briefly OVER-shot target by up to 60 dB
-                # before tanh saturated -- producing a burst of
-                # harmonic distortion at every transient.  Operator
-                # confirmed it made the click problem slightly
-                # worse, not better.  Reverted to instant attack
-                # which is the v0.0.7.1 quiet-pass design.
-                p = m
-                h = hang_init            # rearm hang
-            elif h > 0:
-                h -= 1                   # hold during hang
-            else:
-                p = p * one_minus_alpha  # exp release
-            if p < PEAK_FLOOR:
-                p = PEAK_FLOOR
-            peak_arr[i] = p
-        # Persist envelope state across blocks.  The next call picks up
-        # where this one left off — no block-boundary discontinuity.
-        self._agc_peak = p
-        self._agc_hang_counter = h
+        # ── WDSP AGC (look-ahead, 5-state, soft-knee) ───────────────
+        # Lyra's AGC engine is a Python port of Warren Pratt's WDSP
+        # wcpAGC.  See lyra/dsp/agc_wdsp.py for the engine and the
+        # v0.0.9.3 CHANGELOG entry for the audit + decision rationale
+        # that retired the legacy single-state per-sample tracker.
+        # WdspAgc.process() runs the 5-state machine + 4 ms look-
+        # ahead per sample and returns audio at the WDSP target
+        # level (out_target ≈ 0.98).  Mode is synced from the
+        # operator's profile preset by set_agc_profile.
+        audio = self._wdsp_agc.process(audio)
 
-        # Rolling noise-floor baseline.  Use the per-sample MIN of the
-        # tracked peak envelope as the block's "quietest level seen"
-        # — same use as the v0.0.7 block_peak baseline (the auto-
-        # threshold helper consumes this).  Min over peak_arr is a
-        # cheap NumPy reduction.
-        block_min = float(np.min(peak_arr))
-        self._noise_history.append(block_min)
-        if len(self._noise_history) > self._noise_history_max:
-            self._noise_history.pop(0)
-        if self._noise_history:
-            self._noise_baseline = min(self._noise_history)
-
-        # AGC max gain cap. Was previously 10× (20 dB), which was far
-        # too conservative — any signal below ~-30 dBFS couldn't be
-        # boosted to audible levels. Professional SDR clients give
-        # 80-120 dB of AGC range (typical commercial SDR / rig). We
-        # use 1000× (60 dB) as a safe middle ground: lets weak
-        # signals down to ~-70 dBFS reach audible levels, but the
-        # final tanh limiter still prevents any amplitude damage at
-        # the speaker. Strong signals aren't affected — they hit
-        # target well before the cap matters.
-        AGC_MAX_GAIN = 1000.0   # 60 dB maximum AGC gain
-        gain_arr = np.minimum(
-            self._agc_target / peak_arr, AGC_MAX_GAIN)
-
-        # Report the END-OF-BLOCK gain to meters / diagnostics —
-        # same cadence as v0.0.7 (one emit per block).  Within-block
-        # gain variation is sub-perceptible at the meter's ~6 Hz
-        # update rate.
+        # Report AGC action gain to the meter at one update per
+        # audio block (matches the meter's ~6 Hz repaint rate;
+        # within-block gain variation is sub-perceptible).
         try:
-            action_db = 20.0 * np.log10(max(float(gain_arr[-1]), 1e-6))
-            self.agc_action_db.emit(float(action_db))
-        except Exception:
+            gain_lin = max(self._wdsp_agc.gain, 1e-6)
+            self.agc_action_db.emit(float(20.0 * np.log10(gain_lin)))
+        except Exception:  # noqa: BLE001
             pass
 
-        # Per-sample gain × volume.  Cast to audio's dtype so the
-        # multiply stays in float32 (no allocation churn).
-        audio = audio * gain_arr.astype(audio.dtype) * vol
-
-        # ── Audio-pop diagnostic (env-var gated) ──────────────────
-        # Set LYRA_AUDIO_DEBUG=1 to enable.  Prints one line per
-        # audio block whenever any sample-to-sample step in the
-        # post-AGC, pre-tanh signal exceeds the audibility threshold
-        # (default 0.05 amplitude ~= -26 dBFS).  Includes peak
-        # ratio, input mag at the offending sample, and the gain at
-        # that sample so we can root-cause whether the click came
-        # from the input signal or the AGC.  Zero-cost when the env
-        # var isn't set (one attribute check).
-        if self._lyra_audio_debug:
-            self._diagnose_audio_step(audio, mag, peak_arr, gain_arr)
+        # Volume slider applies AFTER AGC so the operator sees a
+        # full range from silent to clipping regardless of AGC
+        # state.  Cast back to audio's dtype so we don't churn
+        # allocations on the multiply.
+        audio = (audio * vol).astype(audio.dtype, copy=False)
 
         # Audio leveler — soft-knee compressor for taming transient
         # bursts.  Sits BEFORE tanh so its smooth gain reduction
         # can prevent the tanh limiter from clipping; tanh stays
-        # as a safety net when the leveler is off (profile = off).
+        # as a safety net when the leveler is off.
         audio = self._leveler.process(audio)
 
         # ── Stream-gap fade (v0.0.9.1) ──────────────────────────────
@@ -6144,26 +5966,20 @@ class Radio(QObject):
         if name not in (*self.AGC_PRESETS, "custom"):
             name = "med"
         self._agc_profile = name
-        if name != "custom":
-            self._apply_agc_preset(name)
-        # Sync the WDSP engine's mode if it's active.  MODE_BY_NAME
-        # handles "auto" → MODE_MEDIUM (auto-threshold tracking is
-        # a no-op in WDSP mode for the first cut).
+        # AGC_PRESETS is kept as a UI label set; the WDSP engine has
+        # its own internal preset table (mode-specific tau_decay /
+        # hangtime / hang_thresh) and applies them via set_mode().
+        # MODE_BY_NAME handles "auto" → MODE_MEDIUM (auto-threshold
+        # tracking is a no-op in WDSP for now -- can return as a
+        # Settings-controlled WDSP hang_thresh slider later).
         if self._wdsp_agc is not None:
             try:
                 from lyra.dsp.agc_wdsp import MODE_BY_NAME
-                mode_int = MODE_BY_NAME.get(
-                    name, MODE_BY_NAME["med"])
-                self._wdsp_agc.set_mode(mode_int)
-                print(
-                    f"[Radio] WDSP AGC mode → '{name}' "
-                    f"(mode_int={mode_int}, "
-                    f"tau_decay={self._wdsp_agc.tau_decay*1000:.0f}ms, "
-                    f"hangtime={self._wdsp_agc.hangtime*1000:.0f}ms, "
-                    f"hang_thresh={self._wdsp_agc.hang_thresh:.2f})"
+                self._wdsp_agc.set_mode(
+                    MODE_BY_NAME.get(name, MODE_BY_NAME["med"])
                 )
-            except Exception as exc:  # noqa: BLE001
-                print(f"[Radio] WDSP AGC mode sync FAILED: {exc}")
+            except Exception:  # noqa: BLE001
+                pass
         # Auto-track the threshold only in "auto" profile; everything else
         # leaves the threshold where the user put it.
         if name == "auto":
@@ -6178,132 +5994,18 @@ class Radio(QObject):
         self.agc_profile_changed.emit(name)
 
     def set_agc_custom(self, release: float, hang_blocks: int):
-        """Set AGC params and switch profile to 'custom'."""
+        """Set AGC custom-slider values and switch profile to
+        'custom'.  v0.0.9.3 note: these values are no longer wired
+        directly to the AGC engine (the WDSP engine has its own
+        canonical mode presets via WdspAgc.set_mode); they're kept
+        for UI persistence and may map back to operator-facing
+        WDSP knobs (attack/decay/hang in seconds) in a future
+        Settings panel.  For now, picking 'custom' produces the
+        same audio behavior as 'med'."""
         self._agc_release = max(0.0, min(0.1, float(release)))
         self._agc_hang_blocks = max(0, min(200, int(hang_blocks)))
-        self._refresh_agc_per_sample_constants()
         self._agc_profile = "custom"
         self.agc_profile_changed.emit("custom")
-
-    def _apply_agc_preset(self, name: str):
-        params = self.AGC_PRESETS.get(name)
-        if params is None:
-            return
-        self._agc_release = params["release"]
-        self._agc_hang_blocks = params["hang_blocks"]
-        self._refresh_agc_per_sample_constants()
-
-    def set_lyra_audio_debug(self, on: bool) -> None:
-        """Live toggle for the audio-pop diagnostic logger.  When on,
-        ``_apply_agc_and_volume`` prints one line per audio block where
-        any sample-to-sample output step exceeds the audibility
-        threshold.  See ``_diagnose_audio_step`` for the format."""
-        self._lyra_audio_debug = bool(on)
-
-    def _diagnose_audio_step(self, audio_post_gain, mag, peak_arr,
-                             gain_arr) -> None:
-        """Pop / click diagnostic — prints when output has an audible
-        sample-to-sample step.
-
-        Threshold: 0.05 amplitude (~ -26 dBFS).  Below this is
-        usually inaudible against ambient room noise + DAC dither;
-        above is a candidate click.
-
-        Per-line format::
-
-            [Audio] step=0.087 @523/1024 out=+0.064/-0.023
-                in_mag=0.0034 peak=0.0142 gain=2.22
-                peak_ratio=15.4x (jumped at sample 522)
-
-        Where:
-          step      : |out[i] - out[i-1]|, the actual sample step
-          @i/N      : index of the offending sample within the block
-          out=+/-    : output[i] / output[i-1] values
-          in_mag    : |input audio[i]| at the offending sample
-          peak      : AGC peak[i] at the offending sample
-          gain      : AGC gain at the offending sample
-          peak_ratio: peak[i] / peak[i-1] — useful to spot AGC instant-attack events
-
-        Rate-limited to ~5 lines/sec so a stream of clicks doesn't
-        flood the console.
-
-        Note: this examines the post-gain, pre-tanh signal so the
-        amplitudes shown can exceed +/-1; tanh would clamp them in
-        the actual output but we want to see the underlying step.
-        """
-        import time
-        # NumPy diff is faster than a Python loop and only runs when
-        # the diagnostic is enabled.
-        out_arr = np.asarray(audio_post_gain).reshape(-1)
-        if out_arr.size < 2:
-            return
-        diffs = np.abs(np.diff(out_arr.astype(np.float64)))
-        max_step = float(np.max(diffs))
-        STEP_THRESHOLD = 0.05
-        if max_step < STEP_THRESHOLD:
-            return
-        # Rate-limit spam: at most 5 lines/sec.
-        now = time.monotonic()
-        if (now - self._lyra_audio_debug_t0) < 0.2:
-            return
-        self._lyra_audio_debug_t0 = now
-        self._lyra_audio_debug_count += 1
-
-        idx = int(np.argmax(diffs)) + 1   # idx of the second sample of the step
-        i = idx
-        out_curr = float(out_arr[i])
-        out_prev = float(out_arr[i - 1])
-        in_mag = float(mag[i]) if i < len(mag) else 0.0
-        pk = float(peak_arr[i]) if i < len(peak_arr) else 0.0
-        gn = float(gain_arr[i]) if i < len(gain_arr) else 0.0
-        # Peak ratio across the boundary (catches instant-attack
-        # events where peak just jumped).
-        if i >= 1 and i < len(peak_arr):
-            pk_prev = float(peak_arr[i - 1])
-            ratio = pk / max(pk_prev, 1e-12)
-        else:
-            ratio = 1.0
-        print(
-            f"[Audio] step={max_step:.4f} @{idx}/{out_arr.size} "
-            f"out={out_curr:+.4f}/{out_prev:+.4f} "
-            f"in_mag={in_mag:.5f} peak={pk:.5f} gain={gn:.2f} "
-            f"peak_ratio={ratio:.1f}x  [#{self._lyra_audio_debug_count}]"
-        )
-
-    def _refresh_agc_per_sample_constants(self) -> None:
-        """Translate per-block AGC release / hang into per-sample form.
-
-        The operator-facing AGC presets are stated as "release per
-        block" (a fraction by which the peak decays each audio block)
-        and "hang_blocks" (block count to hold the peak after attack).
-        The per-sample envelope tracker in _apply_agc_and_volume
-        consumes these as a per-sample decay factor and a hang sample
-        count instead.
-
-        Math:
-            d_block (per-block decay factor) = 1 - release_per_block
-            d_sample (per-sample decay)      = d_block^(1/block_n)
-            hang_samples                     = hang_blocks × block_n
-
-        The conversion preserves the perceived time constant exactly
-        — N blocks of decay at the per-block rate equals N×block_n
-        samples of decay at the per-sample rate.
-
-        Cached because the power isn't free; called from __init__
-        (via _apply_agc_preset), profile changes, and custom-slider
-        commits.
-        """
-        BLOCK_N = self._AGC_LEGACY_BLOCK_N
-        one_minus_release = max(
-            0.0, min(1.0, 1.0 - float(self._agc_release)))
-        if one_minus_release <= 0.0:
-            # Pathological release == 1.0: peak collapses to floor
-            # immediately every sample.  Useful only as a diagnostic.
-            d_sample = 0.0
-        else:
-            d_sample = one_minus_release ** (1.0 / BLOCK_N)
-        self._agc_one_minus_alpha_per_sample = float(d_sample)
-        self._agc_hang_samples = int(self._agc_hang_blocks) * BLOCK_N
 
     # ── CW pitch ─────────────────────────────────────────────────────
     @property

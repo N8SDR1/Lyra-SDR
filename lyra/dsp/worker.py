@@ -740,13 +740,15 @@ class DspWorker(QObject):
             radio._binaural.reset()
         except Exception as exc:
             print(f"[DspWorker] binaural reset error: {exc}")
-        # AGC + S-meter are plain Python attributes on radio; direct
-        # writes are GIL-safe and the consumer (_apply_agc_and_volume)
-        # reads them inside process_block on this same worker thread,
-        # so the writes here are serialized w.r.t. the next block.
+        # AGC engine flush + S-meter reset.  v0.0.9.3: AGC engine is
+        # WdspAgc; .reset() clears its ring buffer, state machine,
+        # and tracker variables.  S-meter is a plain attribute on
+        # radio (GIL-safe direct write) consumed by
+        # _apply_agc_and_volume on this same worker thread, so the
+        # write is serialized w.r.t. the next block.
         try:
-            radio._agc_peak = 1e-4
-            radio._agc_hang_counter = 0
+            if getattr(radio, "_wdsp_agc", None) is not None:
+                radio._wdsp_agc.reset()
             radio._smeter_avg_lin = 0.0
         except AttributeError as exc:
             print(f"[DspWorker] AGC/smeter reset error: {exc}")
