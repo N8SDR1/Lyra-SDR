@@ -265,6 +265,45 @@ class SoundDeviceSink:
         )
         self._stream.start()
 
+        # ── Audio chain visibility (v0.0.9.3 diagnostic) ────────────
+        # Log the actual device, host API, and negotiated sample rate
+        # at sink open.  When operators see ring-buffer overruns we
+        # need to know whether the issue is wrong device, wrong host
+        # API, or shared-mode resampling -- the sounddevice query
+        # APIs already have all this info, we just weren't surfacing
+        # it.  One print per sink open; zero cost during audio
+        # streaming.  Defensive try/except: a query failure must
+        # never prevent audio from playing.
+        try:
+            dev_info = sd.query_devices(device) if device is not None \
+                else sd.query_devices(kind="output")
+            host_info = sd.query_hostapis(dev_info["hostapi"])
+            actual_sr = self._stream.samplerate
+            actual_latency_ms = self._stream.latency * 1000.0
+            print(
+                f"[Lyra audio] SoundDeviceSink: "
+                f"device=[{dev_info.get('name', '?')}] "
+                f"host={host_info.get('name', '?')} "
+                f"requested_rate={rate} actual_rate={actual_sr:g} "
+                f"latency={actual_latency_ms:.1f}ms "
+                f"channels={self._channels}"
+            )
+            if actual_sr != rate:
+                print(
+                    f"[Lyra audio] WARNING: actual stream rate "
+                    f"({actual_sr:g}) differs from requested ({rate}). "
+                    f"This typically indicates WASAPI shared-mode "
+                    f"resampling or a device that doesn't natively "
+                    f"support {rate} Hz.  Ring overruns under heavy "
+                    f"signal load are likely; consider switching the "
+                    f"Windows default audio device or checking "
+                    f"Settings -> Audio -> Output device."
+                )
+        except Exception as e:  # noqa: BLE001
+            # Query failure is non-fatal -- audio is already running.
+            print(f"[Lyra audio] SoundDeviceSink: device query "
+                  f"failed ({e}); audio streaming anyway")
+
     @staticmethod
     def _pick_wasapi_default(sd):
         """Find the WASAPI host API's default output device. Returns a
