@@ -1034,23 +1034,6 @@ class HL2Stream:
                         # clicks parked since v0.0.7.1).  See
                         # __init__ for state-machine details.
                         self.tx_audio_underruns += 1
-                        # v0.0.9.6 diagnostic: log every underrun
-                        # event so the operator can correlate
-                        # audible clicks with timestamps.  If they
-                        # hear a click but no console line printed,
-                        # the click is NOT from underrun-zero-pad —
-                        # different source per CLAUDE.md §9.6.
-                        # Removed before v0.0.9.6 ship if confirmed
-                        # noisy in steady state.
-                        try:
-                            import time as _t
-                            print(
-                                f"[Lyra audio] EP2 underrun "
-                                f"#{self.tx_audio_underruns} "
-                                f"@{_t.monotonic():.3f}s avail="
-                                f"{avail}/126 (slew engaged)")
-                        except Exception:
-                            pass
                         pulled = self._tx_underflow_fill(
                             pulled, 126 - avail)
                     elif self._tx_underflow_state != "normal":
