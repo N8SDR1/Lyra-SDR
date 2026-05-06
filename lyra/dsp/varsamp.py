@@ -247,23 +247,39 @@ class VarSamp:
         Linear interpolation between R-fold dense taps gives
         approximately ``log2(R)`` bits of fractional-rate accuracy —
         at R=256 that's 8 bits, plenty for sub-ppm rate matching.
+
+        BUG FIX v0.0.9.6 dev cycle: original Python port assigned
+        hs[0] = h[hidx], hs[rsize-1] = h[hidx + (rsize-1)*R].
+        WDSP's C does the OPPOSITE: hs[rsize-1] = h[hidx],
+        hs[0] = h[hidx + (rsize-1)*R].  C's loop is
+
+            for i in [rsize-1..0], j = hidx + (rsize-1-i)*R, k = j+1
+                hs[i] = h[j] + frac * (h[k] - h[j])
+
+        which makes hs[i] decrease in j as i decreases — i.e., hs
+        is FILLED IN REVERSE.  My original port produced an array
+        TIME-REVERSED relative to C.  For a symmetric prototype
+        (Hamming firwin output), magnitudes are similar but the
+        convolution effectively runs filter time-reversed —
+        creates phase distortion, pre-ringing on transients, and
+        the "colored / brittle / thin" coloration operator
+        reported on PC Soundcard mode in v0.0.9.6 testing.
+
+        Single-tone bench tests didn't catch this because steady
+        tones don't exercise transient/phase response.
         """
         pos = float(self.R) * self.h_offset
         hidx = int(pos)
         frac = pos - float(hidx)
-        # Vectorize WDSP's loop:
-        #   for i in [rsize-1..0], j = hidx + (rsize-1-i)*R, k = j+1
-        # rewrites to (for i increasing):
-        #   j[i] = hidx + (rsize - 1 - i) * R
         rsize = self.rsize
-        # NumPy can do the vectorized walk: indexes go from
-        # j = hidx + (rsize-1)*R down to hidx (in steps of -R).
-        i_seq = np.arange(rsize - 1, -1, -1, dtype=np.int64)
+        # Match C's hs filling: hs[i] = h[hidx + (rsize-1-i)*R]
+        # for i in [0, rsize-1].  For i=0: hs[0] = h[hidx + (rsize-1)*R].
+        # For i=rsize-1: hs[rsize-1] = h[hidx].
+        i_seq = np.arange(rsize, dtype=np.int64)
         j_idx = hidx + (rsize - 1 - i_seq) * self.R
         k_idx = j_idx + 1
-        # h is length ncoef = R * rsize + 1; max k = hidx + 0 + 1
-        # = at most R-1 + 1 = R, but at i=0 k = hidx + (rsize-1)*R + 1
-        # which is at most R + (rsize-1)*R = R*rsize = ncoef - 1.  OK.
+        # h is length ncoef = R * rsize + 1; max k for i=0 is
+        # hidx + (rsize-1)*R + 1 ≤ R + (rsize-1)*R = R*rsize = ncoef - 1.
         self.hs[:] = self.h[j_idx] + frac * (self.h[k_idx] - self.h[j_idx])
 
     # ── Public API ───────────────────────────────────────────────

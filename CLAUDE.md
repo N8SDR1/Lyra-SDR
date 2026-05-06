@@ -75,6 +75,16 @@ Lite 2 / 2+, written in Python.  Native HPSDR Protocol 1.
 - **Author**: Rick Langford (N8SDR).  Memory note: nearby AM
   broadcaster causes 5th-harmonic interference on 7.250 MHz; factors
   into AGC / NR / notch defaults.
+- **Audio testing methodology (operator note 2026-05-06):** Rick
+  has very good hearing/ears.  For RX-side audio A/B he runs
+  Windows with **all "audio enhancements" disabled** (no loudness
+  equalization, bass boost, virtual surround, etc.) — no Windows-
+  side coloration.  His standard is "what's produced is what
+  should be heard naturally."  When he reports coloration on a
+  Lyra audio path, it's coming from Lyra (or the audio device
+  itself), NOT from Windows enhancements.  Important context for
+  audio-quality investigations: don't reach for "check your
+  Windows enhancements" as a first hypothesis.
 - **License**: GPL v3+ (since v0.0.6).  Was MIT through v0.0.5.
   Relicensed specifically to enable WDSP-derived code integration.
   See `NOTICE.md`.
