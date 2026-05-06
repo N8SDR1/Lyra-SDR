@@ -304,6 +304,45 @@ class HL2Stream:
         # with audible clicks.  v0.0.9.1+
         self.tx_audio_underruns: int = 0
         self.tx_audio_overruns: int = 0
+
+        # ── v0.0.9.6 EP2 underrun slewed-silence-fill state ─────────
+        # When the deque underruns, the legacy zero-pad
+        #   pulled.extend([(0.0, 0.0)] * (126 - avail))
+        # produces a sample-domain step from steady-state amplitude
+        # to literal zero in one sample → audible click on the
+        # AK4951 codec.  This was the operator-reported "residual
+        # clicks" issue (CLAUDE.md §9.6, parked since v0.0.7.1).
+        #
+        # Architectural note: the analogous click on the PC Sound
+        # Card path was solved in v0.0.9.6 by routing through WDSP's
+        # rmatch (which has its own dslew underflow recovery).  The
+        # HL2 codec path can't use rmatch in a synchronous wrap (the
+        # 3-engineer audit confirmed: writes-then-reads on the same
+        # thread defeat dslew because n_ring is always full).  A
+        # full async rmatch integration would add ~85 ms latency.
+        #
+        # Cheap targeted fix: replicate just the dslew/upslew slew
+        # behavior in the EP2 writer's underrun branch.  No latency
+        # penalty, no new ring buffer — just track last good sample
+        # + apply half-cosine fade.
+        import math as _math
+        self._tx_underflow_state: str = "normal"
+        self._tx_underflow_step: int = 0
+        # 144 samples ≈ 3 ms at 48 kHz — same slew duration as
+        # rmatch.RMatch's tslew default (matches Thetis ASIO).
+        self._tx_ntslew: int = 144
+        # Half-cosine slew: cslew[0]=0.0 at silence, cslew[ntslew]=1.0
+        # at full audio.  Fade-out scales by cslew[ntslew - step];
+        # fade-in scales by cslew[step].  Mirrors rmatch.c::cslew.
+        self._tx_cslew: list[float] = [
+            0.5 * (1.0 - _math.cos(_math.pi * i / self._tx_ntslew))
+            for i in range(self._tx_ntslew + 1)
+        ]
+        # Last good sample (L, R) — refreshed each successful pull,
+        # used as the fade-out anchor when an underrun starts mid-
+        # stream.  Initialized to silence so a startup underrun
+        # produces silence directly.
+        self._tx_dlast: tuple[float, float] = (0.0, 0.0)
         # ── EP2 writer thread state (v0.0.9.2 Commit 4) ─────────────
         # Dedicated EP2 writer thread runs the host->radio frame send
         # at the codec's audio cadence (~380 Hz = 48 kHz / 126
@@ -987,23 +1026,30 @@ class HL2Stream:
                         pulled = [self._tx_audio.popleft()
                                   for _ in range(avail)]
                     if avail < 126:
-                        # Should be impossible under Path C/C.1/C.2
-                        # semantics (semaphore signaled => >= 126
-                        # samples were queued, no _send_cc drain
-                        # path active during injection).  Count it
-                        # as a diagnostic if it ever happens (e.g.,
-                        # clear_tx_audio raced with a signal that
-                        # wasn't drained, or a future code path
-                        # introduces a regression).  The Path C.2
-                        # diagnostic added in bc5713f -- which
-                        # printed each event with a delta-timestamp
-                        # so we could measure the underrun rate --
-                        # is removed now that we're back to ov=0
-                        # un=0 in steady state.  Restore it from
-                        # commit bc5713f if a future regression
-                        # ever puts un back on the meter.
+                        # v0.0.9.6: slewed-silence-fill instead of
+                        # legacy zero-pad.  The hard sample-domain
+                        # step from steady-state audio to zero in
+                        # one sample is the dominant click source on
+                        # the HL2 codec path (CLAUDE.md §9.6 residual
+                        # clicks parked since v0.0.7.1).  See
+                        # __init__ for state-machine details.
                         self.tx_audio_underruns += 1
-                        pulled.extend([(0.0, 0.0)] * (126 - avail))
+                        pulled = self._tx_underflow_fill(
+                            pulled, 126 - avail)
+                    elif self._tx_underflow_state != "normal":
+                        # Audio has resumed after an underrun — apply
+                        # fade-IN slew over the first ntslew samples
+                        # so we don't jump from silence back to
+                        # full amplitude in one sample (which is its
+                        # own click on the codec).
+                        pulled = self._tx_underflow_recover(pulled)
+                    if pulled:
+                        # Track the most recent good sample as the
+                        # fade-out anchor for any future underrun.
+                        last = pulled[-1]
+                        if isinstance(last, tuple) and len(last) == 2:
+                            self._tx_dlast = (
+                                float(last[0]), float(last[1]))
                     try:
                         audio_bytes = self._pack_audio_bytes_pairs(
                             pulled)
@@ -1093,6 +1139,133 @@ class HL2Stream:
                 frame[slot_start:slot_start + 504] = src
             # else: payload bytes stay zero (no audio injected)
         return bytes(frame)
+
+    def _tx_underflow_fill(self, partial_pulled: list, n_missing: int
+                            ) -> list:
+        """Fill an EP2 frame with slewed silence after an underrun.
+
+        State machine driven by ``self._tx_underflow_state`` +
+        ``self._tx_underflow_step``:
+
+        * ``"normal"`` → underrun starts here.  Transition to
+          ``"fading_out"``, step=0, anchor at ``self._tx_dlast``
+          (last good sample saved on the previous successful pull).
+        * ``"fading_out"`` → multiply ``dlast`` by
+          ``cslew[ntslew - step]`` (fade 1→0 over ntslew samples).
+          When step exceeds ntslew, transition to ``"in_silence"``.
+        * ``"in_silence"`` → emit zeros until audio resumes (which
+          is detected outside this method).
+
+        Mirrors WDSP rmatch.c::dslew structurally — half-cosine
+        fade-out anchored to dlast, then zero-fill — but applied
+        at the EP2 frame writer level rather than via a separate
+        ring buffer.  No latency penalty, cheap to compute (per-
+        frame: at most ntslew=144 multiplies + zero-fill).
+
+        Args:
+            partial_pulled: list of (L, R) float tuples already
+                drained from the deque (length = avail samples).
+            n_missing: 126 - avail samples we need to synthesize.
+
+        Returns:
+            list of 126 (L, R) tuples filled with slewed silence.
+        """
+        if self._tx_underflow_state == "normal":
+            # Underrun starts NOW.  partial_pulled holds the last
+            # real-audio samples; their tail value becomes the
+            # fade-out anchor (more recent than self._tx_dlast).
+            if partial_pulled:
+                last = partial_pulled[-1]
+                if isinstance(last, tuple) and len(last) == 2:
+                    self._tx_dlast = (
+                        float(last[0]), float(last[1]))
+            self._tx_underflow_state = "fading_out"
+            self._tx_underflow_step = 0
+
+        result = list(partial_pulled)
+        dl, dr = self._tx_dlast
+        ntslew = self._tx_ntslew
+        cslew = self._tx_cslew
+
+        for _ in range(n_missing):
+            if self._tx_underflow_state == "fading_out":
+                # cslew[ntslew] = 1.0 (full audio), cslew[0] = 0.0
+                # (silence).  Step counter goes 0..ntslew so we
+                # multiply by cslew[ntslew - step]: start at 1.0,
+                # end at 0.0.
+                step = self._tx_underflow_step
+                if step <= ntslew:
+                    scale = cslew[ntslew - step]
+                    result.append((dl * scale, dr * scale))
+                    self._tx_underflow_step = step + 1
+                else:
+                    self._tx_underflow_state = "in_silence"
+                    self._tx_underflow_step = 0
+                    result.append((0.0, 0.0))
+            else:
+                # in_silence — zero-fill until audio resumes.
+                result.append((0.0, 0.0))
+
+        return result
+
+    def _tx_underflow_recover(self, pulled: list) -> list:
+        """Apply fade-IN slew when audio resumes after an underrun.
+
+        On the first frame with full audio after an underrun (126
+        samples available again), don't jump from silence to full
+        amplitude in one sample — that's another click.  Instead,
+        scale the first ntslew samples by cslew[step] (0→1) so the
+        audio fades back in smoothly over ~3 ms.
+
+        Mirrors WDSP rmatch.c::upslew.
+
+        After ntslew samples have been faded in, transitions back
+        to ``"normal"`` and leaves the rest of the frame unaltered.
+
+        Args:
+            pulled: list of 126 real-audio (L, R) tuples freshly
+                drained from the deque.
+
+        Returns:
+            list of 126 (L, R) tuples with fade-in applied to the
+            opening samples.
+        """
+        if self._tx_underflow_state == "in_silence":
+            # Transition to fading_in.  step=0 starts at silence
+            # (cslew[0]=0.0), step=ntslew ends at full audio
+            # (cslew[ntslew]=1.0).
+            self._tx_underflow_state = "fading_in"
+            self._tx_underflow_step = 0
+        # If state == "fading_out" when audio resumes, we got
+        # interrupted mid-fade-out.  Continue from where we were
+        # but reverse direction by switching to fading_in at the
+        # current step.  Cleaner perceptually than jumping back
+        # to full amplitude.
+        elif self._tx_underflow_state == "fading_out":
+            self._tx_underflow_state = "fading_in"
+            # Don't reset step — pick up the fade-in from current
+            # cslew level so there's no discontinuity in scale.
+
+        ntslew = self._tx_ntslew
+        cslew = self._tx_cslew
+
+        result: list = []
+        for sample in pulled:
+            if self._tx_underflow_state == "fading_in":
+                step = self._tx_underflow_step
+                if step <= ntslew:
+                    scale = cslew[step]
+                    result.append((
+                        sample[0] * scale, sample[1] * scale))
+                    self._tx_underflow_step = step + 1
+                else:
+                    self._tx_underflow_state = "normal"
+                    self._tx_underflow_step = 0
+                    result.append(sample)
+            else:
+                result.append(sample)
+
+        return result
 
     def _pack_audio_bytes_pairs(self, pairs) -> bytes:
         """Pack a list of 126 (L, R) float tuples into 1008 bytes
