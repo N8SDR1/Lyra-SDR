@@ -1701,32 +1701,54 @@ class AudioSettingsTab(QWidget):
 
         v = QVBoxLayout(self)
 
-        # ── Output sink selector (AK4951 vs PC Soundcard) ──────────
+        # ── Output sink selector (HL2 audio jack vs PC Soundcard) ──
         # Mirror of the "Out" combo on the DSP+Audio panel — exposed
         # here so operators looking under Settings → Audio find it.
+        # v0.0.9.6: renamed the operator-facing "AK4951" label to
+        # "HL2 audio jack" since not every HL2 revision uses the
+        # AK4951 chip specifically (they all share the same EP2-
+        # back-to-codec path though).  Internal QSettings value
+        # stays "AK4951" for back-compat.
         grp_sink = QGroupBox("Output sink")
         gs = QHBoxLayout(grp_sink)
         gs.addWidget(QLabel("Send audio to:"))
         self._sink_combo = QComboBox()
-        self._sink_combo.addItems(["AK4951", "PC Soundcard"])
-        self._sink_combo.setCurrentText(radio.audio_output)
+        self._sink_combo.addItem("HL2 audio jack", userData="AK4951")
+        self._sink_combo.addItem("PC Soundcard", userData="PC Soundcard")
+        for i in range(self._sink_combo.count()):
+            if self._sink_combo.itemData(i) == radio.audio_output:
+                self._sink_combo.setCurrentIndex(i)
+                break
         self._sink_combo.setMinimumWidth(180)
-        self._sink_combo.currentTextChanged.connect(radio.set_audio_output)
+        self._sink_combo.currentIndexChanged.connect(
+            lambda _idx: radio.set_audio_output(
+                self._sink_combo.currentData()))
         gs.addWidget(self._sink_combo)
         gs.addStretch(1)
         sink_help = QLabel(
-            "AK4951 = HL2's onboard codec (line-out jack on the board).\n"
-            "PC Soundcard = your computer's audio output."
+            "HL2 audio jack: audio routes back to the HL2's onboard "
+            "codec via EP2 packets — single-crystal path, zero "
+            "clock drift, recommended for HL2 hardware.\n"
+            "PC Soundcard: routes to your computer's WASAPI output. "
+            "v0.0.9.6 includes adaptive rate matching to absorb "
+            "the inevitable HL2-vs-soundcard crystal drift."
         )
+        sink_help.setWordWrap(True)
         sink_help.setStyleSheet("color: #8a9aac; font-size: 10px;")
         v.addWidget(grp_sink)
         v.addWidget(sink_help)
-        # Keep the combo in sync if Radio changes the output elsewhere
-        # (rate-driven auto-fallback when AK4951 hits a >48k stream).
-        radio.audio_output_changed.connect(
-            lambda o: self._sink_combo.setCurrentText(o)
-            if self._sink_combo.currentText() != o else None
-        )
+
+        def _sync_sink_combo(stored: str) -> None:
+            """Sync combo when Radio changes the output elsewhere
+            (e.g., rate-driven auto-fallback when AK4951 hits a >48k
+            stream).  Uses userData lookup so the operator-facing
+            label and internal value stay synced."""
+            for idx in range(self._sink_combo.count()):
+                if self._sink_combo.itemData(idx) == stored:
+                    if self._sink_combo.currentIndex() != idx:
+                        self._sink_combo.setCurrentIndex(idx)
+                    return
+        radio.audio_output_changed.connect(_sync_sink_combo)
 
         # ── Output device (PC Soundcard sink) ──────────────────────
         grp_dev = QGroupBox("Output device — PC Soundcard sink")

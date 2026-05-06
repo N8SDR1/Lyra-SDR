@@ -546,15 +546,19 @@ class RMatch:
         if ovfl > 0:
             self._blend()
 
-        # Startup-delay tracking + control loop kick-in.
+        # Startup-delay tracking + control loop kick-in.  Use the
+        # ACTUAL input block size, not the configured ``insize``,
+        # so the ffmav ratio reflects reality when callers pass
+        # variable-sized blocks (typical for SoundDeviceSink).
+        actual_insize = int(audio_in.size)
         if not self.control_flag:
-            self.writesamps += self.insize
+            self.writesamps += actual_insize
             if (self.readsamps >= self.read_startup
                     and self.writesamps >= self.write_startup):
                 self.control_flag = True
 
         if self.control_flag:
-            self._control(self.insize)
+            self._control(actual_insize)
 
         return newsamps
 

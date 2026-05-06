@@ -190,17 +190,31 @@ class SoundDeviceSink:
     _RING_SECONDS = 0.200
 
     def __init__(self, rate: int = 48000, device: Optional[int] = None,
-                 blocksize: int = 0):
+                 blocksize: int = 0, *,
+                 use_rate_match: bool = True):
+        """Construct the PC sound card output.
+
+        v0.0.9.6: ``use_rate_match`` enables the WDSP-derived
+        adaptive resampler (lyra.dsp.rmatch + lyra.dsp.varsamp)
+        that absorbs the inevitable clock drift between Lyra's
+        nominal 48 kHz IQ rate and the sound card's actual rate
+        (HL2 crystal vs. sound card crystal — typically differ by
+        50-100 ppm).  Without rate matching the ring buffer
+        between them fills/drains over time, producing audible
+        glitches.  Default ON; can be disabled for diagnostic A/B
+        via use_rate_match=False.
+        """
         try:
             import sounddevice as sd
         except ImportError as e:
             raise RuntimeError(
                 "sounddevice is not installed. `pip install sounddevice` "
-                "or switch the audio output to AK4951."
+                "or switch the audio output to HL2 audio jack."
             ) from e
         import threading
         self._sd = sd
         self._rate = rate
+        self._use_rate_match = bool(use_rate_match)
 
         if device is None:
             device = self._pick_wasapi_default(sd)
@@ -251,6 +265,10 @@ class SoundDeviceSink:
         self._underruns: int = 0    # callback ran out of data, padded silence
         self._frames_written: int = 0
         self._frames_read: int = 0
+        # v0.0.9.6: track RMatch's internal underflow counter so the
+        # callback can mirror increments into our counter (RMatch
+        # owns the truth post-rate-match-enabled).
+        self._rmatch_last_under: int = 0
         import time as _t
         self._stats_last_print = _t.monotonic()
 
@@ -264,6 +282,47 @@ class SoundDeviceSink:
             callback=self._audio_callback,
         )
         self._stream.start()
+
+        # ── v0.0.9.6: WDSP-derived adaptive resampler ────────────
+        #
+        # Bridges the clock-drift gap between Lyra's nominal 48 kHz
+        # output and the sound card's actual rate (which
+        # PortAudio/WASAPI exposes via _stream.samplerate).  Without
+        # this, the ring fills or drains over time as the two
+        # crystals drift, producing intermittent overruns/
+        # underruns.  See docs/architecture/audio_architecture.md
+        # for the full reasoning + WDSP attribution.
+        #
+        # Mono path: rate-match before the L/R gain stage.  The
+        # callback pulls mono from rmatch, then applies left/right
+        # gains as it fills outdata.  This is simpler than running
+        # two RMatch instances (one per channel) and gives identical
+        # operator-perceived behavior since L/R gains are static
+        # scalars, not signal-dependent.
+        self._rmatch = None
+        if self._use_rate_match:
+            try:
+                from lyra.dsp.rmatch import RMatch
+                actual_outrate = int(round(self._stream.samplerate))
+                # insize: typical DSP block size into the sink.
+                # Lyra's audio worker writes ~2048 frames per cycle.
+                # outsize: typical PortAudio callback request.  256
+                # is the WASAPI shared-mode default at 48 kHz.
+                self._rmatch = RMatch(
+                    insize=2048,
+                    outsize=256,
+                    nom_inrate=rate,
+                    nom_outrate=actual_outrate,
+                    density=64,    # plenty for 50-100 ppm drift
+                )
+                print(f"[Lyra audio] SoundDeviceSink: rate-match "
+                      f"enabled (RMatch nom_in={rate} nom_out="
+                      f"{actual_outrate})")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Lyra audio] SoundDeviceSink: rate-match "
+                      f"init failed ({exc}); falling back to "
+                      f"direct ring (drift glitches possible)")
+                self._rmatch = None
 
         # ── Audio chain visibility (v0.0.9.3 diagnostic) ────────────
         # Log the actual device, host API, and negotiated sample rate
@@ -325,18 +384,47 @@ class SoundDeviceSink:
 
     def _audio_callback(self, outdata, frames, time_info, status):
         """PortAudio audio-thread callback — fill `outdata` with the
-        next `frames` frames from the ring buffer.
+        next `frames` frames.
 
         Runs on a high-priority audio thread (NOT the DSP/main thread).
         Must be fast and must NOT raise. If the ring is short, fill the
         tail with silence rather than blocking — a brief glitch is
         always better than stuttering or hanging the device.
+
+        v0.0.9.6 path:
+          * If rate-match is enabled (default), pull mono samples
+            from RMatch (which also handles drift compensation +
+            underflow recovery internally), then apply L/R gains
+            to produce stereo for outdata.
+          * Otherwise, fall back to the legacy ring path
+            (use_rate_match=False — diagnostic A/B only).
         """
+        if self._rmatch is not None:
+            # Rate-matched path.  RMatch handles its own underflow
+            # recovery (slewed silence-fill); we just apply L/R
+            # gains and project to stereo.
+            mono = self._rmatch.read(frames)
+            # mono is float32 of length frames, may include slewed
+            # silence on underflow.
+            outdata[:, 0] = mono * self._left_gain
+            outdata[:, 1] = mono * self._right_gain
+            # Track underflows for the same diagnostic line the
+            # legacy ring exposes.  RMatch counts them internally;
+            # mirror to our counter so _maybe_print_stats sees them.
+            new_under = self._rmatch.underflows
+            if new_under > self._rmatch_last_under:
+                self._underruns += (new_under
+                                     - self._rmatch_last_under)
+                self._rmatch_last_under = new_under
+            self._frames_read += frames
+            return
+
+        # Legacy ring path (use_rate_match=False).  Identical to
+        # pre-v0.0.9.6 behavior.
         with self._ring_lock:
             avail = self._ring_count
             take = min(avail, frames)
             if take > 0:
-                # Copy `take` frames out of the ring, handling wrap-around.
                 end = self._ring_read_idx + take
                 if end <= self._ring_capacity_frames:
                     outdata[:take] = self._ring[
@@ -350,37 +438,49 @@ class SoundDeviceSink:
                 self._ring_count -= take
                 self._frames_read += take
             if take < frames:
-                # Underrun — pad the rest with silence. This produces a
-                # brief glitch rather than a device stutter.
                 outdata[take:] = 0.0
                 self._underruns += 1
 
     def write(self, audio: np.ndarray) -> None:
-        """Non-blocking write. Prepares stereo float32, applies balance
-        gains, then enqueues into the ring buffer. If the ring is full
-        the oldest frames are dropped (operator hears a brief glitch
-        rather than seeing the entire UI freeze)."""
+        """Non-blocking write. Prepares audio for the device.
+
+        v0.0.9.6: when rate-match is enabled (default), feeds the
+        mono audio through RMatch — L/R gains are applied later in
+        the audio callback when reading.  When rate-match is off,
+        falls back to the legacy stereo-ring path.
+
+        Two input shapes are accepted (see AK4951Sink.write for
+        rationale): mono (N,) or stereo (N, 2).  BIN feeds the
+        stereo path; everything else hits the mono path.
+        """
         if audio.size == 0:
             return
-        # Two input shapes are accepted (see AK4951Sink.write for
-        # rationale): mono (N,) or stereo (N, 2). BIN feeds the
-        # stereo path; everything else hits the mono path.
+
+        # Rate-matched path.  RMatch is mono-only; collapse stereo
+        # input to mono by averaging (BIN audio is the only stereo
+        # producer and BIN's L/R are already correlated, so averaging
+        # is fine).  L/R gains apply in the callback.
+        if self._rmatch is not None:
+            if audio.ndim == 2 and audio.shape[1] == 2:
+                mono = (audio[:, 0] + audio[:, 1]).astype(
+                    np.float32) * 0.5
+            else:
+                mono = audio.astype(np.float32).reshape(-1)
+            self._rmatch.write(mono)
+            self._frames_written += mono.size
+            self._maybe_print_stats()
+            return
+
+        # Legacy stereo-ring path (use_rate_match=False).  Identical
+        # to pre-v0.0.9.6 behavior.
         if audio.ndim == 2 and audio.shape[1] == 2:
             a = audio.astype(np.float32, copy=False) * np.array(
                 [self._left_gain, self._right_gain], dtype=np.float32)
         else:
             mono = audio.astype(np.float32).reshape(-1)
-            # Stereo build with per-channel balance gains applied.
-            # When the operator hasn't moved the Balance slider both
-            # gains are √2/2 (equal-power center) and the result is
-            # the same audio in both ears as before the balance feature
-            # existed.
             l = mono * self._left_gain
             r = mono * self._right_gain
             a = np.stack((l, r), axis=1)
-        # Ensure C-contiguous (N, 2) float32 — np.stack already is, the
-        # explicit cast handles the rare path where a came pre-shaped
-        # but in F-order or with a non-float32 dtype slipped through.
         if not (a.dtype == np.float32 and a.flags["C_CONTIGUOUS"]):
             a = np.ascontiguousarray(a, dtype=np.float32)
         n = a.shape[0]

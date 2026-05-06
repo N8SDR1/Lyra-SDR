@@ -1348,10 +1348,37 @@ class DspPanel(GlassPanel):
         # default-width controls without forcing the panel taller.
         levels.addWidget(QLabel("Out"))
         self.out_combo = QComboBox()
-        self.out_combo.addItems(["AK4951", "PC Soundcard"])
-        self.out_combo.setCurrentText(radio.audio_output)
-        self.out_combo.setFixedWidth(120)
-        self.out_combo.currentTextChanged.connect(self.radio.set_audio_output)
+        # v0.0.9.6: operator-facing labels.  Internal QSettings value
+        # for HL2 codec stays "AK4951" for back-compat (no operator
+        # data migration needed); the combo translates display ↔
+        # stored on selection.  Renamed because not all HL2 revisions
+        # use the AK4951 chip specifically — they all share the same
+        # EP2-back-to-codec path though, so "HL2 audio jack" is the
+        # accurate name.
+        self.out_combo.addItem("HL2 audio jack", userData="AK4951")
+        self.out_combo.addItem("PC Soundcard", userData="PC Soundcard")
+        # Set selection from the stored value.
+        for i in range(self.out_combo.count()):
+            if self.out_combo.itemData(i) == radio.audio_output:
+                self.out_combo.setCurrentIndex(i)
+                break
+        self.out_combo.setFixedWidth(140)
+        self.out_combo.setToolTip(
+            "RX audio output destination.\n"
+            "\n"
+            "HL2 audio jack: route audio back to the HL2 over the "
+            "network (EP2 frames) and play through the HL2's "
+            "onboard codec headphone jack.  Single-crystal path, "
+            "zero clock drift, recommended for HL2 hardware.\n"
+            "\n"
+            "PC Soundcard: route audio to the host PC's default "
+            "WASAPI output device.  v0.0.9.6 enables drift "
+            "compensation via WDSP-derived adaptive resampler — "
+            "should be glitch-free for standard ±50 ppm crystal "
+            "tolerance.")
+        self.out_combo.currentIndexChanged.connect(
+            lambda _idx: self.radio.set_audio_output(
+                self.out_combo.currentData()))
         levels.addWidget(self.out_combo)
 
         levels.addSpacing(12)
