@@ -237,9 +237,12 @@ the capture window.
    station, or wait for a transmission gap).
 2. Right-click the **📷 Cap** button → **Manage profiles…** →
    select the bad profile → **Re-capture**.
-3. Lyra runs the smart-guard variance check — if it flags the
-   new capture as "suspect" too, the band may not have a quiet-
-   enough patch right now. Try a different time of day.
+3. **Listen during the 2-second capture window** and watch the
+   waterfall.  If you hear a signal pass through or see a
+   spectrum spike, re-capture.  (Lyra used to flag this with a
+   "smart-guard" check; it was removed in v0.0.9.5 because
+   field testing showed it was unreliable — your ear is the
+   better filter.)
 
 You can also disable the captured profile temporarily by clicking
 the **source badge** below the DSP buttons row to flip back to

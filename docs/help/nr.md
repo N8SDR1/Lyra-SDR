@@ -109,37 +109,31 @@ any signal contamination.
    profile and the green dot lights up. NR is now using your
    captured profile as the noise model.
 
-### Smart-guard
+### Capture quality — your ear is the filter
 
-After every capture, Lyra runs a two-layer quality check on the
-captured frames:
+Earlier versions of Lyra (v0.0.7.x through v0.0.9.4) ran a two-
+layer "smart-guard" variance check on every capture and warned
+you in the save dialog if a signal looked like it was riding
+through the capture window.  **That check was removed in v0.0.9.5
+after operator field testing showed it produced both false
+positives** (firing on clean noise across multiple band positions)
+**and false negatives** (passing FT8 captures cleanly).
 
-1. **Total-power variance check.**  Stable band noise has stable
-   frame-to-frame total power.  CW keying, SSB syllables, or any
-   intermittent broadband source pushes total-power variance up
-   sharply — flagged as suspect.
-2. **Per-bin variance anomaly check.**  For each FFT bin, Lyra
-   computes its variance over the capture window.  Stationary
-   tonal noise (60 / 120 / 180 Hz powerline harmonics) has low
-   variance per bin even though the carrier itself is loud — so
-   stable powerline crud passes cleanly.  But intermittent
-   contamination concentrated in a small set of bins (a single
-   CW carrier coming and going, an SSB voice's formants) makes
-   those bins' variance much higher than the rest of the
-   spectrum — flagged as suspect via robust median+MAD outlier
-   detection.
+The underlying reason: real ham band noise has legitimate
+amplitude modulation (powerline arcing envelope at 120 Hz US /
+100 Hz EU, BCB carrier modulation, atmospheric crashes, HF
+propagation breathing).  The detector model couldn't separate
+that from real signal contamination.
 
-If either layer flags suspect, Lyra warns you in the save dialog
-with a ⚠ banner ("smart-guard flagged signal during capture") so
-you can re-capture before saving.
+**The replacement is your ear.**  During the 2-second capture
+window, listen.  Watch the waterfall.  If you heard a syllable
+or saw a signal pass through, recapture.  If the band was clean,
+save the profile.  Operators were already doing this naturally —
+the algorithm was duplicating their judgment poorly.
 
-The two-layer check catches the case where the legacy variance-only
-check could be fooled — a stable carrier in just a few bins (e.g.,
-an AM broadcast 5th harmonic) would slip through total-power
-variance, but the per-bin variance check sees it clearly.
-
-You can disable the guard in Settings → Noise → "Detect signal
-during capture" if you know your captures are good.
+The Settings → Noise → "Detect signal during capture" checkbox
+is gone.  The save dialog is back to the simple "Capture
+complete. Save as: [name]" flow it had before v0.0.7.
 
 ### Right-click on 📷 Cap — full menu
 
@@ -411,8 +405,9 @@ overlapping:
 
 - **Capture on a truly quiet patch** — between QSOs, in a
   transmission gap, or 5–10 kHz away from any active station.
-  Smart-guard catches obvious mistakes but a clean capture is
-  always the best starting point.
+  Listen during the 2-second capture and watch the waterfall —
+  if anything passes through, re-capture.  Your ear is the
+  best contamination detector.
 - **Re-capture when the band shifts** — power-line patterns
   change between morning/afternoon/night, atmospheric noise
   shifts with propagation. The age coloring on the source badge
