@@ -226,10 +226,10 @@ class RMatch:
         startup_delay: float = 0.5,
         ff_ringmin: int = 32,
         ff_ringmax: int = 1024,    # power of two
-        ff_alpha: float = 0.01,
+        ff_alpha: float = 0.05,
         prop_ringmin: int = 32,
         prop_ringmax: int = 4096,  # power of two
-        prop_gain: float = 0.005,
+        prop_gain: float = -1.0,   # -1 = auto-scale by ring size
         tslew: float = 0.003,
         fc_high: float = 0.0,
         fc_low: float = -1.0,
@@ -258,11 +258,21 @@ class RMatch:
             ff_ringmin / ff_ringmax: feed-forward MAV bounds.
                 Defaults (32 / 1024) match Thetis IVAC.
             ff_alpha: feed-forward exponential smoothing coefficient.
-                Default 0.01 — slow lock-in, ~100-block time
-                constant.
+                Default 0.05 — ~20-block time constant.  Lyra's
+                v0.0.9.6 tuning bumped this from WDSP's 0.01
+                because Lyra's typical block sizes (insize=2048,
+                outsize=512) result in ~5 control updates per
+                cycle, where 0.01 produced a 20-cycle oscillation
+                period that resonated with the proportional swing.
+                Faster ff lets the ratio lock-in dominate before
+                the proportional has a chance to overshoot.
             prop_ringmin / prop_ringmax: proportional MAV bounds.
-            prop_gain: proportional feedback gain.  Default 0.005,
-                rate-adjusted per WDSP convention to
+            prop_gain: proportional feedback gain.  Default -1.0
+                triggers Lyra's auto-scale: ``pr_gain = 0.04 /
+                rsize``, which keeps the max proportional
+                contribution bounded at ~0.02 (half the var clamp
+                range) regardless of block size.  Operator can
+                pass a positive value to use the WDSP convention
                 ``prop_gain * 48000 / nom_outrate``.
             tslew: slew/blend time on overflow/underflow (seconds).
                 Default 3 ms — short enough to be inaudible, long
@@ -314,9 +324,30 @@ class RMatch:
         self.feed_forward = 1.0
         self.av_deviation = 0.0
 
-        # Rate-adjusted proportional gain — matches C convention
-        # (rmatch.c:147).
-        self.pr_gain = float(prop_gain) * 48000.0 / float(nom_outrate)
+        # Rate-adjusted proportional gain.  v0.0.9.6 Lyra-specific
+        # tuning: WDSP's prop_gain=0.005 default oscillates at the
+        # var clamps for our typical insize=2048 block sizes because
+        # the deviation magnitudes scale linearly with rsize and the
+        # original constant didn't compensate.  We auto-scale by
+        # rsize so the maximum proportional contribution stays
+        # bounded at ~half the clamp range (0.02), regardless of
+        # block size.
+        #
+        # Math:
+        #   max |av_deviation| = rsize / 2  (deviation when ring
+        #                                     spans 0..rsize)
+        #   target max |prop term| = 0.02   (half of 0.04 clamp,
+        #                                     leaving room for ff)
+        #   pr_gain = 0.02 / (rsize/2) = 0.04 / rsize
+        #
+        # Operator can override prop_gain with a positive value to
+        # restore the WDSP-original behavior or specify a custom
+        # absolute gain.  Default (-1.0) triggers the auto-scale.
+        if prop_gain < 0.0:
+            self.pr_gain = 0.04 / float(self.rsize)
+        else:
+            self.pr_gain = (float(prop_gain) * 48000.0
+                            / float(nom_outrate))
 
         # Slew/blend curve.
         self.ntslew = int(self.tslew * float(nom_outrate))
