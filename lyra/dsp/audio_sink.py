@@ -337,6 +337,32 @@ class SoundDeviceSink:
                 # before the next perturbation, conservative enough
                 # to not overshoot.
                 ring_target = int(actual_outrate * 0.400)
+
+                # v0.0.9.6 polish (B): seed initial_var from the
+                # last-known value saved on a previous Lyra session.
+                # Cuts the 10-20 sec startup convergence window to
+                # near-zero because varsamp starts at the locked-in
+                # ratio rather than 1.0.  Stored in QSettings under
+                # "audio/last_rmatch_var" — saved on graceful close
+                # below.  Defaults to 1.0 if no prior value (first
+                # launch, sound-card change, etc.).
+                init_var = 1.0
+                try:
+                    from PySide6.QtCore import QSettings
+                    qs = QSettings("N8SDR", "Lyra")
+                    last_var = qs.value(
+                        "audio/last_rmatch_var", 1.0, type=float)
+                    init_var = float(last_var)
+                except Exception:
+                    pass
+
+                # v0.0.9.6 polish (C): start ring 80% full instead
+                # of 50% to give consumer extra headroom during the
+                # first few seconds of audio.  Operator hears about
+                # 320 ms of silence at startup (320/400 of the ring)
+                # before live audio reaches the head, which matches
+                # the typical Windows audio-engine startup latency
+                # anyway — perceived as instant by the operator.
                 self._rmatch = RMatch(
                     insize=2048,
                     outsize=256,
@@ -345,11 +371,14 @@ class SoundDeviceSink:
                     density=64,    # plenty for 50-100 ppm drift
                     ringsize=ring_target,
                     ff_alpha=0.10,
+                    initial_var=init_var,
+                    initial_fill_fraction=0.80,
                 )
                 print(f"[Lyra audio] SoundDeviceSink: rate-match "
                       f"enabled (RMatch nom_in={rate} nom_out="
                       f"{actual_outrate} ring={ring_target} "
-                      f"= {ring_target * 1000 // actual_outrate}ms)")
+                      f"= {ring_target * 1000 // actual_outrate}ms "
+                      f"init_var={init_var:.5f} init_fill=80%)")
             except Exception as exc:  # noqa: BLE001
                 print(f"[Lyra audio] SoundDeviceSink: rate-match "
                       f"init failed ({exc}); falling back to "
@@ -579,6 +608,21 @@ class SoundDeviceSink:
         self._right_gain = float(right)
 
     def close(self) -> None:
+        # v0.0.9.6 polish (B): persist current rmatch var so the
+        # next Lyra session starts pre-primed at the locked-in
+        # ratio.  Only save if control loop ever became active
+        # (control_flag=True) — otherwise we'd persist the initial
+        # 1.0 which doesn't help.  Also clamp to the [0.96, 1.04]
+        # range defensively so a malformed save can't break a
+        # later session.
+        if self._rmatch is not None and self._rmatch.control_flag:
+            try:
+                from PySide6.QtCore import QSettings
+                qs = QSettings("N8SDR", "Lyra")
+                v = max(0.96, min(1.04, float(self._rmatch.var)))
+                qs.setValue("audio/last_rmatch_var", v)
+            except Exception:
+                pass
         try:
             self._stream.stop()
             self._stream.close()

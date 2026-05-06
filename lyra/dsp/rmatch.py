@@ -235,6 +235,8 @@ class RMatch:
         fc_low: float = -1.0,
         gain: float = 1.0,
         varmode: int = 1,
+        initial_var: float = 1.0,
+        initial_fill_fraction: float = 0.5,
     ) -> None:
         """Construct an RMatch.
 
@@ -302,26 +304,47 @@ class RMatch:
         self.ringsize = int(ringsize)
         self.rsize = self.ringsize       # alias, matches C naming
         self.ring = np.zeros(self.ringsize, dtype=np.complex128)
-        self.n_ring = self.rsize // 2
-        self.iin = self.rsize // 2
+        # v0.0.9.6: configurable initial fill.  Default 0.5 (rsize/2)
+        # matches WDSP's rmatch.c.  SoundDeviceSink passes 0.5 to
+        # match the 200 ms half-fill at 400 ms ring; bench/IQ-rate-
+        # match callers can leave at default.  Pre-fill is silence;
+        # operator hears initial-fill_fraction * ringsize / outrate
+        # of silence at startup before producer fills the ring with
+        # real audio — typically 100-200 ms, well below the
+        # threshold where it feels delayed.
+        fill_frac = max(0.1, min(0.95, float(initial_fill_fraction)))
+        self.n_ring = int(self.rsize * fill_frac)
+        self.iin = self.n_ring
         self.iout = 0
 
         # Resampler intermediate output buffer (max possible size of
         # one xvarsamp call for our insize).
         self._resout_max = max_ring_insize
 
+        # v0.0.9.6: optional initial var lets callers pre-prime the
+        # rate-match loop with the last known-good value (saved
+        # from a previous Lyra session via QSettings).  Cuts the
+        # 10-20 sec startup convergence window down to milliseconds
+        # because varsamp starts at the right ratio rather than
+        # 1.0.  Clamped to the same [0.96, 1.04] range the control
+        # loop honors at runtime.
+        init_var = max(self.VAR_MIN, min(self.VAR_MAX, float(initial_var)))
+
         # VarSamp instance.
         self.v = VarSamp(
             in_rate=nom_inrate, out_rate=nom_outrate,
             density=density, fc=fc_high, fc_low=fc_low, gain=gain,
-            initial_var=1.0, varmode=varmode,
+            initial_var=init_var, varmode=varmode,
         )
 
         # Control-loop MAVs.
         self.ffmav = _AaMav(ff_ringmin, ff_ringmax, self.nom_ratio)
         self.propmav = _Mav(prop_ringmin, prop_ringmax, 0.0)
         self.ff_alpha = float(ff_alpha)
-        self.feed_forward = 1.0
+        # Seed feed_forward with init_var too so the proportional
+        # response doesn't fight against a stale 1.0 baseline on
+        # the first few control updates.
+        self.feed_forward = init_var
         self.av_deviation = 0.0
 
         # Rate-adjusted proportional gain.  v0.0.9.6 Lyra-specific
@@ -378,7 +401,7 @@ class RMatch:
         # Diagnostics.
         self.underflows = 0
         self.overflows = 0
-        self.var = 1.0
+        self.var = init_var
         self.force = False
         self.fvar = 1.0
 
