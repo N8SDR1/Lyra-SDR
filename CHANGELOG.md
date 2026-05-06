@@ -16,40 +16,61 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 ## [0.0.9.5] — unreleased — "Captured-Profile UX"
 
 A focused UX polish release for the captured-noise-profile feature.
-No DSP-path changes; no protocol-path changes.  Three operator-
-visible improvements that close out the captured-profile UX queue
-flagged in the 2026-05-05 audit.
+No DSP-path changes; no protocol-path changes.  Headline change
+is the **removal of the smart-guard** capture-quality check after
+operator field testing showed it gave both false positives and
+false negatives that calibration tuning couldn't bridge.  Plus
+two operator-visible improvements (tunable staleness threshold,
+live drift readout) and one stability fix (TCI server lambda
+crash race).
 
-### Smart-guard suspect-capture dialog: three-way choice
+### Smart-guard removed
 
-When the smart-guard flags a fresh capture as suspect, operators
-now see a three-button dialog instead of being forced through a
-binary OK/Cancel save prompt:
+The "smart-guard" capture-quality check (per-frame total-power
+CV + per-bin variance anomaly detection — added in v0.0.7.x and
+recalibrated several times since) has been **fully removed** in
+v0.0.9.5 after operator field testing showed the algorithm gave
+both:
 
-- **Save anyway** — keep the profile as-is (use it, accept the
-  risk that a signal was riding through the capture window)
-- **Recapture** — discard and trigger another capture immediately
-  (operator waits for transmission gap or moves to a quieter
-  spot first)
-- **Cancel** — discard the capture entirely
+- **False positives**: 12 consecutive captures flagged as suspect
+  across different parts of the band on a real ham QTH (clean
+  noise in every case, verified by ear)
+- **False negatives**: FT8 captures passing as "clean" when the
+  signal was clearly contaminating the capture window
 
-The dialog also surfaces the structured smart-guard *reason* —
-which detection layer fired and the underlying statistic.
-Examples:
+Calibration tuning couldn't bridge both failure modes — the
+underlying detector model didn't separate "real signal
+contamination" from "real-world noise with legitimate amplitude
+modulation" (powerline arcing envelope at 120 Hz US / 100 Hz EU,
+BCB carrier modulation, atmospheric crashes, HF propagation
+breathing).  An unreliable algorithmic check is worse than no
+check because it produces false confidence on captures that
+pass.
 
-  > Layer 1: total-power CV 0.61 > 0.50 (broad amplitude swings
-  > during capture)
+**The operator's ear + waterfall during the capture window are
+the actual filter.**  Operators already do this naturally — they
+listen during the 2-second capture and don't save the profile
+if they heard a signal go by.  The algorithm was duplicating
+their judgment poorly.
 
-  > Layer 2: 23% of active bins anomalous (signal-like
-  > contamination across the voice band)
+What's gone:
 
-  > Layer 2: peak per-bin CV 1.42 > 0.95 (intermittent signal in
-  > 1-3 bins — CW or narrow carrier)
+- ``smart_guard_verdict()`` / ``smart_guard_reason()`` APIs
+  (NR1, Channel, Radio)
+- ``_evaluate_capture_quality()`` algorithm and supporting
+  ``GUARD_*`` thresholds
+- Per-frame power tracking + sum-of-squares accumulator in
+  ``_accumulate_capture_frame``
+- Three-way Save anyway / Recapture / Cancel suspect-save
+  dialog (added briefly earlier in the v0.0.9.5 dev branch
+  before removal)
+- "Detect signal during capture (smart-guard)" Settings
+  checkbox
+- ``noise_capture_done`` signal payload still ``Signal(str)``
+  for slot-signature compatibility but always emits empty string
 
-Knowing *why* the capture was flagged helps operators decide
-between recapturing (timing issue — signal was passing) and
-moving bands (persistent QRM that won't go away).  Reason string
-exposed via new ``Radio.nr_smart_guard_reason()`` API.
+What stays: the basic capture → name → save flow, exactly as it
+was before the smart-guard was added.
 
 ### Operator-tunable staleness threshold
 
@@ -97,17 +118,19 @@ profile is active.
 
 ### Tester checklist
 
-- **Smart-guard dialog:** capture during a transmission gap to
-  trigger the suspect verdict; verify three buttons appear with
-  the smart-guard reason string visible
-- **Recapture flow:** click Recapture from the dialog; verify a
-  new capture starts immediately and brings up the same dialog
-  (or save prompt) when complete
+- **Capture flow:** capture a profile in any band; verify it
+  goes straight to the "Capture complete. Save as: [name]"
+  prompt with no warnings or three-button dialogs (smart-guard
+  is gone)
 - **Staleness threshold:** open Settings → Noise; verify the
-  spinbox shows 10 dB by default, persists across launches
+  Profile staleness spinbox shows 10 dB by default and persists
+  across launches; smart-guard checkbox should NOT be present
 - **Drift readout:** load a captured profile, open the profile
   manager, verify the live drift line at top updates every
   ~1 sec
+- **TCI stability:** with TCI clients connected, open Settings,
+  switch tabs, close Settings — should not produce "wrapped C++
+  object" tracebacks in the console
 
 ### Recovery
 

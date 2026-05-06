@@ -268,7 +268,33 @@ class NoiseProfileManager(QDialog):
                 pass
 
     def _reload(self) -> None:
-        """Re-scan the profile folder and rebuild the table."""
+        """Re-scan the profile folder and rebuild the table.
+
+        Wrapped in try/except RuntimeError to survive the same
+        dialog-teardown race that bit the TCI server lambdas
+        (v0.0.9.5 fix) — Radio's ``noise_profiles_changed`` and
+        ``noise_active_profile_changed`` signals are long-lived,
+        and they can fire after this dialog has been closed and
+        its ``_folder_label`` / ``table`` widgets destroyed.  The
+        guard catches RuntimeError from any zombie-widget access
+        so the exception doesn't propagate up through Radio's
+        signal infrastructure."""
+        try:
+            self._reload_unguarded()
+        except RuntimeError:
+            # Dialog widgets destroyed; let Qt clean up the
+            # connection on next gc.  Also stop the drift timer
+            # if it's still running so subsequent ticks don't
+            # re-fire the same crash.
+            try:
+                self._drift_timer.stop()
+            except Exception:
+                pass
+
+    def _reload_unguarded(self) -> None:
+        """Original _reload body — re-scans the profile folder and
+        rebuilds the table.  Wrapped by ``_reload`` with a
+        try/except guard."""
         self._folder_label.setText(
             f"Folder: {self.radio.noise_profile_folder}")
         s = QSettings("N8SDR", "Lyra")
@@ -413,10 +439,9 @@ class NoiseProfileManager(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "Re-capture save failed", str(exc))
             return
-        msg = f"Re-captured {name!r}"
-        if verdict == "suspect":
-            msg += " ⚠ smart-guard flagged signal during capture"
-        self.radio.status_message.emit(msg, 6000)
+        # ``verdict`` parameter retained for slot-signal compatibility
+        # but ignored — smart-guard removed in v0.0.9.5.
+        self.radio.status_message.emit(f"Re-captured {name!r}", 6000)
 
     def _on_rename(self) -> None:
         meta = self._selected_meta()

@@ -2496,109 +2496,7 @@ class DspPanel(GlassPanel):
         # Also refresh the NR button tooltip via the existing path.
         self._on_nr_profile_changed(self.radio.nr_profile)
 
-    def _show_suspect_capture_dialog(self) -> str:
-        """Three-way dialog shown when smart-guard flags a capture.
-
-        v0.0.9.5: replaces the previous OK/Cancel-only flow.  Returns
-        one of:
-          "save"      — operator wants to save anyway
-          "recapture" — operator wants to discard + try again
-          "cancel"    — operator wants to drop the capture entirely
-
-        Surfaces the smart-guard reason inline so operators
-        understand which detection layer fired (broad amplitude swing
-        vs tonal signal contamination vs voice-band swings) — informs
-        whether to recapture (timing issue) or skip the band entirely
-        (persistent QRM).
-        """
-        from PySide6.QtWidgets import (
-            QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout,
-        )
-        from PySide6.QtCore import Qt
-
-        # Pull the structured reason from Radio if available.  Empty
-        # string means the smart-guard flagged but didn't populate
-        # a reason (shouldn't happen post-v0.0.9.5 but defensive).
-        try:
-            reason = self.radio.nr_smart_guard_reason()
-        except Exception:
-            reason = ""
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Capture flagged — smart-guard")
-        dlg.setMinimumWidth(540)
-
-        v = QVBoxLayout(dlg)
-        v.setContentsMargins(16, 16, 16, 16)
-        v.setSpacing(12)
-
-        header = QLabel(
-            "<h3 style='color:#ff8c1a; margin:0'>"
-            "⚠  Smart-guard flagged this capture as SUSPECT</h3>")
-        header.setWordWrap(True)
-        v.addWidget(header)
-
-        explain = QLabel(
-            "<p>The capture's frame-to-frame power variance suggests "
-            "a signal was riding through the capture window — the "
-            "profile may suppress real signals when used.</p>")
-        explain.setWordWrap(True)
-        v.addWidget(explain)
-
-        if reason:
-            reason_lbl = QLabel(
-                f"<p style='color:#80d8ff; "
-                f"font-family:Consolas,monospace; font-size:11px'>"
-                f"<b>Why:</b> {reason}</p>")
-            reason_lbl.setWordWrap(True)
-            v.addWidget(reason_lbl)
-
-        question = QLabel(
-            "<p style='color:#cdd9e5'>What do you want to do?</p>"
-            "<ul style='color:#8a9aac; margin-top:0'>"
-            "<li><b>Save anyway</b> — keep the profile as-is "
-            "(use it, accept the risk)</li>"
-            "<li><b>Recapture</b> — discard and try again "
-            "(wait for a transmission gap or move to a quieter "
-            "spot first)</li>"
-            "<li><b>Cancel</b> — discard the capture entirely</li>"
-            "</ul>")
-        question.setWordWrap(True)
-        v.addWidget(question)
-
-        # Three buttons with explicit per-button result via captured
-        # closure.  QDialog's standard accept/reject is a 2-state API;
-        # we need 3 outcomes so we set a string attr on the dialog.
-        dlg._choice = "cancel"
-
-        btns = QHBoxLayout()
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(dlg.reject)
-        btns.addWidget(cancel_btn)
-        btns.addStretch(1)
-        recap_btn = QPushButton("Recapture")
-        def _do_recap():
-            dlg._choice = "recapture"
-            dlg.accept()
-        recap_btn.clicked.connect(_do_recap)
-        btns.addWidget(recap_btn)
-        save_btn = QPushButton("Save anyway")
-        save_btn.setStyleSheet(
-            "QPushButton { background:#7d2a2a; color:white; "
-            "padding:6px 14px; border:1px solid #ff8c1a; "
-            "border-radius:4px; font-weight:600; } "
-            "QPushButton:hover { background:#993333; }")
-        def _do_save():
-            dlg._choice = "save"
-            dlg.accept()
-        save_btn.clicked.connect(_do_save)
-        btns.addWidget(save_btn)
-        v.addLayout(btns)
-
-        dlg.exec()
-        return getattr(dlg, "_choice", "cancel")
-
-    def _prompt_save_captured_profile(self, verdict: str) -> None:
+    def _prompt_save_captured_profile(self, verdict: str = "") -> None:
         """Open a save-as dialog after a capture finalizes."""
         from PySide6.QtWidgets import QInputDialog, QMessageBox
         # Default name = "<band> <YYYY-MM-DD HH:MM>" — operator can
@@ -2626,39 +2524,13 @@ class DspPanel(GlassPanel):
             title_bits.append(f"— {' '.join(ctx_bits)}")
         title = "  ".join(title_bits)
 
+        # Plain capture-complete prompt — pre-smart-guard flow
+        # restored in v0.0.9.5 after the guard was decommissioned.
+        # Operator's ear + waterfall during capture are the actual
+        # filter.  No verdict, no warnings, no branching — just
+        # name and save.  ``verdict`` arg retained for slot-signal
+        # compatibility but ignored.
         prompt = "Capture complete.  Save as:"
-        # v0.0.9.5: when verdict is "suspect", show a three-way
-        # dialog (Save anyway / Recapture / Cancel) instead of
-        # forcing the operator into a binary OK/Cancel choice.
-        # Recapture re-triggers begin_noise_capture with the
-        # current duration; the same _handle_capture_done path will
-        # bring us back here on completion.  Also surfaces the
-        # smart-guard reason so the operator understands what
-        # specifically tripped the guard.
-        if verdict == "suspect":
-            choice = self._show_suspect_capture_dialog()
-            if choice == "recapture":
-                from PySide6.QtCore import QSettings
-                s = QSettings("N8SDR", "Lyra")
-                duration = float(s.value("noise/capture_duration_sec",
-                                          2.0, type=float))
-                self.radio.begin_noise_capture(duration)
-                self.radio.status_message.emit(
-                    f"Re-capturing ({duration:.1f} s) — smart-guard "
-                    "flagged the previous attempt.",
-                    6000)
-                return
-            if choice != "save":
-                # "cancel" — operator dropped the capture entirely.
-                self.radio.status_message.emit(
-                    "Capture discarded.", 3000)
-                return
-            # "save" — fall through to the name-prompt with the
-            # explicit save-anyway prompt text.
-            prompt = (
-                "Saving despite smart-guard flag.  This profile may "
-                "suppress real signals when used.\n\n"
-                "Save as:")
         name, ok = _prompt_profile_name(
             self, title, prompt, default_name)
         if not ok:

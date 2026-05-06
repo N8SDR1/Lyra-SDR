@@ -292,15 +292,16 @@ class Radio(QObject):
 
     # Phase 3.D #1 — Captured-noise-profile signals.
     # noise_capture_done fires when a capture finalizes inside the
-    # NR processor; payload is the smart-guard verdict
-    # ("clean" | "suspect" | "n/a") so the UI can warn about
-    # questionable captures before the operator saves.
+    # NR processor.  Payload was the smart-guard verdict in v0.0.7.x
+    # through v0.0.9.4; smart-guard removed in v0.0.9.5 so the
+    # payload is now always empty string (kept for slot-signature
+    # compatibility — slots ignore the arg).
     # noise_active_profile_changed fires whenever the loaded
     # captured profile is replaced or cleared; payload is the
     # display name (or "" when cleared) so the panel badge updates.
     # noise_profiles_changed fires after save / delete / rename
     # so the manager dialog refreshes its list view.
-    noise_capture_done = Signal(str)            # verdict
+    noise_capture_done = Signal(str)            # always "" post-v0.0.9.5
     noise_active_profile_changed = Signal(str)  # name or ""
     noise_profiles_changed = Signal()
     # NR source toggle — fires when set_nr_use_captured_profile flips.
@@ -2631,8 +2632,7 @@ class Radio(QObject):
         (or being inside a transmission gap) before invoking.
         Capture progresses inside the audio chain on subsequent
         IQ blocks; when it completes, ``noise_capture_done`` fires
-        with the smart-guard verdict so UI can prompt for a save
-        name (and warn about questionable captures).
+        so UI can prompt for a save name.
 
         ``seconds`` is clamped to NR's CAPTURE_MIN_SEC..MAX_SEC
         range (1.0..5.0 in normal operator UI).
@@ -2651,21 +2651,6 @@ class Radio(QObject):
         """Return ``(state, fraction_complete)`` for UI progress
         bar.  state ∈ {"idle", "capturing", "ready"}."""
         return self._rx_channel.nr_capture_progress()
-
-    def nr_smart_guard_verdict(self) -> str:
-        """Smart-guard verdict from the most recent capture:
-        "clean" / "suspect" / "n/a"."""
-        return self._rx_channel.nr_smart_guard_verdict()
-
-    def nr_smart_guard_reason(self) -> str:
-        """Human-readable reason for the most recent smart-guard
-        verdict.  Empty when verdict is "clean" or "n/a"; for
-        "suspect" carries which layer fired and the relevant
-        statistic (e.g., "Layer 1: total-power CV 0.61 > 0.50 (broad
-        amplitude swings during capture)").  Surfaced in the
-        suspect-save dialog so operators understand why a capture
-        was flagged.  Added v0.0.9.5."""
-        return self._rx_channel.nr_smart_guard_reason()
 
     @property
     def active_captured_profile_name(self) -> str:
@@ -3520,11 +3505,10 @@ class Radio(QObject):
         main thread regardless of where we emit from.  Slots
         (typically the UI's "save profile" prompt) handle the rest.
         """
-        try:
-            verdict = self._rx_channel.nr_smart_guard_verdict()
-        except Exception:
-            verdict = "n/a"
-        self.noise_capture_done.emit(str(verdict))
+        # v0.0.9.5: smart-guard removed; emit empty string for
+        # slot-signature compatibility with code that still expects
+        # the (str) shape.
+        self.noise_capture_done.emit("")
 
     def _on_nr_profile_stale(self, drift_db: float) -> None:
         """Called from inside NR.process() when staleness threshold

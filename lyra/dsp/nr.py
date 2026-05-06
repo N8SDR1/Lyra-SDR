@@ -67,10 +67,11 @@ Captured-profile workflow (Phase 3.D #1):
        persistence layer (lyra/dsp/noise_profile_store), or clear
        via clear_captured_profile().
 
-Smart-guard (always on by default): after capture finishes,
-inspect frame-to-frame power variance. High variance suggests a
-signal was riding through the capture window; smart_guard_verdict()
-returns "suspect" so the UI can warn the operator before they save.
+Smart-guard removed in v0.0.9.5 — operator field testing showed
+the algorithm gave both false positives (firing on clean noise)
+AND false negatives (passing FT8 cleanly).  The operator's ear +
+waterfall during the capture window are the actual filter.  See
+CHANGELOG for the full reasoning.
 """
 from __future__ import annotations
 
@@ -309,33 +310,21 @@ class SpectralSubtractionNR:
     #    interference that's stable (low total-power CV) but is
     #    actually a contaminating signal.
     #
-    # The fraction-anomalous threshold is operator-untuned; 5% of
-    # bins flagging anomalous means 6+ bins out of 129 (FFT=256).
-    # CW = 1-3 bins, SSB voice = 5-15 bins, AM carrier-with-modulation
-    # = 1 carrier bin + a few sideband bins — all comfortably above
-    # the threshold.  Stable powerline comb has only the carrier
-    # bins themselves with low per-bin CV — comfortably below.
-    GUARD_VARIANCE_THRESHOLD: float = 0.5
-    # Layer-2 anomaly detection thresholds:
-    #   GUARD_ANOMALY_BIN_FRAC: triggers when a fraction of bins
-    #     (relative to total) exceeds the MAD-based outlier threshold.
-    #     Catches SSB voice (5-15 bins anomalous) and AM
-    #     modulation (carrier + sideband bins).
-    #   GUARD_ANOMALY_MAX_CV: backstop that triggers if ANY single
-    #     bin's CV exceeds this absolute threshold.  Catches CW
-    #     keying which contaminates only 1-2 bins (below the
-    #     fraction threshold) but pushes those bins to per-bin CV
-    #     well above 1.0 (stdev > mean — a strong sign of an
-    #     intermittent source).
-    # The two are OR'd — flag if either triggers.
-    GUARD_ANOMALY_BIN_FRAC: float = 0.03
-    GUARD_ANOMALY_MAX_CV: float = 1.5
-    # MAD multiplier for "anomalous bin" detection — robust analog
-    # to ~5 sigma on Gaussian-distributed CV values.  Higher = more
-    # permissive (only flag VERY anomalous bins); lower = more
-    # strict.  5.0 is the textbook sigma-equivalent for MAD-based
-    # outlier detection on Gaussian-ish data.
-    GUARD_ANOMALY_MAD_MULT: float = 5.0
+    # ── Smart-guard REMOVED in v0.0.9.5 ─────────────────────────────
+    #
+    # The per-frame total-power variance + per-bin CV anomaly
+    # detection were retired in v0.0.9.5 after operator field
+    # testing showed the algorithm gave both false positives
+    # (firing on clean noise at multiple band positions) AND
+    # false negatives (passing FT8 captures cleanly).  Calibration
+    # tuning couldn't bridge both failure modes — the underlying
+    # detector didn't separate "real signal contamination" from
+    # "real-world noise with legitimate amplitude modulation"
+    # (powerline arcing envelope, BCB harmonics, atmospheric
+    # crashes, HF propagation breathing).  An unreliable check
+    # is worse than no check — it produces false confidence on
+    # captures that pass.  The operator's ear + waterfall during
+    # the capture window are the actual filter.
 
     # Capture duration sanity bounds (seconds).  Operator UI exposes
     # 1.0 - 5.0 sec range per locked operator decision; these are the
@@ -486,7 +475,7 @@ class SpectralSubtractionNR:
         #   "capturing"  — accumulating frames; process() is feeding
         #                  the accumulator
         #   "ready"      — last capture finished; results in
-        #                  _captured_noise_mag and _capture_verdict
+        #                  _captured_noise_mag
         # State transitions are single-attribute writes (GIL-safe);
         # the worker thread reads "capturing"/"idle" inside process()
         # and the main thread reads "ready" after the done-callback
@@ -495,31 +484,7 @@ class SpectralSubtractionNR:
         self._capture_frames_target: int = 0
         self._capture_frames_done: int = 0
         self._capture_accum: Optional[np.ndarray] = None
-        # Per-frame total-power list for the legacy smart-guard
-        # variance check.  Cleared at begin_noise_capture; populated
-        # during capture; inspected at finalize.  Kept around
-        # afterwards so the UI can re-query smart_guard_verdict().
-        self._capture_per_frame_powers: list[float] = []
-        # Sum-of-squares-per-bin accumulator (v0.0.7.x — for the
-        # per-bin variance anomaly check).  Same lifecycle as
-        # _capture_accum; lets us compute per-bin std at finalize
-        # without storing every frame's spectrum (memory-bounded).
-        # Math:
-        #   E[X²]   = sum_sq / N
-        #   E[X]²   = (sum / N)²
         #   Var[X]  = E[X²] - E[X]²
-        self._capture_accum_sq: Optional[np.ndarray] = None
-        self._capture_verdict: str = "n/a"  # n/a | clean | suspect
-        # Human-readable reason populated alongside _capture_verdict
-        # by _evaluate_capture_quality.  Empty for "clean" / "n/a";
-        # for "suspect" carries which layer fired and the relevant
-        # statistic (e.g. "Layer 1: total-power CV 0.61 > 0.50").  UI
-        # surfaces this in the suspect-save dialog so operators
-        # understand WHY a capture was flagged.  Added v0.0.9.5.
-        self._capture_reason: str = ""
-        # Operator-tunable in v2 (Settings → Noise tab).  For day 1
-        # the smart guard is always on; UI exposes a toggle later.
-        self._smart_guard_enabled: bool = True
         # Done-callback: Radio registers a function here that emits
         # a Qt signal so the UI can react.  Fires from inside
         # process() on whatever thread is running it (worker thread
@@ -694,21 +659,14 @@ class SpectralSubtractionNR:
         # thousands of frames and float32 sums lose precision.
         # Cast back to float32 at finalize.
         self._capture_accum = np.zeros(n_bins, dtype=np.float64)
-        self._capture_accum_sq = np.zeros(n_bins, dtype=np.float64)
-        self._capture_per_frame_powers = []
         self._capture_frames_target = frames
         self._capture_frames_done = 0
-        self._capture_verdict = "n/a"
-        self._capture_reason = ""
         # Flush leftover STFT samples from previous processing so
         # the first capture frame is built from purely-new audio.
         # Without this flush, leftover samples from a previous
         # different signal (e.g., a CW capture before a noise
         # capture) contaminate the first 1-2 frames of the new
-        # capture and can push the smart-guard's per-bin variance
-        # check just over the anomaly threshold.  Operator-visible
-        # symptom: stable noise after a noisy capture sometimes
-        # gets flagged "suspect" even though the new audio is clean.
+        # capture.
         self._in_buf = np.zeros(0, dtype=np.float32)
         # Last write — flips state for process() to start
         # accumulating on its next frame.  Single-attribute write
@@ -726,11 +684,8 @@ class SpectralSubtractionNR:
             return
         self._capture_state = "idle"
         self._capture_accum = None
-        self._capture_accum_sq = None
-        self._capture_per_frame_powers = []
         self._capture_frames_target = 0
         self._capture_frames_done = 0
-        self._capture_verdict = "n/a"
 
     def has_captured_profile(self) -> bool:
         """True if a captured profile is currently loaded.
@@ -1043,34 +998,6 @@ class SpectralSubtractionNR:
             self._accumulate_capture_frame(mag)
             self._in_buf = self._in_buf[self._hop:]
 
-    def smart_guard_verdict(self) -> str:
-        """Verdict from the most recent capture's smart-guard check.
-
-        - "clean"   — low frame-to-frame power variance (= band noise)
-        - "suspect" — high variance suggests a signal was present
-        - "n/a"     — guard disabled, or no recent capture
-        """
-        return self._capture_verdict
-
-    def smart_guard_reason(self) -> str:
-        """Human-readable reason for the most recent verdict.
-
-        Empty string for "clean" / "n/a" verdicts.  For "suspect",
-        carries which detection layer fired and the relevant statistic.
-        Multi-layer suspect captures concatenate reasons separated
-        by " | ".  Examples:
-
-            "Layer 1: total-power CV 0.61 > 0.50 (broad amplitude swings)"
-            "Layer 2: 23% of active bins anomalous (signal contamination)"
-            "Layer 1: ... | Layer 2: ..."
-
-        UI surfaces this in the suspect-save dialog so operators
-        understand whether the capture caught a syllable, a CW key
-        cycle, or a tonal carrier — informs the recapture decision.
-        Added v0.0.9.5.
-        """
-        return self._capture_reason
-
     def set_capture_done_callback(
             self, fn: Optional[Callable[[], None]]) -> None:
         """Register (or clear) a function to be called when a
@@ -1090,147 +1017,6 @@ class SpectralSubtractionNR:
         the only intended caller).
         """
         self._capture_done_callback = fn
-
-    def _evaluate_capture_quality(self) -> str:
-        """Smart-guard heuristic — two-layer detection.
-
-        Layer 1 (legacy total-power CV):
-            Inspect the per-frame total-power list.  Stable band
-            noise has CV well under 0.5; SSB syllables / CW keying
-            push it well over.  Catches captures with broadly
-            unstable power.
-
-        Layer 2 (per-bin variance anomaly, NEW v0.0.7.x):
-            For each FFT bin, compute its CV (std/mean) over the
-            capture frames.  Stationary tonal noise (60/120 Hz
-            powerline harmonic comb) has low per-bin CV — passes
-            cleanly.  Signal contamination concentrates in a small
-            set of bins (CW = 1-3 bins, SSB voice = 5-15 bins) that
-            then have CV much higher than the rest of the spectrum
-            — flagged as anomalous via robust MAD-based outlier
-            detection.  Catches the corner case Layer 1 misses:
-            stable tonal interference that's actually a signal.
-
-        Verdict logic:
-            Both pass               → "clean"
-            Layer 1 fails           → "suspect" (broadly noisy)
-            Layer 2 fails           → "suspect" (signal contamination)
-            Either fails            → "suspect"
-            Insufficient data       → "n/a"
-
-        For UI compatibility the return value stays in the historical
-        {"n/a", "clean", "suspect"} set.  Layer-2 detection is now
-        the dominant failure mode for tonal contamination — the most
-        common real-world false-pass case before this change.
-        """
-        # Reset reason — repopulated below if any layer flags.
-        self._capture_reason = ""
-        if not self._smart_guard_enabled:
-            return "n/a"
-        if not self._capture_per_frame_powers:
-            return "n/a"
-        powers = np.asarray(self._capture_per_frame_powers,
-                            dtype=np.float64)
-        if powers.size < 4:
-            # Too few frames for a meaningful variance estimate.
-            return "n/a"
-
-        # ── Layer 1: total-power CV ─────────────────────────────
-        mean = float(np.mean(powers))
-        if mean <= 0.0:
-            return "n/a"
-        total_cv = float(np.std(powers)) / mean
-        layer1_suspect = total_cv > self.GUARD_VARIANCE_THRESHOLD
-        # Track the structured reason for v0.0.9.5 reasoning string.
-        reasons: list[str] = []
-        if layer1_suspect:
-            reasons.append(
-                f"Layer 1: total-power CV "
-                f"{total_cv:.2f} > {self.GUARD_VARIANCE_THRESHOLD:.2f} "
-                f"(broad amplitude swings during capture)")
-
-        # ── Layer 2: per-bin variance anomaly ───────────────────
-        # Requires both the sum and sum-of-squares accumulators.
-        # If either is missing (capture aborted, accumulator never
-        # created), fall back to layer-1 result only.
-        #
-        # Algorithm:
-        #   1. Compute per-bin CV.  But — and this is the key fix —
-        #      only analyze bins whose mean magnitude is meaningfully
-        #      above the overall median.  Low-magnitude bins (DC,
-        #      near-Nyquist) have numerically noisy CV due to
-        #      small-denominator effects and would dominate any
-        #      max-CV check with garbage.
-        #   2. For "active" bins (magnitude > threshold), look for
-        #      ones whose CV is anomalously high vs the rest of the
-        #      active bins.
-        #
-        # Three signature patterns:
-        #   * Pure broadband noise: most bins similar mean (Rayleigh),
-        #     all with CV ~0.52 (Rayleigh constant).  No active-bin
-        #     anomalies.  → clean
-        #   * Stable carrier / harmonics: 1-3 bins with mean MUCH
-        #     higher than median, those bins with LOW CV (signal
-        #     dominates noise).  Active-bin CV is below the noise-
-        #     bin CV → not flagged.  → clean
-        #   * Intermittent signal (CW, SSB syllables): 1-15 bins with
-        #     elevated mean AND high CV (signal swings between
-        #     present/absent).  → suspect
-        layer2_suspect = False
-        if (self._capture_accum is not None
-                and self._capture_accum_sq is not None
-                and self._capture_frames_done >= 4):
-            n = float(self._capture_frames_done)
-            mean_per_bin = self._capture_accum / n               # E[X]
-            mean_sq_per_bin = self._capture_accum_sq / n         # E[X²]
-            # Var = E[X²] - E[X]² ; clip to 0 for numerical safety.
-            var_per_bin = np.maximum(
-                mean_sq_per_bin - mean_per_bin * mean_per_bin,
-                0.0)
-            std_per_bin = np.sqrt(var_per_bin)
-
-            # Filter to "active" bins — mean magnitude above
-            # half the median across all bins.  This drops near-zero
-            # numerical-noise bins (DC, top of audio band) that
-            # would otherwise pollute the CV analysis.
-            median_mag = float(np.median(mean_per_bin))
-            active_mask = mean_per_bin > 0.5 * median_mag
-            n_active = int(np.sum(active_mask))
-            if n_active >= 8:
-                cv_active = (std_per_bin[active_mask]
-                             / np.maximum(mean_per_bin[active_mask],
-                                          1e-10))
-                # Robust outlier detection within active bins.
-                median_cv = float(np.median(cv_active))
-                mad = float(np.median(np.abs(cv_active - median_cv)))
-                outlier_thresh = (median_cv
-                                  + self.GUARD_ANOMALY_MAD_MULT
-                                  * 1.4826 * mad)
-                n_anomalous = int(np.sum(cv_active > outlier_thresh))
-                frac_anomalous = n_anomalous / float(n_active)
-                max_cv = float(np.max(cv_active))
-                layer2_suspect = (
-                    frac_anomalous > self.GUARD_ANOMALY_BIN_FRAC
-                    or max_cv > self.GUARD_ANOMALY_MAX_CV)
-                if layer2_suspect:
-                    if frac_anomalous > self.GUARD_ANOMALY_BIN_FRAC:
-                        reasons.append(
-                            f"Layer 2: {frac_anomalous*100:.0f}% of "
-                            f"{n_active} active bins anomalous "
-                            f"(signal-like contamination across the "
-                            f"voice band)")
-                    else:
-                        reasons.append(
-                            f"Layer 2: peak per-bin CV {max_cv:.2f} "
-                            f"> {self.GUARD_ANOMALY_MAX_CV:.2f} "
-                            f"(intermittent signal in 1-3 bins — CW "
-                            f"or narrow carrier)")
-
-        # Stash the reason if we're flagging suspect — empty otherwise.
-        if (layer1_suspect or layer2_suspect) and reasons:
-            self._capture_reason = " | ".join(reasons)
-
-        return "suspect" if (layer1_suspect or layer2_suspect) else "clean"
 
     def process(self, audio: np.ndarray) -> np.ndarray:
         """Process one demod block. Returns the same length of audio
@@ -1423,20 +1209,14 @@ class SpectralSubtractionNR:
             return
         mag64 = mag.astype(np.float64)
         self._capture_accum += mag64
-        # Per-bin sum-of-squares for the per-bin variance check at
-        # finalize time.  Cost: one ndarray multiply + one add per
-        # frame — microseconds at FFT=256.
-        if self._capture_accum_sq is not None:
-            self._capture_accum_sq += mag64 * mag64
-        self._capture_per_frame_powers.append(float(np.sum(mag * mag)))
         self._capture_frames_done += 1
         if self._capture_frames_done >= self._capture_frames_target:
             self._finalize_capture()
 
     def _finalize_capture(self) -> None:
         """Convert the accumulated frame sum into a captured profile,
-        run the smart-guard quality check, transition state to
-        "ready", and fire the registered done-callback.
+        transition state to "ready", and fire the registered
+        done-callback.
 
         Always called from inside ``process()`` (i.e. on the audio
         thread).  The done-callback is responsible for any cross-
@@ -1458,14 +1238,8 @@ class SpectralSubtractionNR:
         # applies for externally-loaded profiles.
         avg_mag = np.maximum(avg_mag, 1e-6).astype(np.float32, copy=False)
         self._captured_noise_mag = avg_mag
-        # Smart-guard verdict — uses the per-bin sum-of-squares too,
-        # so this MUST run before we null out _capture_accum_sq.
-        self._capture_verdict = self._evaluate_capture_quality()
-        # Drop the accumulators; per-frame-power list is kept around
-        # in case the UI re-queries the verdict, and gets reset on
-        # the next begin_noise_capture() call.
+        # Drop the accumulator; reset on next begin_noise_capture().
         self._capture_accum = None
-        self._capture_accum_sq = None
         # Last write — flips state.  Done before the callback so
         # the callback can rely on state == "ready".
         self._capture_state = "ready"

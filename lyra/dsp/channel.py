@@ -635,16 +635,6 @@ class PythonRxChannel(DspChannel):
     def nr_capture_progress(self) -> tuple[str, float]:
         return self._nr.capture_progress()
 
-    def nr_smart_guard_verdict(self) -> str:
-        return self._nr.smart_guard_verdict()
-
-    def nr_smart_guard_reason(self) -> str:
-        """Human-readable reason for the most recent smart-guard
-        verdict.  Empty for "clean"/"n/a"; populated for "suspect"
-        with which detection layer fired and the relevant statistic.
-        See ``SpectralSubtractionNR.smart_guard_reason()``."""
-        return self._nr.smart_guard_reason()
-
     def set_nr_capture_done_callback(self, fn) -> None:
         """Register the function NR fires when a capture finalizes.
         Radio uses this to emit a Qt signal so the UI can react."""

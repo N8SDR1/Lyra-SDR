@@ -561,13 +561,36 @@ class TciSettingsTab(QWidget):
         self._apply_bind_edit()
 
     def _update_status(self):
-        if self.server.is_running:
-            self.status_label.setText(
-                f"● listening on {self.server.bind_host}:{self.server.port}  "
-                f"— {self.server.client_count} client"
-                f"{'s' if self.server.client_count != 1 else ''}")
-        else:
-            self.status_label.setText("○ stopped")
+        """Update the TCI server status label.
+
+        Wrapped in try/except RuntimeError to survive the same
+        dialog-teardown race that bit ``_refresh_agc_action_label``
+        in v0.0.9.4 — the TCI ``server`` object lives on Radio (long-
+        lived), but the lambdas connected on lines ~189-190 reach
+        into the dialog's ``self.status_label`` which gets destroyed
+        when the operator closes Settings.  Operator-reported in
+        v0.0.9.5 console log:
+
+            RuntimeError: libshiboken: Internal C++ object
+            (PySide6.QtWidgets.QLabel) already deleted.
+
+        Defensive guard catches the rare race in either path; the
+        connected lambdas don't need to change shape.
+        """
+        try:
+            if self.server.is_running:
+                self.status_label.setText(
+                    f"● listening on {self.server.bind_host}:"
+                    f"{self.server.port}  "
+                    f"— {self.server.client_count} client"
+                    f"{'s' if self.server.client_count != 1 else ''}")
+            else:
+                self.status_label.setText("○ stopped")
+        except RuntimeError:
+            # status_label widget destroyed (dialog teardown).
+            # Server signals stay connected to long-lived Radio
+            # state; let Qt clean up the connection on next gc.
+            pass
 
     def _show_log(self):
         dlg = QDialog(self)
@@ -3343,23 +3366,6 @@ class NoiseSettingsTab(QWidget):
         dur_row.addWidget(self.dur_label)
         gv.addLayout(dur_row)
 
-        # Smart-guard toggle — operator can disable if it's flagging
-        # captures they know are fine.
-        cur_guard = bool(s.value(
-            "noise/smart_guard_enabled", True, type=bool))
-        self.guard_chk = QCheckBox(
-            "Detect signal during capture (smart-guard, recommended)")
-        self.guard_chk.setChecked(cur_guard)
-        self.guard_chk.setToolTip(
-            "When enabled, Lyra checks the captured noise for "
-            "frame-to-frame power variance and warns if a signal "
-            "appears to have been present during capture.\n\n"
-            "Disable if you know your captures are good and the "
-            "warning is firing on stable noise sources you've "
-            "verified by ear.")
-        self.guard_chk.toggled.connect(self._on_guard_toggled)
-        gv.addWidget(self.guard_chk)
-
         # Profile staleness fire threshold — operator-tunable in
         # v0.0.9.5.  Was previously a hard-coded 10 dB constant.
         # When the loaded captured profile drifts beyond this from
@@ -3952,16 +3958,6 @@ class NoiseSettingsTab(QWidget):
         self.dur_label.setText(f"{seconds:.1f} s")
         s = self._QSettings("N8SDR", "Lyra")
         s.setValue("noise/capture_duration_sec", float(seconds))
-
-    def _on_guard_toggled(self, on: bool) -> None:
-        s = self._QSettings("N8SDR", "Lyra")
-        s.setValue("noise/smart_guard_enabled", bool(on))
-        # Push to NR — the smart_guard_enabled flag is a per-instance
-        # attribute on the SpectralSubtractionNR.
-        try:
-            self.radio._rx_channel._nr._smart_guard_enabled = bool(on)
-        except AttributeError:
-            pass
 
     def _on_staleness_threshold_changed(self, val_db: int) -> None:
         """Operator changed the staleness fire threshold via the
