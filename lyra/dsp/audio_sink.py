@@ -315,13 +315,28 @@ class SoundDeviceSink:
             try:
                 from lyra.dsp.rmatch import RMatch
                 actual_outrate = int(round(self._stream.samplerate))
-                # 200 ms ring at the device's actual rate, half-
+                # 400 ms ring at the device's actual rate, half-
                 # filled at startup (RMatch defaults n_ring =
-                # rsize/2).  100 ms initial fill gives ~2 producer-
-                # burst cycles of consumer headroom — same margin
-                # as the legacy direct-ring path that operators
-                # ran without underrun complaints in v0.0.9.x.
-                ring_target = int(actual_outrate * 0.200)
+                # rsize/2 = 200 ms).  Sized to absorb up to 200 ms
+                # producer-thread perturbations from OS scheduling,
+                # GC pauses, USB renegotiation, etc.  Operator A/B
+                # in v0.0.9.6 dev tree showed bursty underrun events
+                # (15-132 per 10s window) with the original 200ms
+                # ring — the bursts correlate with system-level
+                # audio thread pauses that exceed 100 ms, draining
+                # the half-full ring before producer catches back
+                # up.  Doubling the ring gives 200 ms of pause
+                # headroom on top of normal cadence.
+                #
+                # ff_alpha=0.10 (faster than the 0.05 default) so
+                # the control loop recovers var more aggressively
+                # after each perturbation knocks the ring off
+                # target.  20-update time constant becomes 10 —
+                # ~80ms recovery at ~12 control updates/cycle
+                # vs 160ms at 0.05.  Aggressive enough to catch up
+                # before the next perturbation, conservative enough
+                # to not overshoot.
+                ring_target = int(actual_outrate * 0.400)
                 self._rmatch = RMatch(
                     insize=2048,
                     outsize=256,
@@ -329,6 +344,7 @@ class SoundDeviceSink:
                     nom_outrate=actual_outrate,
                     density=64,    # plenty for 50-100 ppm drift
                     ringsize=ring_target,
+                    ff_alpha=0.10,
                 )
                 print(f"[Lyra audio] SoundDeviceSink: rate-match "
                       f"enabled (RMatch nom_in={rate} nom_out="
