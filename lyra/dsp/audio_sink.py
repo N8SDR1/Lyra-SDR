@@ -299,25 +299,41 @@ class SoundDeviceSink:
         # two RMatch instances (one per channel) and gives identical
         # operator-perceived behavior since L/R gains are static
         # scalars, not signal-dependent.
+        #
+        # Ring sizing critical for Lyra's bursty audio worker
+        # cadence: producer writes ~2048 samples every ~43 ms while
+        # the WASAPI callback pulls ~256 samples every ~5 ms.
+        # Between producer bursts the consumer drains the ring
+        # rapidly; the ring needs enough headroom to absorb a full
+        # 43-ms gap with margin.  RMatch's auto-sizing (2*1.05*insize
+        # = ~4300 samples = ~90 ms) was empirically too tight on
+        # operator's machine — caused 30-50 underruns/10s during
+        # initial v0.0.9.6 A/B test.  Match the legacy
+        # SoundDeviceSink's 200-ms ring sizing for proven headroom.
         self._rmatch = None
         if self._use_rate_match:
             try:
                 from lyra.dsp.rmatch import RMatch
                 actual_outrate = int(round(self._stream.samplerate))
-                # insize: typical DSP block size into the sink.
-                # Lyra's audio worker writes ~2048 frames per cycle.
-                # outsize: typical PortAudio callback request.  256
-                # is the WASAPI shared-mode default at 48 kHz.
+                # 200 ms ring at the device's actual rate, half-
+                # filled at startup (RMatch defaults n_ring =
+                # rsize/2).  100 ms initial fill gives ~2 producer-
+                # burst cycles of consumer headroom — same margin
+                # as the legacy direct-ring path that operators
+                # ran without underrun complaints in v0.0.9.x.
+                ring_target = int(actual_outrate * 0.200)
                 self._rmatch = RMatch(
                     insize=2048,
                     outsize=256,
                     nom_inrate=rate,
                     nom_outrate=actual_outrate,
                     density=64,    # plenty for 50-100 ppm drift
+                    ringsize=ring_target,
                 )
                 print(f"[Lyra audio] SoundDeviceSink: rate-match "
                       f"enabled (RMatch nom_in={rate} nom_out="
-                      f"{actual_outrate})")
+                      f"{actual_outrate} ring={ring_target} "
+                      f"= {ring_target * 1000 // actual_outrate}ms)")
             except Exception as exc:  # noqa: BLE001
                 print(f"[Lyra audio] SoundDeviceSink: rate-match "
                       f"init failed ({exc}); falling back to "
