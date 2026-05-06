@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -114,6 +114,27 @@ class NoiseProfileManager(QDialog):
             Qt.TextSelectableByMouse)
         v.addWidget(self._folder_label)
 
+        # v0.0.9.5: live drift readout — shows how far the live noise
+        # floor has shifted from the loaded captured profile, in dB.
+        # Updated every 1 second via QTimer poll.  Color-graded —
+        # green when drift is well under the staleness threshold,
+        # amber as it approaches, red over.  Diagnostic only;
+        # operator decides whether to recapture.
+        self._drift_label = QLabel()
+        self._drift_label.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 11px; "
+            "padding: 2px 0;")
+        self._drift_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse)
+        v.addWidget(self._drift_label)
+        self._drift_timer = QTimer(self)
+        self._drift_timer.setInterval(1000)   # 1 Hz poll
+        self._drift_timer.timeout.connect(self._refresh_drift_readout)
+        self._drift_timer.start()
+        # Prime once so the dialog opens with the right value rather
+        # than blank for the first second.
+        self._refresh_drift_readout()
+
         # Profile list (QTableWidget for column structure).
         self.table = QTableWidget(0, 4, self)
         self.table.setHorizontalHeaderLabels(
@@ -188,6 +209,63 @@ class NoiseProfileManager(QDialog):
         self._reload()
 
     # ── List management ──────────────────────────────────────────
+
+    def _refresh_drift_readout(self) -> None:
+        """Update the live drift label.  Called once per second by
+        the poll QTimer.  Wrapped in try/except RuntimeError so the
+        timer firing during dialog teardown doesn't propagate
+        through to Qt's signal infrastructure."""
+        try:
+            # No profile loaded → no meaningful drift.
+            active = self.radio.active_captured_profile_name
+            if not active:
+                self._drift_label.setText(
+                    "<span style='color:#7a8a9c'>"
+                    "No captured profile loaded — drift readout idle."
+                    "</span>")
+                return
+            drift_db = self.radio.nr_staleness_drift_db()
+            # Resolve operator's threshold from QSettings (matches the
+            # Settings → Noise spinbox).
+            s = QSettings("N8SDR", "Lyra")
+            threshold_db = float(s.value(
+                "noise/staleness_threshold_db", 10.0, type=float))
+            # Color-grade: green well under, amber as it approaches,
+            # red over.
+            ratio = drift_db / max(threshold_db, 1e-3)
+            if ratio < 0.5:
+                color = "#39ff14"
+                hint = "well within profile"
+            elif ratio < 0.85:
+                color = "#cdd9e5"
+                hint = "tracking normally"
+            elif ratio < 1.0:
+                color = "#ffb84a"
+                hint = "approaching threshold"
+            else:
+                color = "#ff6060"
+                hint = "OVER threshold — consider recapturing"
+            self._drift_label.setText(
+                f"<span style='color:#8a9aac'>Live drift:</span> "
+                f"<span style='color:{color}; font-weight:600'>"
+                f"{drift_db:+.1f} dB</span> "
+                f"<span style='color:#8a9aac'>"
+                f"(threshold {threshold_db:.0f} dB — {hint})</span>")
+        except RuntimeError:
+            # Dialog destroyed mid-tick — stop the timer to be safe.
+            try:
+                self._drift_timer.stop()
+            except Exception:
+                pass
+        except Exception as exc:
+            # Be defensive — drift readout is diagnostic, never
+            # block the dialog if Radio API misbehaves.
+            try:
+                self._drift_label.setText(
+                    f"<span style='color:#7a8a9c'>"
+                    f"drift readout unavailable ({exc})</span>")
+            except Exception:
+                pass
 
     def _reload(self) -> None:
         """Re-scan the profile folder and rebuild the table."""

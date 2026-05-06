@@ -11,8 +11,8 @@ bar, About dialog, status bar, settings dialog footer) and the install
 guide all read from this string — bump it once here per release and
 everything else follows automatically.
 """
-__version__      = "0.0.9.4"
-__version_name__ = "Polish & Notifications"
+__version__      = "0.0.9.5"
+__version_name__ = "Captured-Profile UX"
 # Stamped at release time to today's date when packaging the
 # Inno Setup installer. During raw-source-tree development this stays
 # "dev"; the packaging script rewrites this constant before the

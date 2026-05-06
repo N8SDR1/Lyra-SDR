@@ -13,7 +13,110 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
-## [0.0.9.4] — unreleased — "Polish & Notifications"
+## [0.0.9.5] — unreleased — "Captured-Profile UX"
+
+A focused UX polish release for the captured-noise-profile feature.
+No DSP-path changes; no protocol-path changes.  Three operator-
+visible improvements that close out the captured-profile UX queue
+flagged in the 2026-05-05 audit.
+
+### Smart-guard suspect-capture dialog: three-way choice
+
+When the smart-guard flags a fresh capture as suspect, operators
+now see a three-button dialog instead of being forced through a
+binary OK/Cancel save prompt:
+
+- **Save anyway** — keep the profile as-is (use it, accept the
+  risk that a signal was riding through the capture window)
+- **Recapture** — discard and trigger another capture immediately
+  (operator waits for transmission gap or moves to a quieter
+  spot first)
+- **Cancel** — discard the capture entirely
+
+The dialog also surfaces the structured smart-guard *reason* —
+which detection layer fired and the underlying statistic.
+Examples:
+
+  > Layer 1: total-power CV 0.61 > 0.50 (broad amplitude swings
+  > during capture)
+
+  > Layer 2: 23% of active bins anomalous (signal-like
+  > contamination across the voice band)
+
+  > Layer 2: peak per-bin CV 1.42 > 0.95 (intermittent signal in
+  > 1-3 bins — CW or narrow carrier)
+
+Knowing *why* the capture was flagged helps operators decide
+between recapturing (timing issue — signal was passing) and
+moving bands (persistent QRM that won't go away).  Reason string
+exposed via new ``Radio.nr_smart_guard_reason()`` API.
+
+### Operator-tunable staleness threshold
+
+The captured-profile staleness check (which fires the "profile
+drifted X dB" status-bar toast) was previously hardcoded at
+10 dB.  Now operator-tunable via **Settings → Noise → Profile
+staleness**, range 3-25 dB.
+
+- **Tighten to 5-7 dB** on a very stable QTH where the noise
+  floor doesn't move much; gets you earlier warning when
+  conditions shift
+- **Loosen to 15-20 dB** if the default fires too readily on
+  natural band drift over the day
+
+Rearm threshold (when the toast can fire again after drift drops
+back) automatically tracks at 70% of the fire threshold — single
+operator knob.  Persists to QSettings; autoloaded on startup.
+
+### Live drift readout in profile manager
+
+The profile manager dialog now shows a live drift indicator at
+the top of the window, refreshed once per second:
+
+  > Live drift: +6.2 dB  (threshold 10 dB — tracking normally)
+
+Color-graded:
+
+- Green when well under threshold (< 50%)
+- Light grey while tracking normally (50-85%)
+- Amber as it approaches (85-100%)
+- Red when over threshold
+
+Diagnostic only — operator decides whether to recapture.  Idle
+text "No captured profile loaded — drift readout idle" when no
+profile is active.
+
+### What this release does NOT change
+
+- DSP path unchanged (NR1, NR2, AGC, APF, LMS, ANF, NB, SQ all
+  carry forward from v0.0.9.4)
+- HL2 protocol path unchanged
+- All UX queue items already done in earlier work (capture freq
+  in profile names, "Save anyway" dialog wording, source badge
+  hover affordance) verified correct — no changes needed
+
+### Tester checklist
+
+- **Smart-guard dialog:** capture during a transmission gap to
+  trigger the suspect verdict; verify three buttons appear with
+  the smart-guard reason string visible
+- **Recapture flow:** click Recapture from the dialog; verify a
+  new capture starts immediately and brings up the same dialog
+  (or save prompt) when complete
+- **Staleness threshold:** open Settings → Noise; verify the
+  spinbox shows 10 dB by default, persists across launches
+- **Drift readout:** load a captured profile, open the profile
+  manager, verify the live drift line at top updates every
+  ~1 sec
+
+### Recovery
+
+If anything regresses, install [Lyra-Setup-0.0.9.4.exe](https://github.com/N8SDR1/Lyra-SDR/releases/tag/v0.0.9.4).
+Operator settings carry forward unchanged.
+
+---
+
+## [0.0.9.4] — 2026-05-05 — "Polish & Notifications"
 
 A focused polish + bug-fix release on top of v0.0.9.3.  No new
 operator features in the radio path; targets visible cosmetic

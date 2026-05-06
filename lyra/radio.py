@@ -2657,6 +2657,16 @@ class Radio(QObject):
         "clean" / "suspect" / "n/a"."""
         return self._rx_channel.nr_smart_guard_verdict()
 
+    def nr_smart_guard_reason(self) -> str:
+        """Human-readable reason for the most recent smart-guard
+        verdict.  Empty when verdict is "clean" or "n/a"; for
+        "suspect" carries which layer fired and the relevant
+        statistic (e.g., "Layer 1: total-power CV 0.61 > 0.50 (broad
+        amplitude swings during capture)").  Surfaced in the
+        suspect-save dialog so operators understand why a capture
+        was flagged.  Added v0.0.9.5."""
+        return self._rx_channel.nr_smart_guard_reason()
+
     @property
     def active_captured_profile_name(self) -> str:
         """Display name of the currently-loaded captured profile,
@@ -3344,19 +3354,31 @@ class Radio(QObject):
             print(f"[Radio] could not autoload LMS settings: {exc}")
 
     def autoload_staleness_settings(self) -> None:
-        """Restore captured-profile staleness-check toggle from
-        QSettings.  Default ON.  Called once at startup."""
+        """Restore captured-profile staleness settings from QSettings.
+
+        Two operator preferences:
+          * ``noise/staleness_check_enabled`` — default ON
+          * ``noise/staleness_threshold_db`` — default 10 dB
+            (added v0.0.9.5)
+
+        Called once at startup.  Both fall back to defaults silently
+        if QSettings can't be reached or the values are corrupt.
+        """
         try:
             from PySide6.QtCore import QSettings
             s = QSettings("N8SDR", "Lyra")
             on = bool(s.value("noise/staleness_check_enabled",
                               True, type=bool))
+            threshold_db = float(s.value(
+                "noise/staleness_threshold_db", 10.0, type=float))
         except Exception:
             on = True
+            threshold_db = 10.0
         try:
             # Channel-level direct call so we don't redundantly
             # re-persist the value on autoload.
             self._rx_channel.set_nr_staleness_check_enabled(on)
+            self._rx_channel.set_nr_staleness_threshold_db(threshold_db)
         except Exception as exc:
             print(f"[Radio] could not autoload staleness setting: {exc}")
 
@@ -3536,6 +3558,32 @@ class Radio(QObject):
             return float(self._rx_channel.nr_staleness_drift_db())
         except Exception:
             return 0.0
+
+    def set_nr_staleness_threshold_db(self, threshold_db: float) -> None:
+        """Operator-tunable staleness fire threshold (dB).
+
+        Default 10 dB; range [3.0, 25.0].  Rearm threshold tracks at
+        70% of fire (historical 7-of-10 ratio) so operators only
+        think about one number.  Persists to QSettings; autoloaded
+        on startup via ``autoload_staleness_settings``.
+
+        Added v0.0.9.5 to expose what was previously a hard-coded
+        constant.  Operators with very stable noise floors can
+        tighten to 5-7 dB; operators with band conditions that drift
+        a lot can loosen to 15-20 dB to suppress spurious toasts.
+        """
+        try:
+            self._rx_channel.set_nr_staleness_threshold_db(
+                float(threshold_db))
+        except Exception as exc:
+            print(f"[Radio] could not set staleness threshold: {exc}")
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("noise/staleness_threshold_db",
+                       float(threshold_db))
+        except Exception:
+            pass
 
     def _save_active_profile_name_setting(self, name: str) -> None:
         """Persist the active-profile name to QSettings so the next

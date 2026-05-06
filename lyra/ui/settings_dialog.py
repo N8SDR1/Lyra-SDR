@@ -3360,6 +3360,43 @@ class NoiseSettingsTab(QWidget):
         self.guard_chk.toggled.connect(self._on_guard_toggled)
         gv.addWidget(self.guard_chk)
 
+        # Profile staleness fire threshold — operator-tunable in
+        # v0.0.9.5.  Was previously a hard-coded 10 dB constant.
+        # When the loaded captured profile drifts beyond this from
+        # current band noise, Lyra fires a status-bar toast
+        # suggesting recapture.  Higher = more tolerant of drift.
+        cur_thresh = float(s.value(
+            "noise/staleness_threshold_db", 10.0, type=float))
+        cur_thresh = max(3.0, min(25.0, cur_thresh))
+        thresh_row = QHBoxLayout()
+        thresh_row.addWidget(QLabel("Profile staleness:"))
+        self.staleness_thresh_spin = QSpinBox()
+        self.staleness_thresh_spin.setRange(3, 25)
+        self.staleness_thresh_spin.setValue(int(round(cur_thresh)))
+        self.staleness_thresh_spin.setSuffix(" dB")
+        self.staleness_thresh_spin.setFixedWidth(110)
+        self.staleness_thresh_spin.setToolTip(
+            "How far the live noise floor must drift from the loaded "
+            "captured profile (in dB) before Lyra warns you the "
+            "profile may be stale.\n"
+            "\n"
+            "Default 10 dB — fires for genuine band-condition shifts "
+            "(QRN onset, antenna swap, weather front) without "
+            "spurious toasts on normal noise-floor breathing.\n"
+            "\n"
+            "Tighten to 5-7 dB on a very stable QTH; loosen to "
+            "15-20 dB if you find toasts firing too readily on "
+            "natural band drift.\n"
+            "\n"
+            "Rearm threshold (when the toast can fire again after "
+            "drift drops back) tracks at 70% of this value — "
+            "automatic, no separate knob.")
+        self.staleness_thresh_spin.valueChanged.connect(
+            self._on_staleness_threshold_changed)
+        thresh_row.addWidget(self.staleness_thresh_spin)
+        thresh_row.addStretch(1)
+        gv.addLayout(thresh_row)
+
         # Storage location selector.
         loc_box = QGroupBox("Storage location")
         loc_v = QVBoxLayout(loc_box)
@@ -3925,6 +3962,15 @@ class NoiseSettingsTab(QWidget):
             self.radio._rx_channel._nr._smart_guard_enabled = bool(on)
         except AttributeError:
             pass
+
+    def _on_staleness_threshold_changed(self, val_db: int) -> None:
+        """Operator changed the staleness fire threshold via the
+        spinbox.  Push to Radio (which forwards to NR1 + persists to
+        QSettings).  Added v0.0.9.5."""
+        try:
+            self.radio.set_nr_staleness_threshold_db(float(val_db))
+        except Exception as exc:
+            print(f"[Settings] staleness threshold push failed: {exc}")
 
     def _on_location_radio_toggled(self, _checked: bool) -> None:
         custom = self._loc_custom_radio.isChecked()

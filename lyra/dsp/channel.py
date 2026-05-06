@@ -638,6 +638,13 @@ class PythonRxChannel(DspChannel):
     def nr_smart_guard_verdict(self) -> str:
         return self._nr.smart_guard_verdict()
 
+    def nr_smart_guard_reason(self) -> str:
+        """Human-readable reason for the most recent smart-guard
+        verdict.  Empty for "clean"/"n/a"; populated for "suspect"
+        with which detection layer fired and the relevant statistic.
+        See ``SpectralSubtractionNR.smart_guard_reason()``."""
+        return self._nr.smart_guard_reason()
+
     def set_nr_capture_done_callback(self, fn) -> None:
         """Register the function NR fires when a capture finalizes.
         Radio uses this to emit a Qt signal so the UI can react."""
@@ -658,6 +665,13 @@ class PythonRxChannel(DspChannel):
         """Master toggle for the staleness check.  Default ON.
         Operator can disable via Settings -> Noise."""
         self._nr.set_staleness_check_enabled(bool(on))
+
+    def set_nr_staleness_threshold_db(self, threshold_db: float) -> None:
+        """Operator-tunable staleness fire threshold (dB).  Default
+        10 dB.  Range [3.0, 25.0]; rearm held at 70% of fire.  See
+        ``SpectralSubtractionNR.set_staleness_threshold_db()``.
+        Added v0.0.9.5."""
+        self._nr.set_staleness_threshold_db(float(threshold_db))
 
     def nr_staleness_drift_db(self) -> float:
         """Most recent smoothed drift between live noise and the

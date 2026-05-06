@@ -510,6 +510,13 @@ class SpectralSubtractionNR:
         #   Var[X]  = E[X²] - E[X]²
         self._capture_accum_sq: Optional[np.ndarray] = None
         self._capture_verdict: str = "n/a"  # n/a | clean | suspect
+        # Human-readable reason populated alongside _capture_verdict
+        # by _evaluate_capture_quality.  Empty for "clean" / "n/a";
+        # for "suspect" carries which layer fired and the relevant
+        # statistic (e.g. "Layer 1: total-power CV 0.61 > 0.50").  UI
+        # surfaces this in the suspect-save dialog so operators
+        # understand WHY a capture was flagged.  Added v0.0.9.5.
+        self._capture_reason: str = ""
         # Operator-tunable in v2 (Settings → Noise tab).  For day 1
         # the smart guard is always on; UI exposes a toggle later.
         self._smart_guard_enabled: bool = True
@@ -539,6 +546,17 @@ class SpectralSubtractionNR:
         # UI can show a live readout in the profile manager / source
         # badge tooltip.  Updated every STALENESS_CHECK_INTERVAL_FRAMES.
         self._staleness_last_drift_db: float = 0.0
+        # v0.0.9.5: shadow the class-level STALENESS_DB_THRESHOLD and
+        # STALENESS_DB_REARM constants with instance attributes so the
+        # operator can tune them via Settings → Noise.  The class
+        # constants serve as defaults; overrides land here via
+        # ``set_staleness_threshold_db``.  Rearm is held at 70% of the
+        # fire threshold (the historical 7-of-10 ratio) so operators
+        # only need to think about one number.
+        self.STALENESS_DB_THRESHOLD = float(
+            self.__class__.STALENESS_DB_THRESHOLD)
+        self.STALENESS_DB_REARM = float(
+            self.__class__.STALENESS_DB_REARM)
 
     # ── public API ────────────────────────────────────────────────
     def set_strength(self, value: float) -> None:
@@ -681,6 +699,7 @@ class SpectralSubtractionNR:
         self._capture_frames_target = frames
         self._capture_frames_done = 0
         self._capture_verdict = "n/a"
+        self._capture_reason = ""
         # Flush leftover STFT samples from previous processing so
         # the first capture frame is built from purely-new audio.
         # Without this flush, leftover samples from a previous
@@ -855,6 +874,24 @@ class SpectralSubtractionNR:
         diagnostic readouts in the profile manager."""
         return float(self._staleness_smoothed_db)
 
+    def set_staleness_threshold_db(self, threshold_db: float) -> None:
+        """Operator-tunable staleness fire threshold (dB).
+
+        Sets BOTH the fire threshold and the rearm threshold; rearm
+        is held at 70% of fire (the historical 7-of-10 ratio).  Only
+        one operator knob to think about — keeps state-machine
+        hysteresis sensible without making them tune two values that
+        have to maintain a relationship.
+
+        Range clamped to [3.0, 25.0] dB.  Below 3 dB the toast would
+        fire on normal noise-floor breathing; above 25 dB it would
+        rarely fire even on objectively-stale profiles.  Added v0.0.9.5
+        to expose what was previously a hard-coded 10 dB constant.
+        """
+        threshold_db = max(3.0, min(25.0, float(threshold_db)))
+        self.STALENESS_DB_THRESHOLD = threshold_db
+        self.STALENESS_DB_REARM = threshold_db * 0.7
+
     def _reset_staleness_state(self) -> None:
         """Reset the staleness state machine — called on profile
         load / clear / explicit operator reset.  Re-arms warmup so
@@ -1015,6 +1052,25 @@ class SpectralSubtractionNR:
         """
         return self._capture_verdict
 
+    def smart_guard_reason(self) -> str:
+        """Human-readable reason for the most recent verdict.
+
+        Empty string for "clean" / "n/a" verdicts.  For "suspect",
+        carries which detection layer fired and the relevant statistic.
+        Multi-layer suspect captures concatenate reasons separated
+        by " | ".  Examples:
+
+            "Layer 1: total-power CV 0.61 > 0.50 (broad amplitude swings)"
+            "Layer 2: 23% of active bins anomalous (signal contamination)"
+            "Layer 1: ... | Layer 2: ..."
+
+        UI surfaces this in the suspect-save dialog so operators
+        understand whether the capture caught a syllable, a CW key
+        cycle, or a tonal carrier — informs the recapture decision.
+        Added v0.0.9.5.
+        """
+        return self._capture_reason
+
     def set_capture_done_callback(
             self, fn: Optional[Callable[[], None]]) -> None:
         """Register (or clear) a function to be called when a
@@ -1067,6 +1123,8 @@ class SpectralSubtractionNR:
         the dominant failure mode for tonal contamination — the most
         common real-world false-pass case before this change.
         """
+        # Reset reason — repopulated below if any layer flags.
+        self._capture_reason = ""
         if not self._smart_guard_enabled:
             return "n/a"
         if not self._capture_per_frame_powers:
@@ -1083,6 +1141,13 @@ class SpectralSubtractionNR:
             return "n/a"
         total_cv = float(np.std(powers)) / mean
         layer1_suspect = total_cv > self.GUARD_VARIANCE_THRESHOLD
+        # Track the structured reason for v0.0.9.5 reasoning string.
+        reasons: list[str] = []
+        if layer1_suspect:
+            reasons.append(
+                f"Layer 1: total-power CV "
+                f"{total_cv:.2f} > {self.GUARD_VARIANCE_THRESHOLD:.2f} "
+                f"(broad amplitude swings during capture)")
 
         # ── Layer 2: per-bin variance anomaly ───────────────────
         # Requires both the sum and sum-of-squares accumulators.
@@ -1147,6 +1212,23 @@ class SpectralSubtractionNR:
                 layer2_suspect = (
                     frac_anomalous > self.GUARD_ANOMALY_BIN_FRAC
                     or max_cv > self.GUARD_ANOMALY_MAX_CV)
+                if layer2_suspect:
+                    if frac_anomalous > self.GUARD_ANOMALY_BIN_FRAC:
+                        reasons.append(
+                            f"Layer 2: {frac_anomalous*100:.0f}% of "
+                            f"{n_active} active bins anomalous "
+                            f"(signal-like contamination across the "
+                            f"voice band)")
+                    else:
+                        reasons.append(
+                            f"Layer 2: peak per-bin CV {max_cv:.2f} "
+                            f"> {self.GUARD_ANOMALY_MAX_CV:.2f} "
+                            f"(intermittent signal in 1-3 bins — CW "
+                            f"or narrow carrier)")
+
+        # Stash the reason if we're flagging suspect — empty otherwise.
+        if (layer1_suspect or layer2_suspect) and reasons:
+            self._capture_reason = " | ".join(reasons)
 
         return "suspect" if (layer1_suspect or layer2_suspect) else "clean"
 
