@@ -43,6 +43,19 @@ References to the old numbering in commit history / older doc
 revisions are historical and intentionally not back-edited.  Doc
 content below has been mass-renumbered to the new scheme.
 
+**Subsequent patch releases (2026-05-05 / 06):**
+- **v0.0.9.4** "Polish & Notifications" — watermark bundling fix,
+  first-time-per-version update modal, toolbar pulse, Settings
+  dialog lambda crash fixes.
+- **v0.0.9.5** "Captured-Profile UX" — smart-guard removed (false
+  positives + false negatives in field testing), tunable staleness
+  threshold, live drift readout in profile manager, TCI server +
+  profile manager dialog stability fixes.
+- **v0.0.9.6** "Audio Foundation" — pending; ports WDSP `aamix.c`,
+  `varsamp.c`, `rmatch.c`, `patchpanel.c::SetRXAPanelPan` and flips
+  default audio output to HL2 onboard codec via EP2 (HERMES path).
+  See §13 below for the full audio architecture decision.
+
 ---
 
 ## 1. Project at a glance
@@ -891,6 +904,150 @@ this doc is wrong, we update it explicitly.
 
 ---
 
-*Last updated: 2026-05-02 after the senior-engineering pass that
-produced `implementation_playbook.md`.  Update this file when key
+## 13. Audio architecture (locked 2026-05-06)
+
+After multiple deep dives that kept circling, an operator review
+of the Thetis source tree + Thetis settings database produced the
+canonical answer.  See `docs/architecture/audio_architecture.md`
+for the full reasoning trail; below is the operative summary.
+
+### 13.1 The two audio paths
+
+**Path A — HL2 onboard codec via EP2 (DEFAULT for HL2 hardware).**
+
+```
+HL2 IQ  →  Lyra DSP chain  →  L/R audio in EP2 frames  →  back to HL2  →  onboard codec  →  headphone jack
+```
+
+This is the path Thetis defaults to for HermesLite hardware
+(`audioCodecId = HERMES`, `cmsetup.c:75`).  Single crystal (the
+HL2's), zero clock drift, no resampler needed.  Lyra has called
+this "AK4951 mode" through v0.0.9.5; **v0.0.9.6 renames it to
+"HL2 audio jack"** since not all HL2 revisions use the AK4951
+specifically but all use the same EP2 codec path.
+
+**Path B — Host PC sound card via SoundDeviceSink.**
+
+```
+HL2 IQ  →  Lyra DSP chain  →  WDSP rmatch (PI loop) → varsamp →  ring buffer  →  WASAPI/PortAudio  →  PC speakers
+```
+
+Required for:
+- HL2 operators who can't or don't want to use the codec path
+- ANAN family (v0.4) which has no onboard codec at all
+- Audio routing to other apps (digital mode software, recording)
+
+### 13.2 Why two paths
+
+- Thetis's primary audio path (HermesLite) is HERMES-only.  It
+  doesn't even *implement* WASAPI for output (`netInterface.c:
+  1757-1759 — case WASAPI: // not implemented`).  Thetis's
+  PC-soundcard support is ASIO via `cmasio.c`, which uses the
+  same rmatch/varsamp adaptive resampler chain that Path B
+  needs.
+- The HL2 onboard codec path is single-crystal, so there's no
+  rate mismatch to compensate for.  Operators who can use it
+  get glitch-free audio for free, no DSP overhead.
+- The PC sound card path has fundamental two-clock drift
+  (HL2 crystal vs sound card crystal, both nominally 48 kHz,
+  both ±50 ppm tolerance).  Without an adaptive resampler the
+  ring buffer fills (overrun) or drains (underrun) over time.
+  This is what produced operator-reported audio glitches in
+  Lyra v0.0.9.x PC Soundcard mode.
+
+### 13.3 The WDSP-port-not-Thetis-copy principle (restated)
+
+Lyra is GPL v3+, WDSP is GPL v3+.  License-compatible.  WDSP
+is its own GPL'd DSP project that Thetis happens to use; Lyra
+ports directly from WDSP with attribution.  **This is not
+"ripping from Thetis."**  Same pattern as `agc_wdsp.py` (port
+of `wcpAGC.c`), `nr.py` (`anr.c`/`emnr.c`), `nr2.py` (`emnr.c`),
+`lms.py`, `anf.py`, `nb.py` — all already shipped.
+
+What we DO port (with attribution comment per
+`docs/architecture/wdsp_integration.md`):
+
+| When | WDSP file | Lyra target | LOC | Unblocks |
+|---|---|---|---|---|
+| **v0.0.9.6** | `aamix.c` | `lyra/dsp/mix.py` | ~200 | RX1+RX2 mix routing |
+| **v0.0.9.6** | `varsamp.c` | `lyra/dsp/varsamp.py` | ~400 | PC sound card drift, ANAN audio |
+| **v0.0.9.6** | `rmatch.c` | `lyra/dsp/rmatch.py` | ~700 | PI control loop on top of varsamp |
+| **v0.0.9.6** | `patchpanel.c::SetRXAPanelPan` | `lyra/dsp/mix.py` | ~50 | RX2 stereo pan curve |
+| v0.2 | `compress.c` | `lyra/dsp/tx_compressor.py` | ~150 | TX compressor |
+| v0.2 | `eqp.c` | `lyra/dsp/eq.py` | ~300 | Parametric EQ (RX + TX) |
+| v0.2 | `delay.c` | `lyra/dsp/delay_line.py` | ~80 | TX delay matching, PS feedback |
+| v0.3 | `iqc.c` | `lyra/dsp/ps_iqc.py` | ~315 | PS predistortion application |
+| v0.3 | `calcc.c` | `lyra/dsp/ps_calcc.py` | ~1164 | PS calibration math |
+| v0.3 | `lmath.c::xbuilder` | `lyra/dsp/ps_xbuilder.py` | ~200 | Cubic-spline PS coefficient |
+
+What we DO NOT copy (these are Thetis-specific glue, not WDSP
+algorithms):
+
+- `Console/console.cs` — study `UpdateDDCs` etc. as reference,
+  write Lyra-native equivalents.
+- `Console/PSForm.cs` — study the state machine, write Lyra-
+  native (`lyra/ui/ps_dialog.py`).
+- `ChannelMaster/networkproto1.c`, `cmaster.c`, `network.h` —
+  study the protocol bit layouts in CLAUDE.md §3, write Lyra-
+  native (`lyra/protocol/stream.py`).
+- `Console/HPSDR/IoBoardHl2.cs` — study HL2 I/O quirks, write
+  Lyra-native.
+
+What we DO NOT port from WDSP because Python+NumPy+Qt does it
+natively or differently:
+
+- `analyzer.c` — Lyra has its own GPU spectrum widget.
+- `channel.c` — buffer mgmt; GIL handles it.
+- `main.c` — Win32 thread mgmt; Python threading.
+- `RXA.c`/`TXA.c` — channel scaffolding; Lyra has its own.
+
+### 13.4 Hardware capability struct (extends §6.7)
+
+The hardware-abstraction discipline in §6.7 needs an audio
+field added when v0.4 work begins:
+
+```python
+@dataclass
+class RadioCapabilities:
+    nddc: int                        # advertised DDC count
+    has_onboard_codec: bool          # HL2 = True, ANAN = False
+    default_audio_path: AudioPath    # HL2 = HL2_CODEC, ANAN = PC_SOUND
+    puresignal_requires_mod: bool    # HL2 = True, ANAN G2 = False
+    tx_attenuator_range: tuple[int, int]   # HL2 = (-28, 31), ANAN = (0, 31)
+    cwx_ptt_bit_position: int        # HL2 = 3, ANAN = standard
+    # ...
+```
+
+When Lyra opens a connection, the protocol module populates
+this struct.  UI defaults read from it.  Settings UI lets the
+operator override per-radio (e.g., HL2 operator who prefers PC
+sound card despite having a codec).
+
+### 13.5 What this changes about RX2 / TX / PureSignal plans
+
+- **RX2 (v0.1):** No change.  Stereo split via EP2 LR bytes
+  through HL2 codec, exactly as planned in §6.1.  The
+  `aamix.c` port for v0.0.9.6 is the prerequisite that makes
+  RX2 work when it lands.
+- **TX (v0.2):** No change.  Default mic input is HL2 mic jack
+  via EP6 (single crystal, no drift).  PC mic becomes opt-in
+  for ANAN-class hardware in v0.4 — that path uses the same
+  rmatch+varsamp from v0.0.9.6 for input-side rate matching.
+- **PureSignal (v0.3):** No change.  HL2 PS feedback is on
+  DDC2/DDC3 at `rx1_rate` per §3.8 — single crystal, no drift.
+  Different DDC rates (e.g., ANAN's 192 kHz `ps_rate` vs the
+  user-selected RX rate) is a rate-conversion problem solved
+  by the v0.0.9.6 varsamp port.
+
+The audio infrastructure ships once (v0.0.9.6) and gets used
+three more times (RX2 stereo, TX mic input on ANAN, PS rate
+conversion).
+
+---
+
+*Last updated: 2026-05-06 after the operator-driven audio
+architecture decision (§13) — Thetis DB + source trace closed
+out the recurring "PC Soundcard glitch" debate.  Earlier:
+2026-05-02 senior-engineering pass that produced
+`implementation_playbook.md`.  Update this file when key
 decisions change.*
