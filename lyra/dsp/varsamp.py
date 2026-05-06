@@ -68,9 +68,40 @@ measures output frequency / spectral cleanliness against expectation.
 from __future__ import annotations
 
 import math
+import struct
 from typing import Optional
 
 import numpy as np
+
+
+# ── inv_cvar bit-truncation helper ──────────────────────────────────
+#
+# WDSP varsamp.c lines 151-153 do this every input-sample iteration:
+#   picvar = (uint64_t*)(&inv_cvar);
+#   N = *picvar & 0xffffffffffff0000;
+#   inv_cvar = *((double *)&N);
+#
+# Zeros the LOW 16 BITS of the IEEE-754 double's mantissa.  This is
+# NOT a noise-reduction trick — it's deterministic quantization to
+# ~48-bit precision.  Without it the inv_cvar accumulator drifts by
+# ULP-scale amounts each iteration, modulating the FIR-tap
+# interpolation phase by ~2^-52 random jitter.  That jitter is
+# broadband and modulates the output filter shape — produces
+# continuous low-level "color" on broadband content (the operator-
+# reported "thin/brittle" symptom on PC Soundcard mode).
+#
+# Single-tone bench tests don't catch this because steady tones
+# don't exercise the broadband filter shape.
+
+_INV_CVAR_MANTISSA_MASK = 0xFFFF_FFFF_FFFF_0000
+
+
+def _truncate_inv_cvar(value: float) -> float:
+    """Apply WDSP's bit-mask quantization to a float64."""
+    packed = struct.pack("<d", float(value))
+    bits = struct.unpack("<Q", packed)[0]
+    bits &= _INV_CVAR_MANTISSA_MASK
+    return struct.unpack("<d", struct.pack("<Q", bits))[0]
 
 
 class VarSamp:
@@ -220,9 +251,17 @@ class VarSamp:
         # Clamp cutoff to a safe range — at very high or very low
         # ratios the cutoff might wander out of [0, 0.5).
         cutoff_norm = max(0.001, min(0.499, cutoff_norm))
+        # FIR window: Blackman-Harris matches WDSP's fir_bandpass
+        # default (~-92 dB stopband) and gives substantially less
+        # aliasing-induced coloration than Hamming (~-43 dB stopband).
+        # The audit identified Hamming as a contributor to the
+        # operator-reported "colored / brittle / thin" sound.  No
+        # transition-band penalty at our ncoef (R*rsize+1, typically
+        # 8000-18000 taps) — Blackman-Harris's wider main-lobe is
+        # absorbed by the long FIR.
         # firwin returns coefficients normalized for unity gain at DC;
         # multiply by R*gain to match WDSP's convention.
-        h = firwin(self.ncoef, cutoff_norm * 2.0, window="hamming")
+        h = firwin(self.ncoef, cutoff_norm * 2.0, window="blackmanharris")
         h = (h * float(self.R) * self.gain).astype(np.float64)
         self.h = h
         self.hs = np.zeros(self.rsize, dtype=np.float64)
@@ -373,20 +412,34 @@ class VarSamp:
 
             # Update inv_cvar (per-input-sample drift if varmode=1).
             inv_cvar += dicvar
+            # BUG FIX (v0.0.9.6 2026-05-06 audit): apply WDSP's
+            # bit-mask quantization to inv_cvar.  varsamp.c:151-153
+            # zero the low 16 mantissa bits each iteration —
+            # deterministic ~48-bit precision, NOT noise reduction.
+            # Without it, ULP jitter on delta modulates FIR-tap
+            # phase and produces audible "thin/brittle" coloration
+            # on broadband content.  Single-tone bench tests
+            # didn't catch this because steady tones don't
+            # exercise broadband filter shape.
+            inv_cvar = _truncate_inv_cvar(inv_cvar)
             delta = 1.0 - inv_cvar
 
             # Emit zero or more output samples while the fractional
             # counter is below 1.0.
             while isamps < 1.0:
-                # Update h_offset, wrap to [0, 1).
-                h_offset += delta
-                while h_offset >= 1.0:
-                    h_offset -= 1.0
-                while h_offset < 0.0:
-                    h_offset += 1.0
+                # BUG FIX (v0.0.9.6 2026-05-06 audit): WDSP's
+                # ordering is hshift FIRST (using current h_offset),
+                # THEN advance h_offset.  My original Python
+                # advanced h_offset first, producing a half-sample
+                # phase shift + buffer-boundary discontinuity at
+                # ~23 Hz (insize=2048 / 48k = 23 Hz block rate)
+                # that manifested as low-rate flutter coloration.
+                # See varsamp.c:159-162 — the order matters.
 
-                # Compute working FIR hs from prototype h at
-                # h_offset (vectorized hshift).
+                # Compute working FIR hs from prototype h at the
+                # CURRENT h_offset (vectorized hshift).  This
+                # filter design will be applied to the ring on the
+                # next line.
                 self.h_offset = h_offset
                 self._hshift()
 
@@ -398,6 +451,14 @@ class VarSamp:
                 else:
                     out_val = (np.dot(hs[:rsize - idx_in], ring[idx_in:])
                                + np.dot(hs[rsize - idx_in:], ring[:idx_in]))
+
+                # AFTER computing this output sample, advance
+                # h_offset for the NEXT output sample's hshift.
+                h_offset += delta
+                while h_offset >= 1.0:
+                    h_offset -= 1.0
+                while h_offset < 0.0:
+                    h_offset += 1.0
 
                 if outsamps < max_out:
                     out[outsamps] = out_val
