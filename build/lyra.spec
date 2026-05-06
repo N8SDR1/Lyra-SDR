@@ -45,7 +45,7 @@ datas = [
     # the constellation/lyre overlay silently no-ops in the
     # installer because _load_source() returns None on missing
     # asset (meteors keep working — they're pure code).  Operator-
-    # reported missing in v0.0.9.3 installer; fixed in v0.0.9.3.1.
+    # reported missing in v0.0.9.3 installer; fixed in v0.0.9.4.
     (str(PROJECT_ROOT / "lyra" / "assets" / "watermarks"),
      "lyra/assets/watermarks"),
     # DXCC country prefix database used by TCI spot enrichment.
