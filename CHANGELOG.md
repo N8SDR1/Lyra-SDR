@@ -13,6 +13,144 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.4] — unreleased — "Polish & Notifications"
+
+A focused polish + bug-fix release on top of v0.0.9.3.  No new
+operator features in the radio path; targets visible cosmetic
+defects, dialog stability, and the easy-to-miss update-
+notification flow that operators reported missing in v0.0.9.x.
+Folds in the "v0.1.0-pre1 polish items" tagged in the consensus
+plan §3.1 since they're operator-visible and the rebuild was
+already happening.
+
+### Lyra constellation watermark — bundled in installer
+
+- **Fix:** the Lyra/lyre constellation watermark image
+  (`lyra/assets/watermarks/lyra-watermark.jpg`) was missing from
+  the v0.0.9.3 PyInstaller bundle — the spec's ``datas`` list
+  shipped icons and shaders but not the watermark folder.
+  Operators running from the release installer saw meteors but
+  no constellation; operators running from the source tree saw
+  both, which masked the build-only nature of the bug.
+- **What changed:** added the watermarks folder to
+  ``build/lyra.spec`` so the JPG ships with the .exe.  No code
+  changes; rerunning ``build/build.cmd`` produces an installer
+  that includes it.
+
+### First-time-per-version update modal
+
+- **What changed:** when Lyra's silent startup update check
+  detects a NEW release tag for the first time, it now opens a
+  modal dialog with the release notes inline and three buttons:
+  - **Open release page** — launches GitHub release in browser
+  - **Remind me later** — closes modal; toolbar indicator + toast
+    still appear on this and future launches
+  - **Skip this version** — fully silences notifications for
+    this exact tag (toolbar indicator + toast suppressed too)
+- **Why:** the v0.0.8.1 / v0.0.9.x non-modal flow (status-bar
+  toast + toolbar indicator + Help-menu badge) was easy to miss
+  if the operator stepped away during startup or wasn't looking
+  at the toolbar.  Three operators reported missing prior
+  releases entirely and re-downloading manually weeks later.
+  The modal is shown ONCE per new tag — subsequent launches
+  with the same un-skipped tag fall back to the existing
+  non-modal flow, so this isn't nagware.
+- **State persistence:** uses two QSettings keys —
+  ``update_check/skipped_versions`` (existing, full-silence
+  list) and ``update_check/modal_seen_versions`` (new,
+  modal-shown-once list).  Both survive across launches.
+
+### Toolbar update indicator: 5-second pulse on first appearance
+
+- **What changed:** the orange "🆕 v0.X.Y available" indicator
+  in the toolbar (between the clocks and HL2 telemetry block)
+  now pulses for ~5 seconds the first time it appears in a
+  session — 5 cycles of opacity fade (1.0 → 0.4 → 1.0) at 1 Hz.
+  Cache-replay paths on subsequent launches don't re-pulse.
+- **Why:** static indicator was easy to miss against the
+  toolbar's busy layout.  Brief animated entrance draws the eye
+  without becoming permanent visual noise.
+- **Implementation:** ``QGraphicsOpacityEffect`` +
+  ``QPropertyAnimation`` — Qt-native, auto-cleans on finished,
+  no QTimer juggling.
+
+### Console log on silent update check finding new release
+
+- **What changed:** when ``SilentUpdateChecker`` detects a newer
+  release in the background, it now prints one line to stdout:
+  ``Lyra: silent update check found newer release v0.X.Y
+  (running v0.0.9.4)``.  Useful for diagnostic A/B without the
+  toolbar UI in view.
+- **Side effect:** the ``update_available`` signal signature
+  expanded from ``(tag, url)`` to ``(tag, url, body)`` so the
+  modal can render release notes inline.  The cache-replay
+  path passes empty string for body (cached state doesn't
+  store body — modal still renders gracefully with a "no notes
+  attached" message).
+
+### Settings dialog lambda crash fixes
+
+- **Fix:** two "wrapped C/C++ object of type X has been
+  deleted" RuntimeError crashes that both Brent and Rick hit
+  when closing the Settings dialog while the radio was
+  streaming.  Race condition: signals fire during/after the
+  dialog's C++ side is being torn down → connected lambdas
+  reach for a zombie wrapper → exception propagates up
+  through Radio's signal infrastructure.
+- **What changed:**
+  - Inline lambda on ``radio.apf_enabled_changed`` →
+    ``_on_radio_apf_enabled_changed`` named method with
+    ``try/except RuntimeError`` guard.
+  - ``_refresh_agc_action_label`` and ``_on_action_db`` body
+    wrapped in ``try/except RuntimeError`` (called from
+    ``stream_state_changed`` and ``agc_profile_changed`` lambdas
+    that suffer the same race).
+- **Why ``try/except`` not signal-disconnect-on-close:** the
+  defensive guard catches the rare race in any path; explicit
+  disconnect would require giving each lambda a name and
+  threading disconnect logic through dialog teardown — bigger
+  surface area for negligible additional safety.
+
+### Help guide
+
+- New §8 "Staying current — update notifications" in
+  ``docs/help/getting-started.md`` explains the modal flow,
+  toolbar indicator, and skip/remind semantics.  Existing
+  Backups & snapshots renumbered to §9.
+
+### What this release does NOT change
+
+- HL2 protocol path — wire format, frame layout, codec rate
+  all unchanged.
+- DSP path — AGC, NR1, NR2, APF, LMS, ANF, NB, SQ all
+  unchanged from v0.0.9.3.
+- Settings persistence — operator preferences carry forward
+  unchanged.
+
+### Tester checklist
+
+- Visual: launch installer, confirm constellation watermark
+  renders behind the panadapter (both meteors and lyre image
+  visible).
+- Update flow: with a v0.0.9.3 install + this build available
+  on GitHub, confirm the modal pops on first launch, indicator
+  pulses, "Skip this version" hides indicator on next launch,
+  "Remind me later" keeps it visible.
+- Settings stability: open Settings, change AGC profile or
+  toggle APF a few times, close dialog, repeat — should not
+  produce "wrapped C++ object" tracebacks.
+- Console diag: run from a console window
+  (``python -m lyra.ui.app``) and confirm the silent-check
+  log line appears when an update is available.
+
+### Recovery
+
+If anything regresses, install ``Lyra-Setup-0.0.9.3.exe`` from
+<https://github.com/N8SDR1/Lyra-SDR/releases/tag/v0.0.9.3>.
+Operator data is preserved across the downgrade.
+
+---
+
 ## [0.0.9.3] — 2026-05-05 — "WDSP AGC"
 
 The audio-quality follow-up to v0.0.9.2's host-side cadence

@@ -95,7 +95,57 @@ When filing a bug report, please include the version string from any
 of those — it lets the maintainer match your report to the exact
 code that produced it.
 
-## 8. Backups & snapshots
+## 8. Staying current — update notifications
+
+Lyra checks the GitHub repo at startup to see if there's a newer
+release. The check is silent (no telemetry, no account, no data
+sent — just a single anonymous GET to the public releases API; see
+**License & privacy**) and the result drives a three-tier
+notification flow so you can't miss an important update but you're
+also not nagged.
+
+### What you'll see when an update is available
+
+**The first time** Lyra detects a new version on startup:
+
+- A modal dialog opens: **"Lyra v0.X.Y is available"** with the
+  release notes and three buttons.
+- The toolbar grows a glowing **🆕 v0.X.Y available** indicator
+  (between the clocks and the HL2 telemetry block) that pulses
+  for ~5 seconds to draw the eye.
+- A status-bar toast also appears for 12 seconds.
+
+**On subsequent launches** with the same unseen version:
+
+- No modal (you've already been told once).
+- Toolbar indicator stays visible until you upgrade or skip.
+- Status-bar toast still appears briefly.
+
+### The three modal buttons
+
+| Button | Effect |
+|---|---|
+| **Open release page** | Launches your browser at the GitHub release page. The toolbar indicator stays visible until you actually install the new build (so you don't forget). |
+| **Remind me later** | Closes the modal. Toolbar indicator + toast still appear on this launch and future launches; the modal won't re-pop for this same version. |
+| **Skip this version** | Hides ALL notifications for that exact version forever. You'll still be notified about *newer* versions when they appear. Use this for pre-releases you don't want, or if you've decided to stay on your current build. |
+
+### Manual checks
+
+Any time you want to look manually, **Help → Check for Updates…**
+opens the same dialog with the full release notes. This works
+even if you've skipped a version — manual checks always show the
+current state.
+
+### If you operate offline
+
+The startup check fails silently if Lyra can't reach GitHub (no
+internet, firewall block, GitHub rate-limit). You won't see an
+error — Lyra just doesn't pop the modal and doesn't update its
+cache. There's nothing for you to configure. Manual
+**Help → Check for Updates** then surfaces the failure reason
+inside the dialog if you want to know why.
+
+## 9. Backups & snapshots
 
 Lyra stores every operator preference (layout, IP address, audio
 device, AGC profile, color picks, balance, cal trim, dock positions,

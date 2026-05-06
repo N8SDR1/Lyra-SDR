@@ -1269,9 +1269,15 @@ class DspSettingsTab(QWidget):
             "Only runs in CWU/CWL — preserved across mode switches\n"
             "but silent in SSB/AM/FM/digital. Default OFF.")
         self.apf_enable_chk.toggled.connect(self.radio.set_apf_enabled)
-        radio.apf_enabled_changed.connect(
-            lambda on: self.apf_enable_chk.setChecked(bool(on))
-            if self.apf_enable_chk.isChecked() != bool(on) else None)
+        # Safe slot wrapper — Brent + Rick hit "wrapped C++ object of
+        # type QCheckBox has been deleted" RuntimeError when the
+        # radio's apf_enabled_changed signal fired during/after this
+        # dialog's destruction.  The race: dialog closed → C++ side
+        # torn down → another thread emits the signal → lambda
+        # tries to .isChecked() on a zombie wrapper.  Wrap in
+        # try/except so the exception doesn't propagate up through
+        # Radio's signal infrastructure.  Defensive — see v0.0.9.3.1.
+        radio.apf_enabled_changed.connect(self._on_radio_apf_enabled_changed)
         gc.addWidget(self.apf_enable_chk, 1, 1, 1, 2)
 
         gc.addWidget(QLabel("APF BW (Hz):"), 2, 0)
@@ -1547,6 +1553,29 @@ class DspSettingsTab(QWidget):
         self._update_labels()
         self._update_custom_enabled(name)
 
+    def _on_radio_apf_enabled_changed(self, on: bool) -> None:
+        """Safe slot for ``radio.apf_enabled_changed``.
+
+        Used to be a lambda inline at connect time; converted to a
+        named method in v0.0.9.3.1 so we can wrap the body in a
+        try/except RuntimeError guard.  Without the guard, both
+        Brent and Rick hit "wrapped C++ object of type QCheckBox
+        has been deleted" when the radio fired this signal during
+        dialog teardown.
+
+        The body is the original lambda's intent: only update the
+        checkbox if its state would actually change, to avoid
+        signal echo (toggled → set_apf_enabled → apf_enabled_changed
+        → setChecked → toggled again).
+        """
+        try:
+            if self.apf_enable_chk.isChecked() != bool(on):
+                self.apf_enable_chk.setChecked(bool(on))
+        except RuntimeError:
+            # Dialog was destroyed between signal emit and slot
+            # delivery — nothing to update, harmless to ignore.
+            pass
+
     def _on_action_db(self, action_db: float):
         """Live AGC gain reduction in dB, fired from
         ``Radio.agc_action_db`` once per demod block (~40 Hz).
@@ -1556,10 +1585,17 @@ class DspSettingsTab(QWidget):
         AGC session could still fire one last value during the
         teardown.  Belt-and-suspenders — re-check the profile
         before writing live numbers over the "(AGC off)" sentinel.
+
+        Wrapped in try/except RuntimeError to survive dialog
+        teardown — see _on_radio_apf_enabled_changed comment for
+        the same crash class.
         """
         if self.radio.agc_profile == "off" or not self.radio.is_streaming:
             return
-        self.action_label.setText(f"{action_db:+.1f} dB")
+        try:
+            self.action_label.setText(f"{action_db:+.1f} dB")
+        except RuntimeError:
+            pass  # action_label destroyed — dialog being torn down
 
     def _refresh_agc_action_label(self) -> None:
         """Update the AGC-action label to reflect the current
@@ -1574,19 +1610,30 @@ class DspSettingsTab(QWidget):
         - last live    → otherwise leave whatever the latest
                           _on_action_db update wrote there;
                           will be overwritten within ~25 ms
+
+        Wrapped in try/except RuntimeError to survive dialog
+        teardown — both stream_state_changed and agc_profile_changed
+        connect lambdas that call this method, and either signal
+        can fire after the dialog's C++ side is gone.
         """
-        if not self.radio.is_streaming:
-            self.action_label.setText("—")
-            return
-        if self.radio.agc_profile == "off":
-            self.action_label.setText("(AGC off)")
-            return
-        # Stream live + AGC active — _on_action_db handles the
-        # live numeric update.  Show a transient placeholder until
-        # the next emission lands so the operator sees movement
-        # rather than potentially-stale values from before a
-        # profile change.
-        self.action_label.setText("…")
+        try:
+            if not self.radio.is_streaming:
+                self.action_label.setText("—")
+                return
+            if self.radio.agc_profile == "off":
+                self.action_label.setText("(AGC off)")
+                return
+            # Stream live + AGC active — _on_action_db handles the
+            # live numeric update.  Show a transient placeholder until
+            # the next emission lands so the operator sees movement
+            # rather than potentially-stale values from before a
+            # profile change.
+            self.action_label.setText("…")
+        except RuntimeError:
+            # action_label widget destroyed (dialog teardown race) —
+            # harmless, signal will be auto-disconnected by Qt
+            # parent-child cleanup soon.
+            pass
 
     # ── DSP Threading (Phase 3.B+) ─────────────────────────────────
     def _on_threading_combo(self, idx: int):

@@ -39,6 +39,15 @@ datas = [
     # runtime path matches the dev-tree path.
     (str(PROJECT_ROOT / "lyra" / "ui" / "spectrum_gpu_shaders"),
      "lyra/ui/spectrum_gpu_shaders"),
+    # Lyra constellation watermark (JPG). Loaded at runtime by
+    # lyra/ui/constellation.py via Path(__file__).parent.parent /
+    # "assets" / "watermarks" / "lyra-watermark.jpg".  Without this,
+    # the constellation/lyre overlay silently no-ops in the
+    # installer because _load_source() returns None on missing
+    # asset (meteors keep working — they're pure code).  Operator-
+    # reported missing in v0.0.9.3 installer; fixed in v0.0.9.3.1.
+    (str(PROJECT_ROOT / "lyra" / "assets" / "watermarks"),
+     "lyra/assets/watermarks"),
     # DXCC country prefix database used by TCI spot enrichment.
     # Lazily loaded; if missing, country flags just don't render —
     # but we ship it because operators expect spot flags to work.

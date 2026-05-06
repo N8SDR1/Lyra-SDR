@@ -298,6 +298,138 @@ class CheckForUpdatesDialog(QDialog):
         super().closeEvent(event)
 
 
+# ── Startup modal for unseen-version updates ──────────────────────────
+#
+# Headline polish item from §3.1 of the v0.1 RX2 consensus plan,
+# pulled forward into v0.0.9.3.1 alongside the watermark fix.
+#
+# Today's auto-update path is non-modal — toast (12s) + Help-menu
+# badge + toolbar indicator.  Operators who walk away from the desk
+# during startup or who don't notice toolbar changes can miss it
+# entirely.  Brent and Rick both reported missing prior releases.
+#
+# The modal is shown ONCE per new version detected, the first time
+# the operator sees it.  Subsequent launches with the same tag fall
+# back to the existing non-modal (toast + indicator) path — so this
+# isn't nagware, just a "did you see this?" gate on first detection.
+#
+# State machine (driven by app.py _on_startup_update_available):
+#   * tag in skipped_versions   → no modal, no toast, no indicator
+#   * tag in modal_seen_versions → no modal; toast + indicator only
+#   * else                       → MODAL, then add to modal_seen_versions
+#                                  (skip-this-version button also adds
+#                                  to skipped_versions for full silence)
+class UpdateAvailableModal(QDialog):
+    """First-time-per-version modal that announces a new Lyra release.
+
+    Three operator choices, mapped to the QDialog result codes via
+    custom signals so the caller can route them:
+
+      open_release   → operator clicked "Open release page"
+                       (also accepts the dialog so the indicator
+                       stays visible until they actually upgrade)
+      remind_later   → operator clicked "Remind me later"
+                       (dialog closes; toast + indicator still shown
+                       on this launch and future launches)
+      skip_version   → operator clicked "Skip this version"
+                       (dialog closes; tag added to skipped_versions
+                       so toast + indicator suppressed for this tag
+                       forever — until a NEWER tag appears)
+
+    The dialog never blocks the silent-check thread or the main
+    window; it's exec()'d after _on_startup_update_available has
+    already wired the indicator + badge.
+    """
+
+    open_release = Signal()
+    remind_later = Signal()
+    skip_version = Signal()
+
+    def __init__(self, tag: str, url: str, body: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Lyra — {tag} available")
+        self.setMinimumSize(560, 360)
+        # Modal but not application-modal — operator can drag the
+        # main window underneath.
+        self.setModal(True)
+
+        self._url = url or RELEASES_PAGE_URL
+
+        v = QVBoxLayout(self)
+
+        title = QLabel(
+            f"<h3 style='color:#39ff14; margin-bottom:4px'>"
+            f"Lyra {tag} is available</h3>"
+            f"<p style='color:#8a9aac; margin-top:0'>"
+            f"You're running <b>v{lyra.__version__}</b>.</p>")
+        title.setWordWrap(True)
+        v.addWidget(title)
+
+        body_view = QTextBrowser()
+        body_view.setOpenExternalLinks(True)
+        body_html = ""
+        if body and body.strip():
+            body_html = (
+                "<p><b>Release notes</b></p>"
+                f"<pre style='white-space: pre-wrap'>{body}</pre>")
+        else:
+            body_html = (
+                "<p style='color:#8a9aac'>"
+                "No release notes were attached to this build. "
+                "Click <b>Open release page</b> for the full "
+                "description.</p>")
+        body_view.setHtml(body_html)
+        v.addWidget(body_view, 1)
+
+        hint = QLabel(
+            "<p style='color:#8a9aac'>"
+            "<b>Open release page</b> takes you to the GitHub "
+            "download.<br>"
+            "<b>Remind me later</b> dismisses this dialog but keeps "
+            "the toolbar indicator.<br>"
+            "<b>Skip this version</b> hides all notifications for "
+            "{tag}; you'll be notified about newer ones."
+            "</p>".replace("{tag}", tag))
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        # ── Buttons ────────────────────────────────────────────────
+        btns = QHBoxLayout()
+        skip_btn = QPushButton("Skip this version")
+        skip_btn.clicked.connect(self._on_skip)
+        btns.addWidget(skip_btn)
+        btns.addStretch(1)
+        remind_btn = QPushButton("Remind me later")
+        remind_btn.clicked.connect(self._on_remind)
+        btns.addWidget(remind_btn)
+        open_btn = QPushButton("Open release page")
+        open_btn.setDefault(True)
+        open_btn.setStyleSheet(
+            "QPushButton { "
+            "background: #2a7d2a; color: white; "
+            "padding: 6px 16px; font-weight: 600; "
+            "border: 1px solid #39ff14; border-radius: 4px; "
+            "} "
+            "QPushButton:hover { background: #339933; } "
+            "QPushButton:pressed { background: #226622; }")
+        open_btn.clicked.connect(self._on_open_release)
+        btns.addWidget(open_btn)
+        v.addLayout(btns)
+
+    def _on_open_release(self):
+        QDesktopServices.openUrl(QUrl(self._url))
+        self.open_release.emit()
+        self.accept()
+
+    def _on_remind(self):
+        self.remind_later.emit()
+        self.reject()
+
+    def _on_skip(self):
+        self.skip_version.emit()
+        self.reject()
+
+
 # ── Silent background check (auto-update notification) ────────────────
 class SilentUpdateChecker(QObject):
     """Run the same GitHub release check as the dialog, but headless —
@@ -311,8 +443,13 @@ class SilentUpdateChecker(QObject):
     notification in the status bar + Help menu badge without forcing
     the operator into a dialog. Operator can still open Help → Check
     for Updates… any time for the full dialog.
+
+    Signal signature note: ``update_available`` carries ``(tag, url,
+    body)`` as of v0.0.9.3.1 — the third arg is the GitHub release
+    body (release notes) for the new first-time-per-version modal.
+    Empty string when not available.
     """
-    update_available = Signal(str, str)
+    update_available = Signal(str, str, str)
     no_update_available = Signal()
     check_failed = Signal(str)
 
@@ -339,7 +476,16 @@ class SilentUpdateChecker(QObject):
 
     def _on_finished_ok(self, tag: str, url: str, body: str):
         if is_newer(tag, lyra.__version__):
-            self.update_available.emit(tag, url or RELEASES_PAGE_URL)
+            # v0.0.9.3.1: log to console so operators running with a
+            # console window see the silent-check result.  Useful for
+            # diagnosing "did the auto-update check actually find
+            # something" without needing the toolbar UI.
+            print(f"Lyra: silent update check found newer release "
+                  f"{tag} (running v{lyra.__version__})")
+            # Pass body through so the first-time-per-version modal
+            # can render release notes inline.
+            self.update_available.emit(
+                tag, url or RELEASES_PAGE_URL, body or "")
         else:
             self.no_update_available.emit()
 

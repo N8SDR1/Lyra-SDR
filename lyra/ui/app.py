@@ -1794,19 +1794,30 @@ class MainWindow(QMainWindow):
             self._on_startup_update_failed)
         self._startup_update_checker.start()
 
-    def _on_startup_update_available(self, tag: str, url: str):
+    def _on_startup_update_available(self, tag: str, url: str,
+                                      body: str = ""):
         """Background check (or cached state at startup) reports a
-        newer release. Show a non-modal notification: status-bar
-        message (10 s) + Help menu badge.  Operator can
-        dismiss-once-per-version via the "Skipped versions"
-        QSettings list -- already-skipped tags don't re-nag.  The
-        Help menu badge sticks until the operator clicks Help →
-        Check for Updates…
+        newer release.
+
+        v0.0.9.3.1 escalation logic — three tiers of attention:
+
+        1. ``modal_seen_versions`` cache: if we've never shown the
+           modal for this tag, show it ONCE (first-time-per-version).
+           Operator picks Open / Remind / Skip from the dialog.
+        2. ``skipped_versions`` cache: if operator chose Skip, fully
+           silence (no toast, no badge, no indicator) until a newer
+           tag appears.
+        3. Otherwise: non-modal — toolbar indicator (with first-
+           appearance pulse), Help-menu badge, status-bar toast.
 
         Also called from _maybe_run_startup_update_check on every
         launch when the cached tag is still newer than local, so
         the indicator persists across launches even within the
         cache window.
+
+        ``body`` is the GitHub release body (release notes); empty
+        string when the call comes from the cache-replay path that
+        doesn't carry it.
         """
         import lyra
         from datetime import datetime
@@ -1820,10 +1831,37 @@ class MainWindow(QMainWindow):
         s.setValue("update_check/latest_url", url)
 
         # Skipped-version cache — if the operator has dismissed this
-        # exact tag before, don't re-show the toast (badge still
-        # appears so they can see it from the Help menu).
+        # exact tag before, fully silence: no modal, no toast, no
+        # badge, no indicator.  Skip is a stronger signal than
+        # "remind me later".
         skipped_raw = s.value("update_check/skipped_versions") or ""
         skipped = {t.strip() for t in str(skipped_raw).split(",") if t.strip()}
+        if tag in skipped:
+            return
+
+        # Modal-seen cache — if we've never shown the first-time
+        # modal for this tag, show it now.  Operator's choice from
+        # the modal then determines the rest of this call's
+        # behavior.
+        modal_seen_raw = s.value("update_check/modal_seen_versions") or ""
+        modal_seen = {t.strip() for t in str(modal_seen_raw).split(",")
+                      if t.strip()}
+        if tag not in modal_seen:
+            self._show_first_time_update_modal(tag, url, body)
+            # Mark seen regardless of which button operator pressed —
+            # we don't want to show modal again for this tag this
+            # session even if they cancelled it (close button).  Skip
+            # button still adds to skipped_versions separately via
+            # the modal's signal handler.
+            modal_seen.add(tag)
+            s.setValue("update_check/modal_seen_versions",
+                       ",".join(sorted(modal_seen)))
+            # Re-read skipped after modal in case operator skipped.
+            skipped_raw = s.value("update_check/skipped_versions") or ""
+            skipped = {t.strip() for t in str(skipped_raw).split(",")
+                       if t.strip()}
+            if tag in skipped:
+                return
 
         # Help menu badge — rename the action so operators can't miss it.
         self._set_update_menu_badge(tag, has_update=True)
@@ -1832,11 +1870,15 @@ class MainWindow(QMainWindow):
         # (which opens the Check for Updates dialog) or upgrades.
         # Centered between the clocks and HL2 telem block.
         if hasattr(self, "_update_indicator_action"):
+            already_visible = self._update_indicator_action.isVisible()
             self.update_indicator.setText(f"🆕  {tag} available")
             self._update_indicator_action.setVisible(True)
-
-        if tag in skipped:
-            return
+            # Pulse the indicator briefly on first appearance so the
+            # eye catches it even mid-band-tuning.  Skip the pulse
+            # if the indicator was already visible (e.g. cache replay
+            # on subsequent launches with the same unseen tag).
+            if not already_visible:
+                self._start_update_indicator_pulse()
 
         # Status-bar toast for 12 seconds. The version label on the
         # right side of the status bar already shows the running
@@ -1844,6 +1886,72 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"🆕  Lyra {tag} is available — Help → Check for Updates",
             12000)
+
+    def _show_first_time_update_modal(self, tag: str, url: str,
+                                       body: str) -> None:
+        """Show the v0.0.9.3.1 first-time-per-version update modal.
+
+        Wires the modal's three signals back to QSettings + the
+        non-modal indicator state machine in
+        ``_on_startup_update_available``.
+        """
+        from lyra.ui.update_check import UpdateAvailableModal
+        s = self._settings
+        modal = UpdateAvailableModal(tag, url, body, parent=self)
+
+        def _on_skip():
+            # Add tag to skipped_versions for full silence.
+            sv_raw = s.value("update_check/skipped_versions") or ""
+            sv = {t.strip() for t in str(sv_raw).split(",") if t.strip()}
+            sv.add(tag)
+            s.setValue("update_check/skipped_versions",
+                       ",".join(sorted(sv)))
+
+        modal.skip_version.connect(_on_skip)
+        # remind_later and open_release don't need extra wiring —
+        # the modal's accept/reject handles closing, and the caller
+        # continues with the indicator/toast path after exec()
+        # returns (or returns directly on skip via the early-return
+        # in _on_startup_update_available).
+        modal.exec()
+
+    def _start_update_indicator_pulse(self) -> None:
+        """Pulse the toolbar update indicator for ~5 seconds on first
+        appearance.
+
+        Uses QGraphicsOpacityEffect + QPropertyAnimation — Qt-native,
+        no QTimer juggling, auto-cleans on finished.  5 cycles of 1Hz
+        pulse (1.0 → 0.4 → 1.0) so the eye catches the indicator even
+        if the operator was looking at the spectrum or VFO.
+        """
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        from PySide6.QtCore import QPropertyAnimation
+        if not hasattr(self, "update_indicator"):
+            return
+        effect = QGraphicsOpacityEffect(self.update_indicator)
+        effect.setOpacity(1.0)
+        self.update_indicator.setGraphicsEffect(effect)
+
+        anim = QPropertyAnimation(effect, b"opacity")
+        anim.setDuration(5000)
+        # 5 cycles of bright → dim → bright over 5 seconds.
+        for i in range(6):
+            t_bright = i / 5.0           # 0.0, 0.2, 0.4, 0.6, 0.8, 1.0
+            anim.setKeyValueAt(t_bright, 1.0)
+            if i < 5:
+                t_dim = (i + 0.5) / 5.0
+                anim.setKeyValueAt(t_dim, 0.4)
+
+        def _on_pulse_finished():
+            try:
+                self.update_indicator.setGraphicsEffect(None)
+            except RuntimeError:
+                pass
+        anim.finished.connect(_on_pulse_finished)
+        # Stash on the instance so GC doesn't tear down the animation
+        # mid-flight.  Replaced on next pulse.
+        self._update_pulse_anim = anim
+        anim.start()
 
     def _on_startup_update_none(self):
         import lyra
