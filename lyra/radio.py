@@ -131,6 +131,9 @@ class Radio(QObject):
     eibi_store_changed   = Signal()
     audio_output_changed = Signal(str)
     pc_audio_device_changed = Signal(object)   # int index, or None for auto
+    # v0.0.9.6: operator-selected PortAudio host API label (see
+    # lyra/dsp/audio_sink.py::HOST_API_LABEL_*).
+    pc_audio_host_api_changed = Signal(str)
     ip_changed           = Signal(str)
 
     # Phase 3.B B.5 — sink-swap channel for worker mode.
@@ -619,6 +622,16 @@ class Radio(QObject):
         # SoundDeviceSink). Operators can override via Settings →
         # Audio → Output device. Persisted by app.py QSettings.
         self._pc_audio_device_index: Optional[int] = None
+        # v0.0.9.6: operator-pickable PortAudio host API for the
+        # PC Soundcard sink ("Auto" / "MME" / "WASAPI shared" /
+        # "WASAPI exclusive" / "WDM-KS" / "DirectSound" / "ASIO").
+        # Defaults to "Auto" = current behavior (sounddevice picks
+        # WASAPI shared by default on Windows).  Operators on
+        # machines where WASAPI shared has glitches (Windows audio
+        # engine pauses, etc.) can switch to a host API that
+        # bypasses the engine.  Persisted by app.py QSettings.
+        # See lyra/dsp/audio_sink.py::HOST_API_LABEL_* constants.
+        self._pc_audio_host_api: str = "Auto"
 
         # ── Config register (C0=0x00) — composed full ──────────────────
         # C1: sample rate bits[1:0]
@@ -6197,6 +6210,41 @@ class Radio(QObject):
             return None
 
     @property
+    def pc_audio_host_api(self) -> str:
+        """Operator-selected PortAudio host API for the PC Soundcard
+        sink (v0.0.9.6).  See ``lyra/dsp/audio_sink.py::
+        enumerate_host_apis()`` for the available labels."""
+        return self._pc_audio_host_api
+
+    def set_pc_audio_host_api(self, label: str) -> None:
+        """Set the host API label for the PC Soundcard sink.  Triggers
+        a sink rebuild if PC Soundcard is currently active so the
+        change takes effect immediately.  Same swap-cleanup pattern
+        as ``set_pc_audio_device_index``."""
+        new_label = str(label) if label else "Auto"
+        if new_label == self._pc_audio_host_api:
+            return
+        self._pc_audio_host_api = new_label
+        self.pc_audio_host_api_changed.emit(new_label)
+        if self._audio_output != "AK4951" and self._stream:
+            if self._dsp_worker is not None:
+                new_sink = self._make_sink()
+                self._request_dsp_reset_channel_only()
+                self._audio_sink = new_sink
+                self._push_balance_to_sink()
+                self.worker_audio_sink_changed.emit(new_sink)
+            else:
+                try:
+                    self._audio_sink.close()
+                except Exception:
+                    pass
+                self._request_dsp_reset_channel_only()
+                import time as _time
+                _time.sleep(0.030)
+                self._audio_sink = self._make_sink()
+                self._push_balance_to_sink()
+
+    @property
     def pc_audio_device_index(self):
         return self._pc_audio_device_index
 
@@ -6301,7 +6349,10 @@ class Radio(QObject):
             return AK4951Sink(self._stream)
         try:
             return SoundDeviceSink(
-                rate=48000, device=self._pc_audio_device_index)
+                rate=48000,
+                device=self._pc_audio_device_index,
+                host_api_label=self._pc_audio_host_api,
+            )
         except Exception as e:
             self.status_message.emit(f"Audio output error: {e}", 6000)
             return NullSink()

@@ -1729,14 +1729,86 @@ class AudioSettingsTab(QWidget):
             "HL2 audio jack: audio routes back to the HL2's onboard "
             "codec via EP2 packets — single-crystal path, zero "
             "clock drift, recommended for HL2 hardware.\n"
-            "PC Soundcard: routes to your computer's WASAPI output. "
+            "PC Soundcard: routes to your computer's audio output. "
             "v0.0.9.6 includes adaptive rate matching to absorb "
-            "the inevitable HL2-vs-soundcard crystal drift."
+            "the inevitable HL2-vs-soundcard crystal drift, plus "
+            "operator-pickable PortAudio host API (below)."
         )
         sink_help.setWordWrap(True)
         sink_help.setStyleSheet("color: #8a9aac; font-size: 10px;")
         v.addWidget(grp_sink)
         v.addWidget(sink_help)
+
+        # ── v0.0.9.6: PortAudio host API picker ────────────────────
+        # Operator picks which Windows audio API to use for the PC
+        # Soundcard sink.  Different APIs have different latency /
+        # reliability tradeoffs; matches Thetis's Settings → Audio
+        # → Driver flexibility.  Only meaningful when the sink
+        # above is set to "PC Soundcard" — but always editable so
+        # operators can pre-configure before switching.
+        from lyra.dsp.audio_sink import enumerate_host_apis
+        grp_api = QGroupBox("PortAudio host API (PC Soundcard only)")
+        ga = QHBoxLayout(grp_api)
+        ga.addWidget(QLabel("Audio API:"))
+        self._api_combo = QComboBox()
+        self._api_entries: list[dict] = enumerate_host_apis()
+        for entry in self._api_entries:
+            label = entry["label"]
+            display = label
+            if not entry["available"]:
+                display = f"{label} (not available)"
+            self._api_combo.addItem(display, userData=label)
+            # Disable the row if not available (PySide6 requires
+            # poking into the model item).
+            if not entry["available"]:
+                model = self._api_combo.model()
+                idx = self._api_combo.count() - 1
+                model.item(idx).setFlags(
+                    model.item(idx).flags() & ~Qt.ItemIsEnabled)
+        # Set selection from radio's stored value (or "Auto" default).
+        current_api = radio.pc_audio_host_api or "Auto"
+        for i in range(self._api_combo.count()):
+            if self._api_combo.itemData(i) == current_api:
+                self._api_combo.setCurrentIndex(i)
+                break
+        self._api_combo.setMinimumWidth(220)
+        self._api_combo.setToolTip(
+            "Auto: PortAudio picks the system default (currently "
+            "WASAPI shared on Windows).  Generally OK but subject "
+            "to occasional Windows audio-engine pauses.\n"
+            "\n"
+            "MME: oldest/most-compatible Windows audio API.  "
+            "Higher latency (~50-100ms) but very reliable.  "
+            "Default in Thetis VAC.\n"
+            "\n"
+            "WASAPI shared: low latency (~20ms), goes through "
+            "Windows audio engine.  Subject to engine pauses on "
+            "focus changes / app start-stop / etc.\n"
+            "\n"
+            "WASAPI exclusive: low latency, BYPASSES the Windows "
+            "audio engine.  Cleanest audio path BUT locks the "
+            "device — no other Windows apps can play through it "
+            "while Lyra runs.  Use if you operate Lyra exclusively.\n"
+            "\n"
+            "WDM-KS: low latency, bypasses engine, allows sharing.  "
+            "Some sound cards' WDM drivers are flaky — try if "
+            "WASAPI exclusive isn't acceptable.\n"
+            "\n"
+            "DirectSound: legacy fallback.  Built-in resampling.\n"
+            "\n"
+            "ASIO: lowest latency.  Requires an ASIO driver "
+            "installation (ASIO4ALL is a common free option, or "
+            "use device-specific drivers from your audio interface "
+            "manufacturer).  Not shown if no ASIO driver detected.\n"
+            "\n"
+            "Change takes effect immediately if PC Soundcard is "
+            "the active output sink.  Persists across launches.")
+        self._api_combo.currentIndexChanged.connect(
+            lambda _idx: radio.set_pc_audio_host_api(
+                self._api_combo.currentData()))
+        ga.addWidget(self._api_combo)
+        ga.addStretch(1)
+        v.addWidget(grp_api)
 
         def _sync_sink_combo(stored: str) -> None:
             """Sync combo when Radio changes the output elsewhere

@@ -2403,6 +2403,11 @@ class MainWindow(QMainWindow):
                     r.set_pc_audio_device_index(int(v))
             except (TypeError, ValueError):
                 pass
+        if s.contains("pc_audio_host_api"):
+            try:
+                r.set_pc_audio_host_api(str(s.value("pc_audio_host_api")))
+            except Exception:
+                pass
         if s.contains("bw_locked"):
             r.set_bw_lock(s.value("bw_locked", False, type=bool))
         if s.contains("filter_board"):
@@ -2727,6 +2732,9 @@ class MainWindow(QMainWindow):
         s.setValue("pc_audio_device",
                    "auto" if r.pc_audio_device_index is None
                    else str(int(r.pc_audio_device_index)))
+        # v0.0.9.6: PortAudio host API selection ("Auto" / "MME" /
+        # "WASAPI shared" / "WASAPI exclusive" / "WDM-KS" / etc.)
+        s.setValue("pc_audio_host_api", r.pc_audio_host_api)
         s.setValue("bw_locked", r.bw_locked)
         s.setValue("filter_board", r.filter_board_enabled)
         s.setValue("usb_bcd/serial", r.usb_bcd_serial)

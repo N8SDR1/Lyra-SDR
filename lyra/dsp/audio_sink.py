@@ -13,6 +13,143 @@ from typing import Optional, Protocol
 import numpy as np
 
 
+# ── Host API enumeration (v0.0.9.6) ─────────────────────────────────
+#
+# PortAudio supports multiple "host APIs" on Windows for talking to
+# audio hardware: MME, DirectSound, WASAPI (shared / exclusive),
+# WDM-KS, ASIO.  Each has different latency / reliability / sharing
+# characteristics — see docs/architecture/audio_architecture.md or
+# the operator-facing tooltip in Settings → Audio.
+#
+# Lyra exposes the choice to the operator (matching Thetis's
+# Settings → Audio → Driver) because no single API is "best" across
+# all hardware.  Some operators on USB audio devices prefer WASAPI
+# Shared; others want WDM-KS for lowest latency without exclusive
+# device lock; others installed ASIO drivers and want that path.
+#
+# The keys here are operator-facing labels (used in QSettings + UI
+# combo).  Internal code translates from label to PortAudio host
+# API index + sounddevice extra_settings.
+
+# Supported display labels.  Order = preferred display order in
+# the Settings combo.
+HOST_API_LABEL_AUTO            = "Auto"
+HOST_API_LABEL_WASAPI_SHARED   = "WASAPI shared"
+HOST_API_LABEL_WASAPI_EXCLUSIVE = "WASAPI exclusive"
+HOST_API_LABEL_WDM_KS          = "WDM-KS"
+HOST_API_LABEL_DIRECTSOUND     = "DirectSound"
+HOST_API_LABEL_MME             = "MME"
+HOST_API_LABEL_ASIO            = "ASIO"
+
+# Map labels -> PortAudio host API name strings as reported by
+# sounddevice.query_hostapis().  Used to find the host API index
+# at sink-open time.  None means "no specific host API" (Auto).
+_LABEL_TO_PA_NAME: dict[str, Optional[str]] = {
+    HOST_API_LABEL_AUTO:             None,
+    HOST_API_LABEL_WASAPI_SHARED:    "Windows WASAPI",
+    HOST_API_LABEL_WASAPI_EXCLUSIVE: "Windows WASAPI",
+    HOST_API_LABEL_WDM_KS:           "Windows WDM-KS",
+    HOST_API_LABEL_DIRECTSOUND:      "Windows DirectSound",
+    HOST_API_LABEL_MME:              "MME",
+    HOST_API_LABEL_ASIO:             "ASIO",
+}
+
+
+def enumerate_host_apis() -> list[dict]:
+    """Return a list of available audio host APIs on this system.
+
+    Each entry is a dict with keys:
+      * label (str) — operator-facing name (see HOST_API_LABEL_*)
+      * pa_name (str) — PortAudio name as reported by query_hostapis
+      * pa_index (int) — index into sounddevice.query_hostapis()
+      * default_output_device (int) — default output device index
+        for this host API, or -1 if none
+      * device_count (int) — number of output devices on this API
+      * available (bool) — True if the API is reachable on this
+        system (PortAudio enumerated it AND it has at least one
+        output device)
+      * exclusive_mode (bool) — True for WASAPI exclusive variant
+
+    Always includes an "Auto" entry first (PortAudio's system
+    default).  Entries are sorted preference order: Auto, then
+    WASAPI shared, exclusive, WDM-KS, DirectSound, MME, ASIO.
+
+    Defensive: returns just [Auto] if sounddevice import or
+    query fails — caller can still construct SoundDeviceSink
+    in Auto mode.
+    """
+    result: list[dict] = []
+    # Auto is always offered — it's just "let sounddevice pick."
+    result.append({
+        "label": HOST_API_LABEL_AUTO,
+        "pa_name": None,
+        "pa_index": -1,
+        "default_output_device": -1,
+        "device_count": -1,
+        "available": True,
+        "exclusive_mode": False,
+    })
+    try:
+        import sounddevice as sd
+    except Exception:
+        return result
+    try:
+        hostapis = sd.query_hostapis()
+    except Exception:
+        return result
+
+    # Build a label-ordered output list, matching available APIs.
+    # Each PortAudio name might map to multiple labels (e.g., WASAPI
+    # → both shared and exclusive).
+    label_order = [
+        HOST_API_LABEL_WASAPI_SHARED,
+        HOST_API_LABEL_WASAPI_EXCLUSIVE,
+        HOST_API_LABEL_WDM_KS,
+        HOST_API_LABEL_DIRECTSOUND,
+        HOST_API_LABEL_MME,
+        HOST_API_LABEL_ASIO,
+    ]
+    # Count devices per host API by walking sd.query_devices() —
+    # ``device_count`` isn't reliably exposed in older sounddevice
+    # versions on the host API dict, so we count manually.
+    device_counts: dict[int, int] = {}
+    try:
+        for dev in sd.query_devices():
+            ha_idx = int(dev.get("hostapi", -1))
+            max_out = int(dev.get("max_output_channels", 0))
+            if ha_idx >= 0 and max_out > 0:
+                device_counts[ha_idx] = device_counts.get(ha_idx, 0) + 1
+    except Exception:
+        pass
+
+    for label in label_order:
+        pa_name = _LABEL_TO_PA_NAME.get(label)
+        if pa_name is None:
+            continue
+        for idx, ha in enumerate(hostapis):
+            if ha.get("name", "") == pa_name:
+                default_out = int(ha.get("default_output_device", -1))
+                dev_count = device_counts.get(idx, 0)
+                # Available if there's at least one output device.
+                # default_output_device may be -1 even when devices
+                # exist (rare but observed); treat that as available
+                # since we can fall back to None and let PortAudio
+                # pick.
+                available = dev_count > 0
+                result.append({
+                    "label": label,
+                    "pa_name": pa_name,
+                    "pa_index": idx,
+                    "default_output_device": default_out,
+                    "device_count": dev_count,
+                    "available": available,
+                    "exclusive_mode": (
+                        label == HOST_API_LABEL_WASAPI_EXCLUSIVE),
+                })
+                break
+    return result
+
+
 class AudioSink(Protocol):
     def write(self, audio: np.ndarray) -> None: ...
     def close(self) -> None: ...
@@ -191,7 +328,8 @@ class SoundDeviceSink:
 
     def __init__(self, rate: int = 48000, device: Optional[int] = None,
                  blocksize: int = 0, *,
-                 use_rate_match: bool = True):
+                 use_rate_match: bool = True,
+                 host_api_label: str = HOST_API_LABEL_AUTO):
         """Construct the PC sound card output.
 
         v0.0.9.6: ``use_rate_match`` enables the WDSP-derived
@@ -199,10 +337,18 @@ class SoundDeviceSink:
         that absorbs the inevitable clock drift between Lyra's
         nominal 48 kHz IQ rate and the sound card's actual rate
         (HL2 crystal vs. sound card crystal — typically differ by
-        50-100 ppm).  Without rate matching the ring buffer
-        between them fills/drains over time, producing audible
-        glitches.  Default ON; can be disabled for diagnostic A/B
-        via use_rate_match=False.
+        50-100 ppm).  Default ON; can be disabled for diagnostic
+        A/B via ``use_rate_match=False``.
+
+        v0.0.9.6: ``host_api_label`` selects which PortAudio host
+        API to use.  Defaults to "Auto" (PortAudio's system
+        default — historically WASAPI shared on Windows).  Other
+        labels include "WASAPI exclusive" (bypasses Windows audio
+        engine, locks device), "WDM-KS" (kernel streaming, low
+        latency without lock), "MME" (legacy, very compatible),
+        etc.  See enumerate_host_apis() for the discoverable list.
+        Falls back to "Auto" if the requested API isn't available
+        on this system.
         """
         try:
             import sounddevice as sd
@@ -215,9 +361,20 @@ class SoundDeviceSink:
         self._sd = sd
         self._rate = rate
         self._use_rate_match = bool(use_rate_match)
+        self._host_api_label = str(host_api_label)
 
+        # Resolve the host API + device choice.  If operator picked
+        # something specific, use that; otherwise let PortAudio pick
+        # via the legacy WASAPI-default heuristic.
+        host_api_info = self._resolve_host_api(sd, self._host_api_label)
+        self._resolved_host_api_label = host_api_info["label"]
         if device is None:
-            device = self._pick_wasapi_default(sd)
+            if host_api_info["pa_index"] >= 0:
+                device = host_api_info["default_output_device"]
+                if device < 0:
+                    device = None
+            else:
+                device = self._pick_wasapi_default(sd)
 
         self._channels = 2
         # Stereo balance gains. Default = equal-power center
@@ -276,10 +433,28 @@ class SoundDeviceSink:
         # to non-blocking; write() will never be called on the stream
         # itself. blocksize=0 lets PortAudio pick its optimal size for
         # this device (typically 256-512 frames at 48k).
+        #
+        # v0.0.9.6: extra_settings carry the WASAPI-exclusive flag
+        # when operator selected that label.  PortAudio host-API-
+        # specific settings live in sd.WasapiSettings/WdmksSettings/
+        # AsioSettings.  We only set extra_settings for WASAPI
+        # exclusive currently — other APIs use defaults.
+        extra_settings = None
+        if host_api_info.get("exclusive_mode"):
+            try:
+                extra_settings = sd.WasapiSettings(exclusive=True)
+            except Exception as exc:  # noqa: BLE001
+                # Older sounddevice versions might not expose
+                # WasapiSettings; fall back to shared mode.
+                print(f"[Lyra audio] WASAPI exclusive requested but "
+                      f"WasapiSettings unavailable ({exc}); using "
+                      f"shared mode")
+                self._resolved_host_api_label = HOST_API_LABEL_WASAPI_SHARED
         self._stream = sd.OutputStream(
             samplerate=rate, channels=self._channels, dtype="float32",
             blocksize=blocksize, device=device,
             callback=self._audio_callback,
+            extra_settings=extra_settings,
         )
         self._stream.start()
 
@@ -404,6 +579,7 @@ class SoundDeviceSink:
                 f"[Lyra audio] SoundDeviceSink: "
                 f"device=[{dev_info.get('name', '?')}] "
                 f"host={host_info.get('name', '?')} "
+                f"api='{self._resolved_host_api_label}' "
                 f"requested_rate={rate} actual_rate={actual_sr:g} "
                 f"latency={actual_latency_ms:.1f}ms "
                 f"channels={self._channels}"
@@ -442,6 +618,53 @@ class SoundDeviceSink:
                     return default_out
                 return None
         return None
+
+    @staticmethod
+    def _resolve_host_api(sd, label: str) -> dict:
+        """Map an operator-facing host API label to a concrete
+        PortAudio host API + device.  Returns a dict matching the
+        enumerate_host_apis() shape.
+
+        Falls back to "Auto" if:
+          * label not recognized
+          * label maps to a PortAudio host API not present on this
+            system
+          * label maps to an API with no usable output devices
+
+        Always returns a dict (never None).
+        """
+        # Auto fast-path — no enumeration needed.
+        if not label or label == HOST_API_LABEL_AUTO:
+            return {
+                "label": HOST_API_LABEL_AUTO,
+                "pa_name": None,
+                "pa_index": -1,
+                "default_output_device": -1,
+                "device_count": -1,
+                "available": True,
+                "exclusive_mode": False,
+            }
+        # Look up the label in the enumerate list.
+        try:
+            apis = enumerate_host_apis()
+        except Exception:
+            apis = []
+        for entry in apis:
+            if entry["label"] == label and entry["available"]:
+                return entry
+        # Fall through: label requested but unavailable.  Print a
+        # warning + fall back to Auto.
+        print(f"[Lyra audio] requested host API '{label}' is not "
+              f"available on this system; falling back to Auto")
+        return {
+            "label": HOST_API_LABEL_AUTO,
+            "pa_name": None,
+            "pa_index": -1,
+            "default_output_device": -1,
+            "device_count": -1,
+            "available": True,
+            "exclusive_mode": False,
+        }
 
     def _audio_callback(self, outdata, frames, time_info, status):
         """PortAudio audio-thread callback — fill `outdata` with the
