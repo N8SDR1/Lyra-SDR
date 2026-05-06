@@ -245,6 +245,46 @@ class HL2Stream:
         # cycle unsticks (because that cycle re-issues C&C 0x00).
         self._cc_registers: dict[int, tuple[int, int, int, int]] = {
             0x00: (SAMPLE_RATES[sample_rate], 0x00, 0x00, self._config_c4),
+            # ── HL2 FPGA TX/audio buffer config (C0=0x17) ──────────
+            #
+            # The HL2 has a tunable FPGA-side audio/TX buffer that
+            # smooths network jitter from the host (Python GIL/GC
+            # pauses, OS scheduling slop, etc.).  The same buffer
+            # feeds the AK4951 codec headphone-jack output during
+            # RX — so when this buffer underruns, the AK4951 plays
+            # silence/zeros for one or more samples and the operator
+            # hears an audible click.
+            #
+            # Steve Haynal (HL2 author) on the hermes-lite group:
+            #   "TX buffer latency is how much time of samples to
+            #    save in the TX buffer before beginning to transmit,
+            #    which helps smooth out any network UDP packet
+            #    jitter."
+            #
+            # Gateware compiled-in default: latency=10ms / hang=4ms.
+            # Steve's planned default bump: 20/12.  We use 40/12 for
+            # a generous margin against Python-side jitter sources
+            # that don't exist in C-only paths like Thetis.
+            #
+            # Command 0x17 layout (from hermeslite.py
+            # config_txbuffer):
+            #   C0 = 0x17
+            #   C1 = 0x00 (reserved)
+            #   C2 = 0x00 (reserved)
+            #   C3 = ptt_hang & 0x1f       (5-bit, max 31 ms)
+            #   C4 = latency & 0x7f        (7-bit, max 127 ms)
+            #
+            # See `docs/architecture/audio_architecture.md` (to be
+            # updated) and the v0.0.9.6 audit thread.  Operator
+            # symptom this targets: occasional crackles on HL2 audio
+            # jack mode that survived the EP2-writer underrun fix
+            # (Option Z) — confirming the underrun is on the HL2
+            # FPGA side, not on the host writer side.
+            #
+            # If the operator wants to tune this later, expose
+            # latency_ms + ptt_hang_ms in Settings → Audio.  For
+            # v0.0.9.6 we ship the recommended defaults.
+            0x17: (0x00, 0x00, 12 & 0x1F, 40 & 0x7F),
         }
         self._cc_rr_idx: int = 0
         self._cc_lock = threading.Lock()
