@@ -544,6 +544,33 @@ class DspWorker(QObject):
                 print(f"[DspWorker] tone error: {exc}")
             return
 
+        # v0.0.9.6 — WDSP engine path. When the native WDSP RX channel
+        # is active, the entire legacy DSP chain (channel.process / AGC /
+        # binaural / sink) is replaced with one call into Radio's
+        # _do_demod_wdsp helper. WDSP runs its DSP loop in its own C
+        # thread inside the DLL, so even though we're on the worker
+        # thread, the heavy work is GIL-free.
+        #
+        # CRITICAL: still run the FFT/spectrum stage at the end of this
+        # method even when WDSP demod is in use. The panadapter taps the
+        # raw IQ stream BEFORE any demod, so its plumbing is independent
+        # of which audio engine is active. Skipping the FFT path here
+        # breaks the spectrum widget for the operator.
+        if (getattr(radio, "_use_wdsp_engine", False)
+                and getattr(radio, "_wdsp_rx", None) is not None):
+            try:
+                radio._do_demod_wdsp(samples)
+            except Exception as exc:
+                print(f"[DspWorker] WDSP demod error: {exc}")
+            # Fall through to the FFT cadence stage at the bottom of
+            # this method (skipping only the legacy demod / AGC / sink
+            # stages 1-4 below).
+            try:
+                self._maybe_run_fft(samples)
+            except Exception as exc:
+                print(f"[DspWorker] fft error: {exc}")
+            return
+
         # Push current notch state to the channel each block —
         # matches the cadence Radio._do_demod uses.  Cheap (just
         # stores references); ensures channel sees fresh state

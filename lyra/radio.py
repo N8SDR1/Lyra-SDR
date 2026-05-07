@@ -11,6 +11,7 @@ logic; add a TCI bridge by wiring another subscriber to the same signals.
 """
 from __future__ import annotations
 
+import os
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -669,6 +670,28 @@ class Radio(QObject):
 
         # ── Runtime ───────────────────────────────────────────────────
         self._stream: Optional[HL2Stream] = None
+        # ── v0.0.9.6 round 16: AudioMixer DISABLED diagnostically ──────
+        # The audio mixer thread (lyra/dsp/audio_mixer.py), even when
+        # idle on its Ready semaphore, appears to add ~5-7% throughput
+        # loss to the DSP worker via Python GIL pressure -- field-
+        # measured at v0.0.9.6 round 15: PC Sound feed rate 93-95% of
+        # nominal with periodic stumbling underrun spikes.  Hypothesis:
+        # carrying a 4th Python thread (DSP / EP2 writer / mixer / Qt
+        # main) increases per-cycle GIL switching cost beyond what the
+        # DSP worker can absorb without falling behind real-time.
+        #
+        # For v0.0.9.6 we set ``_audio_mixer = None`` -- both sinks
+        # accept ``mixer=None`` and fall back to the round-9 legacy
+        # direct path: AK4951Sink writes straight to HL2 deque,
+        # SoundDeviceSink writes straight to RMatch, no separate
+        # audio mixer thread.
+        #
+        # Wire-cadence pacing for HL2 audio (the architectural reason
+        # the mixer + lockstep was added in the first place) comes
+        # back via WaitableTimerEx HIGH_RESOLUTION inside the EP2
+        # writer thread directly -- no extra Python thread needed,
+        # so no GIL pressure.  Lands as the next v0.0.9.6 task.
+        self._audio_mixer = None
         self._audio_sink = NullSink()
         # Audio block size — channel.process produces audio in chunks
         # of this many samples per inner-loop iteration.  v0.0.9.1
@@ -781,6 +804,36 @@ class Radio(QObject):
         self._wdsp_agc.set_mode(
             MODE_BY_NAME.get(self._agc_profile, MODE_BY_NAME["med"])
         )
+
+        # ── WDSP RX engine (v0.0.9.6 audio rebuild) ──────────────────
+        # Native WDSP RX channel via cffi. Replaces the per-module
+        # Python DSP chain (decim/notch/demod/AGC/NR/ANF/leveler/binaural)
+        # with the C engine running its own thread inside the DLL.
+        # The engine takes IQ in at the current ``_rate`` and produces
+        # 48 kHz stereo audio out. AGC, NR, ANF, filters, mode dispatch
+        # all happen inside the engine; Lyra applies output-stage volume
+        # / mute / TCI tap on top.
+        #
+        # Default ON (the whole point of v0.0.9.6).
+        # Set ``LYRA_USE_LEGACY_DSP=1`` in the environment to fall back
+        # to the existing PythonRxChannel path during testing or for any
+        # regression bisect.
+        self._use_wdsp_engine: bool = (
+            os.environ.get("LYRA_USE_LEGACY_DSP", "").strip() not in ("1", "true", "TRUE", "yes")
+        )
+        self._wdsp_rx = None
+        self._wdsp_rx_in_rate: int = 0
+        if self._use_wdsp_engine:
+            try:
+                self._open_wdsp_rx(self._rate)
+            except Exception as exc:
+                # If WDSP fails to load (missing DLL, ABI mismatch),
+                # fall back to the legacy path so Lyra still runs.
+                # Operator sees a clear log line; the audio quality
+                # bug is back, but the radio itself is functional.
+                print(f"[Radio] WDSP engine failed to initialize: {exc}; "
+                      f"falling back to legacy DSP chain")
+                self._use_wdsp_engine = False
 
         # Auto-tracking timer: only runs while profile == "auto". Owned by
         # Radio (not UI) so tracking continues even if the panel is hidden.
@@ -1411,6 +1464,15 @@ class Radio(QObject):
         # Channel rebuilds its decimator on the next IQ block at the
         # new rate; notches use rate in coefficient calc so rebuild here.
         self._rx_channel.set_in_rate(rate)
+        # WDSP RX engine: the channel's input rate is fixed at
+        # OpenChannel time, so we close + reopen on rate change. WDSP
+        # finishes any partially-processed audio inside _open_wdsp_rx's
+        # close, so this is graceful (no crackle).
+        if self._use_wdsp_engine and rate != self._wdsp_rx_in_rate:
+            try:
+                self._open_wdsp_rx(rate)
+            except Exception as exc:
+                print(f"[Radio] WDSP rx rate-change reopen error: {exc}")
         self._rebuild_notches()
         self.rate_changed.emit(rate)
 
@@ -1479,6 +1541,18 @@ class Radio(QObject):
         # mode switch so the previous mode's noise-floor estimate
         # doesn't leak in as an audible transient.
         self._rx_channel.set_mode(alias)
+        # WDSP RX engine — push mode + recompute filter (CW pitch
+        # changes the centre frequency, so filter follows mode).
+        # Reset clears any in-flight half-block IQ + WDSP iobuffs so
+        # the previous mode's audio doesn't leak in.
+        if self._wdsp_rx is not None:
+            try:
+                self._wdsp_rx.reset()
+                self._wdsp_rx.set_mode(self._wdsp_mode_for(alias))
+                low, high = self._wdsp_filter_for(alias)
+                self._wdsp_rx.set_filter(low, high)
+            except Exception as exc:
+                print(f"[Radio] WDSP rx mode-change error: {exc}")
         # Also reset AGC + S-meter state. Different demods produce
         # very different peak levels (AM envelope vs SSB sideband
         # vs CW pitched tone), so a peak captured under the old
@@ -2554,7 +2628,42 @@ class Radio(QObject):
         # Channel handles its own NR state (including the fresh-reset
         # on enable so a stale overlap tail doesn't leak in).
         self._rx_channel.set_nr_enabled(on)
+        # WDSP RX engine — flip the matching WDSP NR module.  Lyra's
+        # NR1 (spectral subtraction) maps to WDSP's EMNR (Ephraim-Malah
+        # MMSE-LSA), and Lyra's NR2 / LMS map to WDSP's ANR (LMS line
+        # enhancer).  We pick the right WDSP module based on the
+        # operator's current backend selection.
+        if self._wdsp_rx is not None:
+            self._push_wdsp_nr_state()
         self.nr_enabled_changed.emit(on)
+
+    def _push_wdsp_nr_state(self) -> None:
+        """Sync WDSP's NR-module run flags to Lyra's NR enable + backend.
+
+        Lyra exposes one NR on/off toggle plus a backend selector
+        (NR1 = spectral, NR2 = Ephraim-Malah, LMS = adaptive line
+        enhancer).  WDSP exposes two run flags: EMNR (spectral) and
+        ANR (LMS).  We map:
+
+            backend == "nr1" or "nr2" → EMNR run flag
+            backend == "lms"          → ANR  run flag
+            anything else             → both off
+
+        Both off when the master NR toggle is off, regardless of backend.
+        """
+        if self._wdsp_rx is None:
+            return
+        on = bool(self._rx_channel.nr_enabled) and bool(
+            getattr(self, "_lyra_nr_master_on", True)
+        )
+        backend = (self._nr_profile or "nr1").lower()
+        emnr_on = on and backend in ("nr1", "nr2")
+        anr_on = on and backend == "lms"
+        try:
+            self._wdsp_rx.set_emnr(emnr_on)
+            self._wdsp_rx.set_anr(anr_on)
+        except Exception as exc:
+            print(f"[Radio] WDSP rx NR state error: {exc}")
 
     @property
     def nr_profile(self) -> str:
@@ -2603,6 +2712,9 @@ class Radio(QObject):
             backend = "nr1"
         self._nr_profile = backend
         self._rx_channel.set_nr_profile(backend)
+        # WDSP NR module pick follows the operator's backend selection.
+        if self._wdsp_rx is not None:
+            self._push_wdsp_nr_state()
         self.nr_profile_changed.emit(backend)
 
     # ── Noise SOURCE toggle (Phase 3.D #1, orthogonal to profile) ────
@@ -2914,6 +3026,14 @@ class Radio(QObject):
         if name not in self.NB_PROFILES:
             name = "off"
         self._rx_channel.set_nb_profile(name)
+        # WDSP RX engine — noise blanker (NOB/ANB) lives at the EXT
+        # layer, BEFORE the RXA channel.  Those modules need explicit
+        # ``create_nob`` / ``create_anb`` calls (with several tuning
+        # parameters) before their Run flags are usable; calling
+        # SetEXTANBRun on an uninitialized blanker segfaults the DLL.
+        # For v0.0.9.6 we skip the wiring; NB defaults to off in
+        # WDSP mode.  Will land in a follow-up that adds create_nob /
+        # create_anb cffi bindings + initializes them in _open_wdsp_rx.
         # Persist for next Lyra start.
         try:
             from PySide6.QtCore import QSettings
@@ -3015,6 +3135,15 @@ class Radio(QObject):
         if name not in self.ANF_PROFILES:
             name = "off"
         self._rx_channel.set_anf_profile(name)
+        # WDSP RX engine — auto-notch is one binary run flag; profile
+        # name controls strength in Lyra's port but WDSP's ANF has
+        # fixed defaults that work well for most signals. Anything
+        # other than "off" enables the notch.
+        if self._wdsp_rx is not None:
+            try:
+                self._wdsp_rx.set_anf(name != "off")
+            except Exception as exc:
+                print(f"[Radio] WDSP rx ANF state error: {exc}")
         try:
             from PySide6.QtCore import QSettings
             s = QSettings("N8SDR", "Lyra")
@@ -3314,6 +3443,17 @@ class Radio(QObject):
         to QSettings and emits ``lms_enabled_changed``."""
         on = bool(on)
         self._rx_channel.set_lms_enabled(on)
+        # WDSP RX engine — LMS adaptive line enhancer is the same
+        # algorithm WDSP exposes as ANR.  When the operator wants LMS
+        # on, ANR runs.  Mutual-exclusion with EMNR (NR backend) is
+        # handled in _push_wdsp_nr_state when set_nr_profile flips to
+        # "lms"; this setter just toggles the run flag directly so
+        # the operator's LMS button works whether or not NR is on.
+        if self._wdsp_rx is not None:
+            try:
+                self._wdsp_rx.set_anr(on)
+            except Exception as exc:
+                print(f"[Radio] WDSP rx LMS state error: {exc}")
         try:
             from PySide6.QtCore import QSettings
             s = QSettings("N8SDR", "Lyra")
@@ -3400,6 +3540,23 @@ class Radio(QObject):
         """Master toggle for the all-mode voice-presence squelch."""
         on = bool(on)
         self._rx_channel.set_squelch_enabled(on)
+        # WDSP RX engine — pick the right squelch flavor based on the
+        # current mode.  WDSP has separate FM and AM squelch modules;
+        # SSB squelch is the FM module re-purposed (Thetis convention).
+        if self._wdsp_rx is not None:
+            try:
+                if self._mode == "FM":
+                    self._wdsp_rx.set_fm_squelch(on)
+                elif self._mode in ("AM", "SAM", "DSB"):
+                    self._wdsp_rx.set_am_squelch(on)
+                else:
+                    # SSB / CW / DIG — WDSP has no dedicated squelch;
+                    # leave both off (Lyra's voice-presence squelch
+                    # logic was Python-side only).
+                    self._wdsp_rx.set_fm_squelch(False)
+                    self._wdsp_rx.set_am_squelch(False)
+            except Exception as exc:
+                print(f"[Radio] WDSP rx squelch state error: {exc}")
         try:
             from PySide6.QtCore import QSettings
             s = QSettings("N8SDR", "Lyra")
@@ -4073,6 +4230,15 @@ class Radio(QObject):
         # Always push to channel so the per-mode BW state stays in sync
         # — the demod for `mode` rebuilds inside the channel.
         self._rx_channel.set_rx_bw(mode, int(bw))
+        # WDSP RX engine — only push filter when this matches the
+        # currently active mode; per-mode BW is stored above and applied
+        # on the next ``set_mode`` if the operator changes mode.
+        if self._wdsp_rx is not None and mode == self._mode:
+            try:
+                low, high = self._wdsp_filter_for(mode)
+                self._wdsp_rx.set_filter(low, high)
+            except Exception as exc:
+                print(f"[Radio] WDSP rx bw-change error: {exc}")
         if mode == self._mode:
             self._emit_passband()
         self.rx_bw_changed.emit(mode, int(bw))
@@ -5367,6 +5533,14 @@ class Radio(QObject):
             self.shutdown_dsp_worker()
         except Exception as exc:
             print(f"[Radio.close] shutdown_dsp_worker raised: {exc}")
+        # Step 2.25 — AudioMixer thread, if running.  Disabled by
+        # default in v0.0.9.6 (see Radio.__init__ for rationale);
+        # stop() is a no-op when mixer is None.
+        try:
+            if self._audio_mixer is not None:
+                self._audio_mixer.stop()
+        except Exception as exc:
+            print(f"[Radio.close] audio_mixer.stop raised: {exc}")
         # Step 2.5 — Weather worker.  Same idempotent pattern.
         try:
             if self._wx_worker is not None:
@@ -5578,6 +5752,11 @@ class Radio(QObject):
             return
         # Single-thread path — synchronous reset on main.
         self._rx_channel.reset()
+        if self._wdsp_rx is not None:
+            try:
+                self._wdsp_rx.reset()
+            except Exception as exc:
+                print(f"[Radio] WDSP rx reset error: {exc}")
         if self._wdsp_agc is not None:
             self._wdsp_agc.reset()
         self._smeter_avg_lin = 0.0
@@ -5712,24 +5891,132 @@ class Radio(QObject):
             if _rd_dt_ms > self._dbg_samples_max_ms:
                 self._dbg_samples_max_ms = _rd_dt_ms
 
+    # ── WDSP RX engine integration (v0.0.9.6) ─────────────────────────
+    #
+    # ``_wdsp_rx`` is a `lyra.dsp.wdsp_engine.RxChannel` instance backed by
+    # the bundled wdsp.dll. When active it replaces the entire Python DSP
+    # chain (decim → notch → demod → NR → ANF → AGC → leveler → binaural)
+    # with a single ``rx.process(iq)`` call that returns 48 kHz stereo
+    # audio. Lyra applies volume / mute / TCI tap on top.
+    #
+    # Lifecycle:
+    #   * Constructed in ``__init__`` if ``LYRA_USE_LEGACY_DSP`` is unset.
+    #   * Re-opened on rate change (``set_in_rate`` calls ``_open_wdsp_rx``).
+    #   * Mode / filter / AGC pushed via Radio's UI setters.
+
+    def _open_wdsp_rx(self, in_rate: int) -> None:
+        """Open (or re-open) the WDSP RX channel for ``in_rate``.
+
+        Called from ``__init__`` and on ``set_in_rate`` rate changes.
+        Closes any existing channel before opening so we never leak a
+        stale WDSP channel across rate changes.
+        """
+        from lyra.dsp.wdsp_engine import RxChannel, RxConfig
+        # Tear down the old one if any.
+        if self._wdsp_rx is not None:
+            try:
+                self._wdsp_rx.close()
+            except Exception as exc:
+                print(f"[Radio] WDSP rx close error: {exc}")
+            self._wdsp_rx = None
+        # Pick an in_size that keeps the per-call audio block within
+        # Lyra's existing 512-sample audio cadence. WDSP returns
+        # in_size * out_rate / in_rate audio frames per call:
+        #
+        #   192 kHz IQ + in_size=1024 -> 256 audio frames (5.33 ms)
+        #    96 kHz IQ + in_size=512  -> 256 audio frames (5.33 ms)
+        #    48 kHz IQ + in_size=256  -> 256 audio frames (5.33 ms)
+        #   384 kHz IQ + in_size=2048 -> 256 audio frames (5.33 ms)
+        #
+        # Constant 5.33 ms audio block latency across the supported IQ
+        # rates. dsp_size always 4096 (Thetis default).
+        if in_rate >= 48000:
+            in_size = max(256, int(in_rate * 256 / 48000))
+        else:
+            in_size = 256
+        cfg = RxConfig(
+            in_size=in_size,
+            dsp_size=4096,
+            in_rate=int(in_rate),
+            dsp_rate=48000,
+            out_rate=48000,
+        )
+        self._wdsp_rx = RxChannel(channel=0, cfg=cfg)
+        self._wdsp_rx_in_rate = int(in_rate)
+        # Push current operator state into the new channel.
+        try:
+            self._wdsp_rx.set_mode(self._wdsp_mode_for(self._mode))
+            low, high = self._wdsp_filter_for(self._mode)
+            self._wdsp_rx.set_filter(low, high)
+            self._wdsp_rx.set_agc(self._wdsp_agc_for(self._agc_profile))
+            self._wdsp_rx.set_panel_gain(1.0)
+        except Exception as exc:
+            print(f"[Radio] WDSP rx initial-state push error: {exc}")
+        try:
+            self._wdsp_rx.start()
+        except Exception as exc:
+            print(f"[Radio] WDSP rx start error: {exc}")
+
+    def _wdsp_mode_for(self, mode: str) -> str:
+        """Map Lyra's mode string to a WDSP mode name."""
+        # Lyra modes: USB, LSB, AM, FM, CWU, CWL, DSB, DIGU, DIGL, SAM, DRM, SPEC
+        # WDSP rxaMode: USB, LSB, AM, FM, CWU, CWL, DSB, DIGU, DIGL, SAM, DRM, SPEC
+        # 1:1 mapping today.
+        return mode
+
+    def _wdsp_filter_for(self, mode: str) -> tuple[float, float]:
+        """Translate Lyra's per-mode RX bandwidth into WDSP bandpass
+        edges (low_hz, high_hz).
+        """
+        bw = int(self._rx_bw_by_mode.get(mode, 2700))
+        if mode in ("USB", "DIGU"):
+            return (200.0, float(bw))
+        if mode in ("LSB", "DIGL"):
+            return (-float(bw), -200.0)
+        if mode == "CWU":
+            pitch = float(self._cw_pitch_hz)
+            half = bw / 2.0
+            return (pitch - half, pitch + half)
+        if mode == "CWL":
+            pitch = -float(self._cw_pitch_hz)
+            half = bw / 2.0
+            return (pitch - half, pitch + half)
+        # AM / DSB / FM / SAM — symmetric around DC
+        half = bw / 2.0
+        return (-half, half)
+
+    def _wdsp_agc_for(self, profile: str) -> str:
+        """Map Lyra's AGC profile to a WDSP AGC mode name."""
+        # Lyra: off / fast / med / slow / auto / custom
+        # WDSP: FIXED / LONG / SLOW / MED / FAST / CUSTOM
+        return {
+            "off":    "FIXED",
+            "fast":   "FAST",
+            "med":    "MED",
+            "slow":   "SLOW",
+            "auto":   "MED",       # auto rides MED with periodic threshold tweaks
+            "custom": "CUSTOM",
+        }.get(profile.lower() if profile else "med", "MED")
+
     def _do_demod(self, iq):
         """Route IQ through the RX channel, then apply AGC + volume,
         then send to the audio sink.
 
-        Phase 2 refactor: the channel (lyra/dsp/channel.py) owns the
-        decimation, notch chain, demods, and NR. AGC + final volume
-        staging stay here since they're routing-side concerns. The
-        channel returns 48 kHz audio for any complete demod blocks
-        ready in its buffer; empty array if no full block yet.
-
-        WDSP integration path: when WdspChannel(DspChannel) lands,
-        this function doesn't change at all. Channel returns audio,
-        AGC + sink runs the same way."""
+        v0.0.9.6: when ``_use_wdsp_engine`` is True, the work is dispatched
+        to ``_do_demod_wdsp`` which uses the native WDSP DLL via cffi.
+        Legacy Python DSP chain (decim/notch/demod/AGC/NR/ANF/leveler/
+        binaural) only runs when ``LYRA_USE_LEGACY_DSP=1`` is set.
+        """
         mode = self._mode
         if mode == "Off":
             return
         if mode == "Tone":
             self._emit_tone(len(iq))
+            return
+
+        # WDSP engine path — short-circuits the entire legacy chain.
+        if self._use_wdsp_engine and self._wdsp_rx is not None:
+            self._do_demod_wdsp(iq)
             return
 
         # Push current notch state to channel each call (cheap; the
@@ -5806,6 +6093,79 @@ class Radio(QObject):
                     self._dbg_stage_max["sink"] = _dt
         except Exception as e:
             print(f"audio sink error: {e}")
+
+    def _do_demod_wdsp(self, iq):
+        """WDSP-engine RX audio path (v0.0.9.6).
+
+        Pushes IQ through ``_wdsp_rx`` and writes the resulting 48 kHz
+        stereo audio to the audio sink. WDSP handles the entire RX chain
+        internally — decim, notches, demod, AGC, NR, ANF, output filter —
+        in its own C thread (no GIL contention with Python's writer / sink
+        threads). Lyra applies output-stage volume / mute and the TCI tap.
+
+        Note on the HL2 spectrum mirror:
+
+        Lyra's pure-Python demods (lyra/dsp/demod.py:42-47) compensate for
+        HL2's mirrored baseband by building flipped per-mode bandpass
+        phasors.  WDSP — which Thetis also uses with HL2 — doesn't need
+        any compensation because WDSP's INTERNAL filter convention is
+        also flipped: WDSP's USB filter at (+200,+3100) actually selects
+        negative-baseband content, and WDSP's LSB filter at (-3100,-200)
+        selects positive-baseband content.  The two mirrors (HL2's and
+        WDSP's) cancel out, so we hand WDSP raw HL2 IQ untouched and
+        get correct sideband selection.  Confirmed empirically with a
+        synthetic tone test: a +1500 Hz baseband tone demodulates clean
+        in WDSP LSB mode, a -1500 Hz tone demodulates clean in USB mode.
+
+        ``_wdsp_rx.process()`` accepts variable-length IQ and buffers
+        internally to whole ``in_size`` blocks; returns 0+ complete output
+        blocks per call. Empty result = no full block ready yet, which is
+        expected on the first few calls after a freq / mode change.
+        """
+        try:
+            audio = self._wdsp_rx.process(iq)
+        except Exception as exc:
+            print(f"[Radio] WDSP rx process error: {exc}")
+            return
+        if audio.size == 0:
+            return
+
+        # Output-stage volume + mute. WDSP's own PanelGain1 handles the
+        # operator-level gain; volume and mute live above the engine so
+        # quick mute/unmute transitions don't ride through WDSP's slew
+        # envelope (which is sized for mode/freq transitions, not for
+        # operator finger-on-mute).
+        if self._muted:
+            audio = audio * 0.0
+        else:
+            v = float(self._volume)
+            if v != 1.0:
+                audio = audio * np.float32(v)
+
+        try:
+            self._audio_sink.write(audio)
+        except Exception as exc:
+            print(f"[Radio] WDSP audio sink error: {exc}")
+        # TCI audio tap — same contract as the legacy path so any
+        # subscribed TCI client gets the exact audio the operator hears.
+        try:
+            self.audio_for_tci_emit.emit(audio)
+        except Exception:
+            pass
+        # AGC gain readout — WDSP's AGC runs inside the engine, so the
+        # operator's UI gain meter has to read back from WDSP rather
+        # than from the bypassed Python ``_wdsp_agc``. Throttled to
+        # one update per several blocks (~6 Hz) since the meter
+        # repaints at that rate anyway and per-block reads add a
+        # critical-section take per call.
+        try:
+            self._wdsp_agc_meter_skip = (
+                getattr(self, "_wdsp_agc_meter_skip", 0) + 1)
+            if self._wdsp_agc_meter_skip >= 8:
+                self._wdsp_agc_meter_skip = 0
+                self.agc_action_db.emit(self._wdsp_rx.get_agc_gain_db())
+        except Exception:
+            pass
 
     def _emit_tone(self, n: int):
         # n is the size of the incoming IQ block at self._rate. The
@@ -6052,6 +6412,12 @@ class Radio(QObject):
                 )
             except Exception:  # noqa: BLE001
                 pass
+        # WDSP native engine — AGC mode lives inside the engine.
+        if self._wdsp_rx is not None:
+            try:
+                self._wdsp_rx.set_agc(self._wdsp_agc_for(name))
+            except Exception as exc:
+                print(f"[Radio] WDSP rx agc-change error: {exc}")
         # Auto-track the threshold only in "auto" profile; everything else
         # leaves the threshold where the user put it.
         if name == "auto":
@@ -6124,6 +6490,15 @@ class Radio(QObject):
         _QS("N8SDR", "Lyra").setValue("dsp/cw_pitch_hz", new_pitch)
         # Channel rebuilds CWU/CWL demods at the new pitch internally.
         self._rx_channel.set_cw_pitch_hz(float(new_pitch))
+        # WDSP RX engine — the CW filter is centred on the pitch, so a
+        # pitch change requires a filter re-push when the active mode is
+        # CWU or CWL.
+        if self._wdsp_rx is not None and self._mode in ("CWU", "CWL"):
+            try:
+                low, high = self._wdsp_filter_for(self._mode)
+                self._wdsp_rx.set_filter(low, high)
+            except Exception as exc:
+                print(f"[Radio] WDSP rx cw-pitch error: {exc}")
         # Recompute + re-emit passband so the panadapter overlay
         # shifts to the new CW position immediately.
         self._emit_passband()
@@ -6345,10 +6720,16 @@ class Radio(QObject):
             self._dbg_stage_total[_k] = 0.0
 
     def _make_sink(self):
+        # v0.0.9.6: sinks register their outbound on the shared
+        # AudioMixer.  Constructing a new sink automatically takes
+        # over the mixer's outbound (replacing the previous sink's
+        # callback).  ``mixer.set_outbound`` is called inside each
+        # sink's __init__.
         if self._audio_output == "AK4951":
-            return AK4951Sink(self._stream)
+            return AK4951Sink(self._stream, self._audio_mixer)
         try:
             return SoundDeviceSink(
+                self._audio_mixer,
                 rate=48000,
                 device=self._pc_audio_device_index,
                 host_api_label=self._pc_audio_host_api,

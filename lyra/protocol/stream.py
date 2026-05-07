@@ -232,60 +232,77 @@ class HL2Stream:
         # independent RX/TX frequency control. C4[5:3] = NDDC - 1
         # (0 = 1 receiver).
         self._config_c4 = 0x04  # duplex=1, NDDC=1
-        # Round-robin C&C register table — keyed by c0, value is the
-        # (c1,c2,c3,c4) bytes. Each USB block in an EP2 frame can carry
-        # one C&C write, so to keep ALL configured registers fresh on
-        # the HL2 gateware we cycle through this table across frames.
-        # Standard HPSDR P1 host pattern: each frame increments the
-        # round-robin index and wraps back to 0 after the last
-        # register, so every register is re-asserted within a
-        # bounded number of frames. Without this, only the most-
-        # recently-modified register stays "fresh" — the HL2 EP6 IQ
-        # stream could stall in a way only a manual sample-rate
-        # cycle unsticks (because that cycle re-issues C&C 0x00).
+        # ── Round-robin C&C register table (Thetis-mirror) ──────────
+        # Mirrors Thetis ChannelMaster\\networkproto1.c::WriteMainLoop_HL2
+        # case 0..18 verbatim.  Each USB block in an EP2 frame carries
+        # one C&C write.  Each UDP datagram carries 2 USB blocks.  One
+        # full cycle of 19 registers takes 19/2 = 9.5 datagrams ≈ 25 ms
+        # at 380.95 Hz wire cadence -- same as Thetis.
+        #
+        # The Thetis 19-register cycle was first attempted in v0.0.9.6
+        # round 11 (without the audio mixer thread); it destabilized
+        # PC Soundcard feed (deque pegged at maxlen, ov=333956 in
+        # ~30s).  Root cause was bursty wire cadence from the missing
+        # audio mixer thread, NOT the register cycle itself.  With the
+        # mixer thread + lockstep gate now in place (v0.0.9.6 round 13),
+        # wire cadence is steady 380.95 Hz mirroring Thetis -- safe to
+        # re-enable the full register schedule.
+        #
+        # ── ADDRESSING BUG FIX (round 11) ───────────────────────────
+        # Pre-round-11 Lyra had two register entries: 0x00 (correct)
+        # and "0x17" (WRONG -- the dict key was the C0 byte literal,
+        # which on the wire decodes to register address 0x0b = HL2's
+        # CW step-ATT/keyer config, NOT the TX-latency register).
+        # TX latency lives at register address 0x17 = C0 byte 0x2e
+        # (= 0x17 << 1 with PTT bit 0 clear), per Thetis case 17.
+        # Lyra was poking the keyer config at 190 Hz with garbage --
+        # any "cmd 0x17 reduced clicks" finding from earlier was
+        # coincidence or Python-timing noise.  Fixed below.
+        # ────────────────────────────────────────────────────────────
+        #
+        # Registers Lyra doesn't yet drive (TX freq, RX2 freq, mic,
+        # drive level, CW config, EER, BPF2, reset-on-disconnect)
+        # carry zeros -- sufficient for HL2 RX-only operation.  When
+        # TX (v0.2) lands, those entries get populated with real
+        # state via the existing setters (set_lna_gain_db, etc.)
+        # plus new ones (set_tx_freq, set_drive_level, ...).
+        #
+        # 0x2e (TX latency) layout (HL2 register address 0x17):
+        #   C3 = ptt_hang & 0x1f  (5-bit, max 31 ms)
+        #   C4 = latency  & 0x7f  (7-bit, max 127 ms)
+        # Gateware default: 10ms / 4ms.  We ship 40/12 for headroom
+        # against Python-side jitter.
+        # NOTE 2026-05-06 (round 15): the full 19-register Thetis
+        # cycle is REVERTED back to a 2-register baseline because
+        # multiple field tests (round 11 with mixer; rounds 14a/b/c
+        # with mixer + lockstep) showed PC Sound feed-rate dropping
+        # from clean (~100%) to ~95% (with periodic stumbling
+        # underrun spikes) immediately on enabling the cycle.  The
+        # destabilization isn't on Lyra's side -- it's on HL2's
+        # gateware: writing the additional registers to addresses
+        # that Lyra doesn't drive coherently appears to cause the
+        # gateware to do *something* that interferes with EP6 IQ
+        # delivery cadence, which the DSP worker then sees as fewer
+        # IQ blocks per second, which surfaces as audio underrun
+        # downstream.
+        #
+        # The 0x17 -> 0x2e address-bug fix is preserved (it's a real
+        # bug regardless of the cycle change).  The rest of the
+        # Thetis cycle is parked until we figure out which specific
+        # register or value is destabilizing HL2.  Bisect candidates
+        # for v0.0.9.7: probably 0x1c (ADC assignments -- HL2 has
+        # only one ADC but the bit pattern matters), 0x14 (LNA C4
+        # = 0x40 override-enable bit being cycled at 20 Hz), or
+        # 0x16 (step-ATT enable bit 0x20 being cycled).
         self._cc_registers: dict[int, tuple[int, int, int, int]] = {
-            0x00: (SAMPLE_RATES[sample_rate], 0x00, 0x00, self._config_c4),
-            # ── HL2 FPGA TX/audio buffer config (C0=0x17) ──────────
-            #
-            # The HL2 has a tunable FPGA-side audio/TX buffer that
-            # smooths network jitter from the host (Python GIL/GC
-            # pauses, OS scheduling slop, etc.).  The same buffer
-            # feeds the AK4951 codec headphone-jack output during
-            # RX — so when this buffer underruns, the AK4951 plays
-            # silence/zeros for one or more samples and the operator
-            # hears an audible click.
-            #
-            # Steve Haynal (HL2 author) on the hermes-lite group:
-            #   "TX buffer latency is how much time of samples to
-            #    save in the TX buffer before beginning to transmit,
-            #    which helps smooth out any network UDP packet
-            #    jitter."
-            #
-            # Gateware compiled-in default: latency=10ms / hang=4ms.
-            # Steve's planned default bump: 20/12.  We use 40/12 for
-            # a generous margin against Python-side jitter sources
-            # that don't exist in C-only paths like Thetis.
-            #
-            # Command 0x17 layout (from hermeslite.py
-            # config_txbuffer):
-            #   C0 = 0x17
-            #   C1 = 0x00 (reserved)
-            #   C2 = 0x00 (reserved)
-            #   C3 = ptt_hang & 0x1f       (5-bit, max 31 ms)
-            #   C4 = latency & 0x7f        (7-bit, max 127 ms)
-            #
-            # See `docs/architecture/audio_architecture.md` (to be
-            # updated) and the v0.0.9.6 audit thread.  Operator
-            # symptom this targets: occasional crackles on HL2 audio
-            # jack mode that survived the EP2-writer underrun fix
-            # (Option Z) — confirming the underrun is on the HL2
-            # FPGA side, not on the host writer side.
-            #
-            # If the operator wants to tune this later, expose
-            # latency_ms + ptt_hang_ms in Settings → Audio.  For
-            # v0.0.9.6 we ship the recommended defaults.
-            0x17: (0x00, 0x00, 12 & 0x1F, 40 & 0x7F),
+            0x00: (SAMPLE_RATES[sample_rate], 0x00, 0x00,
+                   self._config_c4),                # general settings
+            0x2e: (0, 0, 12 & 0x1F, 40 & 0x7F),     # TX latency (HL2 reg 0x17)
         }
+        self._cc_cycle: tuple[int, ...] = (
+            0x00,  # general
+            0x2e,  # TX latency
+        )
         self._cc_rr_idx: int = 0
         self._cc_lock = threading.Lock()
         # Legacy fallback — the old code path stored last-sent register
@@ -393,6 +410,22 @@ class HL2Stream:
         # an empty deque.
         self._ep2_send_sem = threading.Semaphore(0)
         self._unsignaled_audio_samples: int = 0
+        # ── Audio mixer lockstep slot (v0.0.9.6 Thetis-mirror) ──────
+        # When the AudioMixer thread (lyra/dsp/audio_mixer.py) is
+        # paced by lockstep with the EP2 writer, the mixer's
+        # outbound callback releases this slot semaphore at 0
+        # (representing "no slot has been drained yet") and waits.
+        # Each successful EP2 audio send releases the slot,
+        # unblocking the mixer's NEXT outbound dispatch.  Net
+        # effect: wire cadence becomes exactly 380.95 Hz steady,
+        # mirroring Thetis WaitForSingleObject(hobbuffsRun[1])
+        # at network.c:1322.  The slot is unused (always
+        # available) when no mixer is connected (PC Sound or
+        # NullSink modes); the writer just releases into a
+        # semaphore counter no one is waiting on, which is a
+        # no-op for any blocked-on-it caller and harmless for
+        # the writer.
+        self._lockstep_slot: threading.Semaphore = threading.Semaphore(0)
         # Deque high-water mark (v0.0.9.2 audio rebuild Commit 1).
         # Tracks the maximum deque depth observed since the last UI
         # read.  After v0.0.9.2 Commit 3 lands real backpressure,
@@ -971,6 +1004,27 @@ class HL2Stream:
         # tolerance is at least hundreds of ms, but we don't want
         # to push it).
         EP2_KEEPALIVE_MAX_GAP = 0.050  # 50 ms
+        # ── Cadence-gate experiment (round 12, REVERTED) ────────────
+        # Tried adding a soft sleep gate inside the writer to enforce
+        # a steady 2.625 ms inter-packet interval (mirroring Thetis's
+        # WaitForSingleObject(hobbuffsRun) lockstep pattern).  Failed
+        # because Windows time.sleep snaps to 1 ms granularity even
+        # with timeBeginPeriod(1), so every requested 2.625 ms sleep
+        # actually slept ~3 ms.  Wire cadence dropped to ~333 Hz =
+        # only 42 kHz output sample rate -- AK4951 drains its FIFO
+        # at 48 kHz so the codec output starved cyclically (audible
+        # as "horrid pulsing"), AND the producer-side deque hit its
+        # 48000 cap with ov=333,956 in ~10 s.  Operator confirmed
+        # the symptom + metrics 2026-05-06.
+        #
+        # If we ever want a real cadence gate it would need either
+        # spin-wait (CPU burn), a higher-resolution timer API
+        # (CreateWaitableTimerEx with WAITABLE_TIMER_HIGH_RESOLUTION),
+        # or a producer-side rewrite to lockstep (matching Thetis's
+        # network.c:1287-1339 pattern -- aamix produces 126, signals,
+        # blocks on hobbuffsRun until consumer sends, repeats).
+        # Lockstep is the cleanest fix but it's a producer-pipeline
+        # restructure.  Parked.
         print(f"[HL2Stream] EP2 cadence: producer-paced via "
               f"semaphore; "
               f"{EP2_HEARTBEAT_TIMEOUT*1000:.0f} ms heartbeat "
@@ -1058,6 +1112,11 @@ class HL2Stream:
                 # writer thread; we just log and continue.
                 try:
                     with self._cc_lock:
+                        # Round-robin over current dict keys (sorted
+                        # for deterministic order).  Round-9 baseline
+                        # behaviour.  Setters like ``set_lna_gain_db``
+                        # add entries dynamically (e.g. 0x14 for
+                        # LNA) and this picks them up automatically.
                         if self._cc_registers:
                             keys = sorted(self._cc_registers.keys())
                             c0 = keys[self._cc_rr_idx % len(keys)]
@@ -1077,6 +1136,26 @@ class HL2Stream:
                     # Path C.3: stamp the send so the keepalive
                     # fence above can measure gap-since-last-send.
                     last_ep2_send_t = time.monotonic()
+                    # ── v0.0.9.6 Thetis-mirror lockstep ack ────────
+                    # If this iteration drained audio (i.e., the
+                    # AudioMixer pushed and is now waiting on
+                    # _lockstep_slot), release the slot so the
+                    # mixer can dispatch its NEXT outbound frame.
+                    # Mirrors Thetis ReleaseSemaphore(hobbuffsRun
+                    # [1], 1, 0) at WriteMainLoop_HL2 line 1200.
+                    # Net effect: wire cadence becomes exactly
+                    # 380.95 Hz, paced by HL2's own audio crystal
+                    # via the mixer's blocking outbound.
+                    #
+                    # Released ONLY for audio-bearing frames
+                    # (signaled + inject_audio_tx).  C&C-only
+                    # heartbeat frames don't correspond to a
+                    # mixer outbound dispatch, so don't release
+                    # for those -- otherwise the slot count
+                    # would drift up and the lockstep would
+                    # stop being lockstep.
+                    if signaled and self.inject_audio_tx:
+                        self._lockstep_slot.release()
                 except OSError:
                     # Socket likely closed during stop().  Exit
                     # cleanly.

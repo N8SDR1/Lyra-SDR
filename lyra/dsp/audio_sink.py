@@ -162,11 +162,23 @@ class AudioSink(Protocol):
 class AK4951Sink:
     """Route audio to the HL2's AK4951 line-level output via EP2 TX slots.
 
+    v0.0.9.6 architecture (Thetis-mirror):
+        DSP worker -> AudioMixer.add_input -> mixer thread ->
+        AK4951Sink._lockstep_outbound -> HL2 EP2 deque -> EP2 writer
+
     The AK4951 is a true STEREO codec: the EP2 audio slot has separate
     16-bit Left + Right fields, and the gateware routes both to the
     AK4951 DAC's L/R channels. So Balance is honored end-to-end — we
-    apply per-channel gains here and feed (N, 2) stereo into the EP2
-    queue, which packs L and R independently into the frame.
+    apply per-channel gains here on the producer side (write(), which
+    runs on the DSP worker) and feed (N, 2) stereo into the AudioMixer.
+    The mixer thread then dispatches 126-sample chunks to our
+    ``_lockstep_outbound`` callback, which pushes to the HL2 deque,
+    signals the EP2 writer, and BLOCKS until the writer has actually
+    sent the packet.  The lockstep wait is the gate that produces
+    steady 380.95 Hz wire cadence -- mirroring Thetis's
+    ``WaitForSingleObject(prn->hobbuffsRun[1], INFINITE)`` pattern in
+    ``ChannelMaster\\network.c::WriteUDPFrame`` for the HERMES audio
+    codec path.
 
     Sink-swap cleanup: the underlying HL2Stream owns a TX audio
     queue (deque) that's NOT per-sink — it's a long-lived buffer
@@ -176,30 +188,20 @@ class AK4951Sink:
     interleaved in the EP2 frames).
     """
 
-    def __init__(self, stream):
+    def __init__(self, stream, mixer=None):
         self._stream = stream
+        self._mixer = mixer
+        self._closed = False
         # Drain any leftover TX audio from a previous session before
         # we start enqueuing fresh samples.
         if hasattr(stream, "clear_tx_audio"):
             stream.clear_tx_audio()
-
-        # NOTE (Path C, v0.0.9.2): silence pre-fill REMOVED.
-        # Earlier (timer-paced) revisions pre-filled 100 ms of
-        # silence so the EP2 frame builder never woke to find an
-        # empty deque between DSP worker bursts.  Path C replaces
-        # the timer-paced wait with a semaphore-paced wait
-        # (HL2Stream._ep2_send_sem, signaled by queue_tx_audio
-        # once per 126 samples produced), which makes pre-fill
-        # unnecessary BY CONSTRUCTION -- the writer cannot wake
-        # unless 126 samples are already queued.  Removing the
-        # pre-fill saves 100 ms of audio latency at the AK4951
-        # codec output, which is otherwise stuck at the front of
-        # the deque forever (drain rate == fill rate at steady
-        # state, so the head never catches up).
-        # If a regression appears (sustained underruns visible
-        # in the status bar), revisit -- but the right fix would
-        # be a smaller pre-fill (e.g. 252 samples = 5 ms = 2 EP2
-        # frames), not the original 4800.
+        # Drain any stale lockstep tokens from a previous sink life.
+        try:
+            while stream._lockstep_slot.acquire(blocking=False):  # noqa: SLF001
+                pass
+        except Exception:
+            pass
 
         self._stream.inject_audio_tx = True
         # Stereo balance gains. Default = equal-power center
@@ -208,8 +210,29 @@ class AK4951Sink:
         self._left_gain = 0.7071067811865476
         self._right_gain = 0.7071067811865476
 
+        # v0.0.9.6 round 16: AudioMixer thread is OPTIONAL (mixer
+        # may be None).  When None, fall back to the round-9
+        # legacy direct path: write() pushes straight to HL2's
+        # _tx_audio deque + signals EP2 writer, no separate mixer
+        # thread, no lockstep gate.  This matches operator-tested
+        # clean PC Sound baseline.  Lockstep wire-cadence pacing
+        # comes back via WaitableTimerEx HIGH_RESOLUTION inside
+        # the EP2 writer (TODO v0.0.9.6) -- no extra Python thread.
+        if self._mixer is not None:
+            self._mixer.set_outbound(self._lockstep_outbound)
+
     def write(self, audio: np.ndarray) -> None:
-        if audio.size == 0:
+        """DSP worker producer side -- non-blocking.
+
+        With mixer attached: applies L/R gains, pushes (N, 2) stereo
+        into the mixer's input ring; mixer thread dispatches at codec
+        cadence to ``_lockstep_outbound`` below.
+
+        Without mixer (round-9 legacy path): applies L/R gains and
+        pushes directly to HL2Stream._tx_audio deque, signaling the
+        EP2 writer.  No separate audio mixer thread.
+        """
+        if audio.size == 0 or self._closed:
             return
         # Two input shapes are accepted:
         #   - mono (N,) — duplicated to L/R, then per-channel balance
@@ -228,7 +251,50 @@ class AK4951Sink:
             l = mono * self._left_gain
             r = mono * self._right_gain
             stereo = np.stack((l, r), axis=1)            # (N, 2)
-        self._stream.queue_tx_audio(stereo)
+
+        if self._mixer is not None:
+            # Mixer-routed path: push to mixer (fast, non-blocking;
+            # copies into ring and releases per-stream Ready semaphore
+            # once per 126 samples).  Mixer thread dispatches.
+            self._mixer.add_input(0, stereo)
+        else:
+            # Legacy direct path (round-9 baseline): push straight to
+            # HL2Stream's TX queue.  EP2 writer drains as before.
+            self._stream.queue_tx_audio(stereo)
+
+    def _lockstep_outbound(self, samples_lr: np.ndarray) -> None:
+        """Mixer thread consumer side -- BLOCKS in lockstep.
+
+        Called by the AudioMixer thread once per 126-sample output
+        chunk with a (126, 2) float32 array of (L, R) pairs.  Pushes
+        to the HL2 EP2 deque, signals the EP2 writer there's an
+        audio frame ready, then waits on ``_lockstep_slot`` until
+        the writer has sent the packet.  This is the wire-cadence
+        pacer: while we're waiting, the mixer thread is paused, so
+        the next dispatch can't run until the wire has caught up.
+
+        Mirrors Thetis ``ChannelMaster\\network.c::WriteUDPFrame``
+        lines 1316-1322 (the L-R producer side of the lockstep
+        handshake).
+        """
+        if self._closed:
+            return
+        n = samples_lr.shape[0]
+        # Convert ndarray rows to the deque's tuple format.  At
+        # 126 rows × ~380 Hz = ~48k tuples/sec; small Python overhead
+        # vs bulk numpy.  list-comp + tolist is faster than per-row
+        # tuple() calls (timed at ~25 us per 126-row batch).
+        arr_list = samples_lr.tolist()  # list of [l, r] lists
+        pairs = [(row[0], row[1]) for row in arr_list]
+        with self._stream._tx_audio_lock:  # noqa: SLF001
+            self._stream._tx_audio.extend(pairs)  # noqa: SLF001
+        # Signal the EP2 writer there's a 126-sample frame available.
+        # The writer's drain path will release ``_lockstep_slot``
+        # after sendto() returns.
+        self._stream._ep2_send_sem.release()  # noqa: SLF001
+        # Block until writer has sent the packet (lockstep gate).
+        # This is what produces steady 380.95 Hz wire cadence.
+        self._stream._lockstep_slot.acquire()  # noqa: SLF001
 
     def set_lr_gains(self, left: float, right: float) -> None:
         """Update the L/R channel gains. Called by Radio whenever the
@@ -261,6 +327,42 @@ class AK4951Sink:
         #      audio already dropped the long tail, but the EP2 thread
         #      might have missed pulling a few samples if it was
         #      busy when we slept).
+        # ── v0.0.9.6 lockstep-aware close ───────────────────────────
+        # Mark closed FIRST so any in-flight outbound() returns
+        # early instead of racing the teardown.  Our _lockstep_outbound
+        # checks self._closed before doing any work.
+        #
+        # We deliberately do NOT call self._mixer.set_outbound(None)
+        # here.  The Radio's sink-swap path constructs the NEW sink
+        # (which calls mixer.set_outbound(self._lockstep_outbound)
+        # in __init__) AFTER calling old_sink.close() -- so by the
+        # time the new sink takes over, our close has already run.
+        # If we cleared the outbound here, we'd race-clobber the
+        # new sink's just-installed callback when the swap order
+        # ever inverts (which it does when the new sink is built
+        # before the old is closed).  The mixer naturally moves
+        # past us once the new sink calls set_outbound; until that
+        # happens, our outbound returns immediately due to _closed.
+        self._closed = True
+        # Release the lockstep slot a few times to unblock any
+        # in-flight mixer outbound that's waiting on it.  The
+        # mixer's outbound will return immediately because _closed
+        # is True; the next mixer iteration will use the new
+        # (null) outbound.  Stale tokens left in the semaphore are
+        # harmless -- the next AK4951Sink (or future re-attach)
+        # drains them in __init__ before the first outbound.
+        try:
+            for _ in range(4):
+                self._stream._lockstep_slot.release()  # noqa: SLF001
+        except Exception:
+            pass
+
+        # Quiet-pass v0.0.7.1 (audio_pops_audit P0.3): apply a brief
+        # fade-out before disabling EP2 audio injection.  Pre-fix this
+        # method flipped ``inject_audio_tx`` instantly, which made the
+        # AK4951's audio L/R bytes jump from real samples to zero in
+        # one EP2 frame (~2.6 ms cadence) — operator heard a click on
+        # every sink swap.
         FADE_MS = 5.0
         DRAIN_BUFFER_MS = 2.0
         if hasattr(self._stream, "fade_and_replace_tx_audio"):
@@ -326,7 +428,8 @@ class SoundDeviceSink:
     # init time from rate so this works the same at any future rate.
     _RING_SECONDS = 0.200
 
-    def __init__(self, rate: int = 48000, device: Optional[int] = None,
+    def __init__(self, mixer=None, rate: int = 48000,
+                 device: Optional[int] = None,
                  blocksize: int = 0, *,
                  use_rate_match: bool = True,
                  host_api_label: str = HOST_API_LABEL_AUTO):
@@ -359,6 +462,8 @@ class SoundDeviceSink:
             ) from e
         import threading
         self._sd = sd
+        self._mixer = mixer
+        self._closed = False
         self._rate = rate
         self._use_rate_match = bool(use_rate_match)
         self._host_api_label = str(host_api_label)
@@ -456,7 +561,17 @@ class SoundDeviceSink:
             callback=self._audio_callback,
             extra_settings=extra_settings,
         )
-        self._stream.start()
+        # ── DO NOT start the stream yet ─────────────────────────────
+        # PortAudio fires _audio_callback as soon as start() returns.
+        # The callback reads ``self._rmatch`` (and any other state
+        # initialized below).  If we start() before assigning
+        # ``self._rmatch = None`` / building the RMatch instance,
+        # the first callback fires on a partially-initialized object
+        # and crashes with "AttributeError: 'SoundDeviceSink' object
+        # has no attribute '_rmatch'" — observed in v0.0.9.6 round 11
+        # field test when an operator switched audio sinks.  Build
+        # all callback-visible state first, start() last.
+        # ────────────────────────────────────────────────────────────
 
         # ── v0.0.9.6: WDSP-derived adaptive resampler ────────────
         #
@@ -596,9 +711,32 @@ class SoundDeviceSink:
                     f"Settings -> Audio -> Output device."
                 )
         except Exception as e:  # noqa: BLE001
-            # Query failure is non-fatal -- audio is already running.
+            # Query failure is non-fatal -- audio is not yet running.
             print(f"[Lyra audio] SoundDeviceSink: device query "
-                  f"failed ({e}); audio streaming anyway")
+                  f"failed ({e}); starting stream anyway")
+
+        # ── NOW start the PortAudio stream ──────────────────────────
+        # All callback-visible state (``self._rmatch``, ring buffer,
+        # underrun counters, etc.) is initialized above.  The very
+        # first audio callback can fire any time after this returns;
+        # if any callback-visible state is initialized AFTER this
+        # call, an early callback will crash on the missing
+        # attribute.
+        # ────────────────────────────────────────────────────────────
+        self._stream.start()
+
+        # SoundDeviceSink writes direct to RMatch -- mixer is
+        # bypassed entirely in PC Sound mode.  If a mixer was
+        # passed (HL2 audio jack mode is reachable elsewhere in
+        # the same Radio instance), clear any prior outbound so
+        # leftover AK4951Sink references don't hold the mixer in
+        # a broken state.  When mixer is None (round-9 mode),
+        # nothing to do.
+        if self._mixer is not None:
+            try:
+                self._mixer.set_outbound(None)
+            except Exception:
+                pass
 
     @staticmethod
     def _pick_wasapi_default(sd):
@@ -726,24 +864,40 @@ class SoundDeviceSink:
                 self._underruns += 1
 
     def write(self, audio: np.ndarray) -> None:
-        """Non-blocking write. Prepares audio for the device.
+        """DSP worker producer side -- non-blocking, direct to RMatch.
 
-        v0.0.9.6: when rate-match is enabled (default), feeds the
-        mono audio through RMatch — L/R gains are applied later in
-        the audio callback when reading.  When rate-match is off,
-        falls back to the legacy stereo-ring path.
+        v0.0.9.6 architectural NOTE: SoundDeviceSink does NOT route
+        through AudioMixer.  Reason: PortAudio's audio callback
+        thread is already pacing the wire-side cadence (pulls
+        samples from RMatch at WASAPI's rate), so the mixer thread
+        between DSP and RMatch would add no value -- it's pure
+        overhead.  In Lyra's Python-with-GIL threading model the
+        overhead is measurable: field-tested at v0.0.9.6 round 14b
+        the mixer-routed path dropped DSP feed rate to 83% of nominal
+        (39.3 kHz instead of 48 kHz) due to GIL contention between
+        the mixer thread and DSP worker.  Direct path here avoids
+        the third Python thread entirely.
 
-        Two input shapes are accepted (see AK4951Sink.write for
-        rationale): mono (N,) or stereo (N, 2).  BIN feeds the
-        stereo path; everything else hits the mono path.
+        This deviates from a strict Thetis port: Thetis routes
+        ASIO output through aamix too (cmasio.c).  But Thetis's
+        DSP runs in C threads without GIL -- the aamix overhead is
+        invisible.  Adding aamix-style mixing back here lands when
+        v0.1 RX2 needs the mixing point for stereo split, by which
+        time the mixer's overhead is justified by the stereo work.
+        Until then: PC Sound bypass the mixer.
+
+        AK4951Sink (HL2 audio jack) DOES go through the mixer
+        because the lockstep cadence pacing it provides is
+        essential for steady 380.95 Hz wire arrival at the HL2
+        codec.
         """
-        if audio.size == 0:
+        if audio.size == 0 or self._closed:
             return
 
         # Rate-matched path.  RMatch is mono-only; collapse stereo
         # input to mono by averaging (BIN audio is the only stereo
         # producer and BIN's L/R are already correlated, so averaging
-        # is fine).  L/R gains apply in the callback.
+        # is fine).  L/R gains apply in the audio callback.
         if self._rmatch is not None:
             if audio.ndim == 2 and audio.shape[1] == 2:
                 mono = (audio[:, 0] + audio[:, 1]).astype(
@@ -831,6 +985,13 @@ class SoundDeviceSink:
         self._right_gain = float(right)
 
     def close(self) -> None:
+        # v0.0.9.6 lockstep-aware close: ``_closed`` flag guards any
+        # in-flight _ring_outbound dispatch.  Don't touch the mixer's
+        # outbound -- the new sink (next in the swap) is responsible
+        # for taking over via its own set_outbound call.  See the
+        # AK4951Sink.close() comment for the full rationale.
+        self._closed = True
+
         # v0.0.9.6 polish (B): persist current rmatch var so the
         # next Lyra session starts pre-primed at the locked-in
         # ratio.  Only save if control loop ever became active

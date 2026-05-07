@@ -51,10 +51,23 @@ content below has been mass-renumbered to the new scheme.
   positives + false negatives in field testing), tunable staleness
   threshold, live drift readout in profile manager, TCI server +
   profile manager dialog stability fixes.
-- **v0.0.9.6** "Audio Foundation" — pending; ports WDSP `aamix.c`,
-  `varsamp.c`, `rmatch.c`, `patchpanel.c::SetRXAPanelPan` and flips
-  default audio output to HL2 onboard codec via EP2 (HERMES path).
-  See §13 below for the full audio architecture decision.
+- **v0.0.9.6** "Audio Foundation" — IN PROGRESS on
+  `feature/v0.0.9.6-audio-foundation`. Direction pivoted 2026-05-06
+  after extended audio-quality troubleshooting on the pure-Python
+  port path: per-sample numpy work in agc_wdsp / nr / nr2 / anf /
+  demod / channel was producing GIL contention with the EP2 writer
+  thread, manifesting as HL2 audio-jack clicks and PC Soundcard
+  motorboating that no amount of tweaking the Python chain
+  resolved. Commitment 2026-05-06 to call into the WDSP DSP engine
+  directly via cffi (the engine's own DLL is bundled at
+  `lyra/dsp/_native/`). Status: RX1 audio chain runs through the
+  native engine; mode/filter/AGC/CW-pitch/rate setters wired; NR
+  EMNR + ANR + ANF + LMS + AM/FM squelch wired; AGC gain readout
+  back. Still TBD: PC Soundcard rmatch/varsamp cffi port (~2x CPU
+  vs HL2-jack today because that path stays in pure Python),
+  manual notches, NB EXT-blanker init, RX2 / TX / PureSignal phases.
+  See §13 below for the full audio architecture and §14 for the
+  WDSP-DLL integration architecture.
 
 ---
 
@@ -260,11 +273,39 @@ These are Thetis-specific glue or trivially small:
 - `analyzer.c` — spectrum.  Lyra has its own GPU widget.
 - `main.c` — Win32 thread mgmt.  Use Python threading.
 
-### 4.3 Don't reach for cffi/WDSP DLL until profiling forces it
+### 4.3 cffi + WDSP DLL — adopted 2026-05-06
 
-Pure Python with NumPy comfortably handles 192k I/Q + 48k audio per
-RX, dual-RX, with overhead.  C extensions add wheel-build complexity
-that conflicts with Lyra's "pip install and go" ethos.
+**Earlier guidance** in this section said: "Don't reach for cffi /
+WDSP DLL until profiling forces it. Pure Python with NumPy
+comfortably handles 192k I/Q + 48k audio per RX." That guidance
+turned out to be optimistic.  Profiling DID force it: per-sample
+work in agc_wdsp / nr / nr2 / anf / demod / channel produced GIL
+contention with the EP2 writer thread that surfaced as audio
+clicks and motorboating.  We tried surgical fixes for several
+rounds before pivoting.
+
+**Current direction (v0.0.9.6+):** the RX (and eventually TX, RX2,
+PureSignal) DSP chain is implemented as cffi calls into the WDSP
+DSP engine — Lyra-relevant entry points declared in
+`lyra/dsp/wdsp_native.py`, high-level wrapper in
+`lyra/dsp/wdsp_engine.py`, native binaries bundled at
+`lyra/dsp/_native/` so installs don't depend on any other radio
+program being present on the operator's machine.
+
+**License posture:** Lyra is GPL-3.0-or-later, the bundled DSP
+engine is also GPL-3.0-or-later — link-compatible.
+
+**Wheel-build complexity worry:** the bundled-DLL approach
+sidesteps it entirely. The five DLLs ship with Lyra; cffi loads
+them at runtime. No compiler invocation at install or runtime.
+
+**The pure-Python DSP modules in `lyra/dsp/` stay in tree** as a
+LYRA_USE_LEGACY_DSP=1 fallback and as the basis for DSP layers
+that don't overlap WDSP (the spectrum widget, captured noise
+profiles UX, click-to-tune, etc.).  Cleanup pass after the native
+engine is solid through TX + PureSignal.
+
+See §14 below for the actual integration architecture.
 
 ## 5. Lyra threading model
 
@@ -1055,9 +1096,166 @@ conversion).
 
 ---
 
-*Last updated: 2026-05-06 after the operator-driven audio
-architecture decision (§13) — Thetis DB + source trace closed
-out the recurring "PC Soundcard glitch" debate.  Earlier:
-2026-05-02 senior-engineering pass that produced
-`implementation_playbook.md`.  Update this file when key
-decisions change.*
+## 14. WDSP-DLL integration architecture (added 2026-05-06)
+
+The audio-quality work in v0.0.9.6 pivoted from "port WDSP modules
+into Python" to "call into the WDSP DSP engine via cffi."  This
+section is the operative reference for how that's wired.
+
+### 14.1 Files that matter
+
+| File | Role |
+| --- | --- |
+| `lyra/dsp/_native/` | Bundled native DLLs (~16 MB total): `wdsp.dll`, `libfftw3-3.dll`, `libfftw3f-3.dll`, `rnnoise.dll`, `specbleach.dll` |
+| `lyra/dsp/wdsp_native.py` | cffi cdef declarations + DLL loader. Search order: explicit `dll_dir` arg → `LYRA_WDSP_DIR` env var → bundled `_native/` → fallback Thetis-HL2 install dirs (dev convenience only). |
+| `lyra/dsp/wdsp_engine.py` | High-level Python wrapper: `RxChannel`, `RxConfig`, `RxaMode`, `AgcMode`, `MeterType`. Stable API surface for Radio. |
+| `lyra/radio.py` `_open_wdsp_rx`, `_do_demod_wdsp`, `_wdsp_*_for` helpers | Integration into Radio. Default ON; `LYRA_USE_LEGACY_DSP=1` falls back. |
+| `lyra/dsp/worker.py` `process_block` | Worker-mode dispatch into `_do_demod_wdsp` + still calls `_maybe_run_fft` so panadapter is fed. |
+| `scratch/wdsp_port_status.md` | Living status doc. |
+| `scratch/test_wdsp_poc.py` | Standalone PoC. Run to verify the engine path is healthy without launching the full app. |
+
+### 14.2 What's wired vs what's pending
+
+**Wired (works in WDSP mode):**
+- RX1 audio: IQ in → WDSP RXA → 48 kHz stereo audio → audio sink
+- Mode: USB / LSB / AM / FM / CWU / CWL / DSB / SAM / DIGU / DIGL / DRM / SPEC
+- RX bandwidth (per-mode, propagates filter freqs to NBP0 + BP1)
+- Rate change (closes + reopens WDSP channel at new in_rate)
+- AGC mode (FIXED/LONG/SLOW/MED/FAST/CUSTOM via SetRXAAGCMode)
+- AGC gain readout (GetRXAMeter / RXA_AGC_GAIN, throttled to ~6 Hz)
+- NR (EMNR for nr1+nr2 backend, ANR for lms backend)
+- ANF (auto-notch)
+- LMS (independent toggle from NR backend)
+- AM / FM squelch
+- CW pitch (refilters when active mode is CWU / CWL)
+- Volume + mute (applied in Python after WDSP)
+- TCI audio tap (applied in Python after WDSP)
+- Spectrum / panadapter / S-meter (FFT path is independent of WDSP)
+
+**Inert in WDSP mode (deferred):**
+- Manual notches (right-click on spectrum) — needs WDSP NotchDB
+  cffi bindings + per-notch RXANBPSetFreqs handling
+- NB (noise blanker) UI — needs `create_nob` / `create_anb` cffi
+  bindings + initial-config in `_open_wdsp_rx`. Without those,
+  `SetEXTANBRun` segfaults the DLL because the EXT-blanker
+  objects are not created by `OpenChannel` alone.
+- Captured noise profile UX — Lyra's spectral-subtraction noise
+  reference. WDSP's EMNR uses its own internal noise tracker;
+  the captured-profile UX still loads/saves but doesn't apply
+  in WDSP mode. Either rewire to influence EMNR's noise estimate,
+  or leave as a Python-fallback feature.
+- Binaural (BIN) Hilbert phase split. WDSP returns plain stereo
+  with both channels equal. BIN was a Python-side post-processor
+  in the legacy chain. Either port to WDSP equivalent or run BIN
+  on top of WDSP's stereo output as a thin Python pass.
+- Leveler / APF — same story. Decide per-feature whether to wire
+  to a WDSP equivalent or keep as Python post-processing.
+
+**Crucial gotcha — WDSP filter convention:**
+WDSP's USB filter at `(+200, +3100)` selects content from the
+**negative** baseband, and LSB filter at `(-3100, -200)` selects
+**positive** baseband. (Internal NCO/demod sign flip in WDSP.)
+HL2 baseband is mirrored: USB-RF lands at negative baseband, LSB
+at positive. The two flips cancel out. So we hand HL2 IQ to WDSP
+**unmodified** and get correct sideband selection — the same way
+Thetis does. An earlier `np.conjugate(iq)` "compensation" was
+WRONG and produced reversed sidebands; do not re-add it without
+re-verifying with the synthetic-tone PoC.
+
+**Crucial gotcha — bandpass dispatch:**
+WDSP has TWO bandpass filters in the RXA chain. `BP1`
+(`SetRXABandpassFreqs`) is post-NR and only RUNS when AM/SAM/EMNR/
+ANR/ANF/SNBA is on. `NBP0` (`RXANBPSetFreqs`) is front-of-chain
+and always runs. SSB sideband selection lives in NBP0. The
+`RXASetPassband` collective updates BOTH (plus the SNBA output
+filter) and is what we call from `RxChannel.set_filter()`.
+**Do not** call `SetRXABandpassFreqs` directly for sideband
+selection — with all DSP off, BP1 is bypassed and the call is
+silently ignored.
+
+**Crucial gotcha — OpenChannel "block" parameter:**
+The 13th parameter to `OpenChannel` is a "block until output
+available" flag, not a CW BFO offset. Pass 1, not 0. The WDSP
+source comment is `// block until output available`. Passing 0
+makes `fexchange0` non-blocking and the output buffer can return
+stale data.
+
+**Crucial gotcha — output buffer size:**
+`fexchange0` writes `out_size = in_size * out_rate / in_rate`
+frames, NOT `in_size` frames. With in_size=1024 IQ at 192 kHz
+and out_rate=48 kHz, the output buffer holds 256 frames of audio,
+not 1024. Allocating 1024 leaves uninitialized memory in the
+trailing 768 slots and produces a buzzing "electrocuted" sound
+at the block rate. `RxChannel.__init__` computes `out_size`
+correctly; don't override it.
+
+### 14.3 Threading model with WDSP
+
+Same as §5 except the per-RX DSP heavy work moves into WDSP's
+own internal thread (created by `_beginthreadex` inside the DLL,
+not visible to Python). The Python worker thread (B.x changes)
+still runs `process_block` per IQ batch but the actual DSP
+arithmetic is GIL-free C now. That's the architectural fix that
+ended the click / motorboat saga: Python's writer / sink threads
+no longer compete with the DSP for the GIL.
+
+### 14.4 Deferred work tracked here so it doesn't get lost
+
+1. **PC Soundcard CPU optimization.** Today `lyra/dsp/rmatch.py`
+   and `lyra/dsp/varsamp.py` are pure-Python implementations of
+   the PI control loop and variable-rate resampler that
+   compensate for HL2-vs-soundcard clock drift. They run per-
+   sample with numpy and consume meaningful CPU — operator
+   reports PC Soundcard mode is ~2× HL2-jack-mode CPU. Native
+   equivalents exist in the bundled DLL; cffi-port `rmatch`
+   and `varsamp` to use them. Originally the §13.3 plan; now
+   straightforward since the DLL is already loaded.
+
+2. **NB (noise blanker) wiring.** Add `create_nob` / `create_anb`
+   to `wdsp_native._CDEF` plus default-config calls inside
+   `Radio._open_wdsp_rx` so `SetEXTNOBRun` / `SetEXTANBRun`
+   become safe to call. Then re-enable the wiring in
+   `Radio.set_nb_profile` (currently commented out with a note).
+
+3. **Manual notches.** Add `NotchDB*` cffi bindings, route
+   Lyra's notch-bank UI to write notches into WDSP's notch
+   database, run via the bandpass collective.
+
+4. **Captured noise profile + APF + Leveler + BIN.** Decide
+   per-module whether to wire to WDSP equivalents or run as
+   Python post-processing. Each is independent.
+
+5. **Cleanup pass.** Once RX/TX/PS are all on the native engine,
+   audit `lyra/dsp/agc_wdsp.py`, `nr.py`, `nr2.py`, `anf.py`,
+   `lms.py`, `demod.py`, `channel.py`, `leveler.py`, `binaural.py`
+   for what's still doing real work vs dead code reachable only
+   via `LYRA_USE_LEGACY_DSP=1`. Move the latter to
+   `lyra/dsp/legacy/` or delete entirely depending on whether
+   the fallback toggle stays as a permanent feature.
+
+### 14.5 Where to look when something's off
+
+* **Engine won't load** — DLL set missing or wrong arch. Check
+  `lyra/dsp/_native/`. Confirm five files: `wdsp.dll`,
+  `libfftw3-3.dll`, `libfftw3f-3.dll`, `rnnoise.dll`,
+  `specbleach.dll`. cffi error message names the missing DLL.
+* **Audio is silent** — `LYRA_USE_LEGACY_DSP` set inadvertently?
+  Check `Radio._use_wdsp_engine` is True. Then check
+  `_wdsp_rx is not None`.
+* **USB and LSB swapped** — someone re-added the conjugation.
+  Don't.
+* **Panadapter is dead but audio works** — worker mode bypassed
+  the FFT stage. `worker.py` `process_block`'s WDSP branch must
+  fall through to `_maybe_run_fft(samples)` before returning.
+* **Buzzing tone, no usable audio** — output buffer size wrong.
+  Confirm `RxChannel.out_size` matches `in_size * out_rate /
+  in_rate` (when in_rate ≥ out_rate).
+
+---
+
+*Last updated: 2026-05-06 evening — added §14 after RX1 audio
+chain went live on the native engine, USB/LSB/AM all confirmed
+correct on real signals, AGC gain readout restored. Earlier
+2026-05-06: §13 audio architecture decision; 2026-05-02 senior-
+engineering pass that produced `implementation_playbook.md`.
+Update this file when key decisions change.*
