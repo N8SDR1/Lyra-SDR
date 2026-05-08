@@ -296,6 +296,61 @@ class RxChannel:
         with self._lock:
             self._lib.SetRXAAGCTop(self.channel, float(max_gain_db))
 
+    # ── Per-profile AGC time constants ─────────────────────────────────
+    #
+    # SetRXAAGCMode picks the canonical mode preset, but Thetis (and
+    # WDSP best-practice) ALSO push the per-profile Decay/Hang/HangThresh
+    # values explicitly because the WDSP DLL's mode-preset table doesn't
+    # always update those fields when SetRXAAGCMode runs alone.  Without
+    # these explicit pushes, FAST / MED / SLOW / LONG all behave like
+    # whatever Decay/Hang was last loaded (or the init default), making
+    # them sound identical to operators.  See Thetis comboAGC handler
+    # in console.cs for the canonical per-profile values.
+
+    def set_agc_attack_ms(self, attack_ms: int) -> None:
+        """AGC attack time in milliseconds.  Thetis default ~2 ms."""
+        with self._lock:
+            self._lib.SetRXAAGCAttack(self.channel, int(attack_ms))
+
+    def set_agc_decay_ms(self, decay_ms: int) -> None:
+        """AGC decay time in milliseconds.  Thetis profile values:
+        LONG=2000, SLOW=500, MED=250, FAST=50."""
+        with self._lock:
+            self._lib.SetRXAAGCDecay(self.channel, int(decay_ms))
+
+    def set_agc_hang_ms(self, hang_ms: int) -> None:
+        """AGC hang time in milliseconds.  Thetis profile values:
+        LONG=2000, SLOW=1000, MED=0, FAST=0."""
+        with self._lock:
+            self._lib.SetRXAAGCHang(self.channel, int(hang_ms))
+
+    def set_agc_slope(self, slope: float) -> None:
+        """AGC compression slope (dB).  Thetis init default 0."""
+        with self._lock:
+            self._lib.SetRXAAGCSlope(self.channel, float(slope))
+
+    def set_agc_hang_threshold(self, hang_threshold: int) -> None:
+        """AGC hang-engagement threshold.  Operator-tunable; Thetis
+        runs MED/FAST with 100, others with operator value (default 0)."""
+        with self._lock:
+            self._lib.SetRXAAGCHangThreshold(self.channel, int(hang_threshold))
+
+    def set_agc_threshold(self,
+                          thresh_db: float,
+                          fft_size: int,
+                          sample_rate: int) -> None:
+        """AGC threshold dB (where AGC starts engaging above noise
+        floor).  WDSP needs the FFT size and sample rate to translate
+        the threshold-dB into per-bin reference power.  Thetis
+        defaults to ``fft_size=4096``, ``sample_rate=48000``."""
+        with self._lock:
+            self._lib.SetRXAAGCThresh(
+                self.channel,
+                float(thresh_db),
+                float(fft_size),
+                float(sample_rate),
+            )
+
     def set_panel_binaural(self, binaural: bool) -> None:
         """Set the panel's binaural mode.
 
