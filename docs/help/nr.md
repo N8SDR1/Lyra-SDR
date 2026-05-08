@@ -1,139 +1,149 @@
 # Noise Reduction (NR)
 
-Lyra's NR is a **streaming spectral-subtraction** noise reducer.
-It sits between the demodulator and AGC in the audio chain, so it
-cleans up hiss and background noise before AGC evaluates peaks —
-which keeps AGC from pumping on broadband noise during quiet moments.
+Lyra's noise reduction is the **WDSP EMNR** (Enhanced Multi-band
+Noise Reduction) engine — a Wiener / MMSE-LSA family of spectral
+estimators developed by Warren Pratt NR0V and used by Thetis,
+PowerSDR, and other openHPSDR-class clients for years.  Lyra
+exposes WDSP's knobs in a streamlined four-control UI on the
+DSP & AUDIO panel.
 
-## The two independent controls
+## Operator controls
 
-NR has **two** operator controls that work together:
+The NR UX has four orthogonal controls:
 
-1. **Profile** — how aggressively noise is subtracted
-2. **Noise source** — what model of "noise" is being subtracted
+1. **NR enable** — the **NR** button on the DSP & AUDIO panel.
+   Lit = engaged; dim = bypass.
+2. **Mode (1..4)** — picks WDSP's gain function.
+3. **AEPF** — Adaptive Equalization Post-Filter (anti-musical-
+   noise).
+4. **NPE** — Noise Power Estimator selector.
 
-Operator picks each independently. The profile and the source are
-**orthogonal** — change one without losing the other.
+Plus a fifth, indirect control:
 
-## Toggling on/off
+5. **📷 Cap** — captured noise profile.  Capture works; the
+   apply step is currently disabled (see "Captured profile
+   status" below).
 
-The **NR** button on the [DSP & AUDIO panel](panel:dsp). Lit = NR
-engaged; dim = bypass.
+### NR enable
 
-## Algorithm picker (NR1 vs NR2)
+The **NR** button on the [DSP & AUDIO panel](panel:dsp).  Drives
+WDSP's EMNR run flag — when on, every audio block runs through
+the noise reducer.  When off, EMNR is bypassed at no CPU cost.
 
-**Right-click** the NR button for the algorithm menu:
+### Mode (1..4)
 
-| Algorithm | What it is | When to reach for it |
-|---|---|---|
-| **NR1** *(default)* | Classical spectral subtraction | General band noise; lower CPU; most speech-friendly default |
-| **NR2** | Ephraim-Malah / MMSE-LSA, Wiener LUT, AEPF, SPP | Heavier QRN, weak DX, voice in dense noise; sharper formant preservation |
-| **Neural** | *deferred* | *(disabled — pending RX2 + TX)* |
+A small slider next to the NR button picks WDSP's EMNR gain
+function.  Each mode is a different mathematical model for "what
+gain should each frequency bin get given the live signal +
+noise estimate?":
 
-NR1 and NR2 are independent processors with their own STFT framing.
-Switching between them is sample-accurate (no clicks).  The
-operator-facing strength control (the slider next to the NR button)
-re-binds to whichever algorithm is active.
+| Mode | WDSP gain function | Character                                               |
+|------|--------------------|---------------------------------------------------------|
+| **1** | Wiener + SPP       | Smooth, mid-aggressive.  Good general-purpose.          |
+| **2** | Wiener simple      | Edgier — more raw subtraction, less smoothing.          |
+| **3** | **MMSE-LSA** *(default)* | WDSP default.  Smoothest output, best for speech. |
+| **4** | Trained adaptive   | Most aggressive.  Strong cleanup, can thin signal.      |
 
-## Strength slider
+There's no single "best" mode — they sound different on
+different bands and signal types.  The slider is right at your
+fingertips; try them all on a real signal and pick the one
+that sounds best to you.
 
-Both NR1 and NR2 expose a single continuous strength slider on the
-DSP+Audio panel:
+### AEPF — Adaptive Equalization Post-Filter
 
-- **NR1**: range 0–100 %.  Interpolates internal α (over-subtraction)
-  and β (spectral floor) between gentle and aggressive anchors.  At
-  50 % the values land on the "Medium" preset that matches the
-  classic Lyra default.  At 100 % the result is similar to what
-  earlier Lyra versions called "Aggressive."
-- **NR2**: range 0–200 %.  Drives the MMSE-LSA gain blend toward
-  unity at low values (subtle) and pushes the corrected gain to a
-  higher power at high values (deeper cleanup at the cost of
-  thinning).  100 % is the WDSP-default tuning.
+The **AEPF** checkbox toggles WDSP's anti-musical-noise post-
+filter.  EMNR by itself can leave a "watery" / "bubbling"
+residual on weak signals; AEPF smooths the output spectrum to
+suppress that artifact.  Default **on**.
 
-Internal DSP parameters per processor:
+Toggle off if you're chasing the absolute lowest noise floor on
+a weak signal and want to see if the un-AEPF'd output reveals
+something the post-filter is hiding.  For day-to-day operating,
+leave AEPF on.
 
-| Processor | FFT size | Hop | Bin spacing @ 48 kHz | Internal latency |
-|---|---|---|---|---|
-| NR1 | 256-pt | 128 | 187.5 Hz | ~2.7 ms |
-| NR2 | 1024-pt | 512 | 46.9 Hz | ~10.7 ms |
+### NPE — Noise Power Estimator
 
-Both use Hanning windowing with COLA-exact 50 % overlap-add — no
-clicks on parameter changes mid-transmission.  NR2's larger FFT
-gives 4× finer frequency resolution, which preserves voice formants
-much more cleanly at high strength settings.
+WDSP needs an estimate of the "current noise" to know what to
+subtract.  Two estimators are available:
 
-## Noise source (Live ⇄ Captured)
+- **OSMS** *(default)* — Optimal Smoothing of Minimum Statistics.
+  Tracks the per-bin minimum power over a rolling window.  Fast
+  to track band-noise changes.
+- **MCRA** — Minima-Controlled Recursive Averaging.  More
+  conservative; slower to update but gives a steadier noise
+  reference.
 
-The **source badge** sits on its own row directly below the DSP
-buttons, alongside the **📷 Cap** capture button. It shows the
-current noise source at a glance and one-click toggles between
-the two states (when a captured profile is loaded).
+Switch via the **NPE** dropdown next to the AEPF checkbox.  Most
+operators won't need to change this — OSMS is the default for
+good reason.
 
-### Live (VAD-tracked) — the default
+## Captured noise profile
 
-```
-🔵   Live (VAD)   ·   no captured profile
-```
+The **📷 Cap** button captures ~2 seconds of pure band noise
+into a saved spectral profile.  The intent is "lock in a
+measured noise model so NR has a perfect a-priori reference"
+instead of inferring noise from live audio.
 
-Lyra's adaptive estimator updates the noise model whenever a
-frame is quieter than the current estimate (a VAD-style gate).
-This is what NR1 has done since v0.0.5. Works fine on most bands
-but is always *guessing* the noise model from current audio.
+### Current status (v0.0.9.6)
 
-### Captured — Audacity-style locked profile
+> **Capture works.  Apply is currently disabled.**
 
-```
-🟢   Powerline 80m  ·  3h old  ·  80m LSB  ⇄
-```
+The capture button still records, names, and saves profiles —
+all the operator-facing flow is preserved.  However, applying a
+captured profile to live audio is disabled in WDSP mode.
 
-Operator records ~2 seconds of pure band noise (no signal present)
-on a quiet patch of the band; Lyra averages the FFT magnitudes
-into a locked spectral profile. NR uses *that* as the noise
-reference instead of the live estimate. **Generally cleaner output**
-because the noise model is measured directly from real noise without
-any signal contamination.
+The reason: the captured-profile-apply path was originally
+implemented in Lyra's pure-Python NR.  After the WDSP audio
+rebuild (v0.0.9.6) that Python path was bypassed, and several
+attempts at a WDSP-side equivalent (initial direct-spectrum
+subtraction, gentle Wiener, adaptive scaling, gain-floor) all
+produced audible artifacts that the operator field-tested as
+worse than the un-captured WDSP NR output.  The apply step is
+disabled until a clean IQ-domain rebuild lands (tracked in the
+project backlog as the "captured-profile IQ-domain rebuild"
+item).
 
-### How to capture a profile
+In the meantime:
 
-1. Tune to a frequency on your current band where there's **no
-   signal** — a quiet patch between active QSOs, or wait for a
-   transmission gap.
-2. Click the **📷 Cap** button. The button shows live progress
-   "⏹ NN%" while capturing (default 2.0 sec; configurable in
+- **Capture** still works — you can build a library of profiles
+  for your bands, locations, and noise environments.
+- **Save / load / rename / export / import** all work normally.
+- The profiles are tagged with band, mode, freq, and timestamp
+  so they're ready to use the moment the apply path comes back.
+- The source badge below the DSP buttons may show ⚠ if you
+  toggle "use captured" — that's the engine telling you the
+  apply step is inert.
+
+### How to capture (for future-proofing your library)
+
+1. Tune to a frequency on your current band where there's
+   **no signal** — a quiet patch between active QSOs, or wait
+   for a transmission gap.
+2. Click the **📷 Cap** button.  Capture progress shows on the
+   button as "⏹ NN%" (default 2.0 sec; configurable in
    Settings → Noise → Capture duration).
-3. When capture completes, a save-name dialog prompts. Default
+3. When capture completes, a save-name dialog prompts.  Default
    name is `<band> <date time>` like "80m 2026-04-30 14:22" —
-   edit to whatever's meaningful: "Powerline 80m", "Storm noise",
-   "FT8 hash 20m", etc.
-4. After saving, the source badge auto-flips to the captured
-   profile and the green dot lights up. NR is now using your
-   captured profile as the noise model.
+   edit to whatever's meaningful: "Powerline 80m", "Storm
+   noise", "FT8 hash 20m", etc.
+4. Profile saves to your noise-profile folder.  When the apply
+   path returns in a future build, your library is already
+   ready.
 
 ### Capture quality — your ear is the filter
 
-Earlier versions of Lyra (v0.0.7.x through v0.0.9.4) ran a two-
-layer "smart-guard" variance check on every capture and warned
-you in the save dialog if a signal looked like it was riding
-through the capture window.  **That check was removed in v0.0.9.5
-after operator field testing showed it produced both false
-positives** (firing on clean noise across multiple band positions)
-**and false negatives** (passing FT8 captures cleanly).
+During the 2-second capture window, **listen and watch the
+waterfall**.  If you hear a syllable or see a signal pass
+through, recapture.  If the band was clean, save the profile.
 
-The underlying reason: real ham band noise has legitimate
-amplitude modulation (powerline arcing envelope at 120 Hz US /
-100 Hz EU, BCB carrier modulation, atmospheric crashes, HF
-propagation breathing).  The detector model couldn't separate
-that from real signal contamination.
-
-**The replacement is your ear.**  During the 2-second capture
-window, listen.  Watch the waterfall.  If you heard a syllable
-or saw a signal pass through, recapture.  If the band was clean,
-save the profile.  Operators were already doing this naturally —
-the algorithm was duplicating their judgment poorly.
-
-The Settings → Noise → "Detect signal during capture" checkbox
-is gone.  The save dialog is back to the simple "Capture
-complete. Save as: [name]" flow it had before v0.0.7.
+Earlier Lyra versions had a "smart-guard" detector that tried
+to flag contaminated captures automatically.  It produced both
+false positives and false negatives because real ham-band noise
+has legitimate amplitude modulation (powerline arcing,
+atmospheric crashes, propagation breathing) the detector
+couldn't separate from real signal contamination.  It was
+removed in v0.0.9.5 — your ear and waterfall are better filters
+than the algorithm was.
 
 ### Right-click on 📷 Cap — full menu
 
@@ -149,234 +159,62 @@ Open Noise settings…               ← jumps to Settings → Noise
 Clear loaded profile (Powerline 80m)
 ```
 
-### Click the source badge to toggle
+### Manage Profiles dialog
 
-When a profile is loaded, click anywhere on the source badge
-(the row below the DSP buttons) to flip Live ⇄ Captured. The
-profile (Light/Medium/Aggressive) doesn't change — only the
-noise source does. So you can:
-
-- Switch Aggressive ⇄ Captured to chase a weak DX signal hiding
-  in your captured-profile band noise
-- Switch Light ⇄ Captured for SSB ragchew with a clean noise model
-- Toggle source quickly to A/B test live vs captured against a
-  real signal
-
-### Age coloring on the badge
-
-The captured-at age in the badge changes color based on
-operator-tunable thresholds (Settings → Noise → "Profile age
-warning"):
-
-- **Grey** — fresh (default: less than 24 hours old)
-- **Amber** — getting stale (24h – 7 days by default)
-- **Red** — likely outdated (more than 7 days by default)
-
-Recap when the band shifts noticeably — power-line patterns
-change between morning/afternoon/night, atmospheric noise
-shifts with propagation, etc.
-
-### Captured + NR2: closed-form Wiener filter
-
-When captured-source mode is on AND NR2 is the active processor,
-NR2 takes a different math path internally — a closed-form Wiener
-filter computed directly from the captured profile, rather than
-the decision-directed MMSE-LSA path it uses with live noise
-tracking.  This is mathematically the optimal estimator when the
-noise spectrum is known a priori (which is exactly the
-captured-profile case).
-
-In practical operator terms: **captured-source NR2 produces
-cleaner output than captured-source NR1** for the same captured
-profile.  If you've captured a good profile of your local noise
-environment, NR2 with captured-source on is the strongest
-spectral noise reduction Lyra has.
-
-This was a v0.0.8 fix — earlier Lyra versions reused the live
-MMSE-LSA pipeline when captured-source was on, which was
-mathematically wrong (the decision-directed update assumes a
-moving noise estimate; a frozen captured profile defeated the
-musical-noise damping).  Operators upgrading from v0.0.7 should
-notice their existing captured profiles work substantially
-better in NR2 mode.
-
-### Profile staleness notification
-
-Every few seconds while a captured profile is loaded, Lyra
-compares the live band noise spectrum against the loaded profile.
-If the spectrum *shape* drifts beyond a threshold (e.g., 60 Hz
-powerline comb appears or disappears, atmospheric noise replaces
-local QRM, you change band-pass filters), a one-shot status-bar
-toast appears:
-
-```
-⚠  Noise profile drifted 12.3 dB from current band conditions
-   — consider recapturing.
-```
-
-The notification is **passive** — Lyra never auto-loads or
-auto-switches profiles.  You decide whether the drift is meaningful
-and whether to recapture.  Some drift is normal (band noise
-changes with time of day); the toast just gives you a heads-up
-when the change is large enough that your captured profile may no
-longer be representative.
-
-The check is scale-invariant — same noise getting louder or
-quieter doesn't trigger it.  Only spectrum *shape* changes do.
-That matches what AGC handles (level changes are AGC's job; shape
-changes are NR's job).
-
-Default ON; toggle in Settings → Noise → "Profile staleness
-notifications."  Hysteresis prevents toast spam — at most one fire
-per stale event, with re-arm after band conditions stabilize.
-
-### Mode mismatch warning
-
-If you switch to a mode that doesn't match the profile's captured
-mode, the badge shows ⚠ — the captured noise was measured through
-a different audio chain (e.g. captured on USB, listening on LSB).
-NR still works, but the model isn't a perfect fit. Re-capture or
-switch back to the matching mode for best results.
-
-## Manage Profiles dialog
-
-Right-click on the 📷 Cap button → **Manage profiles…**, or visit
-Settings → Noise → "Open profile manager…". Shows all your
-captured profiles in a list with:
+Right-click on the 📷 Cap button → **Manage profiles…**, or
+visit Settings → Noise → "Open profile manager…".  Shows all
+your captured profiles in a list with:
 
 - **Name** — operator-typed display name
 - **Band / Mode** — derived from frequency at capture time
-- **Captured** — date/time, age-colored
+- **Captured** — date/time
 - **Duration** — how long the capture was
 
 Buttons:
 
-- **Use Selected** — load this profile + flip source to Captured
+- **Use Selected** — load this profile (applies once the apply
+  path returns)
 - **Re-capture** — overwrite this profile with fresh band noise
 - **Rename / Delete** — standard ops
 - **Export… / Import…** — single-profile JSON files for sharing
   or backup
 
-Profiles persist across Lyra restarts. The last-active profile
+Profiles persist across Lyra restarts.  The last-active profile
 auto-restores at startup so you pick up where you left off.
 
 ### Profile storage location
 
 Default: `%APPDATA%\Lyra\noise_profiles\` (Windows) or the
-OS-equivalent user-data folder. Each profile is a single JSON
+OS-equivalent user-data folder.  Each profile is a single JSON
 file you can copy/share/edit by hand.
 
 Settings → Noise → "Storage location" lets you point Lyra at a
 custom folder — Dropbox/OneDrive for sync between shacks, USB
 drive for portable operation, NAS for shared club resources, etc.
 
-## Internals (for the curious)
-
-### Live source
-
-The noise-floor estimate is tracked only during low-energy frames
-(a simple VAD gate rejects speech/signal frames from the update).
-This keeps the estimate from slowly rising as speech energy
-dominates. Each profile has its own VAD gate (`vad_gate` ×
-current-estimate-power threshold).
-
-### Captured source
-
-The captured profile is a per-bin float32 array of FFT magnitudes,
-saved at NR1's FFT bin count (currently 129 bins for the 256-pt
-STFT).  When NR2 loads a profile (NR2 uses a 1024-pt FFT → 513
-bins), Lyra automatically resamples on load via linear
-interpolation across the normalized bin axis — both arrays
-represent the same DC-to-Nyquist frequency range, just at
-different resolutions, so resampling produces a valid profile at
-any target FFT size.  This means existing saved profiles work
-with both NR1 and NR2 transparently.
-
-On capture, Lyra accumulates per-bin magnitudes over the capture
-window, averages them, and stores the result as the locked noise
-reference.  The live noise tracker keeps running in parallel as a
-fallback in case the captured profile is cleared or toggled off
-mid-stream.
-
-### Reset behavior
-
-On **mode change**, the NR internal state (live noise-floor
-estimate + overlap-add tail) is reset so a stale estimate from a
-previous mode doesn't leak in and cause a half-second of artifact.
-The captured profile (operator-locked) is *preserved* across
-resets — you don't lose your work just because you switched
-band or mode.
-
-## Classical vs. neural — the roadmap
-
-Classical spectral subtraction has one well-known limitation:
-**musical noise**. When a bin's gain jumps around rapidly between
-frames (which happens near the noise threshold), the residual tail
-sounds like "bubbling water" or "aliens talking." The Aggressive
-profile has the most of this artifact by design. The captured
-source generally has *less* musical noise than live-source because
-the noise model is more accurate.
-
-**Neural noise reduction** (RNNoise / DeepFilterNet / NSNet2)
-learns from speech+noise datasets and suppresses noise without
-that musical-noise signature.  Lyra has a reserved **Neural**
-slot in the profile menu, currently **disabled** with the label
-*(deferred — pending RX2 + TX)*.
-
-The v0.0.6 development cycle briefly explored both PyTorch /
-DeepFilterNet and onnxruntime / NSNet2 paths.  Both are viable
-but introduce dependency-management friction (Python-version
-lag, Rust toolchain requirements, model-file distribution)
-that's better tackled when the broader transceiver functionality
-(second receiver, TX path) is in place.  The integration code
-was removed in v0.0.7 and will return as a clean implementation
-once the radio side is feature-complete.
-
-This is still a tracked project goal — see `docs/backlog.md`.
-
 ## Where NR sits in the audio chain
 
+WDSP's RXA chain runs entirely inside the C-side cffi engine.
+For operator mental-model purposes:
+
 ```
-IQ → NB → decimate → manual notches → demod → LMS → ANF → SQ → NR → APF → audio out
+IQ → NB → notches → demod → LMS → NR (EMNR) → ANF → AGC → APF (CW) → audio out
 ```
 
-Each stage has a specific role and they're complementary, not
-overlapping:
-
-- **NB** (Noise Blanker) — IQ-domain impulse blanker, before
-  decimation.  Catches lightning crashes, ignition noise.  See
-  [Noise Blanker help](./nb.md).
-- **Manual notches** — kill known stable carriers (heterodyne
-  whistles you've manually clicked).  See
-  [Manual notches help](./notches.md).
-- **LMS** (Line Enhancer / NR3) — predictive: lifts periodic
-  content (CW carriers, voice formants) above broadband noise.
-  Sits BEFORE ANF so LMS sees the periodic content it needs to
-  predict (running ANF first would strip exactly what LMS is
-  trying to lift).  See [LMS help](./lms.md).
-- **ANF** (Auto Notch Filter) — cancels remaining periodic
-  whistles ANF discovers automatically (heterodynes the operator
-  hasn't manually notched).  See [ANF help](./anf.md).
-- **SQ** (Squelch) — voice-presence-aware gate.  Sits AFTER the
-  adaptive filters so they keep adapting during gate-closed
-  periods, BEFORE NR so the voice-presence detector sees audio
-  with full noise variance (NR-smoothed audio confuses the
-  detector).
-- **NR** (this doc) — broadband noise reduction.  Cleans up
-  whatever residual hiss is left.
-- **APF** (Audio Peaking Filter) — CW-only narrow boost.  See
-  [APF help](./apf.md).
+NR sees the post-demod audio; AGC then evaluates the
+NR-cleaned output for level decisions, so AGC doesn't pump on
+broadband noise during quiet moments.
 
 ## What NR doesn't do
 
-- **Impulse noise** (ignition noise, lightning crash, power-line
-  buzz) — that's the **Noise Blanker (NB)** button's job, which
-  operates in the I/Q domain pre-demod.
+- **Impulse noise** (ignition noise, lightning crashes, power-
+  line buzz spikes) — that's the **Noise Blanker (NB)** button's
+  job, which operates pre-demod where impulses are still narrow.
 - **Specific carriers** (heterodynes, birdies) — use [manual
-  notch filters](./notches.md) or let **ANF** find them
-  automatically.  NR treats the whole spectrum statistically; it
-  will not surgically kill a single carrier without also thinning
-  everything around it.
+  notch filters](./notches.md) (you click them) or **ANF** (it
+  finds them automatically).  NR treats the whole spectrum
+  statistically; it will not surgically kill a single carrier
+  without thinning everything around it.
 - **Periodic content amplification** — that's **LMS** (line
   enhancer), the inverse of NR.  Where NR removes what doesn't
   look like signal, LMS amplifies what looks periodic.  Use them
@@ -385,38 +223,31 @@ overlapping:
 
 ## Tips by mode
 
-- **SSB** — Medium + Captured is the sweet spot once you have a
-  band-specific profile. Switch profile to Light if NR is chewing
-  on speech consonants. A captured profile from a quiet patch on
-  your band is dramatically better than live tracking when the
-  band noise is stationary.
-- **CW** — counter-intuitively, NR can hurt weak CW by confusing
-  the subtractor (a dit is short and can read as noise). Try
-  **Light** + Live, or turn NR off and lean on a narrow filter
-  plus the [APF](./apf.md).
-- **FT8 / digital** — NR helps the decoder only modestly; the
-  decoder does its own matched filtering. Try Medium + Captured
-  for a known-noisy band, or leave NR off and let the decoder do
-  its thing.
-- **AM broadcast** — Medium + Captured with a wider RX BW (6 kHz)
-  gives a noticeably cleaner fidelity on a ragged BC signal.
+- **SSB ragchew** — Mode **3** (MMSE-LSA) + AEPF on is the
+  comfortable default.  Try Mode 1 if you want a touch more
+  aggressive cleanup; Mode 4 if a noisy band needs the heaviest
+  hand.
+- **Weak DX SSB** — Mode **3** + AEPF on, NPE = OSMS.  Try
+  toggling AEPF off briefly to make sure the post-filter isn't
+  hiding the signal you're listening for.
+- **CW** — Mode **2** (Wiener simple) is sometimes the best CW
+  mode because the smoother Mode 3 can blur a clean tone.  Try
+  with NR off too — a narrow filter + the [APF](./apf.md) often
+  beats NR for weak CW.
+- **FT8 / digital** — most operators run NR off.  The decoder
+  does its own matched filtering; NR can confuse it.
+- **AM broadcast** — Mode **3** + AEPF on with a wider RX BW
+  (6 kHz) gives noticeably cleaner fidelity on a ragged BC signal.
 
-## Tips for captured profiles
+## Future work
 
-- **Capture on a truly quiet patch** — between QSOs, in a
-  transmission gap, or 5–10 kHz away from any active station.
-  Listen during the 2-second capture and watch the waterfall —
-  if anything passes through, re-capture.  Your ear is the
-  best contamination detector.
-- **Re-capture when the band shifts** — power-line patterns
-  change between morning/afternoon/night, atmospheric noise
-  shifts with propagation. The age coloring on the source badge
-  is your cue.
-- **One profile per band/condition combo** — "Powerline 80m
-  daytime", "80m night QRN", "20m FT8 hash" each get their own
-  profile. They're 700 bytes each on disk; keep as many as you
-  find useful.
-- **Profile sharing** — export your "morning power-line on 80m"
-  and send it to a friend on the same grid. They can import it
-  and have your noise model. Useful for diagnosing common
-  station-vs-station interference.
+The captured-profile apply path will return as a clean
+IQ-domain rebuild (tracked in the backlog).  When it lands, the
+"use captured" toggle on the source badge will start affecting
+the audio again, the apply step will produce visibly cleaner
+output on noise-floor-dominated signals, and the inert-warning
+indicator will go away.
+
+Until then, treat captured profiles as a library you're
+building for the moment they become live again — every clean
+capture you save now is one less you'll need to record later.

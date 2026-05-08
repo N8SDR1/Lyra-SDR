@@ -80,11 +80,11 @@ tanh limiter has prevented clipping. The Hilbert phase transform
 operates on the operator's already-listening-ready audio, so BIN
 never interferes with AGC tracking or peak-meter math.
 
-The audio sinks (PC Soundcard, AK4951) accept either mono or
-already-stereo input. When BIN is off, Lyra sends mono and the
-sink duplicates to L/R as before. When BIN is on, the sink takes
-the (N, 2) stereo array directly and applies your **Balance** slider
-on top.
+The audio sinks (PC Soundcard, HL2 audio jack) accept either
+mono or already-stereo input. When BIN is off, Lyra sends mono
+and the sink duplicates to L/R as before. When BIN is on, the
+sink takes the (N, 2) stereo array directly and applies your
+**Balance** slider on top.
 
 ## Tips
 

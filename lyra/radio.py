@@ -410,7 +410,7 @@ class Radio(QObject):
     peak_markers_color_changed   = Signal(str)    # peak marker color hex
 
     # ── DSP profile signals ────────────────────────────────────────────
-    agc_profile_changed  = Signal(str)    # off / fast / med / slow / auto / custom
+    agc_profile_changed  = Signal(str)    # off / fast / med / slow / long / auto / custom
     agc_action_db        = Signal(float)  # live gain reduction, dB
     agc_threshold_changed = Signal(float) # current threshold (target), dBFS-ish
 
@@ -433,18 +433,17 @@ class Radio(QObject):
     # hang for steady-carrier listening (AM broadcast, DX nets).
     AGC_PRESETS: dict[str, dict] = {
         "off":    {"release": 0.0,   "hang_blocks":  0},   # disabled
-        # Fast originally had 0 hang / 50 ms decay, but Lyra's AGC is
-        # a simple peak-tracker — no attack-envelope buffer, no hang-
-        # index threshold curve. Without those secondary smoothing
-        # stages, 0 / 50 ms produced audible pumping on AM voice
-        # envelopes — "wavey in/out rapid audio." Adding a small
-        # hang (~130 ms) lets brief envelope dips ride through
-        # while still recovering quickly between CW dits or
-        # discrete signal events.
-        "fast":   {"release": 0.30,  "hang_blocks":  3},   # τ≈120 ms, hang 130 ms
-        "med":    {"release": 0.158, "hang_blocks":  0},   # τ≈250 ms
-        "slow":   {"release": 0.083, "hang_blocks": 23},   # τ≈500 ms, hang 1 s
-        "auto":   {"release": 0.158, "hang_blocks":  0},   # med + track
+        # The Release/Hang values in this table were operator-facing
+        # in the legacy single-state Python AGC engine.  As of v0.0.9.6
+        # AGC runs entirely inside WDSP and these values are advisory
+        # state only — Phase 6.A1 deleted the Python wcpAGC wrapper
+        # they used to drive.  Kept as a UI default table so the
+        # Settings sliders position to a sensible value per profile.
+        "fast":   {"release": 0.30,  "hang_blocks":  3},   # WDSP FAST
+        "med":    {"release": 0.158, "hang_blocks":  0},   # WDSP MED
+        "slow":   {"release": 0.083, "hang_blocks": 23},   # WDSP SLOW
+        "long":   {"release": 0.040, "hang_blocks": 46},   # WDSP LONG
+        "auto":   {"release": 0.158, "hang_blocks":  0},   # rides MED today
     }
     AGC_AUTO_INTERVAL_MS = 3000   # re-track threshold every 3 s in auto mode
 
@@ -793,7 +792,7 @@ class Radio(QObject):
         # WdspAgc wrapper that used to forward these was deleted in
         # Phase 6.A.
         self._agc_target = 0.0316        # -30 dBFS, UI-displayed
-        self._agc_profile = "med"        # off / fast / med / slow / custom
+        self._agc_profile = "med"        # off / fast / med / slow / long / auto / custom
         self._agc_release = 0.003        # custom-slider value, UI only
         self._agc_hang_blocks = 23       # custom-slider value, UI only
         # Rolling noise-floor estimate -- legacy field, kept for
@@ -6392,14 +6391,15 @@ class Radio(QObject):
 
     def _wdsp_agc_for(self, profile: str) -> str:
         """Map Lyra's AGC profile to a WDSP AGC mode name."""
-        # Lyra: off / fast / med / slow / auto / custom
+        # Lyra: off / fast / med / slow / long / auto / custom
         # WDSP: FIXED / LONG / SLOW / MED / FAST / CUSTOM
         return {
             "off":    "FIXED",
             "fast":   "FAST",
             "med":    "MED",
             "slow":   "SLOW",
-            "auto":   "MED",       # auto rides MED with periodic threshold tweaks
+            "long":   "LONG",
+            "auto":   "MED",       # auto rides MED today; auto-threshold tracking deferred
             "custom": "CUSTOM",
         }.get(profile.lower() if profile else "med", "MED")
 

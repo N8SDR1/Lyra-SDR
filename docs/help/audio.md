@@ -11,7 +11,7 @@ Two output paths are selectable from the **Out** dropdown on the
 | Sink | Where the audio comes out |
 |---|---|
 | **PC Soundcard** | Your computer's audio output (any selectable device) |
-| **AK4951** | The HL2+'s onboard codec line-out jack |
+| **HL2 audio jack** | The HL2+'s onboard codec line-out jack (AK4951) |
 
 Switching between the two is robust — neither leaks "digitized
 robotic" residue from the previous sink, even if you flip rapidly
@@ -21,8 +21,8 @@ back and forth.
 
 Under **Settings → Audio** you'll find:
 
-- **Output sink** — same AK4951 / PC Soundcard pick as the front-panel
-  dropdown.
+- **Output sink** — same HL2 audio jack / PC Soundcard pick as the
+  front-panel dropdown.
 - **Output device** — which physical PortAudio device the **PC
   Soundcard** sink uses. Default is **"Auto (WASAPI default)"** which
   picks whatever Windows has set as the default output via the
@@ -47,14 +47,23 @@ audio path works on analog AND digital outputs.
 
 ## The gain chain
 
-Every audio sample passes through this chain before reaching your
-speakers:
+Every audio sample passes through this chain before reaching
+your speakers:
 
 ```
-demod → AGC (if on) → AF Gain → Volume → tanh limiter → sink
+RF in → LNA → ADC → IQ → demod → notches → NR → ANF
+                              ↓
+                      AF Gain (pre-AGC) → AGC → APF (CW only)
+                              ↓
+                          Volume → Mute → Bal → sink
 ```
 
-Three operator-controlled stages, each with a distinct role:
+The DSP stages (notches / NR / ANF / AGC / APF) all run inside
+the WDSP engine; the operator-controlled level stages (LNA, AF
+Gain, Volume, Mute, Bal) wrap around it.  This matches Thetis
+and other openHPSDR-class clients.
+
+Operator-controlled stages, each with a distinct role:
 
 ### LNA — RF input gain
 
@@ -173,17 +182,36 @@ field-tested across a variety of stations, it stays off by
 default. Turn it on when you want to try it; turn it off if you
 hear odd mixing products on busy bands.
 
-### AF Gain — makeup gain (post-AGC, pre-Volume)
+### AF Gain — pre-AGC makeup gain
 
-Slider on the DSP + Audio panel, range 0 to +50 dB. Linear (1 tick =
-1 dB). This is the "how much do I need to boost weak signals" knob.
-Critical for digital modes where AGC is typically off — set AF Gain
-to bring weak FT8/RTTY/PSK signals up to listenable levels without
-having to crank Volume.
+Slider on the DSP & AUDIO panel, range 0 to +80 dB.  Pushed
+into WDSP's `PanelGain1` stage on every change — the same
+"AF Gain" wiring Thetis uses.
 
-Set this **once** for your station's typical signal level, then
-forget. Most operators land around +20 to +40 dB depending on
-antenna strength and band.
+AF Gain sits **before** AGC in the chain.  Two practical
+implications:
+
+- **AGC ON** — AGC normalizes output to its target regardless
+  of how much AF Gain you've dialed in, so AF mostly just
+  feeds more signal into AGC.  You'll hear at most a small
+  loudness delta when sweeping AF Gain on a strong signal.
+  This prevents the "AF + AGC stack and clip" symptom.
+- **AGC OFF** (digital modes — FT8 / FT4 / RTTY) — AGC's
+  automatic amplification is off, so AF Gain becomes your
+  primary level knob between weak signals and audible.
+  Sweeping AF Gain produces a dramatic loudness change.
+
+Set AF Gain **once** for your station's typical signal level
+and listening preference, then leave it alone.  Most
+operators land somewhere between +25 and +50 dB depending on
+antenna strength and how much they like to dig into the
+noise floor.
+
+The +80 dB top end is there for AGC-OFF digital-mode
+operators — without AGC's +60 dB internal amplification, weak
+signals can be 30 dB quieter than they would be on AGC ON,
+and the extra AF range closes that gap.  Operators who don't
+need it simply never visit it.
 
 ### Volume — final output trim
 
@@ -227,10 +255,11 @@ sagging in the middle the way a naive linear pan would.
 
 - **PC Soundcard** — applied per-channel before stereo write to
   the WASAPI output device.
-- **AK4951** — the HL2's onboard codec is a true stereo DAC. The
-  EP2 audio frame has separate Left16 / Right16 fields that the
-  gateware routes to the AK4951's L/R channels independently. Lyra
-  applies the balance gains and feeds proper stereo to both.
+- **HL2 audio jack** — the HL2+'s onboard AK4951 codec is a true
+  stereo DAC.  The EP2 audio frame has separate Left16 / Right16
+  fields that the gateware routes to the AK4951's L/R channels
+  independently.  Lyra applies the balance gains and feeds
+  proper stereo to both.
 
 **Future expansion (after RX2 ships):** the same Bal slider will
 become the RX1 / RX2 mixing control — RX1 to one ear, RX2 to the
@@ -238,43 +267,46 @@ other for DX-split listening.
 
 ## AGC interactions
 
-AGC sits BEFORE AF Gain in the chain. With AGC **on** (Fast / Med /
-Slow / Auto), incoming audio is normalized to a target level
-(default −30 dBFS) before AF Gain boosts it further.
+AGC sits AFTER AF Gain in the chain (Thetis-style — AF is the
+pre-AGC makeup gain).  With AGC **on** (Fast / Med / Slow /
+Long / Auto), AGC normalizes whatever AF Gain feeds it to its
+target level, so the volume slider has the same useful range
+across all AGC profiles.
 
-With AGC **off** (correct setting for digital modes), AF Gain is
-your only level control between demod and Volume — that's what it's
-designed for.
+With AGC **off** (correct setting for digital modes), AGC's
+automatic amplification is gone, so **AF Gain becomes your
+primary level knob** between demod and Volume.  Sweep AF Gain
+to find the level your decoder app or ear wants.
 
-Switching AGC on ↔ off produces only a small loudness delta when AF
-Gain is sensibly set (the expected SDR-client behavior). If you see a big jump,
+Switching AGC on ↔ off should produce only a small loudness
+delta when AF Gain is sensibly set.  If you see a big jump,
 either bump AF Gain higher (to bring AGC-off levels closer to
 AGC-on) or lower it (to ease back when AGC-on is too loud).
 
-## AK4951 audio requires 48 kHz sample rate
+## HL2 audio jack requires 48 kHz sample rate
 
-The AK4951 audio path on the HL2+ requires the IQ sample rate to
-be exactly **48 kHz**. At higher rates (96 / 192 / 384 kHz) the EP2
-audio queue gets drained faster than the 48 kHz demod can fill it,
-producing chopped / distorted audio.
+The HL2 audio jack path requires the IQ sample rate to be
+exactly **48 kHz**.  At higher rates (96 / 192 / 384 kHz) the
+EP2 audio queue gets drained faster than the 48 kHz demod can
+fill it, producing chopped / distorted audio.
 
 Lyra auto-handles this:
 
-- **Above 48 k → auto-switch to PC Soundcard** with a status-bar
-  toast. Your AK4951 preference is remembered and restored when
-  Rate returns to 48 k.
-- **Picking AK4951 above 48 k** drops the rate to 48 k and applies
-  AK4951. One click, works.
+- **Above 48 k → auto-switch to PC Soundcard** with a
+  status-bar toast.  Your HL2-jack preference is remembered
+  and restored when Rate returns to 48 k.
+- **Picking HL2 audio jack above 48 k** drops the rate to
+  48 k and applies the HL2 jack.  One click, works.
 
 ## RX audio chain on HL2+
 
 ```
-Antenna → ADC → DDC → EP2 → AK4951 → phones/line jack → (your speakers)
+Antenna → ADC → DDC → EP2 → AK4951 codec → phones/line jack → speakers
 ```
 
-Hardware-level latency for monitoring. The PC is still in the loop
-for spectrum, decoding, TCI, etc. — only the audio playback path
-is offloaded.
+Hardware-level latency for monitoring.  The PC is still in
+the loop for spectrum, decoding, TCI, etc. — only the audio
+playback path is offloaded.
 
 ## Routing to digital decoder apps (WSJT-X, JS8Call, FLDIGI, MSHV, …)
 

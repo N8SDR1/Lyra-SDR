@@ -43,27 +43,28 @@ auto-discover should work.
 4. **Gateware** — if you have an HL2+ with a very old gateware, the
    AK4951 features won't work. Flash the current HL2+ gateware.
 
-## AK4951 audio is distorted / chopped
+## HL2 audio jack distorted / chopped
 
-Rare in current builds. The AK4951 codec is a 48 kHz audio chip
-(matches the HPSDR EP2 audio protocol slot, also 48 kHz), and Lyra
-demodulates to 48 kHz audio regardless of which IQ spectrum rate
-(48 / 96 / 192 / 384 k) you have selected. Audio path is independent
-of spectrum rate.
+Rare in current builds.  The HL2+'s onboard AK4951 codec is a
+48 kHz audio chip (matches the HPSDR EP2 audio protocol slot,
+also 48 kHz), and Lyra demodulates to 48 kHz audio regardless
+of which IQ spectrum rate (48 / 96 / 192 / 384 k) you have
+selected.  Audio path is independent of spectrum rate.
 
-If you DO hear chopping or distortion on AK4951 output:
+If you DO hear chopping or distortion on the HL2 audio-jack
+output:
 
-- Check that gateware is current (older HL2+ gateware had bugs in
-  the EP2 audio routing). Flash the current HL2+ gateware.
-- Check **Volume** isn't past the saturation point on the DSP+Audio
-  panel.
-- Try briefly switching to **PC Soundcard** out, confirm the audio
-  itself sounds clean there. If PC is also chopped, the problem is
-  in the demod path, not AK4951 specifically.
-- Pre-v0.0.5 Lyra builds had broken auto-routing logic that flipped
-  audio output between AK4951 and PC Soundcard whenever you changed
-  IQ rate or band. If you're seeing inexplicable output flipping,
-  upgrade to v0.0.5+.
+- Check that gateware is current (older HL2+ gateware had bugs
+  in the EP2 audio routing).  Flash the current HL2+ gateware.
+- Check **Volume** isn't past the saturation point on the
+  DSP & AUDIO panel.
+- Try briefly switching to **PC Soundcard** out, confirm the
+  audio itself sounds clean there.  If PC is also chopped, the
+  problem is in the demod path, not the HL2 jack specifically.
+- Pre-v0.0.5 Lyra builds had broken auto-routing logic that
+  flipped audio output between HL2 jack and PC Soundcard
+  whenever you changed IQ rate or band.  If you're seeing
+  inexplicable output flipping, upgrade to v0.0.5+.
 
 ## Audio silent but spectrum is alive
 
@@ -105,27 +106,19 @@ and/or threaded demod.
   turn on Notch first — right-click is gated on NF state so the
   gesture stays free for other spectrum features when NF is off.
 
-## Audio sounds "squashed" or "pumping"
+## Audio sounds "pumped" — AGC is doing it
 
-The audio leveler is too aggressive. Audible pumping means each
-syllable triggers the compressor and you're hearing the gain
-move up and down in time with speech.
+If you hear AGC pumping (the gain visibly riding speech
+syllables or breaths), try a slower AGC profile:
 
-**Fix:** Settings → Audio → Audio Leveler.
-
-1. Try **Light** profile (gentle, 2.5:1 ratio) — gives most of
-   the burst-control benefit without the pumping feel.
-2. Or **Off** — the tanh safety limiter still catches hard
-   clips; you just lose the sub-clip-level dynamics control.
-3. If you want to keep some leveling but smoother, pick
-   **Custom** and dial the ratio down (try 2:1 or 3:1) and
-   raise the threshold (closer to 0 dBFS — less content gets
-   compressed in the first place).
-
-Late Night profile is intentionally aggressive (8:1 ratio, lots
-of makeup); pumping is part of how it achieves the "loud peaks
-won't wake the family" effect. If it's too much for normal
-operating, drop to Medium or Light.
+1. Right-click the **AGC** cluster on the DSP & AUDIO panel.
+2. Pick **Slow** for SSB, or **Long** for AM broadcast / steady
+   carrier listening.  Faster profiles (Fast / Med) react too
+   quickly on speech.
+3. For digital modes (FT8 / FT4 / RTTY) where AGC pumping is
+   especially distracting, just turn AGC **Off** — set AF Gain
+   high enough to bring weak signals up to your decoder's
+   level; AGC isn't doing you any favors there.
 
 ## ANF is killing my CW signal
 

@@ -1135,13 +1135,17 @@ class DspSettingsTab(QWidget):
     """DSP chain configuration — AGC, NB, NR, ANC, ANF, EQ."""
 
     # Description + ordering for the AGC profile radio buttons.
+    # Profiles drive WDSP's canonical AGC mode presets via
+    # _wdsp_rx.set_agc(...).  Custom is currently advisory — see
+    # the slider-section tooltips below.
     AGC_PROFILE_UI = [
-        ("off",    "Off",     "No AGC — volume scales raw demod output"),
-        ("fast",   "Fast",    "~130 ms hang, ~120 ms decay — CW and weak signals"),
-        ("med",    "Medium",  "0 hang, ~250 ms decay — general SSB / ragchew (default)"),
-        ("slow",   "Slow",    "~1 s hang, ~500 ms decay — DX nets, AM broadcast"),
-        ("auto",   "Auto",    "Medium release + threshold auto-tracks noise floor every 3 s"),
-        ("custom", "Custom",  "User-defined release and hang values"),
+        ("off",    "Off",     "No AGC — Volume + AF Gain scale the raw demod output"),
+        ("fast",   "Fast",    "Quick attack/decay, no hang — CW, weak-signal work"),
+        ("med",    "Medium",  "Moderate decay, no hang — general SSB / ragchew (default)"),
+        ("slow",   "Slow",    "Longer decay with short hang — DX nets, AM broadcast"),
+        ("long",   "Long",    "Long decay with long hang — beacons, steady-carrier listening"),
+        ("auto",   "Auto",    "Same time-constants as Medium today (auto-threshold tracking is parked)"),
+        ("custom", "Custom",  "Custom Release/Hang sliders below — currently advisory (same as Medium)"),
     ]
 
     def __init__(self, radio, parent=None):
@@ -1166,46 +1170,63 @@ class DspSettingsTab(QWidget):
             self._agc_group.addButton(rb, i)
             self._agc_radios[key] = rb
 
-        # Custom sliders — always visible but disabled unless Custom is picked
-        ga.addWidget(QLabel("Release"), 1, 0)
+        # Advisory note — covers the next three rows of sliders
+        # (Release / Hang / Threshold).  WDSP owns the live AGC
+        # engine so these UI values are operator-state mirrors
+        # only — see CLAUDE.md §14.9 Phase 9.5 for the wire-up TODO.
+        advisory_lbl = QLabel(
+            "Sliders below are persisted as operator preference; "
+            "WDSP currently uses its canonical mode presets, so the "
+            "Custom profile produces the same audio as Medium for now.")
+        advisory_lbl.setWordWrap(True)
+        advisory_lbl.setStyleSheet(
+            "color: #999; font-style: italic; padding: 4px 0px;")
+        ga.addWidget(advisory_lbl, 1, 0, 1, len(self.AGC_PROFILE_UI))
+
+        # Custom sliders — always visible but disabled unless
+        # Custom is picked.  Currently advisory (see note above).
+        ga.addWidget(QLabel("Release"), 2, 0)
         self.release_slider = QSlider(Qt.Horizontal)
         self.release_slider.setRange(1, 100)   # 0.001 .. 0.100
         self.release_slider.setValue(int(radio.agc_release * 1000))
         self.release_slider.setFixedWidth(200)
         self.release_slider.valueChanged.connect(self._on_custom_changed)
-        ga.addWidget(self.release_slider, 1, 1, 1, 3)
+        ga.addWidget(self.release_slider, 2, 1, 1, 3)
         self.release_label = QLabel()
-        ga.addWidget(self.release_label, 1, 4)
+        ga.addWidget(self.release_label, 2, 4)
 
-        ga.addWidget(QLabel("Hang"), 2, 0)
+        ga.addWidget(QLabel("Hang"), 3, 0)
         self.hang_slider = QSlider(Qt.Horizontal)
         self.hang_slider.setRange(0, 100)  # blocks → roughly 0..4.5 s
         self.hang_slider.setValue(int(radio.agc_hang_blocks))
         self.hang_slider.setFixedWidth(200)
         self.hang_slider.valueChanged.connect(self._on_custom_changed)
-        ga.addWidget(self.hang_slider, 2, 1, 1, 3)
+        ga.addWidget(self.hang_slider, 3, 1, 1, 3)
         self.hang_label = QLabel()
-        ga.addWidget(self.hang_label, 2, 4)
+        ga.addWidget(self.hang_label, 3, 4)
 
-        # AGC threshold slider + auto button (the right-click-AGC
-        # "automatic AGC threshold" equivalent)
-        ga.addWidget(QLabel("Threshold"), 3, 0)
+        # AGC threshold slider + auto button.  Currently advisory —
+        # WDSP applies its own per-mode hang threshold internally;
+        # this slider is persisted UI state only.  Column layout
+        # mirrors Release/Hang rows above: label col 0, slider
+        # cols 1-3, value-readout col 4, Auto button col 5.
+        ga.addWidget(QLabel("Threshold"), 4, 0)
         self.threshold_slider = QSlider(Qt.Horizontal)
         self.threshold_slider.setRange(5, 90)   # 0.05 .. 0.90
         self.threshold_slider.setValue(int(radio.agc_threshold * 100))
         self.threshold_slider.setFixedWidth(200)
         self.threshold_slider.valueChanged.connect(
             lambda v: self.radio.set_agc_threshold(v / 100.0))
-        ga.addWidget(self.threshold_slider, 3, 1, 1, 2)
+        ga.addWidget(self.threshold_slider, 4, 1, 1, 3)
         self.threshold_label = QLabel()
-        ga.addWidget(self.threshold_label, 3, 3)
+        ga.addWidget(self.threshold_label, 4, 4)
         self.auto_thresh_btn = QPushButton("Auto")
         self.auto_thresh_btn.setToolTip(
-            "Set the AGC threshold ~18 dB above the current noise floor.\n"
-            "Equivalent to the right-click → 'automatic AGC "
-            "threshold'. Best run on a quiet part of the band.")
+            "Recalculate the threshold value ~18 dB above the current\n"
+            "noise floor.  Persists the UI value; advisory in WDSP mode.\n"
+            "Best run on a quiet part of the band.")
         self.auto_thresh_btn.clicked.connect(self._on_auto_threshold)
-        ga.addWidget(self.auto_thresh_btn, 3, 4)
+        ga.addWidget(self.auto_thresh_btn, 4, 5)
 
         # Live action meter.  Shows the live AGC gain reduction in
         # dB when AGC is actively running.  Falls back to a sentinel
@@ -1222,20 +1243,20 @@ class DspSettingsTab(QWidget):
         # Span the label across 3 cols (was 2) so the colon doesn't
         # crowd the value field even with the widest "Custom" radio
         # column setting the row pitch.
-        ga.addWidget(QLabel("Current AGC action:"), 4, 0, 1, 3)
+        ga.addWidget(QLabel("Current AGC action:"), 5, 0, 1, 3)
         self.action_label = QLabel("—")
         self.action_label.setStyleSheet(
             "color: #50d0ff; font-family: Consolas, monospace; font-weight: 700;")
-        ga.addWidget(self.action_label, 4, 3, 1, 3)
+        ga.addWidget(self.action_label, 5, 3, 1, 4)
 
         v.addWidget(grp_agc)
 
         # ── CW ───────────────────────────────────────────────────────
-        # Home for all CW operator settings. Today it's just pitch
-        # (drives CWDemod offset, panadapter passband overlay
-        # position, and click-to-tune CW correction). APF (audio
-        # peaking filter) and BIN (binaural CW) settings will land
-        # here next. Persisted via QSettings (radio handles save).
+        # Home for all CW operator settings.  Today: pitch (drives
+        # the WDSP CW demod offset, APF center, panadapter passband
+        # overlay, and click-to-tune CW correction), APF (audio
+        # peaking filter), BIN (binaural CW).  Persisted via
+        # QSettings (radio handles save).
         #
         # FUTURE-MOVE NOTE: when TX lands, CW transmission adds
         # break-in mode (semi / full BK / off), keying speed (WPM),
@@ -1259,10 +1280,10 @@ class DspSettingsTab(QWidget):
         self.cw_pitch_spin.setFixedWidth(120)
         self.cw_pitch_spin.setToolTip(
             "CW tone frequency. Operator preference (typical 400-800 Hz; "
-            "many ops settle on 600 or 700 Hz). Drives the CWDemod tone "
-            "offset, the panadapter passband overlay position, and the "
-            "click-to-tune CW correction — all three stay in sync. Live "
-            "update on change.")
+            "many ops settle on 600 or 700 Hz). Drives the WDSP CW "
+            "demod offset, the APF center frequency, the panadapter "
+            "passband overlay position, and the click-to-tune CW "
+            "correction — all stay in sync. Live update on change.")
         self.cw_pitch_spin.valueChanged.connect(
             self.radio.set_cw_pitch_hz)
         gc.addWidget(self.cw_pitch_spin, 0, 1)

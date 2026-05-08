@@ -70,9 +70,8 @@ the speaker (not just an SNR change AGC compensates for).
 
 **Boost too aggressive on already-strong stations?** Toggle APF off
 when the station is loud enough without it — APF earns its keep on
-the weak end. Strong signals plus high APF gain can saturate the
-output limiter (Lyra's tanh safety net), which can sound clamped or
-flat. Drop Gain or turn APF off for those situations.
+the weak end. Strong signals plus high APF gain can saturate
+output; drop Gain or turn APF off for those situations.
 
 **Not on zero-beat and APF feels weak?** Either widen BW (up to
 150 Hz) so the boost band catches your slightly-off signal, or
@@ -94,20 +93,23 @@ sit.
 
 ## Where APF sits in the audio chain
 
+APF is implemented as WDSP's **SPEAK biquad** inside the RXA
+chain — a resonant boost centered on your CW pitch.  WDSP
+runs the entire audio chain in C, so the operator-tunable
+parameters (enable / BW / gain / center) flow into WDSP via
+the engine's own initial-state push and mid-session updates.
+
+For operator mental-model purposes:
+
 ```
-IQ → demod → notches → LMS → ANF → SQ → NR → AF Gain → AGC → Vol → APF → leveler → output
-                                                                   ▲
-                                                                   CW-only stage
+IQ → notches → demod → NR → ANF → AGC → APF (CW only) → audio out
+                                          ▲
+                                          mode-gated to CWU/CWL
 ```
 
-APF runs **after AGC + Volume** in v0.0.9.3 (relocated from the
-earlier pre-AGC position).  When APF was upstream of AGC, the AGC
-saw the boosted CW tone and reduced gain to keep overall output at
-target — the boost was felt as a subtle improvement in tone-vs-noise
-contrast but the overall loudness didn't change, which most operators
-perceived as "APF doesn't do much."  Post-AGC placement gives the
-+18 dB max boost as a literal audible loudness boost on the CW tone.
-The leveler + tanh safety net catches any overshoot above headroom.
+APF runs after AGC inside WDSP, so the operator's gain
+boost (up to +18 dB) is a literal loudness boost on the CW
+tone — not something AGC compensates back to a flat target.
 
 ## Tips
 

@@ -2,20 +2,22 @@
 
 ## What it does
 
-AGC keeps the audio output at a consistent level despite signal
-fluctuation.  Lyra's AGC engine (since v0.0.9.3) is a Python port
-of the WDSP **wcpAGC** reference implementation by Warren Pratt
-NR0V — the same look-ahead, state-machine, soft-knee design used
-by every serious openHPSDR-class SDR client.  Architecturally:
+AGC keeps audio output at a consistent level despite signal
+fluctuation.  Lyra's AGC runs entirely inside the **WDSP** DSP
+engine — the same look-ahead, state-machine, soft-knee design
+used by Thetis, PowerSDR, and other openHPSDR-class SDR clients.
+You're listening to Warren Pratt NR0V's reference implementation
+through Lyra's UI.
 
-- **Look-ahead ring buffer** delays output by ~4 ms so attack
-  ramps complete BEFORE a loud sample reaches the speaker — no
-  "blast" on transients (CW dits, lightning crashes, signal
-  arrival on a quiet band).
-- **5-state state machine** separates attack, fast-decay (post-
-  pop transient recovery), hang, normal decay, and hang-decay
-  regimes so each behaves correctly without one bleeding into
-  another.
+Key behaviors:
+
+- **Look-ahead ring buffer** delays output by a few milliseconds
+  so attack ramps complete BEFORE a loud sample reaches the
+  speaker — no "blast" on transients (CW dits, lightning crashes,
+  signal arrival on a quiet band).
+- **Multi-state state machine** separates attack, fast-decay,
+  hang, normal decay, and hang-decay regimes so each behaves
+  correctly without one bleeding into another.
 - **Soft-knee compression curve** keeps the gain change smooth
   around the threshold (no audible discontinuity on signals
   riding the knee, like SSB voice envelopes).
@@ -23,71 +25,61 @@ by every serious openHPSDR-class SDR client.  Architecturally:
   above background — noise alone never triggers hang, so the
   noise floor stays smooth.
 
-Pre-v0.0.9.3 Lyra used a simpler single-state peak tracker that
-exhibited several limitations the WDSP design eliminates by
-construction (scratchy noise floor, post-impulse audio mute, no
-look-ahead handling of transients).  The v0.0.9.2 → v0.0.9.3 swap
-is a one-way upgrade — no operator-facing API changes, just
-better-sounding audio across the board.
-
 ## Profiles
 
-The **AGC** cluster on the DSP & AUDIO panel shows the active profile.
-**Right-click** the cluster to change profile without opening Settings.
+The **AGC** cluster on the DSP & AUDIO panel shows the active
+profile.  **Right-click** the cluster to change profile without
+opening Settings.
 
-| Profile | Decay (τ)       | Hang time  | Use                              |
-|---------|------------------|------------|----------------------------------|
-| **Off**  | —               | —          | Volume scales raw demod output  |
-| **Fast** | 50 ms           | 0          | CW, weak signals                |
-| **Med**  | 250 ms          | 0          | SSB / ragchew (default)         |
-| **Slow** | 500 ms          | 1 s        | DX nets, steady AM broadcast    |
-| **Long** | 2 s             | 2 s        | Steady-carrier listening, beacon work |
-| **Auto** | same as Med     | same as Med | (auto-threshold tracking is parked in v0.0.9.3) |
-| **Cust** | UI-tracked      | UI-tracked | Persisted slider values; future Settings panel will route them through to WDSP knobs |
+| Profile  | Behaviour                                           | Best for                              |
+|----------|-----------------------------------------------------|---------------------------------------|
+| **Off**  | No automatic gain — Volume scales raw demod output | Digital modes (FT8/FT4/RTTY)         |
+| **Fast** | Quick attack/decay, no hang                         | CW, weak-signal work                  |
+| **Med**  | Moderate decay, no hang (default)                   | SSB / ragchew                         |
+| **Slow** | Longer decay with short hang                        | DX nets, steady AM broadcast          |
+| **Long** | Long decay with long hang                           | Beacons, steady-carrier listening     |
+| **Auto** | Same time-constants as Med                          | (Auto-threshold tracking is parked)   |
+| **Cust** | Persisted UI sliders (advisory only)                | (Future direct-WDSP control)          |
 
-Time constants come straight from the WDSP reference (Pratt's
-SetRXAAGCMode), so behavior is consistent with what operators
-have been using on Thetis and PowerSDR-class clients for over a
-decade.
+The time constants come from WDSP's canonical mode presets, so
+behavior is consistent with what operators have used on
+Thetis-class clients for over a decade.
 
-Label color on the panel tells you which mode is active at a glance:
+Label color on the panel tells you which profile is active at
+a glance:
 
 - **Gray** = Off
-- **Amber** = Fast / Med / Slow (static)
-- **Cyan** = Auto (actively tracking)
-- **Magenta** = Cust (user parameters)
+- **Amber** = Fast / Med / Slow / Long (static)
+- **Cyan** = Auto (currently same behavior as Med)
+- **Magenta** = Cust (UI sliders persisted, advisory only)
 
 ## Threshold
 
-The **thr** value (in dBFS) is the target audio level AGC aims to
-hold signals at.  Operator-tunable via Settings → DSP → Threshold
-slider.
-
-**Auto-calibrate** — picking **Auto** profile previously re-sampled
-the threshold every 3 seconds against a tracked noise floor.  In
-v0.0.9.3 (with the WDSP engine swap) the auto-tracking is currently
-a no-op — Auto behaves the same as Medium.  A future Settings
-panel will expose the WDSP-equivalent **hang threshold** parameter
-which provides the same operator outcome (signal-above-noise
-discrimination) using WDSP's own internal mechanisms.
+The **thr** value (in dBFS) on the panel cluster shows the AGC
+target level.  WDSP's engine handles threshold internally; the
+Settings → DSP threshold slider is currently advisory state
+(persisted in the UI but not pushed to WDSP) — it will be wired
+through in a future build alongside the Custom profile work.
 
 ## Live gain readout
 
-The **gain** value next to the threshold shows the current AGC gain
-action in dB, color-coded by magnitude:
+The **gain** value next to the threshold shows the current AGC
+gain action in dB, color-coded by magnitude:
 
 - **Green** — |gain| < 3 dB (AGC barely working)
 - **Amber** — 3 – 10 dB (normal operation)
-- **Red**   — > 10 dB (hitting hard — strong signal or heavy expansion
-  on a very weak one)
+- **Red**   — > 10 dB (hitting hard — strong signal or heavy
+  expansion on a very weak one)
 
-The number tracks peak-hold-with-decay so it stays readable on fast
-signals (UI refresh ~6 Hz, updated from every demod block internally).
+The number reads back from WDSP's internal AGC meter at ~6 Hz to
+match the panel repaint cadence; per-block reads would only add
+overhead the eye can't see.
 
 ## Front-panel controls
 
-The **AGC** cluster on the [**DSP & AUDIO** panel](panel:dsp) shows,
-left to right (click the panel link to flash it in the main window):
+The **AGC** cluster on the [**DSP & AUDIO** panel](panel:dsp)
+shows, left to right (click the panel link to flash it in the
+main window):
 
 ```
 AGC  <PROFILE>  thr <-NN dBFS>  gain <±N.N dB>
@@ -95,33 +87,35 @@ AGC  <PROFILE>  thr <-NN dBFS>  gain <±N.N dB>
 
 - **Left-click digits / labels** — no action (read-only display).
 - **Right-click** anywhere on the cluster — pops a profile menu:
-  Off / Fast / Med / Slow / Auto / Custom. Checked radio = current
-  profile.
-- **Profile label color** tells you mode at a glance:
-  gray (Off), amber (Fast/Med/Slow), cyan (**Auto** = tracking),
-  magenta (**Cust** = your parameters in effect).
+  Off / Fast / Med / Slow / Long / Auto / Custom. Checked radio =
+  current profile.
 
-Deeper configuration — Custom release/hang, manual threshold slider,
-full label/tooltip layout — lives on **DSP Settings…** (the button
-on the right side of the DSP & AUDIO panel, or File → DSP… in the
-menubar).
+Deeper configuration — Release / Hang / Threshold sliders —
+lives on **DSP Settings…** (the button on the right side of the
+DSP & AUDIO panel, or File → DSP… in the menubar).  Note: those
+sliders are currently **advisory** in WDSP mode (see "Custom
+profile" below).
 
 ## Custom profile
 
-The **Custom** profile in v0.0.9.3 is a UI-state holdover from the
-legacy AGC engine — Release and Hang sliders persist their values,
-but the WDSP engine doesn't currently consume them (it uses its
-own canonical seconds-form parameters per mode preset).  Selecting
-"Custom" produces the same audio behavior as Medium for now.
+The **Release**, **Hang**, and **Threshold** sliders in DSP
+Settings are persisted across restarts but are not currently
+pushed to the WDSP engine — WDSP uses its own canonical
+seconds-form parameters per mode preset, and Lyra hasn't yet
+exposed the WDSP-side knobs (attack ms / decay ms / hang ms /
+hang threshold) one-to-one.  Selecting **Custom** today produces
+the same audio behavior as **Medium**.
 
-A future Settings panel will route the operator-facing knobs
-(Attack ms / Decay ms / Hang ms / Hang threshold) directly to WDSP
-parameters so Custom regains its full operator control.
+A future Settings panel will route the operator knobs directly
+to WDSP parameters so Custom regains full operator control.
 
 ## Tips
 
-- **Pumping on FT8?** — Slow profile. FT8 bursts decay cleanly with a
-  long hang.
-- **CW echo / distortion?** — Fast profile. Let each dit/dah settle.
-- **AM broadcast fading?** — Slow profile + manual threshold.
-- **Stronger station punches through?** — Auto profile; it'll adjust.
+- **Pumping on FT8?** — Use **Off**. FT8 / FT4 / RTTY want fixed
+  gain; AF Gain on the panel is your "station loudness" knob.
+- **Pumping on AM with strong fades?** — **Slow** or **Long**.
+- **CW echo / distortion?** — **Fast**. Let each dit/dah settle.
+- **AM broadcast fading?** — **Slow** + a healthy AF Gain dial.
+- **Stronger station punches through?** — **Auto** behaves like
+  **Med** today; pick **Med** until Auto-threshold tracking
+  returns.

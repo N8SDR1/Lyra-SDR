@@ -17,14 +17,15 @@ up changes.
 
 ## Quick start
 
-1. Open **⚙ Settings…** → **Radio** tab, enter your HL2's IP address
-   (click **Discover** if you don't know it).
-2. Close Settings, click **▶ Start** in the toolbar. The status dot
-   should turn green.
-3. Click a digit on the main frequency display and scroll the mouse
-   wheel to tune — or type a frequency in MHz directly.
-4. Right-click the **AGC** cluster on the DSP & AUDIO panel → pick
-   **Auto**. The threshold will follow the band noise floor.
+1. Open **⚙ Settings…** → **Radio** tab, enter your HL2's IP
+   address (click **Discover** if you don't know it).
+2. Close Settings, click **▶ Start** in the toolbar.  The
+   status dot should turn green.
+3. Click a digit on the main frequency display and scroll the
+   mouse wheel to tune — or type a frequency in MHz directly.
+4. Right-click the **AGC** cluster on the DSP & AUDIO panel →
+   pick **Med** for SSB, **Slow** or **Long** for AM, or
+   **Off** for digital modes (FT8 / FT4).
 5. Pick a mode (LSB / USB / CWL / CWU / AM / FM / DIG) in the
    MODE & FILTER panel.
 
@@ -44,31 +45,35 @@ up changes.
   panadapter inside SW broadcast bands; suppressed inside your
   region's ham bands by default
 - **Modes & Filters** — demodulation modes, bandwidth presets
-- **AGC** — profiles (Off / Fast / Med / Slow / Auto / Custom),
-  threshold, auto-tracking
-- **Notch Filters** — placing, adjusting, multi-notch
-- **Noise Reduction** — NR1 (spectral subtraction) and NR2
-  (Ephraim-Malah / MMSE-LSA / Wiener), continuous strength
-  slider, captured-noise-profile workflow with auto-staleness
-  notification (Audacity-style)
+- **AGC** — profiles (Off / Fast / Med / Slow / Long / Auto /
+  Custom), live gain readout, WDSP-driven engine
+- **Notch Filters** — placing, adjusting, multi-notch, saved
+  notch banks
+- **Noise Reduction** — WDSP EMNR with mode 1-4 picker, AEPF
+  anti-musical-noise post-filter, NPE noise estimator,
+  captured noise profile library
 - **LMS Line Enhancer** — predictive NR3 stage that lifts CW
-  carriers and voice formants above broadband noise; the inverse
-  of NR (where NR removes what isn't signal, LMS amplifies what
-  looks periodic).  Multi-parameter strength slider
-- **Noise Blanker** — IQ-domain impulse suppression, profiles
-  (Off / Light / Medium / Aggressive / Custom), threshold tuning
-- **Auto Notch Filter** — LMS adaptive notch, surgical removal
-  of hetorodynes / carriers / RTTY spurs, profiles
-  (Off / Gentle / Standard / Aggressive / Custom)
-- **APF (Audio Peaking Filter)** — narrow CW boost at the operator's pitch
-- **BIN (Binaural)** — pseudo-stereo headphone listening for CW + SSB
+  carriers and voice formants above broadband noise; the
+  inverse of NR (where NR removes what isn't signal, LMS
+  amplifies what looks periodic)
+- **Noise Blanker** — IQ-domain impulse suppression
+  (pre-decimation), profiles Off / Light / Medium / Heavy /
+  Custom
+- **Auto Notch Filter** — adaptive notch for unknown
+  heterodynes / carriers / RTTY spurs, profiles Off / Light /
+  Medium / Heavy / Custom
+- **APF (Audio Peaking Filter)** — narrow CW boost at the
+  operator's pitch
+- **BIN (Binaural)** — pseudo-stereo headphone listening for
+  CW + SSB
 - **Spectrum & Waterfall** — pan, zoom, drag, palettes
 - **S-Meter** — analog vs LED styles
-- **External Hardware** — N2ADR filter board, USB-BCD for linear amps
-- **TCI Server** — integration with log4OM, N1MM+, JS8Call, etc.
-- **Audio Leveler** — soft-knee compressor for taming bursts,
-  presets (Off / Light / Medium / Late Night / Custom)
-- **Audio Routing** — HL2 vs HL2+ paths, AK4951, sounddevice
+- **External Hardware** — N2ADR filter board, USB-BCD for
+  linear amps
+- **TCI Server** — integration with log4OM, N1MM+, JS8Call,
+  etc.
+- **Audio Routing** — HL2 audio jack vs PC Soundcard, gain
+  chain, AF Gain wiring
 - **Keyboard Shortcuts** — all the hotkeys
 - **Troubleshooting** — common issues and their fixes
 
