@@ -1718,6 +1718,30 @@ deleting.
 * Bump `_open_wdsp_rx` audit reminder from §14.10 to higher
   priority — natural followup work after legacy cleanup lands.
 
+**Phase 9.5 — AGC behaviour audit** (operator-reported 2026-05-08
+during Phase 4 verification):
+
+* **Symptom:** AGC mode dropdown (Slow / Medium / Fast / Off)
+  only audibly changes behaviour for OFF.  Slow/Medium/Fast all
+  sound identical.  AGC gain meter in the display is static
+  (no movement on signal peaks).
+* **Hypothesis:**
+  - AGC OFF works → `SetRXAAGCMode(ch, 0)` is wired correctly.
+  - Slow/Med/Fast all identical → either the dropdown's
+    `currentIndexChanged` isn't connected to a Radio setter,
+    or all three map to the same numeric WDSP mode.
+  - Static display → the gain-reduction meter isn't polling
+    WDSP's AGC state (likely `GetRXAAGCHangLevel` or
+    `GetRXAAGCThresh` family).
+* **Likely overlap:** the `_open_wdsp_rx` audit (§14.10
+  followup) probably also surfaces missing AGC initial-state
+  push.  Bundle the two together.
+* **Defer until Phase 9 done.**  Cleaner codebase makes the
+  routing trivial to trace; today the AGC code path winds
+  through `lyra/dsp/agc_wdsp.py` (Phase 6 delete target) plus
+  legacy `channel.py` (Phase 5 slim target) plus `radio.py`
+  setters.  After Phase 6 there's exactly one path to audit.
+
 **Total estimated work for Phases 3-9: 5-7 hours focused.**
 
 #### Why Phase A first (and not the whole thing tonight)

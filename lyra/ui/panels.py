@@ -3373,7 +3373,6 @@ class DspPanel(GlassPanel):
         presets the operator can pick directly."""
         from PySide6.QtWidgets import QMenu
         from PySide6.QtGui import QAction
-        from lyra.dsp.apf import AudioPeakFilter as _APF
         btn = self.dsp_btns["APF"]
         menu = QMenu(self)
 

@@ -134,11 +134,8 @@ class MainWindow(QMainWindow):
             self.radio.autoload_anf_settings()
         except Exception as exc:
             print(f"[app] ANF autoload error: {exc}")
-        # Audio leveler — same belt-and-suspenders pattern.
-        try:
-            self.radio.autoload_leveler_settings()
-        except Exception as exc:
-            print(f"[app] leveler autoload error: {exc}")
+        # NOTE: Audio Leveler autoload removed in Phase 4 of
+        # legacy-DSP cleanup (CLAUDE.md §14.9) — leveler API gone.
         # Phase 3.D #4 — NR2 operator knobs (aggression, smoothing,
         # speech-aware).  NR profile selection itself is handled by
         # the standard nr_profile QSettings key (loaded elsewhere).
