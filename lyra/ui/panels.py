@@ -10,9 +10,9 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QInputDialog,
-    QLabel, QLineEdit, QMenu, QPushButton, QSizePolicy, QSlider,
-    QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout,
+    QInputDialog, QLabel, QLineEdit, QMenu, QPushButton, QSizePolicy,
+    QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 
@@ -673,12 +673,24 @@ class ViewPanel(GlassPanel):
         h = QHBoxLayout()
         h.setSpacing(6)
 
+        # ── Zoom + Step group (vertically stacked) ───────────────────
+        # Zoom controls (combo + slider + label) live on the top row;
+        # Panadapter scroll Step combo lives on the row below them.
+        # Stacked rather than side-by-side so adding the Step combo
+        # doesn't push every other panel control to the right.  The
+        # rest of the panel (Spec FPS, Wf, etc.) keeps its existing
+        # horizontal placement — only this group is two rows tall.
+        zoom_grid = QGridLayout()
+        zoom_grid.setSpacing(4)
+        zoom_grid.setContentsMargins(0, 0, 0, 0)
+
+        # Top row: Zoom controls.
+        zoom_grid.addWidget(QLabel("Zoom"), 0, 0)
         # Zoom combo — same preset levels as Settings + mouse wheel.
         # Pairs with a fine-zoom slider to its right: combo for fast
         # preset jumps (1× / 2× / 4× / 8× / 16×), slider for in-between
         # values (e.g. 1.5×, 2.5×, 3.7×) when the operator wants to
         # fine-tune the panadapter span without snapping to a preset.
-        h.addWidget(QLabel("Zoom"))
         self.zoom_combo = QComboBox()
         for lvl in Radio.ZOOM_LEVELS:
             self.zoom_combo.addItem(f"{lvl:g}x", float(lvl))
@@ -686,10 +698,10 @@ class ViewPanel(GlassPanel):
         self.zoom_combo.setFixedWidth(64)
         self.zoom_combo.setToolTip(
             "Panadapter zoom presets (1× / 2× / 4× / 8× / 16×).\n"
-            "Mouse-wheel on empty spectrum steps through these.\n"
+            "Ctrl + mouse wheel on empty spectrum steps through these.\n"
             "For in-between values, use the slider to the right.")
         self.zoom_combo.currentIndexChanged.connect(self._on_zoom_pick)
-        h.addWidget(self.zoom_combo)
+        zoom_grid.addWidget(self.zoom_combo, 0, 1)
 
         # Fine-zoom slider — linear 1.0× .. 16.0× in 0.1× ticks.
         # Internal slider int = zoom × 10 so we don't need a custom
@@ -710,7 +722,7 @@ class ViewPanel(GlassPanel):
             "or 3× to span a CW pile-up).\n\n"
             "The combo on the left snaps to the standard presets;\n"
             "this slider freely rides between them. Either control\n"
-            "drives the same Radio.zoom — mouse-wheel on the\n"
+            "drives the same Radio.zoom — Ctrl + mouse-wheel on the\n"
             "spectrum still uses preset steps.")
         # Same press/release pattern as the FPS slider — committing
         # zoom on every pixel of drag was DESTROYING the waterfall
@@ -732,7 +744,7 @@ class ViewPanel(GlassPanel):
         self.zoom_slider.sliderPressed.connect(self._on_zoom_slider_press)
         self.zoom_slider.sliderReleased.connect(self._on_zoom_slider_release)
         self.zoom_slider.valueChanged.connect(self._on_zoom_slider)
-        h.addWidget(self.zoom_slider)
+        zoom_grid.addWidget(self.zoom_slider, 0, 2)
 
         # Live readout next to the slider — "1.7x" — so the operator
         # always sees the current value without having to read pixel
@@ -743,16 +755,15 @@ class ViewPanel(GlassPanel):
         self.zoom_label.setStyleSheet(
             "color: #cdd9e5; font-family: Consolas, monospace; "
             "font-weight: 700;")
-        h.addWidget(self.zoom_label)
+        zoom_grid.addWidget(self.zoom_label, 0, 3)
 
-        # ── Panadapter scroll step ────────────────────────────────────
+        # Bottom row: Panadapter scroll step.
         # Mouse-wheel-over-panadapter tune step.  Distinct from the
         # VFO step on the Tuning panel: VFO step is for fine-tuning
         # onto a signal (10 Hz / 100 Hz / 1 kHz); panadapter scroll
         # step is for skimming across a band (1 kHz / 5 kHz / 10 kHz
         # / 25 kHz / 100 kHz).  Both knobs persist across sessions.
-        h.addSpacing(10)
-        h.addWidget(QLabel("Step"))
+        zoom_grid.addWidget(QLabel("Step"), 1, 0)
         self.scroll_step_combo = QComboBox()
         for hz in Radio.PANADAPTER_SCROLL_STEPS_HZ:
             label = (f"{hz} Hz" if hz < 1000
@@ -763,18 +774,22 @@ class ViewPanel(GlassPanel):
         self.scroll_step_combo.setToolTip(
             "Mouse-wheel-over-panadapter tune step.\n\n"
             "Wheel up = freq up.  Wheel down = freq down.\n"
-            "Step size below picks how far each wheel tick moves.\n\n"
+            "Step size picks how far each wheel tick moves.\n\n"
             "Independent of the VFO step on the Tuning panel —\n"
             "VFO step is for fine-tuning onto a signal,\n"
             "this is for skimming across a band.\n\n"
             "Ctrl + wheel still zooms (escape hatch).")
         self.scroll_step_combo.currentIndexChanged.connect(
             self._on_scroll_step_pick)
-        h.addWidget(self.scroll_step_combo)
+        zoom_grid.addWidget(self.scroll_step_combo, 1, 1)
+        # Bottom row leaves cols 2..3 empty so the Step combo sits
+        # directly under the Zoom combo without stretching.
         # Two-way sync so external changes (CAT command, autoload)
         # land in the combo too.
         radio.panadapter_scroll_step_changed.connect(
             self._sync_scroll_step_combo)
+
+        h.addLayout(zoom_grid)
 
         # Spectrum rate — compact slider only; live value is in the
         # tooltip on hover. Operator wanted a thin panel with no
