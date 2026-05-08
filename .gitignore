@@ -83,3 +83,9 @@ New Text Document*.txt
 *.log
 logs/
 scratch/
+
+# Local rollback bundles — git bundle archives created at major
+# milestones (see CLAUDE.md / commit history for tag context).
+# Keep them on-disk but out of the repo: bundles balloon git
+# history because each one is a full repo snapshot.
+_backups/
