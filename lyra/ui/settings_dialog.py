@@ -1518,9 +1518,10 @@ class DspSettingsTab(QWidget):
         # Initialize and keep the AGC-action label state-aware so it
         # never sits at the placeholder "—" when AGC is on and the
         # stream is running, and shows a sensible label ("AGC off",
-        # "stream stopped") otherwise.  Radio's _apply_agc_and_volume
-        # short-circuits before emitting agc_action_db when the
-        # profile is "off", so without this we'd show stale data.
+        # "stream stopped") otherwise.  WDSP's AGC engine drives the
+        # agc_action_db signal directly, but it doesn't fire when
+        # the operator picks profile "off" — without this hook we'd
+        # show stale data on toggle.
         radio.stream_state_changed.connect(
             lambda _on: self._refresh_agc_action_label())
         # agc_profile_changed already wired above for the radio

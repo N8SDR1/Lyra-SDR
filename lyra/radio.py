@@ -730,17 +730,14 @@ class Radio(QObject):
         self._audio_block = 512
         self._tone_phase = 0.0
 
-        # Stream-gap tracking — every audio block compares stream's
-        # current seq_errors counter against this last-seen value;
-        # if it incremented, a UDP frame was dropped between this
-        # block and the previous one and the IQ stream is no longer
-        # continuous.  See _apply_agc_and_volume for the fade we
-        # apply on gap to mask the discontinuity.  v0.0.9.1 +.
-        self._last_seen_seq_errors = 0
-        # 10 ms ramp at 48 kHz audio rate.  Long enough to mask the
-        # decimator-FIR ringing + AGC gain step caused by the IQ
-        # discontinuity; short enough to be subliminal in voice or CW.
-        self._gap_fade_samples = 480
+        # Stream-gap tracking attributes (``_last_seen_seq_errors``,
+        # ``_gap_fade_samples``) used to drive a 10 ms post-AGC
+        # linear fade-in inside ``_apply_agc_and_volume`` when the
+        # UDP RX socket dropped a frame.  Phase 6.A deleted that
+        # method as orphan; WDSP doesn't know about UDP-frame-level
+        # discontinuity so the fade is no longer applied.  Logged
+        # for restoration in Phase 9.5 if operators report audible
+        # clicks on lossy networks.
 
         # RX DSP channel — the WDSP integration seam. Owns its own
         # decimator, audio buffer, demod instances, NR, and notch
@@ -784,7 +781,9 @@ class Radio(QObject):
         # / _agc_target directly was retired in v0.0.9.3 -- those
         # fields are now informational only on the audio path; the
         # WDSP engine derives its time constants from operator-
-        # facing presets via WdspAgc.set_mode().
+        # facing presets via ``_wdsp_rx.set_agc(mode)``.  The Python
+        # WdspAgc wrapper that used to forward these was deleted in
+        # Phase 6.A.
         self._agc_target = 0.0316        # -30 dBFS, UI-displayed
         self._agc_profile = "med"        # off / fast / med / slow / custom
         self._agc_release = 0.003        # custom-slider value, UI only
@@ -798,23 +797,15 @@ class Radio(QObject):
         # WDSP hang_thresh slider in a future release.
         self._noise_baseline = 1e-4
 
-        # ── WDSP AGC engine (v0.0.9.3) ───────────────────────────────
-        # Lyra's AGC is a Python port of Warren Pratt's WDSP wcpAGC
-        # (look-ahead ring buffer + 5-state machine + soft-knee
-        # compression curve).  Replaced the legacy single-state
-        # per-sample tracker in v0.0.9.3 because the legacy tracker
-        # had three structural defects (no look-ahead, no state
-        # machine, hard-threshold gain) that surgical fixes couldn't
-        # address without introducing other regressions.  Engine
-        # lives in lyra/dsp/agc_wdsp.py with full GPL chain
-        # attribution to Warren Pratt NR0V.  Mode is synced from
-        # the persisted profile here; subsequent profile changes
-        # call set_agc_profile which keeps the engine in step.
-        from lyra.dsp.agc_wdsp import WdspAgc, MODE_BY_NAME
-        self._wdsp_agc = WdspAgc(sample_rate=48000)
-        self._wdsp_agc.set_mode(
-            MODE_BY_NAME.get(self._agc_profile, MODE_BY_NAME["med"])
-        )
+        # ── AGC ─────────────────────────────────────────────────────
+        # AGC runs entirely inside the WDSP engine (wcpAGC, look-
+        # ahead 5-state soft-knee).  The Python-side WdspAgc wrapper
+        # that originally drove `_apply_agc_and_volume` was deleted
+        # in Phase 6.A (v0.0.9.6) — see the deletion note where
+        # `_apply_agc_and_volume` used to live.  AGC mode/profile
+        # synchronization with WDSP happens through
+        # `self._wdsp_rx.set_agc(self._wdsp_agc_for(name))` in
+        # set_agc_profile.
 
         # ── WDSP RX engine (v0.0.9.6 audio rebuild) ──────────────────
         # Native WDSP RX channel via cffi.  WDSP is the only DSP path
@@ -1644,13 +1635,12 @@ class Radio(QObject):
                 self._push_wdsp_squelch_state()
             except Exception as exc:
                 print(f"[Radio] WDSP rx mode-change error: {exc}")
-        # Also reset AGC + S-meter state. Different demods produce
-        # very different peak levels (AM envelope vs SSB sideband
-        # vs CW pitched tone), so a peak captured under the old
-        # mode would mis-clamp gain under the new one until it
-        # decayed. Same field-test motivation as set_freq_hz.
-        if self._wdsp_agc is not None:
-            self._wdsp_agc.reset()
+        # Also reset S-meter state. Different demods produce very
+        # different peak levels (AM envelope vs SSB sideband vs CW
+        # pitched tone), so a peak captured under the old mode
+        # would mis-clamp gain under the new one until it decayed.
+        # WDSP's AGC runs inside the engine and resets internally
+        # through the mode-change wiring above.
         self._smeter_avg_lin = 0.0
         self._smeter_peak_hold_lin = 0.0
         # WDSP SSQL handles all-mode squelch natively; mode-specific
@@ -1828,18 +1818,24 @@ class Radio(QObject):
         return self._af_gain_db
 
     def set_af_gain_db(self, db: int):
-        """Integer dB, clamped 0..+80. Applied in _apply_agc_and_volume
-        as a linear multiplier between AGC and Volume. Dedicated stage
-        so operators running AGC off on digital modes have a natural
-        "station loudness" knob independent of moment-to-moment
-        Volume trim.
+        """Integer dB, clamped 0..+80.  Originally applied in
+        _apply_agc_and_volume as a linear multiplier between AGC
+        and Volume — that method was deleted Phase 6.A as orphan
+        dead code, and AF Gain is currently NOT wired to WDSP's
+        PanelGain1 (which is hardcoded to 1.0).
 
-        Range goes to +80 dB (was +50) because AGC OFF has no other
-        source of makeup gain — and AGC ON internally provides up to
-        +60 dB of automatic amplification, so a +50 dB AF cap left
-        AGC OFF roughly 30 dB quieter on weak signals than AGC ON.
-        +80 dB closes that gap; operators who don't need the upper
-        range simply never visit it."""
+        Live consumers of af_gain_linear today:
+          * _emit_tone — test-tone path uses AF + Volume so the
+            tone level matches what the operator hears on real
+            signals.
+
+        For actual demodulated audio, AF Gain is currently inert.
+        Routing it to WDSP (set_panel_gain) is logged in CLAUDE.md
+        §14.9 Phase 9.5 Item 4 alongside the AGC wiring audit;
+        bundle the two when the cleanup arc finishes.
+
+        Range goes to +80 dB because AGC OFF has no other source
+        of makeup gain when AF Gain is wired back up."""
         db = max(0, min(80, int(db)))
         if db == self._af_gain_db:
             return
@@ -6010,11 +6006,12 @@ class Radio(QObject):
         self._dsp_worker.attach_to_radio(self)
         # Seed the worker's config from Radio's current state so the
         # worker has correct AF / Vol / Mute / BIN values from frame
-        # zero.  AGC config is no longer synced to the worker because
-        # the worker's process_block calls radio._apply_agc_and_volume
-        # via back-reference, which uses Radio's WDSP engine
-        # directly -- the worker's local AGC config slots are
-        # vestigial from the legacy architecture.
+        # zero.  These config slots are vestigial post-Phase-6.A:
+        # the worker calls ``radio._do_demod_wdsp`` directly, and
+        # WDSP applies AGC / NR / ANF / output filter inside the
+        # engine — Volume + Mute are applied by ``_do_demod_wdsp``
+        # itself reading off Radio.  The worker setters just keep
+        # the config dataclass current for any future re-use.
         self._dsp_worker.set_agc_profile(self._agc_profile)
         self._dsp_worker.set_af_gain_db(self._af_gain_db)
         self._dsp_worker.set_volume(self._volume)
@@ -6075,13 +6072,12 @@ class Radio(QObject):
         self._dsp_worker.spectrum_raw_ready.connect(
             self._on_worker_spectrum_raw, _qc)
         # AF Gain, Volume, Muted aren't currently exposed as Qt
-        # signals on Radio (single-thread path reads them directly
-        # from `_af_gain_db` / `_volume` / `_muted` each block).
-        # Worker mode currently uses Radio's _apply_agc_and_volume
-        # which reads those same attributes, so live updates work
-        # for free.  When B.4+ migrates AGC to worker-owned state,
-        # we'll add the necessary _changed signals on Radio + slots
-        # on the worker.
+        # signals on Radio (the audio path reads them directly from
+        # ``_af_gain_db`` / ``_volume`` / ``_muted`` each block).
+        # Worker mode calls ``radio._do_demod_wdsp`` which reads the
+        # same attributes, so live updates work for free.  AF Gain
+        # routing into WDSP's PanelGain is logged as Phase 9.5 Item 4
+        # — see CLAUDE.md §14.9.
         # The worker's slot @run_loop runs once (until exit), driven
         # by the thread's started signal.
         self._dsp_worker_thread.started.connect(self._dsp_worker.run_loop)
@@ -6142,8 +6138,9 @@ class Radio(QObject):
                 self._wdsp_rx.reset()
             except Exception as exc:
                 print(f"[Radio] WDSP rx reset error: {exc}")
-        if self._wdsp_agc is not None:
-            self._wdsp_agc.reset()
+        # NOTE: legacy `self._wdsp_agc.reset()` removed Phase 6.A —
+        # WDSP's AGC state lives inside the DLL and resets via the
+        # _wdsp_rx.reset() above.
         self._smeter_avg_lin = 0.0
         self._smeter_peak_hold_lin = 0.0
         # WDSP SSQL state lives inside the DLL and resets via WDSP's
@@ -6654,12 +6651,10 @@ class Radio(QObject):
             self.audio_for_tci_emit.emit(audio)
         except Exception:
             pass
-        # AGC gain readout — WDSP's AGC runs inside the engine, so the
-        # operator's UI gain meter has to read back from WDSP rather
-        # than from the bypassed Python ``_wdsp_agc``. Throttled to
-        # one update per several blocks (~6 Hz) since the meter
-        # repaints at that rate anyway and per-block reads add a
-        # critical-section take per call.
+        # AGC gain readout — WDSP's AGC runs inside the engine.
+        # Throttled to one update per several blocks (~6 Hz) since
+        # the meter repaints at that rate anyway and per-block reads
+        # add a critical-section take per call.
         try:
             self._wdsp_agc_meter_skip = (
                 getattr(self, "_wdsp_agc_meter_skip", 0) + 1)
@@ -6710,174 +6705,20 @@ class Radio(QObject):
         except Exception:
             pass
 
-    def _apply_agc_and_volume(self, audio):
-        # Chain: audio → AF Gain (pre-AGC makeup) → AGC → Volume → tanh
-        #
-        # AF Gain sits BEFORE AGC for two critical reasons:
-        #   1. When AGC is ON, it normalizes to target regardless of
-        #      AF Gain — so AF just feeds more signal into AGC, which
-        #      needs to do less work. Output level stays at target.
-        #      This prevents the "AF + AGC stack and clip" bug.
-        #   2. When AGC is OFF (FT8/FT4/digital modes where pumping
-        #      is unwanted), AF Gain is the manual makeup gain — the
-        #      only way to bring weak signals up to audible.
-        #
-        # Net effect: switching AGC on ↔ off produces only a slight
-        # loudness delta (the expected SDR-client behaviour). Vol slider
-        # has a useful full range in both AGC-on and AGC-off modes.
-        #
-        # Mute multiplies final gain by 0 — keeps everything else
-        # (AGC state, noise-floor tracking, meter feeds) running so
-        # unmuting doesn't cause a glitch.
-        #
-        # AGC engine — quiet-pass v0.0.7.1 rewrite:
-        #
-        # Pre-v0.0.7.1, AGC was a BLOCK-SCALAR tracker — one peak,
-        # one gain, applied to the whole audio block.  Between blocks,
-        # the gain could change abruptly (instant attack on block_peak,
-        # exponential release otherwise), which created an audible
-        # sample-domain step at every block boundary on signal arrival
-        # and during release recovery.  Operators heard this as random
-        # loud pops, sometimes many dB above standard playback level.
-        # See docs/architecture/audio_pops_audit.md §3 P0.1 for the
-        # full diagnosis + bench numbers.
-        #
-        # The fix: track the peak envelope SAMPLE-BY-SAMPLE.  For
-        # each input sample,
-        #
-        #   if mag[n] > peak[n-1]:    peak[n] = mag[n]    (instant attack)
-        #                             hang_remaining = hang_samples
-        #   elif hang_remaining > 0:  peak[n] = peak[n-1] (hang)
-        #                             hang_remaining -= 1
-        #   else:                     peak[n] *= (1 − α)  (exp release)
-        #
-        # gain[n] = target / peak[n], clamped at AGC_MAX_GAIN.
-        # output[n] = audio[n] × gain[n] × vol.
-        #
-        # Per-sample tracking eliminates the boundary discontinuity by
-        # construction — the gain crosses the boundary continuously
-        # because the same per-sample state machine drives both sides.
-        # Time constants are translated from the legacy per-block
-        # release / hang at __init__ + every profile change so the
-        # perceived behaviour matches the v0.0.7 baseline (see
-        # _refresh_agc_per_sample_constants).
-        #
-        # Cost: one Python loop over the block.  At 1024 samples and
-        # ~46 blocks/sec on 48 kHz audio, ~100-150 µs per block on a
-        # modern CPU — well under the 21 ms block budget.
-        vol = 0.0 if self._muted else self._volume
-        af = self.af_gain_linear
-        # Apply AF Gain first — same for both AGC paths.
-        audio = audio * af
-
-        if self._agc_profile == "off":
-            # AGC disabled — AF Gain + Volume scale the raw demod
-            # output. Critical for digital modes (FT8/FT4/RTTY)
-            # where operators intentionally run AGC off.
-            #
-            # Apply a fixed +14 dB makeup gain to compensate for
-            # the absence of AGC's automatic amplification stage.
-            # Field test on AM/SSB with weak signals showed demod
-            # outputs around -94 dBFS, where AGC ON's typical gain
-            # (~5x = +14 dB) made signals audible while AGC OFF at
-            # the same AF+Vol was 14 dB quieter. Matching the
-            # "only a slight loudness delta" promise from the chain
-            # design comment requires this constant compensation —
-            # without it, operators have to re-dial AF and Vol every
-            # time they toggle AGC. tanh limiter still prevents
-            # over-driving the sink on strong signals; digital-mode
-            # operators feeding a decoder can simply lower AF Gain
-            # by ~14 dB to get the previous (uncompensated) level.
-            AGC_OFF_MAKEUP = 5.0119   # 10 ** (14/20) — +14 dB linear
-            out = audio * AGC_OFF_MAKEUP * vol
-            # APF (CW only) — runs in AGC-OFF path too so operators
-            # who run digital modes with AGC off (FT8/FT4 don't use
-            # APF) and CW operators who prefer AGC off both get
-            # consistent APF behavior.  See main AGC-ON path below
-            # for the rationale comment block.
-            if (self._mode in ("CWU", "CWL")
-                    and getattr(self._rx_channel, "_apf", None) is not None
-                    and self._rx_channel._apf.enabled
-                    and out.size > 0):
-                out = self._rx_channel._apf.process(out)
-            # NOTE: legacy `self._leveler.process(out)` removed
-            # Phase 4 (entire _apply_agc_and_volume is orphan in
-            # WDSP mode, awaiting deletion in Phase 8).
-            return np.tanh(out).astype(np.float32)
-
-        if audio.size == 0:
-            return audio.astype(np.float32, copy=False)
-
-        # ── WDSP AGC (look-ahead, 5-state, soft-knee) ───────────────
-        # Lyra's AGC engine is a Python port of Warren Pratt's WDSP
-        # wcpAGC.  See lyra/dsp/agc_wdsp.py for the engine and the
-        # v0.0.9.3 CHANGELOG entry for the audit + decision rationale
-        # that retired the legacy single-state per-sample tracker.
-        # WdspAgc.process() runs the 5-state machine + 4 ms look-
-        # ahead per sample and returns audio at the WDSP target
-        # level (out_target ≈ 0.98).  Mode is synced from the
-        # operator's profile preset by set_agc_profile.
-        audio = self._wdsp_agc.process(audio)
-
-        # Report AGC action gain to the meter at one update per
-        # audio block (matches the meter's ~6 Hz repaint rate;
-        # within-block gain variation is sub-perceptible).
-        try:
-            gain_lin = max(self._wdsp_agc.gain, 1e-6)
-            self.agc_action_db.emit(float(20.0 * np.log10(gain_lin)))
-        except Exception:  # noqa: BLE001
-            pass
-
-        # Volume slider applies AFTER AGC so the operator sees a
-        # full range from silent to clipping regardless of AGC
-        # state.  Cast back to audio's dtype so we don't churn
-        # allocations on the multiply.
-        audio = (audio * vol).astype(audio.dtype, copy=False)
-
-        # ── APF — Audio Peaking Filter (CW only) ────────────────────
-        # Moved POST-AGC in v0.0.9.3.  When APF lived inside
-        # Channel.process() (pre-AGC), the AGC compensated the +18 dB
-        # tone-boost back to target -- operator perceived only a
-        # subtle change in tone-vs-noise contrast, not the
-        # dramatic "louder tone" they expected.  Post-AGC placement
-        # gives the operator-facing boost matching expectation: APF
-        # on = literally louder CW tone, leveler + tanh catch any
-        # excursion above headroom.  The APF object still lives on
-        # Channel (so its center freq tracks CW pitch
-        # automatically); only the .process() call site moved.
-        if (self._mode in ("CWU", "CWL")
-                and getattr(self._rx_channel, "_apf", None) is not None
-                and self._rx_channel._apf.enabled
-                and audio.size > 0):
-            audio = self._rx_channel._apf.process(audio)
-
-        # NOTE: legacy `self._leveler.process(audio)` removed
-        # Phase 4.  Whole _apply_agc_and_volume awaits Phase 8.
-
-        # ── Stream-gap fade (v0.0.9.1) ──────────────────────────────
-        # If the UDP RX socket dropped a frame between this audio
-        # block and the previous one, the IQ stream is discontinuous
-        # at some point inside this block.  After decimation and
-        # demod, that produces an audible step in the audio output —
-        # operators heard this as occasional "louder than the rest"
-        # bursts.  Mask it with a 10 ms linear fade-in on the first
-        # samples of the post-AGC audio.  Detection is by comparing
-        # the stream's seq_errors counter against the last-seen
-        # value; cheap, lock-free (the int read is atomic under the
-        # GIL, slight staleness is fine).  See
-        # docs/architecture/audio_pops_audit.md §4 for the analysis.
-        if self._stream is not None:
-            current_seq_errors = self._stream.stats.seq_errors
-            if current_seq_errors > self._last_seen_seq_errors:
-                self._last_seen_seq_errors = current_seq_errors
-                if audio.size > 0:
-                    n = min(self._gap_fade_samples, audio.size)
-                    ramp = np.linspace(
-                        0.0, 1.0, n, dtype=audio.dtype)
-                    audio = audio.copy()
-                    audio[:n] *= ramp
-
-        return np.tanh(audio).astype(np.float32)
+    # NOTE: _apply_agc_and_volume removed in Phase 6.A
+    # (v0.0.9.6).  Originally the post-demod audio chain (AF Gain →
+    # AGC → Volume → APF → stream-gap fade → tanh limiter) for the
+    # legacy DSP path.  WDSP took over all of these stages
+    # internally as of Phase 3 — AF Gain via SetRXAPanelGain, AGC
+    # via WDSP's wcpAGC C engine, APF via WDSP's SPEAK biquad,
+    # volume + mute applied directly inside _do_demod_wdsp.  The
+    # method became orphan dead code in Phase 4 and was originally
+    # scheduled for Phase 8 deletion; an audit during Phase 6
+    # confirmed zero callers (only docstring / comment references
+    # remained) so the deletion landed earlier than planned.
+    # See git history for the prior body if anyone needs to
+    # recover the per-sample AGC tracker or the stream-gap fade
+    # logic.
 
     # ── AGC profile API ───────────────────────────────────────────────
     @property
@@ -6897,20 +6738,11 @@ class Radio(QObject):
         if name not in (*self.AGC_PRESETS, "custom"):
             name = "med"
         self._agc_profile = name
-        # AGC_PRESETS is kept as a UI label set; the WDSP engine has
-        # its own internal preset table (mode-specific tau_decay /
-        # hangtime / hang_thresh) and applies them via set_mode().
-        # MODE_BY_NAME handles "auto" → MODE_MEDIUM (auto-threshold
-        # tracking is a no-op in WDSP for now -- can return as a
-        # Settings-controlled WDSP hang_thresh slider later).
-        if self._wdsp_agc is not None:
-            try:
-                from lyra.dsp.agc_wdsp import MODE_BY_NAME
-                self._wdsp_agc.set_mode(
-                    MODE_BY_NAME.get(name, MODE_BY_NAME["med"])
-                )
-            except Exception:  # noqa: BLE001
-                pass
+        # AGC_PRESETS is kept as a UI label set; WDSP has its own
+        # internal preset table (mode-specific tau_decay / hangtime
+        # / hang_thresh) and applies them via _wdsp_rx.set_agc().
+        # The legacy Python `_wdsp_agc.set_mode()` call was removed
+        # Phase 6.A.
         # WDSP native engine — AGC mode lives inside the engine.
         if self._wdsp_rx is not None:
             try:
@@ -6932,13 +6764,13 @@ class Radio(QObject):
 
     def set_agc_custom(self, release: float, hang_blocks: int):
         """Set AGC custom-slider values and switch profile to
-        'custom'.  v0.0.9.3 note: these values are no longer wired
-        directly to the AGC engine (the WDSP engine has its own
-        canonical mode presets via WdspAgc.set_mode); they're kept
-        for UI persistence and may map back to operator-facing
-        WDSP knobs (attack/decay/hang in seconds) in a future
-        Settings panel.  For now, picking 'custom' produces the
-        same audio behavior as 'med'."""
+        'custom'.  WDSP owns the live AGC engine (Phase 6.A
+        deleted the legacy Python WdspAgc wrapper); WDSP applies
+        canonical mode presets through ``_wdsp_rx.set_agc(mode)``.
+        These slider values are kept for UI persistence and may
+        map back to operator-facing WDSP knobs (attack/decay/hang
+        in seconds) in a future Settings panel.  For now, picking
+        'custom' produces the same audio behavior as 'med'."""
         self._agc_release = max(0.0, min(0.1, float(release)))
         self._agc_hang_blocks = max(0, min(200, int(hang_blocks)))
         self._agc_profile = "custom"

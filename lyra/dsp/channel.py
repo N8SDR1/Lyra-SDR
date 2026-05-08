@@ -10,10 +10,14 @@ directly in ``Radio._do_demod_wdsp`` — not as a DspChannel subclass
 — so the abstract façade no longer pulls its weight.  What remains
 here is a thin state container that:
 
-  * Owns the live DSP module instances (NR1, NR2, NB, ANF, LMS,
-    SSQL, APF) that were ported in Phases 3.D #1-#4 and reused by
-    Radio's WDSP path for things WDSP doesn't ship by default
-    (post-AGC APF, captured-noise profile capture, etc.).
+  * Owns the operator-state for each DSP module (NR1, NR2, NB,
+    ANF, LMS, SSQL, APF).  WDSP performs the actual signal
+    processing in its C-side engine; the channel mirrors operator
+    knobs so saved settings persist across mode / freq changes.
+    Phase 6 (v0.0.9.6) replaced the live AudioPeakFilter class
+    with a dataclass state container — APF runs through WDSP's
+    SPEAK biquad now.  Phases 6.B / 6.C continue the same swap
+    for the remaining modules.
   * Exposes setters / getters Radio uses to mirror operator state
     (mode, rx-bw, cw-pitch, notches) onto whichever module needs
     it (e.g. APF center follows the CW pitch).
@@ -33,6 +37,58 @@ instances with dataclasses, deleting now-orphan setters).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+
+# ── State containers (Phase 6) ─────────────────────────────────────
+#
+# These dataclass-style holders replace the legacy DSP-module
+# instances (AudioPeakFilter, ImpulseBlanker, AutoNotchFilter,
+# LineEnhancerLMS, AllModeSquelch, EphraimMalahNR) on the channel.
+# WDSP performs the actual signal processing; what the channel needs
+# is a place to mirror operator-tunable state so its setters /
+# getters keep working unchanged for radio.py and the UI.
+#
+# Each class deliberately exposes the same surface the original DSP
+# module did (same setter names, same property names, same default
+# values), so callers don't change.  Phase 6 lifts the heavy DSP
+# bodies out from under that surface and leaves only the state.
+
+
+@dataclass
+class _APFState:
+    """State container for the Audio Peaking Filter — what the
+    channel needs after Phase 6 deleted the live AudioPeakFilter
+    class.  Defaults match the historical AudioPeakFilter defaults
+    so the operator's saved settings still apply.
+
+    Lyra's APF is now driven by WDSP's internal SPEAK biquad (see
+    Radio._push_wdsp_apf_state); the dataclass below is just the
+    operator-facing knob mirror.
+    """
+    sample_rate: int = 48000
+    enabled: bool = False
+    center_hz: float = 650.0
+    bw_hz: int = 100
+    gain_db: float = 12.0
+
+    def set_enabled(self, on: bool) -> None:
+        self.enabled = bool(on)
+
+    def set_center_hz(self, hz: float) -> None:
+        self.center_hz = float(hz)
+
+    def set_bw_hz(self, hz: int) -> None:
+        self.bw_hz = int(hz)
+
+    def set_gain_db(self, db: float) -> None:
+        self.gain_db = float(db)
+
+    def reset(self) -> None:
+        # Live audio path lives in WDSP — nothing biquad-state-wise
+        # to clear here.  Method exists so channel.reset() doesn't
+        # need a special-case branch.
+        return
 
 
 # ── Abstract channel ───────────────────────────────────────────────
@@ -114,12 +170,13 @@ class PythonRxChannel(DspChannel):
     house DSP module instances.
 
     Live callers of the embedded DSP instances (as of v0.0.9.6
-    Phase 5):
+    Phase 6.A):
 
-      * ``_apf``  → Radio calls ``_apf.process()`` directly in its
-                    post-AGC audio path (lines 6803, 6853 in
-                    radio.py); ``set_cw_pitch_hz`` keeps its
-                    center frequency tracking the CW pitch.
+      * ``_apf``  → Pure state container (``_APFState`` dataclass,
+                    defined above).  Operator knobs (enabled / BW /
+                    gain / center) propagate to WDSP's SPEAK biquad
+                    via ``Radio._push_wdsp_apf_state``.  Center
+                    tracks CW pitch through ``set_cw_pitch_hz``.
       * ``_nr``   → Radio drives the captured-noise capture
                     machinery through it (see ``begin_noise_capture``
                     and friends below).  The ``feed_capture()`` API
@@ -216,12 +273,12 @@ class PythonRxChannel(DspChannel):
         # — it's controlled by the active NR's .enabled attribute.
         self._active_nr: str = "nr1"
 
-        # APF (Audio Peaking Filter) — owned by the channel. Mode-
-        # gated to CWU/CWL inside process(). Center freq tracks the
-        # CW pitch automatically, so the operator only needs to
-        # toggle it on/off and (optionally) tune BW/gain.
-        from lyra.dsp.apf import AudioPeakFilter
-        self._apf = AudioPeakFilter(
+        # APF (Audio Peaking Filter) state mirror — Phase 6 swapped
+        # the live AudioPeakFilter class for a state container.  The
+        # operator-tunable knobs (enabled / BW / gain / center) still
+        # propagate to WDSP via Radio._push_wdsp_apf_state.  Center
+        # tracks the CW pitch automatically (set_cw_pitch_hz).
+        self._apf = _APFState(
             sample_rate=self.audio_rate,
             center_hz=self._cw_pitch_hz,
         )
@@ -278,10 +335,10 @@ class PythonRxChannel(DspChannel):
         self._cw_pitch_hz = new_pitch
         # APF center follows pitch automatically — that's the natural
         # operator mental model ("I tuned to the pitch, now boost
-        # what I tuned to").  This is a LIVE call: Radio runs the
-        # APF in its post-AGC chain (radio.py:6803, 6853), so the
-        # coefficient swap matters audibly.  Smooth on a populated
-        # zi (low-Q peaking filter), so no click.
+        # what I tuned to").  Phase 6.A: ``_apf`` is now an
+        # ``_APFState`` dataclass; the value mirrors here and Radio's
+        # ``_push_wdsp_apf_state`` propagates it to WDSP's SPEAK
+        # biquad on the next push tick.
         self._apf.set_center_hz(new_pitch)
 
     def set_nr_enabled(self, enabled: bool) -> None:
@@ -651,14 +708,14 @@ class PythonRxChannel(DspChannel):
         """
         self._nr.reset()
         # State-mirror resets (kept for Phase 6 forward-compat;
-        # see method docstring).
+        # see method docstring).  Phase 6.A swapped ``_apf`` for a
+        # dataclass; its ``reset()`` is a no-op since live filtering
+        # happens inside WDSP's SPEAK biquad.
         self._nb.reset()
         self._anf.reset()
         self._nr2.reset()
         self._lms.reset()
         self._squelch.reset()
-        # Live: Radio's post-AGC chain runs ``_apf.process()``,
-        # so its zi state matters.
         self._apf.reset()
 
     # ── Misc accessors for Radio (read-only views into channel state) ─

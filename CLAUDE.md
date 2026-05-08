@@ -1774,6 +1774,24 @@ followup, restated here for grouping):
 * Bundle with Items 1 + 2 since all three touch the same
   code path.
 
+**Item 4 — AF Gain wiring** (discovered Phase 6.A, 2026-05-08):
+
+* When `_apply_agc_and_volume` was deleted in Phase 6.A, AF
+  Gain went silently inert for actual demodulated audio.
+  WDSP's `PanelGain1` is hardcoded to 1.0 in `_open_wdsp_rx`
+  (radio.py:6324) — it never picks up `self._af_gain_db`.
+* The deletion didn't cause this — `_apply_agc_and_volume` had
+  been orphan since Phase 4 — but Phase 6.A makes it visible.
+* AF Gain still works in `_emit_tone` (test-tone path) so the
+  slider isn't entirely dead.
+* **Fix path:** route `set_af_gain_db` to push the linear value
+  to `_wdsp_rx.set_panel_gain` (which is what WDSP uses for
+  pre-AGC makeup gain).  Re-emit on every change.  Audit
+  whether the worker's `set_af_gain_db` should also route there
+  or be deleted as dead.
+* Bundle with Items 1-3 since all four touch the same
+  initial-state push path.
+
 **Total estimated work for Phases 3-9: 5-7 hours focused.**
 
 #### Why Phase A first (and not the whole thing tonight)
