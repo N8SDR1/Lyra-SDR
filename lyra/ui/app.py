@@ -179,6 +179,13 @@ class MainWindow(QMainWindow):
             self.radio.autoload_staleness_settings()
         except Exception as exc:
             print(f"[app] staleness autoload error: {exc}")
+        # Panadapter mouse-wheel scroll step — Display panel combo,
+        # persisted under display/panadapter_scroll_step_hz.
+        # Default 1 kHz.
+        try:
+            self.radio.autoload_panadapter_scroll_step()
+        except Exception as exc:
+            print(f"[app] panadapter scroll-step autoload error: {exc}")
 
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.

@@ -35,8 +35,13 @@ class SpectrumWidget(_PaintedWidget):
     right_clicked_freq = Signal(float, bool, QPoint)
     wheel_at_freq = Signal(float, int)
     # Fires when the mouse wheel scrolls over empty spectrum (not over
-    # a notch). Positive = zoom in, negative = zoom out. SpectrumPanel
-    # routes this to Radio.zoom_step.
+    # a notch).  Positive = wheel up = freq up.  SpectrumPanel routes
+    # this to Radio.panadapter_scroll_tune which uses the operator's
+    # Display-panel-set scroll step (default 1 kHz).
+    wheel_tune    = Signal(int)
+    # Ctrl+wheel over empty spectrum keeps the legacy zoom behavior
+    # so power users with muscle memory for the old gesture still
+    # have a path.  Positive = zoom in, negative = zoom out.
     wheel_zoom    = Signal(int)
     notch_q_drag = Signal(float, float)
     spot_clicked = Signal(float)                      # freq near a spot
@@ -944,13 +949,20 @@ class SpectrumWidget(_PaintedWidget):
         if delta_units == 0:
             super().wheelEvent(event)
             return
-        # If the wheel is over a notch tick, adjust that notch's Q
-        # (preserves the classic "hover a notch and wheel" gesture).
-        # Otherwise, wheel = zoom the panadapter.
+        # Wheel routing:
+        #   * Over a notch tick → adjust that notch's width (classic
+        #     "hover a notch and wheel" gesture, unchanged).
+        #   * Ctrl+wheel anywhere else → zoom (escape hatch for
+        #     operators with muscle memory from the pre-2026-05-08
+        #     wheel-zoom default).
+        #   * Plain wheel anywhere else → tune VFO by the operator's
+        #     panadapter scroll step (Display panel combo).
         if self._nearest_notch_at_x(x) is not None:
             self.wheel_at_freq.emit(freq, int(delta_units))
-        else:
+        elif event.modifiers() & Qt.ControlModifier:
             self.wheel_zoom.emit(int(delta_units))
+        else:
+            self.wheel_tune.emit(int(delta_units))
         event.accept()
 
     def set_spectrum(self, spec_db: np.ndarray, center_hz: float, span_hz: float):
@@ -1814,6 +1826,10 @@ class WaterfallWidget(_PaintedWidget):
     # appeared" surprise.
     right_clicked_freq = Signal(float, bool, QPoint)
     wheel_at_freq = Signal(float, int)
+    # Plain wheel over empty waterfall = tune VFO (panadapter scroll
+    # step).  Mirrors SpectrumWidget so the gesture works on either
+    # view.
+    wheel_tune = Signal(int)
     notch_q_drag = Signal(float, float)
 
     NOTCH_HIT_PX = 14
@@ -1985,13 +2001,22 @@ class WaterfallWidget(_PaintedWidget):
     def wheelEvent(self, event):
         if self.width() <= 0:
             return
-        freq = self._freq_at_x(event.position().x())
+        x = event.position().x()
+        freq = self._freq_at_x(x)
         delta_units = event.angleDelta().y() // 120
-        if delta_units != 0:
-            self.wheel_at_freq.emit(freq, int(delta_units))
-            event.accept()
+        if delta_units == 0:
+            super().wheelEvent(event)
             return
-        super().wheelEvent(event)
+        # Wheel routing (mirrors SpectrumWidget):
+        #   * Over a notch → wheel_at_freq (panel maps to width adjust)
+        #   * Plain wheel elsewhere → tune VFO by panadapter scroll step
+        # (No Ctrl+wheel zoom branch here — the waterfall doesn't have
+        # an independent zoom; it shares the spectrum's zoom.)
+        if self._nearest_notch_at_x(x) is not None:
+            self.wheel_at_freq.emit(freq, int(delta_units))
+        else:
+            self.wheel_tune.emit(int(delta_units))
+        event.accept()
 
     def set_palette(self, name: str):
         """Switch waterfall palette live. Unknown names fall back to

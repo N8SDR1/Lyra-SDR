@@ -194,8 +194,13 @@ class SpectrumGpuWidget(QOpenGLWidget):
     # shift+right = remove-nearest-notch quick gesture.
     right_clicked_freq = Signal(float, bool, QPoint)
     # Mouse-wheel zoom — payload is direction (+1 = zoom in,
-    # -1 = zoom out), one emit per wheel notch.
+    # -1 = zoom out).  Now Ctrl+wheel only (escape hatch); plain
+    # wheel emits wheel_tune below.
     wheel_zoom = Signal(int)
+    # Plain wheel-over-empty-spectrum — tune VFO by the operator's
+    # panadapter scroll step (Display panel combo).  Positive = wheel
+    # up = freq up.
+    wheel_tune = Signal(int)
     # Wheel-over-notch — payload is (notch_freq_hz, delta_units).
     # Panel routes to set_notch_width_at to adjust the notch's width
     # multiplicatively. Same name as the QPainter widget's signal.
@@ -1200,13 +1205,19 @@ class SpectrumGpuWidget(QOpenGLWidget):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event) -> None:
-        """Mouse wheel = zoom OR notch-width adjust.
+        """Mouse wheel routing — three branches:
 
-        Phase B.14: wheel-over-notch adjusts that notch's width
-        (via the wheel_at_freq signal which the panel routes to
-        radio's notch-width API). Wheel over empty spectrum = zoom
-        (wheel_zoom signal).
+          * Wheel over a notch tick → adjust that notch's width
+            (wheel_at_freq signal; panel routes to
+            radio.set_notch_width_at).
+          * Ctrl+wheel anywhere else → zoom (wheel_zoom signal,
+            escape hatch for muscle memory from the
+            pre-2026-05-08 wheel-zoom default).
+          * Plain wheel anywhere else → tune VFO by the operator's
+            panadapter scroll step (wheel_tune signal; panel routes
+            to radio.panadapter_scroll_tune).
         """
+        from PySide6.QtCore import Qt
         dy = event.angleDelta().y()
         if dy == 0:
             event.accept()
@@ -1215,11 +1226,11 @@ class SpectrumGpuWidget(QOpenGLWidget):
         x = int(event.position().x())
         notch_freq = self._notch_at_x(x)
         if notch_freq is not None:
-            # Wheel over notch → adjust width. Panel handles the
-            # actual width math against radio.set_notch_width_at.
             self.wheel_at_freq.emit(float(notch_freq), delta)
-        else:
+        elif event.modifiers() & Qt.ControlModifier:
             self.wheel_zoom.emit(delta)
+        else:
+            self.wheel_tune.emit(delta)
         event.accept()
 
     # ── QOpenGLWidget virtual method overrides ─────────────────────

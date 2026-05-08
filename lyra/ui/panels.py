@@ -745,6 +745,37 @@ class ViewPanel(GlassPanel):
             "font-weight: 700;")
         h.addWidget(self.zoom_label)
 
+        # ── Panadapter scroll step ────────────────────────────────────
+        # Mouse-wheel-over-panadapter tune step.  Distinct from the
+        # VFO step on the Tuning panel: VFO step is for fine-tuning
+        # onto a signal (10 Hz / 100 Hz / 1 kHz); panadapter scroll
+        # step is for skimming across a band (1 kHz / 5 kHz / 10 kHz
+        # / 25 kHz / 100 kHz).  Both knobs persist across sessions.
+        h.addSpacing(10)
+        h.addWidget(QLabel("Step"))
+        self.scroll_step_combo = QComboBox()
+        for hz in Radio.PANADAPTER_SCROLL_STEPS_HZ:
+            label = (f"{hz} Hz" if hz < 1000
+                     else f"{hz // 1000} kHz")
+            self.scroll_step_combo.addItem(label, int(hz))
+        self._sync_scroll_step_combo(radio.panadapter_scroll_step_hz)
+        self.scroll_step_combo.setFixedWidth(72)
+        self.scroll_step_combo.setToolTip(
+            "Mouse-wheel-over-panadapter tune step.\n\n"
+            "Wheel up = freq up.  Wheel down = freq down.\n"
+            "Step size below picks how far each wheel tick moves.\n\n"
+            "Independent of the VFO step on the Tuning panel —\n"
+            "VFO step is for fine-tuning onto a signal,\n"
+            "this is for skimming across a band.\n\n"
+            "Ctrl + wheel still zooms (escape hatch).")
+        self.scroll_step_combo.currentIndexChanged.connect(
+            self._on_scroll_step_pick)
+        h.addWidget(self.scroll_step_combo)
+        # Two-way sync so external changes (CAT command, autoload)
+        # land in the combo too.
+        radio.panadapter_scroll_step_changed.connect(
+            self._sync_scroll_step_combo)
+
         # Spectrum rate — compact slider only; live value is in the
         # tooltip on hover. Operator wanted a thin panel with no
         # redundant numeric readouts.
@@ -835,6 +866,23 @@ class ViewPanel(GlassPanel):
                     self.zoom_combo.setCurrentIndex(i)
                     self.zoom_combo.blockSignals(False)
                 return
+
+    def _sync_scroll_step_combo(self, step_hz: int) -> None:
+        """Mirror Radio's panadapter_scroll_step_hz into the combo."""
+        for i in range(self.scroll_step_combo.count()):
+            if int(self.scroll_step_combo.itemData(i)) == int(step_hz):
+                if self.scroll_step_combo.currentIndex() != i:
+                    self.scroll_step_combo.blockSignals(True)
+                    self.scroll_step_combo.setCurrentIndex(i)
+                    self.scroll_step_combo.blockSignals(False)
+                return
+
+    def _on_scroll_step_pick(self, index: int) -> None:
+        """Operator picked a new scroll step from the combo."""
+        if index < 0:
+            return
+        step = int(self.scroll_step_combo.itemData(index))
+        self.radio.set_panadapter_scroll_step_hz(step)
 
     # Backward-compat shims. The waterfall slider encoding now lives
     # at module scope (WATERFALL_SPEED_STEPS + wf_*_slider_position
@@ -4163,7 +4211,12 @@ class SpectrumPanel(GlassPanel):
         # handlers as the QPainter path — _on_right_click handles
         # the shift+right quick-remove + plain-right menu logic.
         self.widget.right_clicked_freq.connect(self._on_right_click)
-        # Mouse-wheel zoom (Phase B.7) — direct passthrough to Radio.
+        # Plain wheel over panadapter — tune VFO by panadapter scroll
+        # step (Display-panel combo, default 1 kHz).  Wheel up = freq up.
+        self.widget.wheel_tune.connect(
+            self.radio.panadapter_scroll_tune)
+        # Ctrl+wheel — zoom the panadapter (escape hatch / muscle-memory
+        # path; was the default pre-2026-05-08).
         self.widget.wheel_zoom.connect(self.radio.zoom_step)
         # Wheel-over-notch (Phase B.14) — adjust that notch's width.
         self.widget.wheel_at_freq.connect(self._on_wheel)
@@ -4328,9 +4381,12 @@ class SpectrumPanel(GlassPanel):
         self.widget.clicked_freq.connect(self._on_click)
         self.widget.right_clicked_freq.connect(self._on_right_click)
         self.widget.wheel_at_freq.connect(self._on_wheel)
-        # Mouse wheel on empty spectrum = zoom in/out via Radio's
-        # preset zoom levels. wheel_at_freq still handles notch-Q when
-        # the wheel is over a notch tick (widget-side dispatch).
+        # Plain wheel over empty spectrum = tune VFO by panadapter
+        # scroll step (default 1 kHz; combo on Display panel).
+        # Ctrl+wheel = zoom (escape hatch).  wheel_at_freq still
+        # handles notch-width when wheel is over a notch tick.
+        self.widget.wheel_tune.connect(
+            self.radio.panadapter_scroll_tune)
         self.widget.wheel_zoom.connect(self.radio.zoom_step)
         self.widget.notch_q_drag.connect(self._on_notch_q_drag)
         self.widget.spot_clicked.connect(self._on_spot_clicked)
@@ -5541,6 +5597,11 @@ class WaterfallPanel(GlassPanel):
         self.widget.clicked_freq.connect(self._on_click)
         self.widget.right_clicked_freq.connect(self._on_right_click)
         self.widget.wheel_at_freq.connect(self._on_wheel)
+        # Plain wheel over waterfall = tune VFO by panadapter scroll
+        # step (Display panel combo).  Same gesture works on the
+        # spectrum view above.
+        self.widget.wheel_tune.connect(
+            self.radio.panadapter_scroll_tune)
         self.widget.notch_q_drag.connect(self._on_notch_q_drag)
         # Subscribe to waterfall_ready (fires on its own cadence — the
         # Radio gates it by waterfall_divider). This decouples the

@@ -214,6 +214,7 @@ class Radio(QObject):
 
     # Panadapter zoom + update rates
     zoom_changed                  = Signal(float)      # 1.0 = full span
+    panadapter_scroll_step_changed = Signal(int)       # mouse-wheel-tune step, Hz
     spectrum_fps_changed          = Signal(int)        # frames/sec
     waterfall_divider_changed     = Signal(int)        # push 1 row per N FFT ticks
     waterfall_multiplier_changed  = Signal(int)        # push M rows per tick (visual speedup)
@@ -5681,6 +5682,69 @@ class Radio(QObject):
                   key=lambda i: abs(levels[i] - self._zoom))
         cur = max(0, min(len(levels) - 1, cur + direction))
         self.set_zoom(levels[cur])
+
+    # ── Panadapter scroll step ────────────────────────────────────────
+    # Operator-facing scroll step for mouse-wheel tuning over the
+    # panadapter / waterfall.  Independent of the VFO step (which is
+    # a fine-tune control).  Defaults to 1 kHz — fast enough for
+    # band-skimming, slow enough to land on signals.
+    PANADAPTER_SCROLL_STEPS_HZ = (
+        100, 500, 1000, 5000, 10_000, 25_000, 100_000)
+
+    @property
+    def panadapter_scroll_step_hz(self) -> int:
+        """Mouse-wheel-over-panadapter tune step in Hz.  Distinct
+        from the VFO step (Tuning panel) — that's for click-zeroing
+        on a signal; this is for skimming across a band."""
+        return int(getattr(self, "_panadapter_scroll_step_hz", 1000))
+
+    def set_panadapter_scroll_step_hz(self, hz: int) -> None:
+        """Set the panadapter mouse-wheel scroll step.  Persists via
+        QSettings.  Clamped to valid presets in
+        ``PANADAPTER_SCROLL_STEPS_HZ`` if exact; otherwise accepted
+        as-is for forward compatibility with future operator-set
+        custom values."""
+        step = int(hz)
+        if step < 1:
+            step = 1
+        old = int(getattr(self, "_panadapter_scroll_step_hz", 1000))
+        if step == old:
+            return
+        self._panadapter_scroll_step_hz = step
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("display/panadapter_scroll_step_hz", step)
+        except Exception as exc:
+            print(f"[Radio] persist panadapter scroll step: {exc}")
+        self.panadapter_scroll_step_changed.emit(step)
+
+    def panadapter_scroll_tune(self, delta_units: int) -> None:
+        """Tune the VFO by ``delta_units * panadapter_scroll_step_hz``.
+
+        Wheel-over-panadapter handler.  Wheel up (positive delta) =
+        freq up (matches physical-radio VFO knob convention).  Step
+        size comes from ``panadapter_scroll_step_hz``, settable via
+        the Display panel combo.
+        """
+        if delta_units == 0:
+            return
+        step = self.panadapter_scroll_step_hz
+        new_freq = int(self._freq_hz) + int(delta_units) * step
+        # Clamp to HL2's tunable range (~0..30 MHz on RX1).
+        new_freq = max(0, min(30_000_000, new_freq))
+        self.set_freq_hz(new_freq)
+
+    def autoload_panadapter_scroll_step(self) -> None:
+        """Restore the operator's persisted scroll step on startup."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            step = int(s.value(
+                "display/panadapter_scroll_step_hz", 1000, type=int))
+        except Exception:
+            return
+        self._panadapter_scroll_step_hz = max(1, step)
 
     # ── Spectrum FPS ─────────────────────────────────────────────────
     @property
