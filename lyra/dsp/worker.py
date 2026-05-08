@@ -544,93 +544,25 @@ class DspWorker(QObject):
                 print(f"[DspWorker] tone error: {exc}")
             return
 
-        # v0.0.9.6 — WDSP engine path. When the native WDSP RX channel
-        # is active, the entire legacy DSP chain (channel.process / AGC /
-        # binaural / sink) is replaced with one call into Radio's
-        # _do_demod_wdsp helper. WDSP runs its DSP loop in its own C
-        # thread inside the DLL, so even though we're on the worker
-        # thread, the heavy work is GIL-free.
+        # WDSP engine path — only DSP path as of Phase 3 (2026-05-08).
+        # The DSP heavy work happens inside the WDSP DLL's C thread, so
+        # even though we're on the Python worker thread, the GIL is
+        # released during fexchange0 and the EP2 writer / sink threads
+        # don't compete for it.
         #
-        # CRITICAL: still run the FFT/spectrum stage at the end of this
-        # method even when WDSP demod is in use. The panadapter taps the
-        # raw IQ stream BEFORE any demod, so its plumbing is independent
-        # of which audio engine is active. Skipping the FFT path here
-        # breaks the spectrum widget for the operator.
-        if (getattr(radio, "_use_wdsp_engine", False)
-                and getattr(radio, "_wdsp_rx", None) is not None):
+        # CRITICAL: run the FFT stage in addition to WDSP demod —
+        # the panadapter taps the RAW IQ stream BEFORE any demod, so
+        # its plumbing is independent of audio rendering.  Skipping
+        # the FFT path here would freeze the spectrum widget.
+        if getattr(radio, "_wdsp_rx", None) is not None:
             try:
                 radio._do_demod_wdsp(samples)
             except Exception as exc:
                 print(f"[DspWorker] WDSP demod error: {exc}")
-            # Fall through to the FFT cadence stage at the bottom of
-            # this method (skipping only the legacy demod / AGC / sink
-            # stages 1-4 below).
-            try:
-                self._maybe_run_fft(samples)
-            except Exception as exc:
-                print(f"[DspWorker] fft error: {exc}")
-            return
-
-        # Push current notch state to the channel each block —
-        # matches the cadence Radio._do_demod uses.  Cheap (just
-        # stores references); ensures channel sees fresh state
-        # without us tracking 8+ call sites.
-        try:
-            radio._rx_channel.set_notches(
-                radio._notches, radio._notch_enabled)
-        except Exception as exc:
-            print(f"[DspWorker] notch update error: {exc}")
-            # Continue — old notch state is fine for one block.
-
-        # Stage 1 — channel runs decim → notch → demod → NR → APF
-        try:
-            audio = radio._rx_channel.process(samples)
-        except Exception as exc:
-            print(f"[DspWorker] channel.process error: {exc}")
-            return
-        if audio.size == 0:
-            # No complete demod block ready yet (channel buffers
-            # partial blocks across calls).  Next call may produce.
-            return
-
-        # Stage 2 — AGC + AF Gain + Volume + tanh limiter
-        try:
-            audio = radio._apply_agc_and_volume(audio)
-        except Exception as exc:
-            print(f"[DspWorker] agc/volume error: {exc}")
-            return
-
-        # Stage 3 — BIN (Hilbert phase split for headphone listening).
-        # No-op pass-through when bin_enabled == False, returns
-        # (N, 2) stereo when active.  Both audio sinks accept either
-        # mono or stereo input.
-        try:
-            audio = radio._binaural.process(audio)
-        except Exception as exc:
-            print(f"[DspWorker] binaural error: {exc}")
-            # Continue with whatever audio we had — better than
-            # silence.
-
-        # Stage 4 — write to audio sink (AK4951 or PC Soundcard).
-        # B.5: use the worker's OWN sink reference, kept in sync with
-        # Radio's via ``worker_audio_sink_changed``.  Falls back to
-        # Radio's reference for any narrow window before the first
-        # signal lands (defensive — in practice Radio seeds the
-        # reference before moveToThread, so it's never None here).
-        sink = self._audio_sink if self._audio_sink is not None \
-            else radio._audio_sink
-        try:
-            sink.write(audio)
-        except Exception as exc:
-            print(f"[DspWorker] sink write error: {exc}")
-            # Continue; next block may succeed.
-
-        # Stage 5 — FFT cadence (B.8).  Append IQ to worker-owned
-        # sample ring; every N blocks (where N tracks the operator's
-        # FPS preference + sample rate), run the FFT and emit the
-        # raw spectrum to Radio's main-thread post-processing slot.
-        # Errors here NEVER stop audio; they'd just freeze the
-        # panadapter for a frame.
+        # FFT cadence (B.8): append IQ to the worker-owned sample
+        # ring; every N blocks compute one FFT and emit raw spec_db.
+        # Errors NEVER stop audio — at worst the panadapter freezes
+        # for a frame.
         try:
             self._maybe_run_fft(samples)
         except Exception as exc:

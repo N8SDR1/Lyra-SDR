@@ -809,27 +809,13 @@ class Radio(QObject):
         )
 
         # ── WDSP RX engine (v0.0.9.6 audio rebuild) ──────────────────
-        # Native WDSP RX channel via cffi. Replaces the per-module
-        # Python DSP chain (decim/notch/demod/AGC/NR/ANF/leveler/binaural)
-        # with the C engine running its own thread inside the DLL.
+        # Native WDSP RX channel via cffi.  WDSP is the only DSP path
+        # as of Phase 3 of the legacy-cleanup arc (CLAUDE.md §14.9).
         # The engine takes IQ in at the current ``_rate`` and produces
-        # 48 kHz stereo audio out. AGC, NR, ANF, filters, mode dispatch
-        # all happen inside the engine; Lyra applies output-stage volume
-        # / mute / TCI tap on top.
-        #
-        # Phase A of legacy-DSP cleanup (CLAUDE.md §14.9): the
-        # ``LYRA_USE_LEGACY_DSP=1`` env-var escape hatch is REMOVED.
-        # WDSP is the only supported DSP path.  The legacy-Python
-        # branches (`if not self._use_wdsp_engine`) remain in tree
-        # but are unreachable — they'll be deleted in subsequent
-        # phases along with the pure-Python DSP modules
-        # (agc_wdsp / demod / nb / lms / anf / leveler / apf).
-        #
-        # ``self._use_wdsp_engine`` stays as a constant True for now
-        # so the old conditional branches don't need to change shape
-        # in this phase — they evaluate the same way and the legacy
-        # bodies become dead code.  Phase 3 deletes them.
-        self._use_wdsp_engine: bool = True
+        # 48 kHz stereo audio out.  Decim, notches, demod, AGC, NR,
+        # ANF, filters, mode dispatch all happen inside the engine in
+        # its own GIL-free C thread; Lyra applies output-stage volume
+        # / mute / capture-feed / BIN post-processor / TCI tap on top.
         self._wdsp_rx = None
         self._wdsp_rx_in_rate: int = 0
         try:
@@ -837,10 +823,10 @@ class Radio(QObject):
         except Exception as exc:
             # WDSP DLL set is bundled at lyra/dsp/_native/ — should
             # never fail in production.  If it does (corrupt install,
-            # missing DLL, ABI mismatch), Lyra can't function: the
-            # legacy fallback is gone (Phase A) and TX/PS work also
-            # depends on WDSP.  Raise a clear, actionable error
-            # rather than crashing later in some confusing way.
+            # missing DLL, ABI mismatch), Lyra can't function: there
+            # is no fallback DSP path, and TX/PS work also depends on
+            # WDSP.  Raise a clear, actionable error rather than
+            # crashing later in some confusing way.
             raise RuntimeError(
                 "Lyra requires the bundled WDSP DLL set at "
                 "lyra/dsp/_native/ (wdsp.dll, libfftw3-3.dll, "
@@ -1546,7 +1532,7 @@ class Radio(QObject):
         # OpenChannel time, so we close + reopen on rate change. WDSP
         # finishes any partially-processed audio inside _open_wdsp_rx's
         # close, so this is graceful (no crackle).
-        if self._use_wdsp_engine and rate != self._wdsp_rx_in_rate:
+        if rate != self._wdsp_rx_in_rate:
             try:
                 self._open_wdsp_rx(rate)
             except Exception as exc:
@@ -1607,7 +1593,7 @@ class Radio(QObject):
         # list (in case widths / active flags changed).  Both calls
         # are cheap when the notch list hasn't changed (DLL filter
         # rebuild only fires on actual difference).
-        if self._use_wdsp_engine and self._wdsp_rx is not None:
+        if self._wdsp_rx is not None:
             try:
                 self._wdsp_rx.set_notch_tune_frequency(float(self._freq_hz))
                 self._push_wdsp_notches()
@@ -2980,11 +2966,10 @@ class Radio(QObject):
         # spectral-subtraction apply path is not currently wired
         # (see _do_demod_wdsp comment block + CLAUDE.md §14.6 for
         # the why).  Capture itself works (Cap button still saves
-        # profiles to disk), but enabling the toggle in WDSP mode
-        # has no audio effect.  Surface that visibly so the operator
-        # doesn't quietly wonder why nothing changed.  Legacy mode
-        # (LYRA_USE_LEGACY_DSP=1) applies the profile normally.
-        if on and self._use_wdsp_engine:
+        # profiles to disk), but enabling the toggle has no audio
+        # effect in WDSP mode.  Surface that visibly so the operator
+        # doesn't quietly wonder why nothing changed.
+        if on:
             msg = ("Captured profile is currently INERT in WDSP mode "
                    "(known issue, needs attention).  Capture saves "
                    "to disk; spectral subtraction is not applied.")
@@ -4252,7 +4237,7 @@ class Radio(QObject):
         # only running WDSP's biquad when in CW mode.  Operator's
         # toggle state is preserved across mode switches via
         # _apf_enabled.
-        if self._use_wdsp_engine and self._wdsp_rx is not None:
+        if self._wdsp_rx is not None:
             try:
                 self._push_wdsp_apf_state()
             except Exception as exc:
@@ -4269,7 +4254,7 @@ class Radio(QObject):
             return
         self._apf_bw_hz = bw
         self._rx_channel.set_apf_bw_hz(bw)
-        if self._use_wdsp_engine and self._wdsp_rx is not None:
+        if self._wdsp_rx is not None:
             try:
                 self._wdsp_rx.set_apf_bw(float(bw))
             except Exception as exc:
@@ -4283,7 +4268,7 @@ class Radio(QObject):
             return
         self._apf_gain_db = g
         self._rx_channel.set_apf_gain_db(g)
-        if self._use_wdsp_engine and self._wdsp_rx is not None:
+        if self._wdsp_rx is not None:
             try:
                 self._wdsp_rx.set_apf_gain_db(float(g))
             except Exception as exc:
@@ -4299,7 +4284,7 @@ class Radio(QObject):
         the operator's prior on/off state automatically because
         _apf_enabled is the source of truth.
         """
-        if not self._use_wdsp_engine or self._wdsp_rx is None:
+        if self._wdsp_rx is None:
             return
         # Init-order guard: _open_wdsp_rx runs early in __init__,
         # before _apf_enabled / _apf_bw_hz / _apf_gain_db are set.
@@ -4759,7 +4744,7 @@ class Radio(QObject):
         # NotchDB is bypassed even if individual notches have
         # active=1 — saves CPU and lets the operator A/B the notch
         # bank in one click.
-        if self._use_wdsp_engine and self._wdsp_rx is not None:
+        if self._wdsp_rx is not None:
             try:
                 self._wdsp_rx.set_notches_master_run(self._notch_enabled)
             except Exception as exc:
@@ -6569,7 +6554,7 @@ class Radio(QObject):
         current profile + custom threshold.  We mirror its state
         into the DLL's NOB module via ``set_nob`` + ``set_nob_threshold``.
         """
-        if not self._use_wdsp_engine or self._wdsp_rx is None:
+        if self._wdsp_rx is None:
             return
         profile = (self._rx_channel.nb_profile or "off").lower()
         if profile == "off":
@@ -6602,7 +6587,7 @@ class Radio(QObject):
         database with active=0 — that way operator-toggled visibility
         survives the round-trip.
         """
-        if not self._use_wdsp_engine or self._wdsp_rx is None:
+        if self._wdsp_rx is None:
             return
         # Init-order guard: _open_wdsp_rx runs before self._notches /
         # self._notch_enabled are populated in __init__.  An empty
@@ -6637,13 +6622,14 @@ class Radio(QObject):
             print(f"[Radio] WDSP notch push: {exc}")
 
     def _do_demod(self, iq):
-        """Route IQ through the RX channel, then apply AGC + volume,
-        then send to the audio sink.
+        """Route IQ through the WDSP RX engine into the audio sink.
 
-        v0.0.9.6: when ``_use_wdsp_engine`` is True, the work is dispatched
-        to ``_do_demod_wdsp`` which uses the native WDSP DLL via cffi.
-        Legacy Python DSP chain (decim/notch/demod/AGC/NR/ANF/leveler/
-        binaural) only runs when ``LYRA_USE_LEGACY_DSP=1`` is set.
+        WDSP is the only DSP path (Phase 3 of legacy cleanup, 2026-05-08).
+        ``_do_demod_wdsp`` handles the full chain: WDSP fexchange0 →
+        Lyra volume/mute → capture-feed → BIN post-processor → sink →
+        TCI tap.  WDSP itself runs in its own C thread inside the DLL,
+        so the heavy DSP work is GIL-free even though this function is
+        called from a Python thread.
         """
         mode = self._mode
         if mode == "Off":
@@ -6651,86 +6637,12 @@ class Radio(QObject):
         if mode == "Tone":
             self._emit_tone(len(iq))
             return
-
-        # WDSP engine path — short-circuits the entire legacy chain.
-        if self._use_wdsp_engine and self._wdsp_rx is not None:
+        # `_wdsp_rx is None` should never occur in practice: __init__
+        # raises a clear RuntimeError if the WDSP DLL fails to load.
+        # The defensive check here protects against transient teardown
+        # windows (e.g., between channel close + reopen on rate change).
+        if self._wdsp_rx is not None:
             self._do_demod_wdsp(iq)
-            return
-
-        # Push current notch state to channel each call (cheap; the
-        # channel just stores the references). We do this here rather
-        # than in every notch-mutation site so the channel always sees
-        # fresh state without us tracking 8+ call sites.
-        self._rx_channel.set_notches(self._notches, self._notch_enabled)
-
-        # Per-stage timing — only when LYRA_PAINT_DEBUG=1. The branch
-        # is cheap (single attribute lookup) when off.
-        _dbg = self._radio_debug
-        if _dbg:
-            import time as _ddtime
-            try:
-                _n = int(iq.shape[0])
-                if _n > self._dbg_largest_iq_n:
-                    self._dbg_largest_iq_n = _n
-            except Exception:
-                pass
-
-        try:
-            if _dbg:
-                _t = _ddtime.perf_counter()
-            audio = self._rx_channel.process(iq)
-            if _dbg:
-                _dt = (_ddtime.perf_counter() - _t) * 1000.0
-                self._dbg_stage_total["channel"] += _dt
-                if _dt > self._dbg_stage_max["channel"]:
-                    self._dbg_stage_max["channel"] = _dt
-        except Exception as e:
-            print(f"channel error: {e}")
-            return
-        if audio.size == 0:
-            return
-        try:
-            if _dbg:
-                _t = _ddtime.perf_counter()
-            audio = self._apply_agc_and_volume(audio)
-            if _dbg:
-                _dt = (_ddtime.perf_counter() - _t) * 1000.0
-                self._dbg_stage_total["agc"] += _dt
-                if _dt > self._dbg_stage_max["agc"]:
-                    self._dbg_stage_max["agc"] = _dt
-            # BIN — Binaural pseudo-stereo. Runs LAST in the audio
-            # chain so the spatial Hilbert-pair transform happens on
-            # the operator's already-leveled signal. Returns the input
-            # unchanged when disabled; returns a (N, 2) stereo array
-            # when active. Both audio sinks accept either shape.
-            if _dbg:
-                _t = _ddtime.perf_counter()
-            audio = self._binaural.process(audio)
-            if _dbg:
-                _dt = (_ddtime.perf_counter() - _t) * 1000.0
-                self._dbg_stage_total["bin"] += _dt
-                if _dt > self._dbg_stage_max["bin"]:
-                    self._dbg_stage_max["bin"] = _dt
-            if _dbg:
-                _t = _ddtime.perf_counter()
-            self._audio_sink.write(audio)
-            # TCI audio tap (v0.0.9.1+).  Emit a copy of the
-            # finalised audio so any subscribed TCI client gets the
-            # exact same audio the operator hears.  Cheap when no
-            # TCI server / no subscribed clients (slot is a no-op
-            # early-return).  See lyra/control/tci.py
-            # broadcast_audio() for the consumer side.
-            try:
-                self.audio_for_tci_emit.emit(audio)
-            except Exception:
-                pass
-            if _dbg:
-                _dt = (_ddtime.perf_counter() - _t) * 1000.0
-                self._dbg_stage_total["sink"] += _dt
-                if _dt > self._dbg_stage_max["sink"]:
-                    self._dbg_stage_max["sink"] = _dt
-        except Exception as e:
-            print(f"audio sink error: {e}")
 
     # NOTE: an earlier Python-side spectrum-SNR squelch gate lived
     # here (and even earlier, an audio-domain RMS gate).  Both were
