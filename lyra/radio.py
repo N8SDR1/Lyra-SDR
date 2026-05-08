@@ -3828,19 +3828,31 @@ class Radio(QObject):
         on = bool(self._rx_channel.squelch_enabled)
         try:
             mode = self._mode
-            # First, disable any module that doesn't apply to this mode.
+            # Master-off path FIRST — disable ALL three squelch
+            # modules unconditionally so toggling SQ off cleanly
+            # restores audio regardless of which module was active.
+            #
+            # Bug (v0.0.9.6 pre-Phase-6.A4 fix-up): the original
+            # implementation interleaved mode-targeted disables
+            # with the master-off check, which left the active
+            # mode's module running when SQ went off — operator
+            # in AM mode toggling SQ off would still hear audio
+            # gated because set_am_squelch(False) was skipped by
+            # the mode-mismatch guard.  Same bug for FM mode.
+            if not on:
+                self._wdsp_rx.set_ssql_run(False)
+                self._wdsp_rx.set_fm_squelch(False)
+                self._wdsp_rx.set_am_squelch(False)
+                return
+            # Master is ON — disable any module that doesn't apply
+            # to this mode (cleans up after a mode change), then
+            # enable + threshold the right one.
             if mode != "FM":
                 self._wdsp_rx.set_fm_squelch(False)
             if mode not in ("AM", "SAM", "DSB"):
                 self._wdsp_rx.set_am_squelch(False)
             if mode in ("FM", "AM", "SAM", "DSB"):
                 self._wdsp_rx.set_ssql_run(False)
-            # Now enable + (re-)threshold the active module.
-            if not on:
-                # Master off — make sure SSQL is also off (it may have
-                # been enabled in a previous mode).
-                self._wdsp_rx.set_ssql_run(False)
-                return
             if mode == "FM":
                 # FM SQ has its own threshold field independent of
                 # AM SQ / SSQL.  Wired in Phase 6.A4 — previously
