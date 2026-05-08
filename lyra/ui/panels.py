@@ -757,13 +757,15 @@ class ViewPanel(GlassPanel):
             "font-weight: 700;")
         zoom_grid.addWidget(self.zoom_label, 0, 3)
 
-        # Bottom row: Panadapter scroll step.
+        # Bottom row: Panafall scroll step.
         # Mouse-wheel-over-panadapter tune step.  Distinct from the
         # VFO step on the Tuning panel: VFO step is for fine-tuning
-        # onto a signal (10 Hz / 100 Hz / 1 kHz); panadapter scroll
-        # step is for skimming across a band (1 kHz / 5 kHz / 10 kHz
-        # / 25 kHz / 100 kHz).  Both knobs persist across sessions.
-        zoom_grid.addWidget(QLabel("Step"), 1, 0)
+        # onto a signal (10 Hz / 100 Hz / 1 kHz); panafall step is
+        # for skimming across a band (1 kHz / 5 kHz / 10 kHz /
+        # 25 kHz / 100 kHz).  "Panafall" = panadapter + waterfall
+        # (the gesture works over either view).  Both knobs persist
+        # across sessions.
+        zoom_grid.addWidget(QLabel("Panafall Step"), 1, 0)
         self.scroll_step_combo = QComboBox()
         for hz in Radio.PANADAPTER_SCROLL_STEPS_HZ:
             label = (f"{hz} Hz" if hz < 1000
