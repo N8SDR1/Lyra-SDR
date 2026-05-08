@@ -1898,56 +1898,13 @@ class DspPanel(GlassPanel):
             "}")
         self.npe_combo.currentIndexChanged.connect(self._on_npe_combo)
 
-        # Build NR2 strength widgets — added to the row dynamically
-        # below depending on whether NR2 is active.
-        self._nr2_label_widget = QLabel("NR2 strength:")
-        self._nr2_label_widget.setStyleSheet(
-            "color: #cdd9e5; font-family: 'Segoe UI', sans-serif; "
-            "font-size: 11px;")
-        # Slider maps integer 0..200 → aggression 0.0..2.0 (×100
-        # internal scaling for 0.01-step precision).  Range was
-        # bumped from 0..150 to 0..200 after the WDSP-port machinery
-        # (Martin + SPP + AEPF) made the higher aggression range
-        # listenable — SPP guards speech bins from over-attenuation,
-        # AEPF smooths deep-suppression masks.  Operators on very
-        # noisy bands can usefully push past 100% now.
-        self.nr2_agg_slider = QSlider(Qt.Horizontal)
-        self.nr2_agg_slider.setRange(0, 200)
-        self.nr2_agg_slider.setValue(
-            int(round(radio.nr2_aggression * 100)))
-        self.nr2_agg_slider.setSingleStep(5)
-        self.nr2_agg_slider.setPageStep(25)
-        self.nr2_agg_slider.setTickPosition(QSlider.TicksBelow)
-        self.nr2_agg_slider.setTickInterval(50)
-        # Slightly wider than NR1's slider (160) to accommodate the
-        # 0..250 range with comparable per-tick resolution.
-        self.nr2_agg_slider.setFixedWidth(200)
-        self.nr2_agg_slider.setToolTip(
-            "NR2 suppression strength.\n"
-            "  0   = unity gain (effectively NR off)\n"
-            "  100 = full Ephraim-Malah / Wiener (default)\n"
-            "  150 = harder cleanup\n"
-            "  200 = ceiling — extreme noise / stacking with LMS\n"
-            "\n"
-            "Right-click the NR button to switch between NR1, NR2,\n"
-            "and Neural backends.  Right-click this slider to pick\n"
-            "MMSE-LSA vs Wiener gain function.")
-        self.nr2_agg_slider.valueChanged.connect(
-            self._on_nr2_agg_slider)
-        # Right-click on the NR2 slider opens the gain-method picker
-        # (MMSE-LSA vs Wiener).  Both are MMSE-derived; MMSE-LSA is
-        # the WDSP case-1 path with sharper noise attack and
-        # classical sound, Wiener is the WDSP case-0 path with
-        # smoother per-bin transitions and "fuller" residual.
-        self.nr2_agg_slider.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.nr2_agg_slider.customContextMenuRequested.connect(
-            self._show_nr2_method_menu)
-        self.nr2_agg_label = QLabel(
-            f"{int(round(radio.nr2_aggression * 100))} %")
-        self.nr2_agg_label.setFixedWidth(40)
-        self.nr2_agg_label.setStyleSheet(
-            "color: #50d0ff; font-family: Consolas, monospace; "
-            "font-weight: 700; font-size: 11px;")
+        # NOTE: legacy NR2 strength slider + gain-method picker
+        # widgets removed in Phase 8 (v0.0.9.6).  Replaced by the
+        # Mode 1-4 picker + AEPF + NPE controls above (Phase 7
+        # NR-UX overhaul).  Persisted nr2_aggression /
+        # gain_method state still lives on _NR2State for forward
+        # compat — only the panel widgets were vestigial (built
+        # then immediately hidden).
 
         # Source badge gets a max width so it doesn't span the
         # whole panel — looks visually balanced with the cap
@@ -2106,15 +2063,9 @@ class DspPanel(GlassPanel):
         self.content_layout().addLayout(nr_status_row)
         # NR-UX overhaul: Mode + AEPF always visible (the new model
         # has a single mode selector, not branched by backend).
-        # Legacy NR2 widgets stay hidden (they're not in the layout
-        # but ensure setVisible(False) for any code path that might
-        # query them).
         self._nr1_label_widget.setVisible(True)
         self.nr1_strength_slider.setVisible(True)
         self.nr1_strength_label.setVisible(True)
-        self._nr2_label_widget.setVisible(False)
-        self.nr2_agg_slider.setVisible(False)
-        self.nr2_agg_label.setVisible(False)
         # LMS slider visibility tied to LMS enable state.
         lms_visible = bool(radio.lms_enabled)
         self._lms_label_widget.setVisible(lms_visible)
@@ -2131,8 +2082,6 @@ class DspPanel(GlassPanel):
         # Two-way sync so each slider mirrors Radio's state.
         radio.nr1_strength_changed.connect(
             self._on_nr1_strength_signal)
-        radio.nr2_aggression_changed.connect(
-            self._on_nr2_agg_signal)
         # NR-UX overhaul: mirror Radio's mode + AEPF + NPE state
         # into the new widgets.
         radio.nr_mode_changed.connect(self._on_nr_mode_signal)
@@ -2688,21 +2637,10 @@ class DspPanel(GlassPanel):
 
     # ── NR2 panel-slider handlers — Phase 3.D #4 ─────────────────────
 
-    def _on_nr2_agg_slider(self, slider_int: int) -> None:
-        """Operator dragged the NR2 strength slider."""
-        agg = slider_int / 100.0
-        self.nr2_agg_label.setText(f"{slider_int} %")
-        self.radio.set_nr2_aggression(agg)
-
-    def _on_nr2_agg_signal(self, agg: float) -> None:
-        """Mirror an external aggression change (e.g. from Settings
-        → Noise tab) into the panel slider."""
-        target = int(round(agg * 100))
-        if self.nr2_agg_slider.value() != target:
-            self.nr2_agg_slider.blockSignals(True)
-            self.nr2_agg_slider.setValue(target)
-            self.nr2_agg_slider.blockSignals(False)
-        self.nr2_agg_label.setText(f"{target} %")
+    # NOTE: _on_nr2_agg_slider, _on_nr2_agg_signal removed in
+    # Phase 8 (v0.0.9.6) along with the panel widgets they served.
+    # NR2 aggression is now operator-controlled via the Mode 1-4
+    # picker.
 
     # ── LMS handlers ──────────────────────────────────────────────
 
@@ -2804,26 +2742,10 @@ class DspPanel(GlassPanel):
         menu.addAction(toggle_act)
         menu.exec(btn.mapToGlobal(pos))
 
-    def _show_nr2_method_menu(self, pos):
-        """Right-click on the NR2 strength slider — gain function
-        picker.  Both gain methods come from WDSP emnr.c with
-        Pratt attribution.  See nr2.py docstring for the math.
-        """
-        menu = QMenu(self)
-        current = self.radio.nr2_gain_method
-        for key, label in (
-                ("mmse_lsa",
-                 "MMSE-LSA  (default — classical, sharper attack)"),
-                ("wiener",
-                 "Wiener     (smoother transitions, fuller residue)"),
-        ):
-            act = QAction(label, menu)
-            act.setCheckable(True)
-            act.setChecked(key == current)
-            act.triggered.connect(
-                lambda _=False, k=key: self.radio.set_nr2_gain_method(k))
-            menu.addAction(act)
-        menu.exec(self.nr2_agg_slider.mapToGlobal(pos))
+    # NOTE: _show_nr2_method_menu removed Phase 8 (v0.0.9.6) along
+    # with the NR2 strength slider it was bound to.  The Mode 1-4
+    # picker on the panel covers the gain-method selection now (each
+    # mode maps to a WDSP gain_method per Radio._NR_MODE_TO_GAIN_METHOD).
 
     # ── NR1 strength-slider handlers ─────────────────────────────────
 
@@ -2907,25 +2829,18 @@ class DspPanel(GlassPanel):
             pass
 
     def _refresh_nr2_panel_visibility(self, profile: str | None = None) -> None:
-        """LEGACY method — now a no-op-ish guard.
-
-        Pre-2026-05-07 this toggled NR1 vs NR2 strength slider
-        visibility based on backend.  After the NR-mode UX overhaul,
-        the Mode slider is always visible and the legacy NR2 widgets
-        are not added to any layout — calling setVisible(True) on
-        them would promote them to top-level windows (Qt default
-        behavior for parentless widgets), causing the "floating
-        widget mess" bug operators reported.
+        """Legacy method kept as a no-op shim for any caller wired
+        before the Phase 7 NR-UX overhaul + Phase 8 NR2-widget
+        deletion.  The NR Mode 1-4 slider is always visible; there
+        are no NR2-specific widgets to manage.  Safe to call from
+        anywhere; no longer toggles anything.
         """
-        # Mode slider always visible.
+        # Mode slider always visible.  Kept here so callers that
+        # used to drive backend-specific visibility see the
+        # canonical state restored.
         self._nr1_label_widget.setVisible(True)
         self.nr1_strength_slider.setVisible(True)
         self.nr1_strength_label.setVisible(True)
-        # Legacy NR2 widgets stay hidden permanently — never call
-        # setVisible(True) on them, they'd float as windows.
-        self._nr2_label_widget.setVisible(False)
-        self.nr2_agg_slider.setVisible(False)
-        self.nr2_agg_label.setVisible(False)
 
     # ── NB (Noise Blanker) handlers — Phase 3.D #2 ───────────────────
 

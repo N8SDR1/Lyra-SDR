@@ -411,17 +411,10 @@ class PythonRxChannel(DspChannel):
     are operator-state containers — Radio sets profile / strength /
     threshold / enabled on them, but their ``process()`` methods are
     no longer called.  Phase 6 replaces them with dataclasses.
-
-    The ``block_size`` constructor parameter is accepted but ignored
-    — it used to size the legacy ``_audio_buf`` drain unit.  Kept on
-    the signature for one cleanup cycle so radio.py doesn't need a
-    same-commit signature change; will be dropped in Phase 8.
     """
 
-    def __init__(self, in_rate: int, block_size: int = 1024):
+    def __init__(self, in_rate: int):
         super().__init__(in_rate)
-        # block_size accepted but unused — see class docstring.
-        del block_size
         self._mode: str = "USB"
         self._cw_pitch_hz: float = 650.0
 

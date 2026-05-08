@@ -752,7 +752,7 @@ class Radio(QObject):
         # process(). See lyra/dsp/channel.py for the full contract.
         from lyra.dsp.channel import PythonRxChannel
         self._rx_channel: PythonRxChannel = PythonRxChannel(
-            in_rate=self._rate, block_size=self._audio_block,
+            in_rate=self._rate,
         )
         # Phase 3.D #1 — register the NR capture-done callback so
         # captures complete with a Qt signal emission.  The callback
