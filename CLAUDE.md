@@ -1577,12 +1577,160 @@ methods on the `RxChannel` class.
   speed) is hardcoded inside the DLL at 0.5 sec — would need a
   WDSP rebuild to change.
 
-### 14.9 Legacy pure-Python DSP path — DEPRECATED
+### 14.9 Legacy pure-Python DSP path — Phase A done; resume Phase 3 next
 
-**Status (2026-05-07 night):** the `LYRA_USE_LEGACY_DSP=1`
-environment-variable escape hatch is **deprecated and scheduled
-for removal**.  WDSP is the only supported DSP path going
-forward.
+**Status (2026-05-07 night, end of session):**
+
+Cleanup is being done in phases.  Where we are:
+
+* **Phase A — DONE:** the `LYRA_USE_LEGACY_DSP=1` env-var
+  escape hatch is REMOVED.  `radio.py` line ~824:
+  `self._use_wdsp_engine: bool = True` (constant, no env-var
+  read).  WDSP-init failure now raises a clear `RuntimeError`
+  rather than silently falling back to legacy.  The legacy code
+  branches (`if not self._use_wdsp_engine:`) still exist in tree
+  but are unreachable — dead code.  Tag: `v0.0.9.6-rx1-working-r3`.
+  Bundle: `_backups/lyra-2026-05-07-rx1-working-r3.bundle`.
+
+* **Phase 3 — RESUME HERE NEXT SESSION:** delete the dead branches
+  + slim `channel.py` to a state container.  Plan in §14.9 below.
+
+The general "WDSP is the only DSP path" principle is now enforced
+at runtime.  Operators can't accidentally end up on the legacy
+path; the only way to run legacy code now is to explicitly call
+the legacy module classes from a new code path, which we won't
+do.
+
+#### Resume plan (Phase 3-9, ~5-7 hours of focused work)
+
+The audit revealed the legacy modules host state containers that
+`radio.py` references regardless of DSP path (e.g., `_leveler`
+has 20+ getter/setter sites; `_apf` has dual ownership in
+`channel.py` and `radio.py`).  So "just delete the files" doesn't
+work — we need to surgically separate the **state** (operator's
+slider values, persisted settings) from the **DSP body** (the
+actual processing code).
+
+**Phase 3 — strip dead branches** (60 min):
+* In `radio.py`, find every `if not self._use_wdsp_engine:` branch
+  (10+ sites per the Phase 0 audit) and DELETE the body — the
+  legacy DSP processing code that's never reached.  Keep the
+  state-mirroring `if self._use_wdsp_engine and self._wdsp_rx is
+  not None:` calls (those run the live WDSP path).
+* In `worker.py`, delete the legacy DSP chain branch in
+  `process_block` (everything after the `if (getattr(radio,
+  "_use_wdsp_engine"...)` block has the WDSP early-return).
+* In `radio.py` `_use_wdsp_engine: bool = True` can be deleted
+  entirely along with its now-orphan conditional checks once the
+  branches are gone.
+
+**Phase 4 — refactor `_leveler` and `_apf` to state containers**
+(90 min):
+
+These two modules have ~50+ Radio method references between them
+(threshold, ratio, makeup_db, profile, BW, gain — every operator
+slider has its own getter/setter).  None of them need DSP code;
+they just need to hold the values that get pushed to WDSP via
+`_push_wdsp_apf_state`, AGC settings, etc.
+
+Approach:  define `LevelerState` and `APFState` dataclasses with
+the operator-facing fields (threshold_db, ratio, makeup_db,
+profile, enabled / bw_hz, gain_db, enabled).  Replace
+`Radio._leveler = AudioLeveler(rate=48000)` with
+`Radio._leveler = LevelerState()`.  Update each accessor to read
+the dataclass field instead of calling into the legacy class.
+Most setters become one-liners.
+
+**Phase 5 — slim `channel.py`** (60 min):
+
+`PythonRxChannel.process()` body is now dead code.  Delete it.
+Also delete the demod orchestration, the decimator, the per-DSP-
+module instances (`_nb`, `_lms`, `_anf`, `_nr`, `_nr2`, `_apf`,
+`_squelch`).  Keep:
+* The `__init__` and basic state (mode, filter, BW, freq).
+* The setters that radio.py calls for state mirroring
+  (set_squelch_enabled, set_notches, etc.).
+* The `_squelch` instance reference for the legacy fallback we
+  no longer have — actually, since the dead branch is gone, the
+  squelch object only needs threshold/enabled state for WDSP
+  state mirroring.  Replace `AllModeSquelch()` with a dataclass
+  too.
+* The `_nr` instance ONLY for the capture path (the FFT magnitude
+  accumulator that captures noise profiles).  Audit what
+  `_capture_state` exposes; that's the only nr.py interface still
+  used.
+
+**Phase 6 — delete pure-legacy modules** (15 min):
+
+After Phases 3-5 land, delete these files outright:
+* `lyra/dsp/agc_wdsp.py` — verify radio.py only imports
+  `MODE_BY_NAME` for data lookup (inline that small dict)
+* `lyra/dsp/demod.py` — verify all uses are gone
+* `lyra/dsp/nb.py`, `lms.py`, `anf.py` — channel.py state
+  containers replaced by dataclasses in Phase 5
+* `lyra/dsp/leveler.py`, `apf.py` — state containers replaced in
+  Phase 4
+* `lyra/dsp/squelch.py` — state container replaced in Phase 5
+  (BUT keep this module's file just in case it ends up holding
+  the AllModeSquelch dataclass — judgment call at the time)
+
+**Phase 7 — Settings → Noise tab UI cleanup** (45 min):
+
+`lyra/ui/settings_dialog.py` `NoiseSettingsTab` has ~5 group
+boxes for DSP modules whose advanced settings are now obsolete:
+* NB advanced settings group (line 3577) — delete
+* ANF settings group (line ~3730) — delete
+* NR2 group (line 3767) + NR2 method picker — delete (Mode 1-4
+  on DSP+Audio panel covers it)
+* LMS taps/delay/gain advanced settings — delete (strength
+  slider on panel covers the operator-relevant knob)
+
+KEEP:
+* Captured Profile group (line 3422) — operator-curated feature
+* Squelch group — drives WDSP SSQL via the existing wiring
+
+**Phase 8 — radio.py orphan setter sweep** (30 min):
+
+Methods on `Radio` that only existed for now-deleted UI controls
+go away too.  Candidates from initial scan:
+* `set_lms_taps`, `set_lms_delay`, `set_lms_gain`,
+  `set_lms_leakage` — kept the strength slider only
+* `set_anf_taps`, `set_anf_mu`, `set_anf_delay`,
+  `set_anf_decimation` — WDSP ANF is binary on/off
+* `set_nb_threshold`, `set_nb_advanced_*` — NB profile dropdown
+  is enough
+* Any `*_changed` Qt signals that nothing connects to anymore
+
+Use `grep -rn` to verify each method has zero callers before
+deleting.
+
+**Phase 9 — final test pass + CLAUDE.md update** (45 min):
+
+* Smoke tests: load Lyra, walk every settings tab, every mode,
+  every DSP toggle.  Confirm no crashes / no orphan signal-slot
+  warnings in the console.
+* Operator real-signal pass: WWV AM, an SSB conversation, FM
+  repeater if available.  Verify behaviour identical to r3.
+* Update `CLAUDE.md` §14.9: status changes from "deprecated and
+  scheduled" to "DELETED" with summary of what came out.
+* Update `lyra/dsp/__init__.py` if any module names were
+  removed from imports.
+* Bump `_open_wdsp_rx` audit reminder from §14.10 to higher
+  priority — natural followup work after legacy cleanup lands.
+
+**Total estimated work for Phases 3-9: 5-7 hours focused.**
+
+#### Why Phase A first (and not the whole thing tonight)
+
+Audit at the start of the session showed the legacy modules have
+deeper coupling than initial estimates suggested (state container
+patterns; many radio.py methods reference legacy module instances
+even in WDSP mode).  The proper cleanup is more invasive than a
+straight `rm` of files.  Phase A removes the operator-visible
+escape hatch (env-var) without touching the deep coupling, which
+gets fresh-mind time tomorrow.
+
+
 
 **Why deprecated:**
 
@@ -1754,16 +1902,21 @@ phase before TX work starts.
 
 ---
 
-*Last updated: 2026-05-07 night — added §14.10 (AM/FM/DSB
-right-channel-silent bug, root-caused to EMNR-zeroes-Q +
-WDSP-default-copy=0, fixed via SetRXAPanelBinaural(0); operator-
-verified on WWV AM and across all modes).  Earlier same night:
-§14.8 (WDSP SSQL all-mode squelch architecture) + §14.9 (legacy
-pure-Python DSP path deprecated, deletion scheduled).  Earlier
-same day: §14.7 NR-mode UX overhaul (in operator testing) +
-extended §14.6 with the IQ-domain captured-profile architectural
-plan (operator-confirmed direction to keep the feature alive).
-Earlier 2026-05-07: RX1 polish push
+*Last updated: 2026-05-07 late night — Phase A of legacy-DSP
+cleanup landed (env-var dispatch removed, `_use_wdsp_engine`
+constant True, WDSP-init failure raises clear error).  Tag
+`v0.0.9.6-rx1-working-r3`, bundle
+`_backups/lyra-2026-05-07-rx1-working-r3.bundle`.  Resume Phase 3
+next session — see §14.9 "Resume plan".  Earlier same night:
+§14.10 (AM/FM/DSB right-channel-silent bug, root-caused to
+EMNR-zeroes-Q + WDSP-default-copy=0, fixed via
+SetRXAPanelBinaural(0); operator-verified on WWV AM and across all
+modes).  §14.8 (WDSP SSQL all-mode squelch architecture).  §14.9
+(legacy pure-Python DSP path deprecated, Phase A done, Phases 3-9
+remaining).  Earlier same day: §14.7 NR-mode UX overhaul (in
+operator testing) + extended §14.6 with the IQ-domain captured-
+profile architectural plan (operator-confirmed direction to keep
+the feature alive).  Earlier 2026-05-07: RX1 polish push
 (1-5 + APF + BIN-PC-Sound + dither + S-meter peak-hold + capture-
 feed + captured-profile-apply revert + LMS slider wiring + EMNR
 gainMethod + AEPF cffi bindings).  Earlier 2026-05-06: §14 added

@@ -817,26 +817,38 @@ class Radio(QObject):
         # all happen inside the engine; Lyra applies output-stage volume
         # / mute / TCI tap on top.
         #
-        # Default ON (the whole point of v0.0.9.6).
-        # Set ``LYRA_USE_LEGACY_DSP=1`` in the environment to fall back
-        # to the existing PythonRxChannel path during testing or for any
-        # regression bisect.
-        self._use_wdsp_engine: bool = (
-            os.environ.get("LYRA_USE_LEGACY_DSP", "").strip() not in ("1", "true", "TRUE", "yes")
-        )
+        # Phase A of legacy-DSP cleanup (CLAUDE.md §14.9): the
+        # ``LYRA_USE_LEGACY_DSP=1`` env-var escape hatch is REMOVED.
+        # WDSP is the only supported DSP path.  The legacy-Python
+        # branches (`if not self._use_wdsp_engine`) remain in tree
+        # but are unreachable — they'll be deleted in subsequent
+        # phases along with the pure-Python DSP modules
+        # (agc_wdsp / demod / nb / lms / anf / leveler / apf).
+        #
+        # ``self._use_wdsp_engine`` stays as a constant True for now
+        # so the old conditional branches don't need to change shape
+        # in this phase — they evaluate the same way and the legacy
+        # bodies become dead code.  Phase 3 deletes them.
+        self._use_wdsp_engine: bool = True
         self._wdsp_rx = None
         self._wdsp_rx_in_rate: int = 0
-        if self._use_wdsp_engine:
-            try:
-                self._open_wdsp_rx(self._rate)
-            except Exception as exc:
-                # If WDSP fails to load (missing DLL, ABI mismatch),
-                # fall back to the legacy path so Lyra still runs.
-                # Operator sees a clear log line; the audio quality
-                # bug is back, but the radio itself is functional.
-                print(f"[Radio] WDSP engine failed to initialize: {exc}; "
-                      f"falling back to legacy DSP chain")
-                self._use_wdsp_engine = False
+        try:
+            self._open_wdsp_rx(self._rate)
+        except Exception as exc:
+            # WDSP DLL set is bundled at lyra/dsp/_native/ — should
+            # never fail in production.  If it does (corrupt install,
+            # missing DLL, ABI mismatch), Lyra can't function: the
+            # legacy fallback is gone (Phase A) and TX/PS work also
+            # depends on WDSP.  Raise a clear, actionable error
+            # rather than crashing later in some confusing way.
+            raise RuntimeError(
+                "Lyra requires the bundled WDSP DLL set at "
+                "lyra/dsp/_native/ (wdsp.dll, libfftw3-3.dll, "
+                "libfftw3f-3.dll, rnnoise.dll, specbleach.dll).  "
+                f"Engine initialization failed: {exc}.  "
+                "Reinstall Lyra or check that the _native/ directory "
+                "is present and readable."
+            ) from exc
         # Mirror Lyra's notch-mutation signal into WDSP's notch DB
         # without scattering the push call across every mutator
         # method.  notches_changed fires whenever any of add_notch /
