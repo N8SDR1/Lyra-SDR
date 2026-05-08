@@ -2775,7 +2775,7 @@ class DspPanel(GlassPanel):
 
         Direct operator UX — no need to drag the slider when one of
         the standard zones is what you want.  Threshold values
-        match the AllModeSquelch.set_threshold docstring.
+        match Channel.set_squelch_threshold's documented zones.
         """
         btn = self.dsp_btns["SQ"]
         menu = QMenu(self)

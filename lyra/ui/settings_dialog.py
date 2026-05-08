@@ -3475,15 +3475,17 @@ class NoiseSettingsTab(QWidget):
 
         # Threshold slider (only directly meaningful when Custom is
         # active; greyed out on the presets but still readable).
-        from lyra.dsp.nb import ImpulseBlanker
+        # Phase 6.C: range constants moved to the _NBState dataclass
+        # alongside the deletion of lyra/dsp/nb.py.
+        from lyra.dsp.channel import _NBState
         thr_row = QHBoxLayout()
         thr_row.addWidget(QLabel("Threshold:"))
         self.nb_thr_slider = QSlider(Qt.Horizontal)
         # Range maps slider integer 15..500 to threshold 1.5..50.0
         # (×10 internal scaling for finer resolution).
         self.nb_thr_slider.setRange(
-            int(ImpulseBlanker.THRESHOLD_MIN * 10),
-            int(ImpulseBlanker.THRESHOLD_MAX * 10))
+            int(_NBState.THRESHOLD_MIN * 10),
+            int(_NBState.THRESHOLD_MAX * 10))
         self.nb_thr_slider.setValue(
             max(self.nb_thr_slider.minimum(),
                 int(round(radio.nb_threshold * 10))))
@@ -3577,7 +3579,6 @@ class NoiseSettingsTab(QWidget):
         # μ slider — operator-tunable in Custom; presets show the
         # value but disabled.  Uses log scale for ergonomic feel
         # since μ ranges over 2 decades (1e-5 to 1e-3).
-        from lyra.dsp.anf import AutoNotchFilter
         anf_mu_row = QHBoxLayout()
         anf_mu_row.addWidget(QLabel("μ (adapt rate):"))
         self.anf_mu_slider = QSlider(Qt.Horizontal)
@@ -4094,7 +4095,7 @@ class NoiseSettingsTab(QWidget):
         multiplicative change in μ.
         """
         import math
-        from lyra.dsp.anf import AutoNotchFilter as ANF
+        from lyra.dsp.channel import _ANFState as ANF
         mu = max(ANF.MU_MIN, min(ANF.MU_MAX, mu))
         # log10(MU_MIN) = -5, log10(MU_MAX) = -3 → 2 decades.
         log_min = math.log10(ANF.MU_MIN)
@@ -4105,7 +4106,7 @@ class NoiseSettingsTab(QWidget):
     @staticmethod
     def _anf_slider_to_mu(slider_int: int) -> float:
         import math
-        from lyra.dsp.anf import AutoNotchFilter as ANF
+        from lyra.dsp.channel import _ANFState as ANF
         log_min = math.log10(ANF.MU_MIN)
         log_max = math.log10(ANF.MU_MAX)
         frac = max(0, min(200, slider_int)) / 200.0

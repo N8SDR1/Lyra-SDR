@@ -91,6 +91,225 @@ class _APFState:
         return
 
 
+# Operator-facing constants for the NB / ANF state containers.
+# Reproduced from the deleted modules so settings_dialog.py can
+# still import them by name from anywhere it likes.
+_NB_THRESHOLD_MIN: float = 1.5
+_NB_THRESHOLD_MAX: float = 50.0
+_NB_PROFILES: dict[str, float] = {
+    "off":    1.5,
+    "light":  10.0,
+    "medium": 5.0,
+    "heavy":  3.0,
+}
+
+_ANF_MU_MIN: float = 1e-5
+_ANF_MU_MAX: float = 1e-3
+_ANF_PROFILES: dict[str, float] = {
+    "off":    1e-4,
+    "light":  5e-5,
+    "medium": 1.5e-4,
+    "heavy":  4e-4,
+}
+
+
+@dataclass
+class _NBState:
+    """Noise Blanker state container.  WDSP runs the live noise
+    blanker (xnobEXT/xanbEXT inside the cffi engine).  Phase 6.C
+    swapped the legacy Python ImpulseBlanker for this dataclass —
+    the profile / threshold / rate fields are persisted operator
+    state that radio.py mirrors to WDSP via the NB profile mapping
+    in ``_push_wdsp_nb_state``.
+    """
+    rate: int = 384000
+    enabled: bool = False
+    profile: str = "off"
+    _threshold: float = _NB_PROFILES["off"]
+
+    # Class-level constants kept for settings_dialog.py compat.
+    THRESHOLD_MIN: float = _NB_THRESHOLD_MIN
+    THRESHOLD_MAX: float = _NB_THRESHOLD_MAX
+    PROFILES: dict = None  # type: ignore[assignment]
+
+    def set_rate(self, rate: int) -> None:
+        self.rate = int(rate)
+
+    def set_profile(self, profile: str) -> None:
+        name = (profile or "off").lower()
+        self.profile = name
+        self.enabled = name != "off"
+        self._threshold = _NB_PROFILES.get(name, _NB_PROFILES["medium"])
+
+    def set_threshold(self, threshold: float) -> None:
+        clamped = max(_NB_THRESHOLD_MIN,
+                      min(_NB_THRESHOLD_MAX, float(threshold)))
+        self._threshold = clamped
+        # Manual threshold tweak implies "Custom" profile.
+        self.profile = "custom"
+        self.enabled = True
+
+    def reset(self) -> None:
+        # No internal IIR state in the dataclass — WDSP's
+        # impulse-blanker state lives in C-land and resets via
+        # the engine's own reset() path.
+        return
+
+
+# Patch class-level dict default (dataclass can't take mutable defaults).
+_NBState.PROFILES = dict(_NB_PROFILES)
+
+
+@dataclass
+class _LMSState:
+    """LMS line enhancer state container.  WDSP's ANR runs the
+    live predictor; this dataclass mirrors operator state
+    (``enabled`` + ``strength``) that radio.py pushes to WDSP via
+    ``_push_wdsp_nr_state`` (the ANR run flag and any future
+    strength→adapt-rate mapping).
+    """
+    rate: int = 48000
+    enabled: bool = False
+    strength: float = 0.5
+
+    def set_strength(self, value: float) -> None:
+        self.strength = max(0.0, min(1.0, float(value)))
+
+    def reset(self) -> None:
+        return
+
+
+@dataclass
+class _ANFState:
+    """Auto Notch Filter state container.  WDSP's ANF (sibling of
+    EMNR in the RXA chain) handles the live filtering; the
+    dataclass mirrors operator state (``enabled`` / ``profile`` /
+    ``_mu``) that radio.py pushes to WDSP's ANF run flag via
+    ``_push_wdsp_nr_state`` and ``set_anf_profile``.
+    """
+    rate: int = 48000
+    enabled: bool = False
+    profile: str = "off"
+    _mu: float = _ANF_PROFILES["off"]
+
+    # Class-level constants kept for settings_dialog.py compat.
+    MU_MIN: float = _ANF_MU_MIN
+    MU_MAX: float = _ANF_MU_MAX
+    PROFILES: dict = None  # type: ignore[assignment]
+
+    def set_profile(self, profile: str) -> None:
+        name = (profile or "off").lower()
+        self.profile = name
+        self.enabled = name != "off"
+        self._mu = _ANF_PROFILES.get(name, _ANF_PROFILES["medium"])
+
+    def set_mu(self, mu: float) -> None:
+        clamped = max(_ANF_MU_MIN, min(_ANF_MU_MAX, float(mu)))
+        self._mu = clamped
+        self.profile = "custom"
+        self.enabled = True
+
+    def reset(self) -> None:
+        return
+
+
+_ANFState.PROFILES = dict(_ANF_PROFILES)
+
+
+@dataclass
+class _SquelchState:
+    """All-mode squelch state container.  WDSP's SSQL is the live
+    squelch engine; this dataclass mirrors operator state
+    (``enabled`` + ``threshold``) which radio.py pushes via
+    ``_push_wdsp_squelch_state``.
+
+    ``is_passing()`` returns True unconditionally — WDSP gates
+    audio internally so the Python side has no readback for the
+    current open/closed state.  The UI's activity-dot indicator
+    consequently shows "passing" whenever squelch is on; reading
+    back the live SSQL state from WDSP is logged as a Phase 9.5
+    follow-up.
+    """
+    rate: int = 48000
+    enabled: bool = False
+    threshold: float = 0.16
+
+    def set_threshold(self, value: float) -> None:
+        self.threshold = max(0.0, min(1.0, float(value)))
+
+    def is_passing(self) -> bool:  # noqa: D401
+        # Stub: WDSP gates audio internally; we don't have a
+        # readback yet.  Return True so the UI activity dot
+        # doesn't sit dark when squelch is enabled and audio is
+        # actually passing.  Phase 9.5 audit will wire a real
+        # readback if WDSP exposes one.
+        return True
+
+    def reset(self) -> None:
+        return
+
+
+@dataclass
+class _NR2State:
+    """NR2 (Ephraim-Malah) state container.  WDSP's EMNR is the
+    live noise reducer; this dataclass mirrors operator state for
+    the NR2 panel controls (aggression / smoothing / speech-aware
+    / gain method) plus the captured-noise-profile machinery
+    (load / clear / use-captured).
+
+    Captured-profile apply is INERT in WDSP mode (see CLAUDE.md
+    §14.6 — capture works, apply step is parked until the
+    IQ-domain rebuild lands).  This dataclass STORES the captured
+    magnitudes so they survive in memory and the future apply
+    path can pick them up; nothing in the audio path reads them
+    today.
+    """
+    rate: int = 48000
+    enabled: bool = False
+    aggression: float = 1.0
+    musical_noise_smoothing: bool = True
+    speech_aware: bool = False
+    gain_method: str = "mmse_lsa"
+    _captured_mag: object = None  # numpy array or None
+    _using_captured: bool = False
+
+    def set_aggression(self, value: float) -> None:
+        self.aggression = max(0.0, min(2.0, float(value)))
+
+    def set_musical_noise_smoothing(self, on: bool) -> None:
+        self.musical_noise_smoothing = bool(on)
+
+    def set_speech_aware(self, on: bool) -> None:
+        self.speech_aware = bool(on)
+
+    def set_gain_method(self, method: str) -> None:
+        m = (method or "").strip().lower()
+        if m not in ("mmse_lsa", "wiener"):
+            m = "mmse_lsa"
+        self.gain_method = m
+
+    def has_captured_profile(self) -> bool:
+        return self._captured_mag is not None
+
+    def load_captured_profile(self, mag) -> None:
+        # No size validation here — channel.load_captured_profile
+        # validates upstream via NR1 (which DOES check size).  If
+        # NR1 succeeds, we trust the array and just store it.
+        self._captured_mag = mag
+
+    def clear_captured_profile(self) -> None:
+        self._captured_mag = None
+
+    def set_use_captured_profile(self, on: bool) -> None:
+        self._using_captured = bool(on)
+
+    def is_using_captured_source(self) -> bool:
+        return bool(self._using_captured) and self._captured_mag is not None
+
+    def reset(self) -> None:
+        return
+
+
 # ── Abstract channel ───────────────────────────────────────────────
 class DspChannel(ABC):
     """Abstract RX DSP state container.
@@ -206,60 +425,26 @@ class PythonRxChannel(DspChannel):
         self._mode: str = "USB"
         self._cw_pitch_hz: float = 650.0
 
-        # NR processor — owned by the channel.
+        # NR1 — captured-noise profile capture lives on this
+        # instance.  Phase 6.C kept NR1 as a real class because
+        # nr.py owns the FFT-magnitude accumulator + smart-guard
+        # logic that powers the 📷 Cap button.  Radio drives it
+        # via _do_demod_wdsp's capture-feed branch.
         from lyra.dsp.nr import SpectralSubtractionNR
         self._nr = SpectralSubtractionNR(rate=self.audio_rate)
 
-        # NB (Impulse Blanker) — owned by the channel.  Operates on
-        # the IQ input rate (PRE-decimation) so impulses stay narrow
-        # and easy to detect; bandpass filtering inside the
-        # decimator would otherwise spread each impulse across many
-        # output samples and make it hard to surgically blank.
-        # Default profile = off; operator opts in via the DSP-row
-        # NB button or Settings → Noise tab.
-        from lyra.dsp.nb import ImpulseBlanker
-        self._nb = ImpulseBlanker(rate=self.in_rate)
-
-        # ANF (Auto Notch Filter, LMS adaptive) — owned by the
-        # channel.  Operates on the AUDIO rate (post-demod, 48 kHz),
-        # between the demodulator output and the NR processor.
-        # Default profile = off; operator opts in via DSP-row ANF
-        # button or Settings → Noise tab.
-        from lyra.dsp.anf import AutoNotchFilter
-        self._anf = AutoNotchFilter(rate=self.audio_rate)
-
-        # LMS adaptive line enhancer (NR3-style) — predictive NR
-        # complementary to NR1/NR2's subtractive approach.  Slots
-        # AFTER ANF and BEFORE NR in the chain so that:
-        #   - ANF kills any known stable carriers/whistles first
-        #   - LMS lifts the periodic signal (CW tones, voice
-        #     formants) above the broadband residual
-        #   - NR cleans up whatever broadband hiss remains
-        # Disabled by default; operator opts in via DSP-row LMS
-        # button.  Most useful in CW mode for weak-signal work, but
-        # also helps SSB clarity on noisy bands.
-        from lyra.dsp.lms import LineEnhancerLMS
-        self._lms = LineEnhancerLMS(rate=self.audio_rate)
-
-        # All-mode voice-presence squelch — slots LAST in the chain
-        # (after APF) so the detector sees the cleanest possible
-        # audio.  Direct port from WDSP ssql.c.  Mutes the output
-        # entirely when no voice is detected; opens with a smooth
-        # cosine ramp when voice arrives.  Works on every mode —
-        # SSB, AM, FM, CW.  Disabled by default.
-        from lyra.dsp.squelch import AllModeSquelch
-        self._squelch = AllModeSquelch(rate=self.audio_rate)
-
-        # NR2 (Phase 3.D #4) — Ephraim-Malah MMSE-LSA noise reducer.
-        # Lives alongside NR1 (self._nr).  Channel routes audio
-        # through whichever is active based on the operator's NR
-        # profile selection — see set_nr_profile() and process().
-        # Both stay in memory; switching is sample-accurate (same
-        # STFT framing).  Default disabled — operator opts in via
-        # the "High Quality (NR2)" entry in the DSP-row right-click
-        # menu.
-        from lyra.dsp.nr2 import EphraimMalahNR
-        self._nr2 = EphraimMalahNR(rate=self.audio_rate)
+        # State-container dataclasses for the DSP modules WDSP
+        # runs internally.  Phase 6.C swapped the live Python
+        # implementations for these mirrors — the operator-facing
+        # API surface is unchanged (set_nb_profile, set_lms_strength,
+        # etc.); WDSP gets the operator state via Radio's
+        # _push_wdsp_*_state methods.  See dataclass docstrings
+        # above for per-module rationale.
+        self._nb = _NBState(rate=self.in_rate)
+        self._anf = _ANFState(rate=self.audio_rate)
+        self._lms = _LMSState(rate=self.audio_rate)
+        self._squelch = _SquelchState(rate=self.audio_rate)
+        self._nr2 = _NR2State(rate=self.audio_rate)
         # Tracks which NR processor process() should route through.
         # Mirror of operator's active NR profile string:
         #   "nr1" → use _nr (spectral subtraction)
@@ -480,8 +665,8 @@ class PythonRxChannel(DspChannel):
     # ── Noise blanker proxies (Phase 3.D #2) ──────────────────────────
 
     def set_nb_profile(self, profile: str) -> None:
-        """Apply an NB preset: off / light / medium / aggressive /
-        custom.  See ImpulseBlanker.PROFILES."""
+        """Apply an NB preset: off / light / medium / heavy /
+        custom.  See ``_NBState.PROFILES``."""
         self._nb.set_profile(profile)
 
     def set_nb_threshold(self, threshold: float) -> None:
@@ -505,13 +690,13 @@ class PythonRxChannel(DspChannel):
     # ── Auto Notch Filter proxies (Phase 3.D #3) ──────────────────────
 
     def set_anf_profile(self, profile: str) -> None:
-        """Apply an ANF preset: off / gentle / standard / aggressive
-        / custom.  See AutoNotchFilter.PROFILES."""
+        """Apply an ANF preset: off / light / medium / heavy /
+        custom.  See ``_ANFState.PROFILES``."""
         self._anf.set_profile(profile)
 
     def set_anf_mu(self, mu: float) -> None:
         """Operator-tunable ANF adaptation step size (Custom profile).
-        Clamped to AutoNotchFilter's [MU_MIN, MU_MAX]."""
+        Clamped to ``_ANFState.[MU_MIN, MU_MAX]``."""
         self._anf.set_mu(mu)
 
     @property
@@ -529,11 +714,13 @@ class PythonRxChannel(DspChannel):
     # ── NR2 proxies (Phase 3.D #4) ────────────────────────────────────
 
     def set_nr2_aggression(self, value: float) -> None:
-        """Operator-tunable NR2 suppression strength (0.0..1.5).
+        """Operator-tunable NR2 suppression strength (0.0..2.0).
 
         0.0 ≈ NR off (unity gain); 1.0 = full MMSE-LSA;
         >1.0 = power-law for harder cleanup at the cost of some
-        thinning.  See AutoNotchFilter docstring for details."""
+        thinning.  Phase 6.C: this value is mirrored into
+        ``_NR2State.aggression`` and pushed to WDSP via
+        Radio's ``_push_wdsp_nr_state``."""
         self._nr2.set_aggression(value)
 
     def set_nr2_musical_noise_smoothing(self, on: bool) -> None:
@@ -605,9 +792,10 @@ class PythonRxChannel(DspChannel):
             self._squelch.reset()
 
     def set_squelch_threshold(self, value: float) -> None:
-        """Squelch threshold, 0.0..1.0.  See AllModeSquelch
-        docstring for the operator-meaningful zones (default 0.16,
-        loose ~0.10, tight ~0.30)."""
+        """Squelch threshold, 0.0..1.0.  Default 0.16; loose ≈ 0.10,
+        tight ≈ 0.30.  Phase 6.C: WDSP's SSQL is the live engine —
+        this value is mirrored on ``_SquelchState.threshold`` and
+        pushed via Radio's ``_push_wdsp_squelch_state``."""
         self._squelch.set_threshold(float(value))
 
     @property

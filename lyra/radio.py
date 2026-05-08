@@ -1633,9 +1633,9 @@ class Radio(QObject):
         # WDSP SSQL handles all-mode squelch natively; mode-specific
         # re-routing (FM ↔ AM ↔ SSQL) happens in
         # `_push_wdsp_squelch_state` via the WDSP-rx mode-change
-        # block above.  Legacy AllModeSquelch resets through
-        # `_rx_channel.set_mode` for the LYRA_USE_LEGACY_DSP=1
-        # fallback but is otherwise inert.
+        # block above.  Phase 6.C swapped the channel's _squelch
+        # for an `_SquelchState` dataclass; its set_mode reset
+        # call is a no-op (state-mirror only).
         # NOTE: legacy `self._leveler.reset()` removed in Phase 4
         # along with the rest of the leveler API.  WDSP AGC handles
         # the equivalent envelope-state cleanup internally on mode
@@ -3295,8 +3295,8 @@ class Radio(QObject):
         """Operator-tunable NB threshold (Custom profile).
 
         Switches profile to ``custom`` because the operator is
-        hand-tuning.  Clamped to the underlying ImpulseBlanker's
-        [THRESHOLD_MIN, THRESHOLD_MAX].  Persists via QSettings.
+        hand-tuning.  Clamped to ``_NBState.[THRESHOLD_MIN,
+        THRESHOLD_MAX]``.  Persists via QSettings.
         """
         self._rx_channel.set_nb_threshold(float(threshold))
         # Mirror operator-set custom threshold into WDSP NOB.
@@ -3474,9 +3474,9 @@ class Radio(QObject):
 
         0.0 = unity gain (effectively NR off)
         1.0 = full MMSE-LSA (default)
-        1.5 = harder cleanup with mild thinning
-        Clamped to [0.0, 1.5] inside EphraimMalahNR.
-        Persists to QSettings.
+        2.0 = harder cleanup with mild thinning
+        Clamped to [0.0, 2.0] inside ``_NR2State``.  Persists to
+        QSettings; pushed to WDSP's EMNR via _push_wdsp_nr_state.
         """
         self._rx_channel.set_nr2_aggression(float(value))
         try:
