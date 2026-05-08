@@ -691,6 +691,12 @@ class EphraimMalahNR:
         # off mid-stream gives a warm noise estimate with no glitch.
         self._captured_lambda_d: Optional[np.ndarray] = None
         self._use_captured_profile: bool = False
+        # Smoothed scale factor used to keep the captured profile's
+        # absolute level in step with the live (post-AGC) audio noise
+        # floor in WDSP mode.  Updated per frame via heavy EWMA when
+        # captured-source is active and the live tracker has converged
+        # (see process()); 0 = uninitialized, seeded on first use.
+        self._captured_scale_smooth: float = 0.0
 
         # ── Min-statistics noise tracker (Martin 2001) ───────────────
         # ENABLED BY DEFAULT — replaces the asymmetric exponential
@@ -764,6 +770,9 @@ class EphraimMalahNR:
         self._prev_gain = np.ones(n_bins, dtype=np.float64)
         self._prev_clean_pow = np.zeros(n_bins, dtype=np.float64)
         self._vad_hangover_frames = 0
+        # Drop the smoothed captured-profile scale on reset so a
+        # band/mode change re-seeds it from the new live tracker.
+        self._captured_scale_smooth = 0.0
         if self._minstats is not None:
             self._minstats.reset()
         if self._martin is not None:
@@ -1116,6 +1125,9 @@ class EphraimMalahNR:
             # output than the live MMSE-LSA path.  The Wiener-from-
             # profile path is the mathematically correct optimum
             # estimator when the noise PSD is known a priori.
+            # Pick the noise-PSD reference the gain math will use.
+            # Captured wins when the toggle is on AND a profile is
+            # loaded; otherwise the live tracker drives the math.
             captured_active = (self._use_captured_profile
                                and self._captured_lambda_d is not None)
             if captured_active:
@@ -1127,64 +1139,27 @@ class EphraimMalahNR:
             gamma = mag_sq / lambda_ref
 
             if captured_active:
-                # ── Wiener-from-profile path ─────────────────────
+                # ── Wiener-from-profile path (original) ──────────
                 # Closed-form Wiener gain when the noise PSD is
-                # known (= the captured profile, fixed).  The
-                # Wiener form (signal/(signal+noise)) is the
-                # MSE-optimal linear estimator under Gaussian
-                # assumptions when the noise PSD is known a priori
-                # — exactly the captured-profile case.
-                #
-                # Unlike MMSE-LSA's decision-directed ξ smoothing
-                # (which assumes a moving λ_d), this path's quality
-                # only depends on the captured profile being a good
-                # model of the actual band noise — operator's
-                # responsibility (smart-guard catches obvious
-                # capture errors).
-                #
-                # Math:
-                #   signal_pow = max(|Y|² - profile², 0)
-                #   SNR_post   = signal_pow / profile²
-                #   gain²      = SNR_post / (1 + SNR_post)
-                #   gain       = sqrt(gain²)  (mag domain)
-                #
-                # Operator aggression is applied via the standard
-                # _apply_aggression() blend at the end of the
-                # pipeline, identical to the MMSE-LSA path — keeps
-                # the slider's semantic ("less = gentler, more =
-                # cleaner") consistent across both modes.
-                #
-                # XI_FLOOR doubles as the gain² floor here so the
-                # output never collapses to literal zero (which
-                # produces clicks at low-SNR bins).
+                # known (= the captured profile, fixed).
                 signal_pow = np.maximum(mag_sq - lambda_ref, 0.0)
                 snr_post = signal_pow / lambda_ref
                 gain_sq = snr_post / (1.0 + snr_post)
                 np.maximum(gain_sq, self.XI_FLOOR, out=gain_sq)
                 gain = np.sqrt(gain_sq).astype(np.float32)
-
                 # ξ for SPP downstream — under the Wiener model,
-                # SNR_post IS the a-priori SNR estimate.  Provides
-                # SPP with a sensible value even though the
-                # decision-directed update isn't running.
+                # SNR_post IS the a-priori SNR estimate.
                 xi = snr_post
             else:
-                # ── Live MMSE-LSA path (unchanged) ───────────────
+                # ── Live MMSE-LSA path ───────────────────────────
                 # ξ — a-priori SNR via decision-directed smoothing.
                 alpha = (self.XI_SMOOTHING_ON
                          if self.musical_noise_smoothing
                          else self.XI_SMOOTHING_OFF)
-                # |G[n-1] · Y[n-1]|² / λ_d[n] — using stored prev
-                # clean estimate squared (which IS |G[n-1]·Y[n-1]|²
-                # already).
                 ml_estimate = self._prev_clean_pow / lambda_ref
-                # Maximum-likelihood term: max(γ - 1, 0).
                 ml_term = np.maximum(gamma - 1.0, 0.0)
                 xi = alpha * ml_estimate + (1.0 - alpha) * ml_term
-                # Floor on ξ to prevent gain collapse at very-low-SNR
-                # bins.
                 np.maximum(xi, self.XI_FLOOR, out=xi)
-
                 # MMSE-LSA gain via 2-D LUT lookup.
                 gain = self._lookup_gain(gamma, xi)
 

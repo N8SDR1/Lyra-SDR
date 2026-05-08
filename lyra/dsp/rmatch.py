@@ -718,3 +718,426 @@ class RMatch:
         self.overflows = 0
         self.ucnt = -1
         self.v.reset()
+
+
+# ── Native (cffi) implementation ─────────────────────────────────────
+
+
+class WdspRMatch:
+    """Adaptive rate matcher backed by the bundled WDSP DSP engine.
+
+    Public API matches :class:`RMatch` (insize/outsize/nom_inrate/nom_
+    outrate constructor args, ``write`` / ``read`` / ``reset`` / diag
+    properties) so callers can swap implementations transparently.
+
+    Why this class exists
+    ---------------------
+    The pure-Python :class:`RMatch` runs varsamp's per-input-sample
+    polyphase convolution in a Python ``for`` loop with NumPy.  At
+    Lyra's typical 48 kHz sound-card rate, that loop fires 48,000
+    times per second per RMatch instance — the dominant CPU cost on
+    the PC Soundcard audio path (~2× HL2-jack-mode CPU per operator
+    measurement, v0.0.9.6 dev cycle).  The bundled WDSP DLL ships
+    the exact same algorithm in optimized C with CRITICAL_SECTION-
+    based locking, GIL-free; calling into it via cffi recovers the
+    bulk of that overhead.
+
+    Threading
+    ---------
+    The DLL implements internal CRITICAL_SECTION around ring + var
+    state, so concurrent ``write`` + ``read`` from different threads
+    is safe.  Diagnostic readers (``var``, ``underflows`` etc.) use
+    ``getRMatchDiags`` which takes the same locks.
+
+    Tuning gaps vs Python implementation
+    -----------------------------------
+    A handful of operator-tunable knobs Lyra's Python class exposes
+    are NOT addressable on the DLL's public surface:
+
+    * ``density`` — DLL uses its internal default (R=1024).  Memory
+      footprint slightly higher than Python's R=64 default but a
+      one-time alloc, not a hot-path concern.
+    * ``fc_high`` / ``fc_low`` / ``gain`` — DLL uses defaults
+      (auto cutoff, no low cutoff, unity gain) which match what
+      audio_sink.py actually uses today.
+    * ``initial_fill_fraction`` — DLL hardcodes 50%.  Lyra Python's
+      default of 80% gave a slightly longer startup-silence period
+      (~320 ms vs 200 ms at 400 ms ring), traded for extra consumer
+      headroom during the first few seconds.  Native path reverts
+      to 200 ms — operator-perceptible at sink open but minor.
+    * ``startup_delay`` — DLL hardcodes 3.0 s (vs Lyra Python's 0.5).
+      Means the PI control loop kicks in later, so var stays at the
+      initial value (typically the persisted last-good var) for the
+      first few seconds.  In practice the persisted-var optimization
+      means var IS already near steady state at startup, so the
+      longer delay is invisible to operators.
+    * ``tdelayup`` / ``tdelaydown`` / ``tslewup`` / ``tslewdown``
+      flags — DLL has its own slew-time defaults (3 ms via
+      ``setRMatchSlewTime``).
+
+    The ones we DO map through to the DLL: ringsize, ff_alpha,
+    initial_var (via ``create_rmatchV(...,var)``), prop ringmin/max,
+    ff ringmin/max.
+    """
+
+    # Same operating range as :class:`RMatch`.  WDSP clamps internally
+    # to [0.96, 1.04] regardless of what we say here; we expose the
+    # constants for callers that want to validate before passing.
+    VAR_MIN: float = 0.96
+    VAR_MAX: float = 1.04
+
+    def __init__(
+        self,
+        insize: int,
+        outsize: int,
+        nom_inrate: int,
+        nom_outrate: int,
+        *,
+        ringsize: int = 0,
+        density: int = 256,                 # accepted, not propagated
+        startup_delay: float = 0.5,         # accepted, not propagated
+        ff_ringmin: int = 32,
+        ff_ringmax: int = 1024,
+        ff_alpha: float = 0.05,
+        prop_ringmin: int = 32,
+        prop_ringmax: int = 4096,
+        prop_gain: float = -1.0,
+        tslew: float = 0.003,
+        fc_high: float = 0.0,               # accepted, not propagated
+        fc_low: float = -1.0,               # accepted, not propagated
+        gain: float = 1.0,                  # accepted, not propagated
+        varmode: int = 1,                   # accepted, DLL hardcodes 1
+        initial_var: float = 1.0,
+        initial_fill_fraction: float = 0.5, # accepted, not propagated
+    ) -> None:
+        from lyra.dsp import wdsp_native
+
+        self._lib = wdsp_native.load()
+        self._ffi = wdsp_native.ffi()
+
+        self.insize = int(insize)
+        self.outsize = int(outsize)
+        self.nom_inrate = int(nom_inrate)
+        self.nom_outrate = int(nom_outrate)
+        self.nom_ratio = float(nom_outrate) / float(nom_inrate)
+        self.inv_nom_ratio = float(nom_inrate) / float(nom_outrate)
+
+        # Mirror the Python class's auto-sized ring formula so the DLL
+        # gets the same headroom Lyra's Python path used.  WDSP clamps
+        # ringsize internally to >= max(2*max_ring_insize, 2*outsize).
+        max_ring_insize = int(1.0 + float(insize) * (1.05 * self.nom_ratio))
+        if ringsize <= 0:
+            ringsize = 2 * max_ring_insize
+        if ringsize < 2 * outsize:
+            ringsize = 2 * outsize
+        self.ringsize = int(ringsize)
+        self.rsize = self.ringsize  # alias matches RMatch
+
+        init_var = max(self.VAR_MIN, min(self.VAR_MAX, float(initial_var)))
+
+        # Construct via the convenience constructor — defaults for
+        # density / startup / etc. land here; we override the few
+        # knobs we expose immediately afterward.
+        self._h = self._lib.create_rmatchV(
+            self.insize,
+            self.outsize,
+            self.nom_inrate,
+            self.nom_outrate,
+            self.ringsize,
+            init_var,
+        )
+        if not self._h:
+            raise RuntimeError("create_rmatchV returned NULL")
+
+        # Apply the operator-tunable knobs Lyra cares about.
+        # ff/prop ringmax must be powers of two (DLL doesn't validate
+        # but the moving-average ring uses a bit mask).
+        if ff_ringmax & (ff_ringmax - 1):
+            raise ValueError(f"ff_ringmax must be a power of two; got {ff_ringmax}")
+        if prop_ringmax & (prop_ringmax - 1):
+            raise ValueError(f"prop_ringmax must be a power of two; got {prop_ringmax}")
+        self._lib.setRMatchFFRingMin(self._h, int(ff_ringmin))
+        self._lib.setRMatchFFRingMax(self._h, int(ff_ringmax))
+        self._lib.setRMatchFFAlpha(self._h, float(ff_alpha))
+        self._lib.setRMatchPropRingMin(self._h, int(prop_ringmin))
+        self._lib.setRMatchPropRingMax(self._h, int(prop_ringmax))
+        # WDSP applies pr_gain = prop_gain * 48000 / nom_outrate.
+        # If caller asks for the auto-scale (negative sentinel), use
+        # the same 0.04/rsize formula RMatch does: max prop term
+        # = 0.02 (half the [0.96..1.04] clamp range).
+        if prop_gain < 0.0:
+            target_pr_gain = 0.04 / float(self.rsize)
+            feedback = target_pr_gain * float(self.nom_outrate) / 48000.0
+        else:
+            feedback = float(prop_gain)
+        self._lib.setRMatchFeedbackGain(self._h, feedback)
+        self._lib.setRMatchSlewTime(self._h, float(tslew))
+
+        # Pre-allocate the I/O buffers (interleaved I/Q doubles).  The
+        # DLL writes/reads exactly insize*2 doubles per xrmatchIN call
+        # and outsize*2 doubles per xrmatchOUT call.
+        self._in_buf = self._ffi.new(f"double[{2 * self.insize}]")
+        self._out_buf = self._ffi.new(f"double[{2 * self.outsize}]")
+        self._in_view = np.frombuffer(
+            self._ffi.buffer(self._in_buf), dtype=np.float64
+        )
+        self._out_view = np.frombuffer(
+            self._ffi.buffer(self._out_buf), dtype=np.float64
+        )
+
+        # Diagnostic readback scratch (allocated once, reused).
+        self._diag_uf = self._ffi.new("int*")
+        self._diag_of = self._ffi.new("int*")
+        self._diag_var = self._ffi.new("double*")
+        self._diag_rsize = self._ffi.new("int*")
+        self._diag_nring = self._ffi.new("int*")
+        self._cf_buf = self._ffi.new("int*")
+
+        # Reservoirs for variable-length read() / read_complex().
+        # PortAudio (the typical caller) asks for whatever block size
+        # WASAPI/MME negotiates with the device — often 256 or 480 or
+        # something else, NOT necessarily our configured ``outsize``.
+        # xrmatchOUT pulls EXACTLY ``outsize`` interleaved-IQ doubles
+        # per call, so we may need to call it multiple times to fill
+        # the operator's request and stash the leftover for next time.
+        self._mono_reservoir = np.empty(0, dtype=np.float32)
+        self._complex_reservoir = np.empty(0, dtype=np.complex128)
+
+        # Mirror reservoir on the input side.  Lyra's audio worker
+        # delivers audio in blocks whose natural size (one process_block
+        # ≈ 256 mono samples) doesn't necessarily match our configured
+        # ``insize``.  xrmatchIN pulls EXACTLY ``insize`` interleaved-IQ
+        # doubles per call, so write() accumulates into a Python-side
+        # buffer and drains in whole insize chunks.  Pure-Python
+        # ``RMatch`` got this for free via ``varsamp.process`` accepting
+        # variable input sizes; the native DLL doesn't, so we mirror
+        # the contract here.  Without this, a small write padded with
+        # zeros to fill the C buffer produced the classic 1/N-duty-
+        # cycle "woodpecker" sound.
+        self._in_reservoir_real = np.empty(0, dtype=np.float64)
+        self._in_reservoir_imag = np.empty(0, dtype=np.float64)
+
+        self._closed = False
+
+    # ── Lifecycle ────────────────────────────────────────────────
+
+    def close(self) -> None:
+        """Free the DLL resources.  Idempotent."""
+        if self._closed:
+            return
+        try:
+            self._lib.destroy_rmatchV(self._h)
+        finally:
+            self._closed = True
+
+    def __del__(self) -> None:  # pragma: no cover (best-effort)
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    # ── Producer / consumer hot path ─────────────────────────────
+
+    def write(self, audio_in: np.ndarray) -> int:
+        """Push variable-length audio into the rate matcher.
+
+        Accepts mono (real) or complex IQ of ANY length; we accumulate
+        into the input reservoir and drain in whole ``insize`` chunks
+        via ``xrmatchIN``.  The remainder carries forward — exactly
+        the contract pure-Python :class:`RMatch` exposes (its
+        underlying ``varsamp.process`` natively accepts variable input).
+
+        Returns
+        -------
+        int
+            Approximate number of samples deposited downstream this
+            call (``audio_in.size * var * nom_ratio``).  Caller in
+            ``audio_sink`` ignores the return value.
+        """
+        if self._closed or audio_in.size == 0:
+            return 0
+
+        # Append to the reservoir (split into real/imag).
+        if np.iscomplexobj(audio_in):
+            self._in_reservoir_real = np.concatenate(
+                [self._in_reservoir_real,
+                 audio_in.real.astype(np.float64, copy=False)]
+            )
+            self._in_reservoir_imag = np.concatenate(
+                [self._in_reservoir_imag,
+                 audio_in.imag.astype(np.float64, copy=False)]
+            )
+        else:
+            real = audio_in.astype(np.float64, copy=False)
+            self._in_reservoir_real = np.concatenate(
+                [self._in_reservoir_real, real]
+            )
+            # Pad imag with zeros so the two reservoirs stay length-aligned.
+            self._in_reservoir_imag = np.concatenate(
+                [self._in_reservoir_imag,
+                 np.zeros(real.size, dtype=np.float64)]
+            )
+
+        # Drain whole insize blocks through xrmatchIN.
+        n = self.insize
+        consumed = 0
+        while self._in_reservoir_real.size >= n:
+            self._in_view[0::2] = self._in_reservoir_real[:n]
+            self._in_view[1::2] = self._in_reservoir_imag[:n]
+            self._lib.xrmatchIN(self._h, self._in_buf)
+            self._in_reservoir_real = self._in_reservoir_real[n:]
+            self._in_reservoir_imag = self._in_reservoir_imag[n:]
+            consumed += n
+
+        return int(round(consumed * self.var * self.nom_ratio))
+
+    def read(self, outsize: Optional[int] = None) -> np.ndarray:
+        """Pull ``outsize`` samples (or ``self.outsize`` if None) —
+        returns float32 mono.
+
+        Variable-length reads are supported by reservoir-buffering
+        between the DLL's fixed-block xrmatchOUT pulls and the
+        caller's request.  E.g. caller asks for 480 with a configured
+        outsize=256: we call xrmatchOUT twice (512 samples), return
+        the first 480, save the remaining 32 for next call.
+        """
+        n = self.outsize if outsize is None else int(outsize)
+        if self._closed or n <= 0:
+            return np.zeros(max(0, n), dtype=np.float32)
+        # Pull whole xrmatchOUT blocks until the reservoir has enough.
+        while self._mono_reservoir.size < n:
+            self._lib.xrmatchOUT(self._h, self._out_buf)
+            chunk = self._out_view[0::2].astype(np.float32, copy=True)
+            if self._mono_reservoir.size == 0:
+                self._mono_reservoir = chunk
+            else:
+                self._mono_reservoir = np.concatenate(
+                    [self._mono_reservoir, chunk]
+                )
+        out = self._mono_reservoir[:n].copy()
+        self._mono_reservoir = self._mono_reservoir[n:]
+        return out
+
+    def read_complex(self, outsize: Optional[int] = None) -> np.ndarray:
+        """Pull ``outsize`` samples — returns complex128.
+
+        Used by IQ-rate-match callers (TX path + future RX2 work)
+        that fed complex IQ in.  Same reservoir-buffered variable-
+        length contract as :meth:`read`.
+        """
+        n = self.outsize if outsize is None else int(outsize)
+        if self._closed or n <= 0:
+            return np.zeros(max(0, n), dtype=np.complex128)
+        while self._complex_reservoir.size < n:
+            self._lib.xrmatchOUT(self._h, self._out_buf)
+            block = np.empty(self.outsize, dtype=np.complex128)
+            block.real = self._out_view[0::2]
+            block.imag = self._out_view[1::2]
+            if self._complex_reservoir.size == 0:
+                self._complex_reservoir = block
+            else:
+                self._complex_reservoir = np.concatenate(
+                    [self._complex_reservoir, block]
+                )
+        out = self._complex_reservoir[:n].copy()
+        self._complex_reservoir = self._complex_reservoir[n:]
+        return out
+
+    # ── Diagnostics & control ────────────────────────────────────
+
+    def _refresh_diags(self) -> None:
+        if self._closed:
+            return
+        self._lib.getRMatchDiags(
+            self._h, self._diag_uf, self._diag_of,
+            self._diag_var, self._diag_rsize, self._diag_nring,
+        )
+        self._lib.getControlFlag(self._h, self._cf_buf)
+
+    @property
+    def var(self) -> float:
+        self._refresh_diags()
+        return float(self._diag_var[0])
+
+    @property
+    def underflows(self) -> int:
+        self._refresh_diags()
+        return int(self._diag_uf[0])
+
+    @property
+    def overflows(self) -> int:
+        self._refresh_diags()
+        return int(self._diag_of[0])
+
+    @property
+    def n_ring(self) -> int:
+        self._refresh_diags()
+        return int(self._diag_nring[0])
+
+    @property
+    def control_flag(self) -> bool:
+        self._refresh_diags()
+        return bool(self._cf_buf[0])
+
+    # The DLL doesn't expose feed_forward / av_deviation — they're
+    # internal control-loop state, not observable through the public
+    # surface.  Return last-known stand-ins so callers that read these
+    # for diagnostics get sensible values rather than AttributeError.
+    @property
+    def feed_forward(self) -> float:
+        return self.var  # at steady state ff ≈ var
+
+    @property
+    def av_deviation(self) -> float:
+        return 0.0
+
+    def diagnostics(self) -> dict:
+        """Return current control-loop state — same shape as
+        :meth:`RMatch.diagnostics`."""
+        self._refresh_diags()
+        return {
+            "underflows": int(self._diag_uf[0]),
+            "overflows": int(self._diag_of[0]),
+            "var": float(self._diag_var[0]),
+            "ringsize": int(self._diag_rsize[0]),
+            "n_ring": int(self._diag_nring[0]),
+            "feed_forward": float(self._diag_var[0]),
+            "av_deviation": 0.0,
+            "control_active": bool(self._cf_buf[0]),
+        }
+
+    def force_var(self, var: float) -> None:
+        """Pin the rate multiplier to ``var`` and bypass the control
+        loop (diagnostic / bench-test only)."""
+        v = float(max(self.VAR_MIN, min(self.VAR_MAX, var)))
+        self._lib.forceRMatchVar(self._h, 1, v)
+
+    def unforce_var(self) -> None:
+        """Resume normal control-loop operation after ``force_var``."""
+        # forceRMatchVar with force=0 disables the override; the
+        # ``fvar`` value is irrelevant in that case.
+        self._lib.forceRMatchVar(self._h, 0, 1.0)
+
+    def reset(self) -> None:
+        """Clear streaming state.
+
+        The DLL doesn't export an in-place "flush state" entry point
+        for rmatch; ``reset_rmatch`` is internal and not in the
+        ``__declspec(dllexport)`` set.  We approximate by zeroing the
+        diagnostic counters via ``resetRMatchDiags`` — the underlying
+        ring + var settle quickly on resumed traffic via the existing
+        feedback loop, which is what an audio-side rate change /
+        stream restart cares about most.
+        """
+        if self._closed:
+            return
+        self._lib.resetRMatchDiags(self._h)
+        # Drop any unconsumed leftover samples so a stream-restart
+        # doesn't bleed pre-discontinuity audio across the gap.
+        self._mono_reservoir = np.empty(0, dtype=np.float32)
+        self._complex_reservoir = np.empty(0, dtype=np.complex128)
+        self._in_reservoir_real = np.empty(0, dtype=np.float64)
+        self._in_reservoir_imag = np.empty(0, dtype=np.float64)
+
+
+__all__ = ["RMatch", "WdspRMatch"]

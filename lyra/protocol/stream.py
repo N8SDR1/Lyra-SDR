@@ -204,6 +204,62 @@ def _decode_hl2_telemetry(cc: bytes, stats: "FrameStats") -> None:
         stats.supply_adc  = ((cc[3] << 8) | cc[4]) & 0xFFFF
 
 
+# ── TPDF dither for float→int16 audio quantization ────────────────────
+#
+# The HL2 audio path quantizes Lyra's float32 audio to int16 for the
+# AK4951 codec.  Without dither, quantization noise correlates with
+# the signal — at low signal levels this manifests as audible
+# "graininess" or "harshness," especially on quiet SSB passages and
+# near silence (where the 16-bit LSB structure modulates the
+# zero-crossing area).
+#
+# TPDF (Triangular Probability Density Function) dither at ±1 LSB
+# peak amplitude decorrelates the quantization error so it becomes
+# spectrally flat white noise at -90 dBFS RMS — well below the
+# audible threshold on speakers / headphones at any reasonable
+# listening level, and inaudible against the band noise the operator
+# is actually trying to copy.
+#
+# Why TPDF specifically: rectangular (1-LSB uniform) dither still
+# leaves audible noise modulation correlated with the signal.  TPDF
+# (sum of two uniform [-0.5, 0.5] randoms) eliminates the
+# modulation entirely — the noise floor is independent of signal
+# content.  This is the standard professional-audio recipe (Wannamaker,
+# Vanderkooy, Lipshitz) used by every mastering tool since the 90s.
+#
+# Cost: ~10 microseconds per 126-sample EP2 frame.  Inaudible
+# overhead on the ~381 Hz EP2 writer cadence.
+
+_DITHER_LSB_FLOAT = 1.0   # in float-scaled-to-int16 units (i.e. 1.0 = 1 LSB)
+# Module-level RNG so we don't pay default_rng() construction cost
+# on every call.  Thread-safe enough for our use — the EP2 writer
+# is the only consumer.
+_dither_rng = np.random.default_rng()
+
+
+def _quantize_to_int16_be(lr: np.ndarray) -> np.ndarray:
+    """Float32 [-1, 1] → big-endian int16 with TPDF dither.
+
+    Input shape: (N, 2) for stereo or (N,) for mono.  Output shape
+    matches input dtype=">i2".  Caller is responsible for any gain
+    scaling / clipping; this only applies dither and quantizes.
+    """
+    scaled = lr * 32767.0
+    # Triangular dither = sum of two uniform [-0.5, 0.5].  rng.random
+    # returns [0, 1); subtract to center.
+    n = scaled.size
+    d1 = _dither_rng.random(n, dtype=np.float32)
+    d2 = _dither_rng.random(n, dtype=np.float32)
+    dither = (d1 - d2) * _DITHER_LSB_FLOAT  # range [-1, 1] LSB triangular
+    scaled = scaled + dither.reshape(scaled.shape)
+    # Clip BEFORE casting so we don't wrap around at full scale.
+    np.clip(scaled, -32767.0, 32767.0, out=scaled)
+    # Round-to-nearest (default int cast truncates toward zero, which
+    # introduces a -0.5 LSB DC offset for negative-half-LSB samples;
+    # explicit round avoids that).
+    return np.round(scaled).astype(">i2")
+
+
 class HL2Stream:
     """Open a P1 stream to an HL2, run an RX loop in a background thread.
 
@@ -513,7 +569,11 @@ class HL2Stream:
         lr = np.asarray(pulled, dtype=np.float32)        # shape (N, 2)
         lr *= self.tx_audio_gain
         np.clip(lr, -1.0, 1.0, out=lr)
-        int16 = (lr * 32767.0).astype(">i2")             # shape (N, 2) big-endian
+        # TPDF-dithered quantization to int16 (see module-level
+        # _quantize_to_int16_be docstring for rationale).  Replaces
+        # bare ``(lr * 32767.0).astype(">i2")`` so quiet AK4951 audio
+        # doesn't pick up signal-correlated quantization grain.
+        int16 = _quantize_to_int16_be(lr)                # shape (N, 2)
         left_bytes  = int16[:, 0].tobytes()
         right_bytes = int16[:, 1].tobytes()
         # Interleave L R I Q per sample (TX_I/TX_Q stay zero on RX).
@@ -1229,11 +1289,15 @@ class HL2Stream:
         spent here is a microsecond the writer thread is asleep on
         the Win32 timer instead of holding the GIL.
         """
-        # (126, 2) -> apply gain -> clip -> quantize to BE int16
+        # (126, 2) -> apply gain -> clip -> dither + quantize to BE int16
         lr = np.asarray(pairs, dtype=np.float32)
         lr = lr * self.tx_audio_gain
         np.clip(lr, -1.0, 1.0, out=lr)
-        int16_be = (lr * 32767.0).astype(">i2")          # (126, 2)
+        # TPDF-dithered quantization — eliminates the signal-correlated
+        # quantization grain that operators perceive as "harshness" on
+        # the AK4951 audio path.  See module-level _quantize_to_int16_be
+        # docstring for the why.  ~10 us added per 126-sample frame.
+        int16_be = _quantize_to_int16_be(lr)             # (126, 2)
 
         # Build the 8-byte slot directly as a (126, 4) BE-int16 view:
         # column 0 = L, column 1 = R, columns 2..3 = TX I/Q (stay 0).

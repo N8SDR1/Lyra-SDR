@@ -603,7 +603,22 @@ class SoundDeviceSink:
         self._rmatch = None
         if self._use_rate_match:
             try:
-                from lyra.dsp.rmatch import RMatch
+                # v0.0.9.6 (RX1 polish): prefer the cffi-backed WDSP
+                # rmatch when the bundled DSP engine loads, fall back
+                # to the pure-Python implementation otherwise.  The
+                # wrappers expose identical public API so the rest of
+                # this method doesn't care which backend is active.
+                # Recovers ~50% of the PC Soundcard CPU overhead the
+                # operator measured in v0.0.9.6 dev cycle (varsamp's
+                # per-input-sample loop was the dominant hot spot).
+                try:
+                    from lyra.dsp import wdsp_native
+                    wdsp_native.load()  # idempotent; raises if DLL missing
+                    from lyra.dsp.rmatch import WdspRMatch as RMatch
+                    _rmatch_backend = "wdsp.dll"
+                except Exception:
+                    from lyra.dsp.rmatch import RMatch  # type: ignore[assignment]
+                    _rmatch_backend = "python"
                 actual_outrate = int(round(self._stream.samplerate))
                 # 400 ms ring at the device's actual rate, half-
                 # filled at startup (RMatch defaults n_ring =
@@ -665,7 +680,8 @@ class SoundDeviceSink:
                     initial_fill_fraction=0.80,
                 )
                 print(f"[Lyra audio] SoundDeviceSink: rate-match "
-                      f"enabled (RMatch nom_in={rate} nom_out="
+                      f"enabled ({_rmatch_backend} backend, "
+                      f"nom_in={rate} nom_out="
                       f"{actual_outrate} ring={ring_target} "
                       f"= {ring_target * 1000 // actual_outrate}ms "
                       f"init_var={init_var:.5f} init_fill=80%)")
@@ -825,11 +841,18 @@ class SoundDeviceSink:
             # Rate-matched path.  RMatch handles its own underflow
             # recovery (slewed silence-fill); we just apply L/R
             # gains and project to stereo.
-            mono = self._rmatch.read(frames)
-            # mono is float32 of length frames, may include slewed
-            # silence on underflow.
-            outdata[:, 0] = mono * self._left_gain
-            outdata[:, 1] = mono * self._right_gain
+            #
+            # We always run RMatch in COMPLEX mode (L=I, R=Q) so the
+            # operator's BIN-stereo content survives end-to-end.
+            # WdspRMatch's internal FIR is real-coefficient against
+            # complex data — same CPU as mono since it was already
+            # processing complex internally.  When BIN is off we
+            # write L=R into the resampler and the L/R gains then
+            # split the (mono-equivalent) output normally.
+            stereo = self._rmatch.read_complex(frames)
+            # complex128 of length frames.  real=L, imag=R.
+            outdata[:, 0] = stereo.real.astype(np.float32, copy=False) * self._left_gain
+            outdata[:, 1] = stereo.imag.astype(np.float32, copy=False) * self._right_gain
             # Track underflows for the same diagnostic line the
             # legacy ring exposes.  RMatch counts them internally;
             # mirror to our counter so _maybe_print_stats sees them.
@@ -894,18 +917,29 @@ class SoundDeviceSink:
         if audio.size == 0 or self._closed:
             return
 
-        # Rate-matched path.  RMatch is mono-only; collapse stereo
-        # input to mono by averaging (BIN audio is the only stereo
-        # producer and BIN's L/R are already correlated, so averaging
-        # is fine).  L/R gains apply in the audio callback.
+        # Rate-matched path.  RMatch runs in COMPLEX (L,R) mode so
+        # BIN-distinct stereo survives the resampling step.  We pack
+        # L into real, R into imag; the rmatch's real-coefficient FIR
+        # filters each side independently for free.  When the input
+        # is mono (no BIN), we duplicate to L=R so the read side
+        # still gets two equal channels (operator's L/R balance gain
+        # in the audio callback then differentiates them).
         if self._rmatch is not None:
             if audio.ndim == 2 and audio.shape[1] == 2:
-                mono = (audio[:, 0] + audio[:, 1]).astype(
-                    np.float32) * 0.5
+                # BIN-active or otherwise stereo input
+                stereo_complex = (
+                    audio[:, 0].astype(np.complex64)
+                    + 1j * audio[:, 1].astype(np.complex64)
+                )
             else:
+                # Mono input — duplicate to L=R as a complex signal.
                 mono = audio.astype(np.float32).reshape(-1)
-            self._rmatch.write(mono)
-            self._frames_written += mono.size
+                stereo_complex = (
+                    mono.astype(np.complex64)
+                    + 1j * mono.astype(np.complex64)
+                )
+            self._rmatch.write(stereo_complex)
+            self._frames_written += stereo_complex.size
             self._maybe_print_stats()
             return
 
@@ -1012,6 +1046,15 @@ class SoundDeviceSink:
             self._stream.close()
         except Exception:
             pass
+        # Release the cffi rmatch handle (no-op for the pure-Python
+        # backend, frees DLL state for WdspRMatch).  Done after the
+        # stream stop so the audio callback can't fire one more time
+        # against a closed handle.
+        if self._rmatch is not None and hasattr(self._rmatch, "close"):
+            try:
+                self._rmatch.close()
+            except Exception:
+                pass
 
 
 class NullSink:

@@ -78,9 +78,9 @@ class AllModeSquelch:
 
     # Noise-floor tracker time constants.  Track-down (signal
     # quieting) is fast so the floor settles after voice ends.
-    # Track-up tau is mostly irrelevant now because we only
-    # update the floor when the gate is CLOSED (see _process_block);
-    # this keeps speech from dragging the floor up over long
+    # Track-up tau is mostly irrelevant because we only update
+    # the floor when the gate is CLOSED (see _process_block); this
+    # keeps speech from dragging the floor up over long
     # transmissions.
     FLOOR_TRACK_DOWN_TAU: float = 0.5    # seconds
     FLOOR_TRACK_UP_TAU: float = 8.0      # seconds (rarely active)
@@ -97,6 +97,16 @@ class AllModeSquelch:
     # the gate, and must drop below K_CLOSE to close it.  The gap
     # between them prevents chatter on signals right at threshold.
     # Both scale with the operator threshold.
+    #
+    # NOTE 2026-05-07: this module is no longer in the WDSP audio
+    # path — WDSP SSQL handles all-mode squelch natively (see
+    # radio.py `_push_wdsp_squelch_state` and CLAUDE.md §14.8).
+    # The constants below are the originals from the pre-WDSP
+    # legacy DSP path (LYRA_USE_LEGACY_DSP=1 fallback) and stay
+    # at their proven values.  Several tightening / loosening
+    # attempts during the SSQL bring-up arc cycled through this
+    # block looking for AGC-compatible values; none of those are
+    # relevant now that the WDSP audio path uses SSQL instead.
     K_OPEN_BASE: float = 1.5             # at threshold=0
     K_OPEN_RANGE: float = 6.0            # threshold=1 adds this
     K_CLOSE_FRACTION: float = 0.5        # close-thresh = open · this
@@ -142,7 +152,8 @@ class AllModeSquelch:
         """Operator threshold, 0.0..1.0.
 
         Maps to "how far above the noise floor must the signal
-        rise" before the gate opens:
+        rise" before the gate opens (legacy DSP path only — the
+        WDSP audio path uses native SSQL):
 
           0.00  - 1.5× floor (effectively always open)
           0.20  - ~2.7× floor — voice-friendly default
@@ -151,7 +162,7 @@ class AllModeSquelch:
           0.80  - ~6.3× floor — very tight
           1.00  - 7.5× floor — only the loudest stations open
 
-        The gate has hysteresis: it closes at 70% of the open
+        The gate has hysteresis: it closes at 50% of the open
         threshold to prevent chatter on signals right at the edge.
         """
         self.threshold = max(0.0, min(1.0, float(value)))

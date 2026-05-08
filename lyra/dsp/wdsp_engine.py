@@ -158,6 +158,12 @@ class RxChannel:
         self._in_buff = self._ffi.new(f"double[{2 * self.cfg.in_size}]")
         self._out_buff = self._ffi.new(f"double[{2 * self.out_size}]")
         self._err = self._ffi.new("int*")
+        # Optional scratch buffer used when an EXT noise blanker is
+        # active.  IQ flows _in_buff -> xnobEXT/xanbEXT -> _nb_buff
+        # -> fexchange0.  Allocated once; size matches in_buff.
+        self._nb_buff = self._ffi.new(f"double[{2 * self.cfg.in_size}]")
+        self._nob_running = False
+        self._anb_running = False
 
         # Zero-copy numpy views over the cffi buffers.
         self._in_view = np.frombuffer(
@@ -177,8 +183,26 @@ class RxChannel:
         self._lock = threading.Lock()
         self._opened = False
         self._running = False
+        self._blankers_inited = False
+        # Active manual notches.  list[(idx, fcenter, fwidth, active)]
+        # — populated by set_notches and used to rebuild WDSP's NotchDB
+        # on rate-change re-open.
+        self._notches: list[tuple[int, float, float, bool]] = []
+        self._notches_master_run = False
 
         self._open()
+        # NB EXT-blanker objects must exist before SetEXTNOBRun /
+        # SetEXTANBRun is safe to call.  init_blankers is idempotent,
+        # creates with run=0 / threshold=20 (silent), and the NB
+        # profile setter in Radio drives the run flag + threshold to
+        # match the operator's selection.
+        try:
+            self.init_blankers()
+        except Exception as exc:
+            # Not fatal — log but keep the channel usable; the NB
+            # toggle path checks _blankers_inited and no-ops if init
+            # failed.
+            print(f"[WDSP] init_blankers failed for ch {self.channel}: {exc}")
 
     # -- lifecycle -------------------------------------------------------
 
@@ -216,6 +240,12 @@ class RxChannel:
 
     def close(self) -> None:
         """Stop and free the channel."""
+        # Tear down the EXT blankers BEFORE CloseChannel so the DLL's
+        # global blanker table doesn't outlive the channel slot.
+        try:
+            self.destroy_blankers()
+        except Exception:
+            pass
         with self._lock:
             if self._opened:
                 if self._running:
@@ -289,18 +319,223 @@ class RxChannel:
         with self._lock:
             self._lib.SetRXAEMNRRun(self.channel, int(bool(run)))
 
+    # ── EMNR live-tuning knobs ─────────────────────────────────────
+    #
+    # Exposes WDSP's per-channel EMNR character knobs.  Used by Radio
+    # to give the operator's NR backend selector audible meaning
+    # (NR1 vs NR2 → different gain method) and to put the AEPF
+    # (anti-musical-noise) toggle in the operator's hands.
+    #
+    # WDSP's defaults (RXA.c create_emnr): gain_method=2, npe_method=0,
+    # ae_run=1.  Lyra mirrors these as defaults; the setters below
+    # let the operator nudge any of them.
+
+    # gain_method codes (from emnr.c switch in calc_window):
+    #   0 — Wiener gain
+    #   1 — Magnitude estimator
+    #   2 — MMSE-LSA gain (WDSP default)
+    EMNR_GAIN_WIENER   = 0
+    EMNR_GAIN_MAGNITUDE = 1
+    EMNR_GAIN_MMSE_LSA = 2
+
+    def set_emnr_gain_method(self, method: int) -> None:
+        """Pick the EMNR gain function — different sonic character.
+
+        ``method`` ∈ {EMNR_GAIN_WIENER, EMNR_GAIN_MAGNITUDE,
+        EMNR_GAIN_MMSE_LSA}.  Operator typically picks one of the
+        three at the backend-selector level."""
+        with self._lock:
+            self._lib.SetRXAEMNRgainMethod(self.channel, int(method))
+
+    def set_emnr_npe_method(self, method: int) -> None:
+        """Pick the EMNR noise-power estimator (background tracker)."""
+        with self._lock:
+            self._lib.SetRXAEMNRnpeMethod(self.channel, int(method))
+
+    def set_emnr_aepf(self, run: bool) -> None:
+        """Adaptive Equalization Post-Filter — REDUCES musical noise.
+
+        Default ON.  Operator-disable only for diagnostic A/B.  Off
+        gives raw EMNR character (more pronounced watery sound on
+        spectral subtraction); On smooths the gain mask across
+        frequency bins and damps the bin-by-bin transitions that
+        cause musical noise."""
+        with self._lock:
+            self._lib.SetRXAEMNRaeRun(self.channel, int(bool(run)))
+
+    def set_emnr_ae_zeta_thresh(self, thresh: float) -> None:
+        """Fine-tune AEPF — operator-tunable threshold (advanced)."""
+        with self._lock:
+            self._lib.SetRXAEMNRaeZetaThresh(self.channel, float(thresh))
+
+    def set_emnr_ae_psi(self, psi: float) -> None:
+        """Fine-tune AEPF — operator-tunable psi (advanced)."""
+        with self._lock:
+            self._lib.SetRXAEMNRaePsi(self.channel, float(psi))
+
+    # ── ANR (LMS) live-tuning knobs ────────────────────────────────
+    #
+    # WDSP's ANR is the LMS adaptive line enhancer.  Lyra's "LMS"
+    # toggle and strength slider drive it.  Defaults from RXA.c
+    # create_anr: taps=64, delay=16, two_mu=0.0001, gamma=0.1.
+    # The "Gain" exported setter corresponds internally to two_mu
+    # (LMS step size = the operator-perceived "strength").
+
+    def set_anr_vals(self, taps: int, delay: int,
+                     gain: float, leakage: float) -> None:
+        """Push all four ANR/LMS tuning params atomically."""
+        with self._lock:
+            self._lib.SetRXAANRVals(
+                self.channel, int(taps), int(delay),
+                float(gain), float(leakage),
+            )
+
+    def set_anr_taps(self, taps: int) -> None:
+        with self._lock:
+            self._lib.SetRXAANRTaps(self.channel, int(taps))
+
+    def set_anr_delay(self, delay: int) -> None:
+        with self._lock:
+            self._lib.SetRXAANRDelay(self.channel, int(delay))
+
+    def set_anr_gain(self, gain: float) -> None:
+        """LMS step size (the operator-perceived strength).
+
+        WDSP default 0.0001.  Stable upper bound roughly 0.001.
+        Higher = more aggressive adaptation but risk of instability.
+        """
+        with self._lock:
+            self._lib.SetRXAANRGain(self.channel, float(gain))
+
+    def set_anr_leakage(self, leakage: float) -> None:
+        """LMS leak factor (forgetting rate)."""
+        with self._lock:
+            self._lib.SetRXAANRLeakage(self.channel, float(leakage))
+
+    # ── EXT noise-blanker lifecycle ────────────────────────────────
+    #
+    # The EXT noise blankers (NOB / ANB) are NOT created by
+    # OpenChannel — calling SetEXTNOBRun / SetEXTANBRun before
+    # ``init_blankers`` segfaults the DLL.  __init__ calls
+    # ``init_blankers`` once per channel right after the channel is
+    # opened; ``destroy_blankers`` runs from ``close()``.
+
+    # Defaults match Thetis Console radio.cs nb_threshold/nb_tau/
+    # nb_advtime/nb_hangtime defaults (3.3 / 50 µs / 50 µs / 50 µs).
+    # The very tight tau/advtime/hangtime values are correct for
+    # impulse-only behavior — longer values would notch out wanted
+    # CW or SSB transients.
+    _NB_DEFAULTS_NOB = dict(
+        mode=0,
+        slewtime=0.0001,
+        hangtime=0.0001,
+        advtime=0.0001,
+        backtau=0.020,
+        threshold=20.0,        # initially silent; set_nob_threshold tunes
+    )
+    _NB_DEFAULTS_ANB = dict(
+        tau=0.00005,
+        hangtime=0.00005,
+        advtime=0.00005,
+        backtau=0.020,
+        threshold=20.0,
+    )
+
+    def init_blankers(self) -> None:
+        """Create the EXT-layer NOB + ANB blankers for this channel.
+
+        Idempotent — safe to call again after :meth:`destroy_blankers`.
+        Defaults are conservative (run=0, threshold=20) so the channel
+        doesn't actually blank until the operator opts in via
+        :meth:`set_nob` / :meth:`set_anb` and the appropriate threshold
+        setter.
+        """
+        if self._blankers_inited:
+            return
+        c = self.cfg
+        with self._lock:
+            self._lib.create_nobEXT(
+                self.channel, 0, self._NB_DEFAULTS_NOB["mode"],
+                c.in_size, float(c.in_rate),
+                self._NB_DEFAULTS_NOB["slewtime"],
+                self._NB_DEFAULTS_NOB["hangtime"],
+                self._NB_DEFAULTS_NOB["advtime"],
+                self._NB_DEFAULTS_NOB["backtau"],
+                self._NB_DEFAULTS_NOB["threshold"],
+            )
+            self._lib.create_anbEXT(
+                self.channel, 0,
+                c.in_size, float(c.in_rate),
+                self._NB_DEFAULTS_ANB["tau"],
+                self._NB_DEFAULTS_ANB["hangtime"],
+                self._NB_DEFAULTS_ANB["advtime"],
+                self._NB_DEFAULTS_ANB["backtau"],
+                self._NB_DEFAULTS_ANB["threshold"],
+            )
+            self._blankers_inited = True
+
+    def destroy_blankers(self) -> None:
+        """Free the EXT-layer NOB + ANB blankers for this channel."""
+        if not self._blankers_inited:
+            return
+        with self._lock:
+            try:
+                self._lib.destroy_nobEXT(self.channel)
+            except Exception:
+                pass
+            try:
+                self._lib.destroy_anbEXT(self.channel)
+            except Exception:
+                pass
+            self._blankers_inited = False
+
     def set_nob(self, run: bool) -> None:
         """Noise-OFF blanker — narrowband impulse blanker on raw IQ
-        before the RXA chain.  Use for clicks / popcorn impulse noise."""
+        before the RXA chain.  Use for clicks / popcorn impulse noise.
+
+        :meth:`init_blankers` must have been called first or the DLL
+        will segfault.  ``__init__`` does it for you.
+
+        Note: the EXT blanker is NOT spliced into fexchange0 by the
+        DLL — Lyra has to call ``xnobEXT`` on each IQ block before
+        handing it to fexchange0.  ``process_block`` does this
+        automatically based on the ``_nob_running`` flag mirrored
+        below.
+        """
         with self._lock:
-            self._lib.SetEXTNOBRun(self.channel, int(bool(run)))
+            if not self._blankers_inited:
+                # Defensive — silent no-op rather than segfault.
+                return
+            run_flag = bool(run)
+            self._lib.SetEXTNOBRun(self.channel, int(run_flag))
+            self._nob_running = run_flag
 
     def set_anb(self, run: bool) -> None:
         """Advanced noise blanker — broadband impulse blanker on raw IQ
         before the RXA chain.  Use for switching power-supply hash and
         similar broadband impulse interference."""
         with self._lock:
-            self._lib.SetEXTANBRun(self.channel, int(bool(run)))
+            if not self._blankers_inited:
+                return
+            run_flag = bool(run)
+            self._lib.SetEXTANBRun(self.channel, int(run_flag))
+            self._anb_running = run_flag
+
+    def set_nob_threshold(self, threshold: float) -> None:
+        """Adjust NOB impulse-detection threshold (raw signal-to-average
+        ratio).  Lower values = more aggressive blanking but more
+        false positives.  Typical range 2..20."""
+        with self._lock:
+            if not self._blankers_inited:
+                return
+            self._lib.SetEXTNOBThreshold(self.channel, float(threshold))
+
+    def set_anb_threshold(self, threshold: float) -> None:
+        """Adjust ANB impulse-detection threshold."""
+        with self._lock:
+            if not self._blankers_inited:
+                return
+            self._lib.SetEXTANBThreshold(self.channel, float(threshold))
 
     def set_fm_squelch(self, run: bool) -> None:
         with self._lock:
@@ -310,6 +545,141 @@ class RxChannel:
         with self._lock:
             self._lib.SetRXAAMSQRun(self.channel, int(bool(run)))
             self._lib.SetRXAAMSQThreshold(self.channel, float(threshold_db))
+
+    # ── SSQL — WDSP's all-mode (SSB/CW/DIG) voice-activity squelch ─
+    #
+    # SSQL = "Single-mode Squelch Level".  Pre-AGC zero-crossing-rate
+    # voice detector with hysteresis + raised-cosine ramps.  Same
+    # mechanism Thetis uses for the SSB SQ button.  Operator-tunable
+    # parameters:
+    #   * threshold: 0..1.  Higher = more aggressive muting.  WU2O
+    #     calibration default 0.16; 0.20 is common for ham SSB.
+    #   * tau_mute / tau_unmute: ramp time constants in seconds.
+    #     0.1 default both directions for snappy response without
+    #     clicks.  Wider range 0.1..2.0 (mute) and 0.1..1.0 (unmute).
+    def set_ssql_run(self, run: bool) -> None:
+        """Master enable for the SSQL all-mode squelch."""
+        with self._lock:
+            self._lib.SetRXASSQLRun(self.channel, int(bool(run)))
+
+    def set_ssql_threshold(self, threshold: float) -> None:
+        """SSQL threshold.  Operator slider 0.0..1.0."""
+        v = max(0.0, min(1.0, float(threshold)))
+        with self._lock:
+            self._lib.SetRXASSQLThreshold(self.channel, v)
+
+    def set_ssql_tau_mute(self, seconds: float) -> None:
+        """SSQL mute-ramp time constant.  WU2O default 0.1 s."""
+        with self._lock:
+            self._lib.SetRXASSQLTauMute(self.channel, float(seconds))
+
+    def set_ssql_tau_unmute(self, seconds: float) -> None:
+        """SSQL unmute-ramp time constant.  WU2O default 0.1 s."""
+        with self._lock:
+            self._lib.SetRXASSQLTauUnMute(self.channel, float(seconds))
+
+    # ── APF (CW Audio Peaking Filter) ─────────────────────────────
+    #
+    # WDSP's APF is the SPEAK stage in the RXA chain — a resonant
+    # boost centered on the CW pitch.  Operator-facing parameters
+    # (center frequency, bandwidth, gain in dB) match Lyra's legacy
+    # AudioPeakFilter so the existing UI panel just routes through.
+    # WDSP's gain is LINEAR; the dB→linear conversion happens here
+    # so callers stay in operator units.
+
+    def set_apf(self, run: bool) -> None:
+        """Enable / disable the CW audio peaking filter.
+
+        Filter shape (center / bandwidth / gain) should be configured
+        via :meth:`set_apf_freq` / :meth:`set_apf_bw` / :meth:`set_apf_gain`
+        before enabling, otherwise the WDSP defaults apply.
+        """
+        with self._lock:
+            self._lib.SetRXABiQuadRun(self.channel, int(bool(run)))
+
+    def set_apf_freq(self, center_hz: float) -> None:
+        """APF center frequency (Hz) — typically the operator's CW pitch."""
+        with self._lock:
+            self._lib.SetRXABiQuadFreq(self.channel, float(center_hz))
+
+    def set_apf_bw(self, bw_hz: float) -> None:
+        """APF -3 dB bandwidth (Hz)."""
+        with self._lock:
+            self._lib.SetRXABiQuadBandwidth(self.channel, float(bw_hz))
+
+    def set_apf_gain_db(self, gain_db: float) -> None:
+        """APF peak gain in dB (operator-facing convention).  WDSP's
+        SPEAK takes linear gain internally; we convert here."""
+        linear = float(10.0 ** (float(gain_db) / 20.0))
+        with self._lock:
+            self._lib.SetRXABiQuadGain(self.channel, linear)
+
+    # ── Manual notch DB ────────────────────────────────────────────
+    #
+    # WDSP's RXA chain owns a ``notchdb`` consulted by the front-of-
+    # chain bandpass (NBP0).  Each entry has center/width/active
+    # state.  Lyra's manual notches map directly onto this database
+    # — operator right-clicks on the spectrum to add a notch, which
+    # propagates to one notchdb entry per Lyra notch.
+    #
+    # The full set is written here in one call rather than diffed,
+    # because the DLL's RXANBPSetNotchesRun has been observed to
+    # require a full filter rebuild when notches change anyway.
+
+    def set_notches(self, notches: list[tuple[float, float, bool]],
+                    master_run: bool = True) -> None:
+        """Replace the WDSP notch database with the given list.
+
+        Each tuple is ``(fcenter_hz, fwidth_hz, active)``.  Use
+        signed center frequencies to address baseband: positive for
+        USB, negative for LSB (matches Lyra's notch model where each
+        Notch carries an absolute RF freq + the radio's VFO+mode
+        determines the sign in baseband).
+
+        ``master_run`` is the global notch-engine on/off — must be
+        True for any individual notches to attenuate.  When False
+        (or when the list is empty), the notch engine is disabled
+        and CPU returns to baseline.
+        """
+        with self._lock:
+            # Clear the existing set by deleting from the back.
+            # RXANBPDeleteNotch shrinks ``nn`` by 1 and shifts the
+            # remaining entries; iterating from highest index down
+            # avoids index renumbering surprises.
+            n_old = self._ffi.new("int*")
+            self._lib.RXANBPGetNumNotches(self.channel, n_old)
+            for i in range(int(n_old[0]) - 1, -1, -1):
+                self._lib.RXANBPDeleteNotch(self.channel, i)
+            # Add the new set in order.
+            for i, (fc, fw, active) in enumerate(notches):
+                self._lib.RXANBPAddNotch(
+                    self.channel, i,
+                    float(fc), float(max(1.0, fw)), int(bool(active)),
+                )
+            run_flag = int(bool(master_run) and bool(notches))
+            self._lib.RXANBPSetNotchesRun(self.channel, run_flag)
+            self._notches = [
+                (i, float(fc), float(fw), bool(active))
+                for i, (fc, fw, active) in enumerate(notches)
+            ]
+            self._notches_master_run = bool(master_run)
+
+    def set_notches_master_run(self, run: bool) -> None:
+        """Toggle the global notch engine without touching the database
+        (for the operator's "Notches enabled" check box)."""
+        with self._lock:
+            self._notches_master_run = bool(run)
+            self._lib.RXANBPSetNotchesRun(
+                self.channel,
+                int(bool(run) and bool(self._notches)),
+            )
+
+    def set_notch_tune_frequency(self, vfo_hz: float) -> None:
+        """Tell the notch engine the current absolute RF tune frequency
+        so absolute notch frequencies map onto baseband correctly.
+        Call this on every freq change."""
+        with self._lock:
+            self._lib.RXANBPSetTuneFrequency(self.channel, float(vfo_hz))
 
     # -- hot path --------------------------------------------------------
 
@@ -340,10 +710,28 @@ class RxChannel:
         v[0::2] = iq.real.astype(np.float64, copy=False)
         v[1::2] = iq.imag.astype(np.float64, copy=False)
 
+        # Optional EXT noise blanker stage — runs BEFORE fexchange0 on
+        # the raw IQ.  The DLL's xnobEXT / xanbEXT take separate in
+        # and out buffers; we ping-pong _in_buff <-> _nb_buff as
+        # blankers chain.  When neither blanker is active, skip
+        # entirely and fexchange0 reads directly from _in_buff.
+        active_in = self._in_buff
+        if self._nob_running:
+            self._lib.xnobEXT(self.channel, active_in, self._nb_buff)
+            active_in = self._nb_buff
+        if self._anb_running:
+            # Reuse _in_buff as the next destination if NOB just
+            # wrote into _nb_buff; otherwise overwrite _nb_buff with
+            # ANB's output.  Either way fexchange0 reads from the
+            # buffer ANB wrote into.
+            dst = self._in_buff if active_in is self._nb_buff else self._nb_buff
+            self._lib.xanbEXT(self.channel, active_in, dst)
+            active_in = dst
+
         # Process. With block=1, this blocks until the DSP thread has
         # produced the next out_size frames at out_rate.
         self._lib.fexchange0(
-            self.channel, self._in_buff, self._out_buff, self._err
+            self.channel, active_in, self._out_buff, self._err
         )
 
         # De-interleave into a (out_size, 2) float32 array.

@@ -238,6 +238,9 @@ class Radio(QObject):
     # "heavy" via _NR_PROFILE_ALIASES for QSettings backwards compat.
     nr_enabled_changed = Signal(bool)
     nr_profile_changed = Signal(str)
+    nr_mode_changed = Signal(int)        # NR mode (1..4) — WDSP gain_method picker
+    aepf_enabled_changed = Signal(bool)  # AEPF (anti-musical-noise) on/off
+    npe_method_changed = Signal(int)     # NPE method — 0=OSMS, 1=MCRA
 
     # Phase 3.D #2 — Noise blanker (impulse suppression, IQ-domain).
     # Profile = preset name (off / light / medium / aggressive /
@@ -834,6 +837,19 @@ class Radio(QObject):
                 print(f"[Radio] WDSP engine failed to initialize: {exc}; "
                       f"falling back to legacy DSP chain")
                 self._use_wdsp_engine = False
+        # Mirror Lyra's notch-mutation signal into WDSP's notch DB
+        # without scattering the push call across every mutator
+        # method.  notches_changed fires whenever any of add_notch /
+        # remove_nearest_notch / set_notch_*_at / clear_notches
+        # touches state — _push_wdsp_notches re-derives the WDSP
+        # database from the current Notch list on every emission.
+        # Only matters in WDSP mode; the helper no-ops otherwise.
+        try:
+            self.notches_changed.connect(
+                lambda _details: self._push_wdsp_notches()
+            )
+        except Exception as exc:
+            print(f"[Radio] notches→WDSP connect failed: {exc}")
 
         # Auto-tracking timer: only runs while profile == "auto". Owned by
         # Radio (not UI) so tracking continues even if the panel is hidden.
@@ -1111,6 +1127,31 @@ class Radio(QObject):
         # save.  Persisted via QSettings noise/use_captured_profile.
         self._nr_use_captured_profile: bool = False
 
+        # NR mode (1..4) — operator-facing selector that maps to
+        # WDSP's EMNR gain_method (0..3 internally).  Replaces the
+        # legacy NR1/NR2/Neural backend dropdown + dual strength
+        # sliders with a single mode selector that matches Thetis's
+        # NR2 mode UX.  Default mode 3 = MMSE-LSA (= old "NR1"
+        # default behavior — preserves the audio character of fresh
+        # installs).  See _push_wdsp_nr_state for the mode→gain_method
+        # mapping.
+        self._nr_mode: int = 3
+        # AEPF — Adaptive Equalization Post-Filter — anti-musical-
+        # noise smoother in WDSP's EMNR output.  Default ON because
+        # off is noticeably more "watery" / pronounced spectral-
+        # subtraction residue.  Operator can disable to A/B and on
+        # really clean bands where the smoothing isn't needed.
+        # Persisted via QSettings noise/aepf_enabled.
+        self._aepf_enabled: bool = True
+        # NPE method — Noise Power Estimator selection.
+        # 0 = OSMS (recursive averaging, smoother tracking — WDSP default)
+        # 1 = MCRA (Minimum-Controlled Recursive Averaging — newer,
+        #     faster-tracking, better for non-stationary band noise)
+        # Operator-tunable on the DSP+Audio panel.  Persisted via
+        # QSettings noise/npe_method.  Surfacing this knob is one of
+        # Lyra's WDSP-UX differentiators (Thetis hides it).
+        self._npe_method: int = 0
+
         # APF — Audio Peaking Filter (CW only). Defaults match the
         # AudioPeakFilter class constants so a fresh install gets a
         # sensible 80 Hz BW / +12 dB peak. Operator can tune both
@@ -1267,6 +1308,31 @@ class Radio(QObject):
         # (long enough to smooth out jitter, short enough to track
         # band changes within a fade).
         self._smeter_avg_lin = 0.0    # linear power running average
+        # Peak-hold-with-decay state for "peak" mode.  Without this,
+        # the meter snaps to whatever single bin was loudest in each
+        # ~5 Hz FFT tick, which jumps ±6 dB block-to-block on voice
+        # content (operator perceives it as jittery vs Thetis-style
+        # smoothness).  With peak-hold:
+        #
+        #   - on each tick, if the new peak exceeds the held value,
+        #     the displayed value snaps to it (fast attack)
+        #   - otherwise, the held value decays toward the new peak
+        #     by a fixed factor per tick (slow release)
+        #
+        # 0.85 per 200 ms tick → ~500 ms decay time constant, the
+        # same feel as analog mechanical S-meters and Thetis's
+        # default meter response.  Operator can tune later.
+        self._smeter_peak_hold_lin = 0.0
+        self._SMETER_PEAK_DECAY = 0.85
+        # ── Squelch (WDSP mode) ──────────────────────────────────
+        # All-mode squelch is handled natively inside WDSP (FM SQ /
+        # AM SQ / SSQL via `_push_wdsp_squelch_state`).  No Python-
+        # side state needed here — earlier hand-rolled gate designs
+        # (audio-RMS, AllModeSquelch delegate, spectrum-SNR) all
+        # fought WDSP's AGC compression and lost.  WDSP SSQL
+        # operates pre-AGC on the IQ-domain F-to-V detector, exactly
+        # where Pratt designed it to live.  See CLAUDE.md §14.8 for
+        # the full architecture history.
         self._sample_ring: deque = deque(maxlen=self._fft_size * 4)
         self._ring_lock = threading.Lock()
 
@@ -1524,6 +1590,17 @@ class Radio(QObject):
                 )
             except Exception as e:
                 self.status_message.emit(f"Notch error: {e}", 3000)
+        # WDSP path: tell the notch engine the current VFO so it can
+        # do its own absolute→baseband mapping, then push the notch
+        # list (in case widths / active flags changed).  Both calls
+        # are cheap when the notch list hasn't changed (DLL filter
+        # rebuild only fires on actual difference).
+        if self._use_wdsp_engine and self._wdsp_rx is not None:
+            try:
+                self._wdsp_rx.set_notch_tune_frequency(float(self._freq_hz))
+                self._push_wdsp_notches()
+            except Exception as exc:
+                print(f"[Radio] WDSP notch refresh: {exc}")
         if self._notch_enabled:
             self.notches_changed.emit(self.notch_details)
 
@@ -1551,6 +1628,15 @@ class Radio(QObject):
                 self._wdsp_rx.set_mode(self._wdsp_mode_for(alias))
                 low, high = self._wdsp_filter_for(alias)
                 self._wdsp_rx.set_filter(low, high)
+                # APF is mode-gated to CW only — push state so the
+                # peaking filter activates / deactivates at the mode
+                # switch, not on the operator's next slider tweak.
+                self._push_wdsp_apf_state()
+                # Re-route the squelch module to match the new mode
+                # (FM ↔ AM ↔ SSQL).  Without this, operator's SQ
+                # toggle would stay attached to the old mode's
+                # module and silently no-op on the new one.
+                self._push_wdsp_squelch_state()
             except Exception as exc:
                 print(f"[Radio] WDSP rx mode-change error: {exc}")
         # Also reset AGC + S-meter state. Different demods produce
@@ -1561,6 +1647,13 @@ class Radio(QObject):
         if self._wdsp_agc is not None:
             self._wdsp_agc.reset()
         self._smeter_avg_lin = 0.0
+        self._smeter_peak_hold_lin = 0.0
+        # WDSP SSQL handles all-mode squelch natively; mode-specific
+        # re-routing (FM ↔ AM ↔ SSQL) happens in
+        # `_push_wdsp_squelch_state` via the WDSP-rx mode-change
+        # block above.  Legacy AllModeSquelch resets through
+        # `_rx_channel.set_mode` for the LYRA_USE_LEGACY_DSP=1
+        # fallback but is otherwise inert.
         # Leveler envelope follower (_env_db) — without this reset,
         # switching from a loud LSB signal to a weak CW one leaves
         # the leveler "holding down" for ~100-200 ms while its
@@ -2637,29 +2730,61 @@ class Radio(QObject):
             self._push_wdsp_nr_state()
         self.nr_enabled_changed.emit(on)
 
+    # NR mode (1..4) → WDSP gain_method (0..3) mapping.
+    # Operator-facing modes are 1-indexed because Thetis is 1-indexed
+    # and that's what HPSDR-class operators expect.  Per emnr.c:
+    #   gain_method 0 = Wiener with witchHat (SPP soft mask)
+    #   gain_method 1 = Wiener simple (no SPP)
+    #   gain_method 2 = MMSE-LSA via 2-D LUT (WDSP default)
+    #   gain_method 3 = Trained Wiener with adaptive thresholds
+    _NR_MODE_TO_GAIN_METHOD = {
+        1: 0,  # Wiener + SPP — smooth, mid-aggressive
+        2: 1,  # Wiener simple — edgier, more raw subtraction
+        3: 2,  # MMSE-LSA — WDSP default, smoothest
+        4: 3,  # Trained adaptive — newest, most aggressive
+    }
+
     def _push_wdsp_nr_state(self) -> None:
-        """Sync WDSP's NR-module run flags to Lyra's NR enable + backend.
+        """Sync WDSP's NR-module run flags + EMNR character to operator state.
 
-        Lyra exposes one NR on/off toggle plus a backend selector
-        (NR1 = spectral, NR2 = Ephraim-Malah, LMS = adaptive line
-        enhancer).  WDSP exposes two run flags: EMNR (spectral) and
-        ANR (LMS).  We map:
+        Operator-facing controls in WDSP mode (post-2026-05-07 NR-UX
+        overhaul):
+          * NR enable button → EMNR run flag
+          * NR mode 1..4     → EMNR gain_method
+          * AEPF toggle      → EMNR ae_run
+          * LMS enable       → ANR run flag (separate, not part of NR)
 
-            backend == "nr1" or "nr2" → EMNR run flag
-            backend == "lms"          → ANR  run flag
-            anything else             → both off
-
-        Both off when the master NR toggle is off, regardless of backend.
+        Legacy `_nr_profile` ("nr1"/"nr2"/"neural") is preserved for
+        QSettings backwards compat + external CAT/TCI but is now a
+        derived value: it tracks `_nr_mode` for "did NR change?"
+        signaling.  When operators select Mode 1-4 directly via the
+        new UI, this method drives WDSP's EMNR knobs without
+        consulting the legacy backend string.
         """
         if self._wdsp_rx is None:
             return
         on = bool(self._rx_channel.nr_enabled) and bool(
             getattr(self, "_lyra_nr_master_on", True)
         )
-        backend = (self._nr_profile or "nr1").lower()
-        emnr_on = on and backend in ("nr1", "nr2")
-        anr_on = on and backend == "lms"
+        # Legacy "lms" backend still routes to ANR via this method
+        # so external CAT calling set_nr_profile("lms") still works.
+        # New code paths use set_lms_enabled directly.
+        legacy_backend = (self._nr_profile or "").lower()
+        anr_on = on and legacy_backend == "lms"
+        # EMNR runs whenever NR is on and the operator hasn't
+        # specifically picked LMS.
+        emnr_on = on and legacy_backend != "lms"
+        # Map current mode to WDSP gain_method (default 3=MMSE-LSA
+        # if mode is out of range somehow).
+        mode = int(getattr(self, "_nr_mode", 3))
+        gain_method = self._NR_MODE_TO_GAIN_METHOD.get(mode, 2)
+        aepf_on = bool(getattr(self, "_aepf_enabled", True))
+        npe_method = int(getattr(self, "_npe_method", self.NPE_OSMS))
         try:
+            if emnr_on:
+                self._wdsp_rx.set_emnr_gain_method(gain_method)
+                self._wdsp_rx.set_emnr_aepf(aepf_on)
+                self._wdsp_rx.set_emnr_npe_method(npe_method)
             self._wdsp_rx.set_emnr(emnr_on)
             self._wdsp_rx.set_anr(anr_on)
         except Exception as exc:
@@ -2712,10 +2837,111 @@ class Radio(QObject):
             backend = "nr1"
         self._nr_profile = backend
         self._rx_channel.set_nr_profile(backend)
+        # Legacy "nr1"/"nr2" backends migrate to NR mode for the new
+        # UI: nr1 → mode 3 (MMSE-LSA, current default behavior),
+        # nr2 → mode 1 (Wiener+SPP — old NR2 character).  This keeps
+        # the operator's saved-state experience consistent across
+        # the UX overhaul.  External CAT/TCI calling set_nr_profile
+        # see the equivalent NR mode in WDSP.
+        if backend == "nr2":
+            self._nr_mode = 1
+        elif backend == "nr1":
+            self._nr_mode = 3
         # WDSP NR module pick follows the operator's backend selection.
         if self._wdsp_rx is not None:
             self._push_wdsp_nr_state()
         self.nr_profile_changed.emit(backend)
+        self.nr_mode_changed.emit(self._nr_mode)
+
+    # ── NR mode (Thetis-style 1..4 selector) ─────────────────────────
+    #
+    # Replaces the legacy NR1/NR2 backend dropdown + dual strength
+    # sliders with a single integer-valued mode selector that drives
+    # WDSP's EMNR gain_method directly.  See _NR_MODE_TO_GAIN_METHOD
+    # above for the mapping; see _push_wdsp_nr_state for the apply
+    # path.
+
+    NR_MODE_MIN = 1
+    NR_MODE_MAX = 4
+    NR_MODE_DEFAULT = 3   # MMSE-LSA — WDSP default, matches old NR1
+
+    @property
+    def nr_mode(self) -> int:
+        return int(getattr(self, "_nr_mode", self.NR_MODE_DEFAULT))
+
+    def set_nr_mode(self, mode: int) -> None:
+        """Set the NR mode (1..4).  Clamps out-of-range values."""
+        m = max(self.NR_MODE_MIN, min(self.NR_MODE_MAX, int(mode)))
+        if m == getattr(self, "_nr_mode", None):
+            return
+        self._nr_mode = m
+        # Persist for next session.
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue("noise/nr_mode", m)
+        except Exception as exc:
+            print(f"[Radio] could not persist nr_mode: {exc}")
+        if self._wdsp_rx is not None:
+            self._push_wdsp_nr_state()
+        self.nr_mode_changed.emit(m)
+
+    # ── NPE method (noise power estimator selection) ───────────────
+    #
+    # Operator-tunable noise-tracker choice — one of WDSP EMNR's
+    # internal knobs that's normally hidden in other clients.
+    # Surfaced on the DSP+Audio panel for quick on-air A/B between
+    # OSMS (smooth, stationary noise) and MCRA (fast-tracking,
+    # non-stationary band conditions).
+    NPE_OSMS = 0  # WDSP default — recursive averaging
+    NPE_MCRA = 1  # Newer — Minimum-Controlled Recursive Averaging
+
+    @property
+    def npe_method(self) -> int:
+        return int(getattr(self, "_npe_method", self.NPE_OSMS))
+
+    def set_npe_method(self, method: int) -> None:
+        """Pick the EMNR noise-power estimator (0 = OSMS, 1 = MCRA)."""
+        m = int(method)
+        if m not in (self.NPE_OSMS, self.NPE_MCRA):
+            m = self.NPE_OSMS
+        if m == getattr(self, "_npe_method", None):
+            return
+        self._npe_method = m
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue("noise/npe_method", m)
+        except Exception as exc:
+            print(f"[Radio] could not persist npe_method: {exc}")
+        if self._wdsp_rx is not None:
+            self._push_wdsp_nr_state()
+        self.npe_method_changed.emit(m)
+
+    # ── AEPF (anti-musical-noise post-filter) ──────────────────────
+    @property
+    def aepf_enabled(self) -> bool:
+        return bool(getattr(self, "_aepf_enabled", True))
+
+    def set_aepf_enabled(self, on: bool) -> None:
+        """Toggle WDSP's Adaptive Equalization Post-Filter.
+
+        AEPF smooths the EMNR gain mask across frequency bins to
+        reduce musical-noise artifacts.  Default ON because the
+        un-AEPF residual character is noticeably more "watery" /
+        pronounced.  Operator can disable for raw EMNR character on
+        clean bands where AEPF's smoothing isn't needed.
+        """
+        on = bool(on)
+        if on == bool(getattr(self, "_aepf_enabled", True)):
+            return
+        self._aepf_enabled = on
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue("noise/aepf_enabled", on)
+        except Exception as exc:
+            print(f"[Radio] could not persist aepf_enabled: {exc}")
+        if self._wdsp_rx is not None:
+            self._push_wdsp_nr_state()
+        self.aepf_enabled_changed.emit(on)
 
     # ── Noise SOURCE toggle (Phase 3.D #1, orthogonal to profile) ────
 
@@ -2738,6 +2964,23 @@ class Radio(QObject):
         self._nr_use_captured_profile = on
         self._rx_channel.set_use_captured_profile(on)
         self.nr_use_captured_profile_changed.emit(on)
+        # KNOWN-INACTIVE flag: in WDSP mode the captured-profile
+        # spectral-subtraction apply path is not currently wired
+        # (see _do_demod_wdsp comment block + CLAUDE.md §14.6 for
+        # the why).  Capture itself works (Cap button still saves
+        # profiles to disk), but enabling the toggle in WDSP mode
+        # has no audio effect.  Surface that visibly so the operator
+        # doesn't quietly wonder why nothing changed.  Legacy mode
+        # (LYRA_USE_LEGACY_DSP=1) applies the profile normally.
+        if on and self._use_wdsp_engine:
+            msg = ("Captured profile is currently INERT in WDSP mode "
+                   "(known issue, needs attention).  Capture saves "
+                   "to disk; spectral subtraction is not applied.")
+            print(f"[Radio] {msg}")
+            try:
+                self.status_message.emit(msg, 6000)
+            except Exception:
+                pass
         # Persist the toggle state so the next Lyra start matches
         # what the operator left running.
         try:
@@ -3027,13 +3270,11 @@ class Radio(QObject):
             name = "off"
         self._rx_channel.set_nb_profile(name)
         # WDSP RX engine — noise blanker (NOB/ANB) lives at the EXT
-        # layer, BEFORE the RXA channel.  Those modules need explicit
-        # ``create_nob`` / ``create_anb`` calls (with several tuning
-        # parameters) before their Run flags are usable; calling
-        # SetEXTANBRun on an uninitialized blanker segfaults the DLL.
-        # For v0.0.9.6 we skip the wiring; NB defaults to off in
-        # WDSP mode.  Will land in a follow-up that adds create_nob /
-        # create_anb cffi bindings + initializes them in _open_wdsp_rx.
+        # layer, before the RXA channel.  RxChannel.__init__ calls
+        # init_blankers automatically so SetEXTNOBRun is safe; we
+        # mirror Lyra's profile -> WDSP NOB threshold via the
+        # helper (off / light / medium / heavy / custom).
+        self._push_wdsp_nb_state()
         # Persist for next Lyra start.
         try:
             from PySide6.QtCore import QSettings
@@ -3056,6 +3297,8 @@ class Radio(QObject):
         [THRESHOLD_MIN, THRESHOLD_MAX].  Persists via QSettings.
         """
         self._rx_channel.set_nb_threshold(float(threshold))
+        # Mirror operator-set custom threshold into WDSP NOB.
+        self._push_wdsp_nb_state()
         try:
             from PySide6.QtCore import QSettings
             s = QSettings("N8SDR", "Lyra")
@@ -3464,9 +3707,36 @@ class Radio(QObject):
 
     def set_lms_strength(self, value: float) -> None:
         """LMS strength slider (0.0..1.0).  Persists to QSettings
-        and emits ``lms_strength_changed``."""
+        and emits ``lms_strength_changed``.
+
+        In WDSP mode the slider drives ``SetRXAANRGain`` — the LMS
+        step size (a.k.a. ``two_mu`` / mu).  WDSP's default is
+        0.0001; stable upper bound roughly 0.001.  We map slider
+        0..1 onto a logarithmic 0.00005..0.001 sweep so:
+          * slider 0%  → mu = 5e-5    (very gentle, barely adapts)
+          * slider 50% → mu = ~2e-4   (close to WDSP default)
+          * slider 100% → mu = 1e-3   (aggressive, just below
+                                       instability threshold)
+        Logarithmic mapping makes the slider behavior feel
+        progressive across the full range — linear would put
+        most of the audible change in the top 10% of travel.
+        """
         v = max(0.0, min(1.0, float(value)))
         self._rx_channel.set_lms_strength(v)
+        # WDSP path: map 0..1 slider → 5e-5..1e-3 ANR gain
+        # (logarithmic).  Operator's slider position now actually
+        # changes the LMS step size, addressing the "sliders don't
+        # do anything in WDSP mode" complaint for LMS.
+        if self._wdsp_rx is not None:
+            try:
+                import math
+                # Log-interp between [5e-5, 1e-3].
+                lo_log = math.log(5e-5)
+                hi_log = math.log(1e-3)
+                mu = math.exp(lo_log + v * (hi_log - lo_log))
+                self._wdsp_rx.set_anr_gain(mu)
+            except Exception as exc:
+                print(f"[Radio] WDSP rx LMS strength error: {exc}")
         try:
             from PySide6.QtCore import QSettings
             s = QSettings("N8SDR", "Lyra")
@@ -3537,26 +3807,19 @@ class Radio(QObject):
         return self._rx_channel.squelch_passing
 
     def set_squelch_enabled(self, on: bool) -> None:
-        """Master toggle for the all-mode voice-presence squelch."""
+        """Master toggle for the all-mode voice-presence squelch.
+
+        Routes to the right WDSP squelch module based on current mode:
+          * FM        → SetRXAFMSQRun
+          * AM / SAM / DSB → SetRXAAMSQRun
+          * SSB / CW / DIG / SPEC → SetRXASSQLRun (the all-mode
+            voice-activity detector Thetis uses for SSB SQ)
+        Only one is active at a time.  Mode changes re-route through
+        ``_push_wdsp_squelch_state`` from set_mode.
+        """
         on = bool(on)
         self._rx_channel.set_squelch_enabled(on)
-        # WDSP RX engine — pick the right squelch flavor based on the
-        # current mode.  WDSP has separate FM and AM squelch modules;
-        # SSB squelch is the FM module re-purposed (Thetis convention).
-        if self._wdsp_rx is not None:
-            try:
-                if self._mode == "FM":
-                    self._wdsp_rx.set_fm_squelch(on)
-                elif self._mode in ("AM", "SAM", "DSB"):
-                    self._wdsp_rx.set_am_squelch(on)
-                else:
-                    # SSB / CW / DIG — WDSP has no dedicated squelch;
-                    # leave both off (Lyra's voice-presence squelch
-                    # logic was Python-side only).
-                    self._wdsp_rx.set_fm_squelch(False)
-                    self._wdsp_rx.set_am_squelch(False)
-            except Exception as exc:
-                print(f"[Radio] WDSP rx squelch state error: {exc}")
+        self._push_wdsp_squelch_state()
         try:
             from PySide6.QtCore import QSettings
             s = QSettings("N8SDR", "Lyra")
@@ -3565,11 +3828,75 @@ class Radio(QObject):
             print(f"[Radio] could not persist squelch_enabled: {exc}")
         self.squelch_enabled_changed.emit(on)
 
+    # ── SSQL slider → threshold mapping ──
+    # WDSP's WU2O-tested-good default for SSQL threshold is 0.16.
+    # Direct 1:1 mapping (slider value passed straight to SSQL) put
+    # the operator's typical slider position (~0.20-0.30) above
+    # that default, producing "slightly tight" behavior in field
+    # test 2026-05-07.  Scale factor 0.65 lands the operator's
+    # typical zone in WU2O-friendly territory:
+    #   slider 0.16 → SSQL 0.104  (just below WU2O default — loose)
+    #   slider 0.20 → SSQL 0.130  (≈ WU2O default — comfortable)
+    #   slider 0.30 → SSQL 0.195  (slightly above WU2O default)
+    #   slider 0.50 → SSQL 0.325  (firm)
+    #   slider 1.00 → SSQL 0.650  (very tight, not pathological)
+    _SSQL_SCALE: float = 0.65
+
+    # ── SSQL trigger-voltage time constants ──
+    # SSQL's window detector (`wdaverage`) tracks an EWMA of the
+    # F-to-V signal with a fixed wdtau=0.5s.  On a quasi-stationary
+    # signal (continuous SSB conversation, digital modes) the
+    # average converges to the signal level within 1-2 sec → gate
+    # marks "no signal" → trigger voltage rises toward mute.
+    # That convergence is hardcoded in the DLL; we can't change it
+    # without rebuilding WDSP, but we CAN slow the trigger-voltage
+    # rise via tau_mute, which is the actual time constant that
+    # turns the false "no signal" reading into a closed gate.
+    #
+    # WDSP create_ssql default: tau_mute=0.1 s, tau_unmute=0.1 s.
+    # Operator field test 2026-05-07: with these defaults, the gate
+    # "starts okay then pulls back and clamps after a bit" — the
+    # ~134 ms trigger rise time means a transient window-detector
+    # convergence translates almost-instantly into a clamp.
+    #
+    # Lyra's SSQL_TAU_MUTE = 0.7 s lets the trigger voltage take
+    # ~0.94 s to reach mute threshold — long enough that brief
+    # window-detector convergences don't clamp the gate, while
+    # genuine end-of-transmission still mutes within ~1 s of
+    # speech ending (snappier than 1.0 s while still bridging
+    # convergence transients).  Operator-tuned 2026-05-07 from
+    # initial 1.0 s default.
+    # tau_unmute stays at 0.1 s for snappy speech-onset response.
+    _SSQL_TAU_MUTE: float = 0.7     # seconds (vs WDSP default 0.1)
+    _SSQL_TAU_UNMUTE: float = 0.1   # seconds (matches WDSP default)
+
     def set_squelch_threshold(self, value: float) -> None:
         """Squelch threshold, 0.0..1.0.  Higher = more aggressive
         muting.  Persists to QSettings and emits change signal."""
         v = max(0.0, min(1.0, float(value)))
         self._rx_channel.set_squelch_threshold(v)
+        # Push to whichever WDSP squelch module is active for the
+        # current mode.  AM threshold is dB-scaled; SSQL is scaled
+        # via _SSQL_SCALE for operator-friendly slider feel.
+        if self._wdsp_rx is not None:
+            try:
+                if self._mode in ("AM", "SAM", "DSB"):
+                    # AM threshold range is roughly -160..0 dB.
+                    # Map slider 0..1 → -160..-50 dB.  Higher slider
+                    # = less negative threshold = harder to open.
+                    am_db = -160.0 + 110.0 * v
+                    self._wdsp_rx.set_am_squelch(
+                        bool(self._rx_channel.squelch_enabled), am_db)
+                elif self._mode == "FM":
+                    # FM SQ has no per-threshold setter we've wired;
+                    # WDSP's FM squelch decides on RF SNR with
+                    # internal thresholds.  Slider unused for FM.
+                    pass
+                else:
+                    # SSB / CW / DIG / SPEC → SSQL via scaling.
+                    self._wdsp_rx.set_ssql_threshold(v * self._SSQL_SCALE)
+            except Exception as exc:
+                print(f"[Radio] WDSP rx squelch threshold error: {exc}")
         try:
             from PySide6.QtCore import QSettings
             s = QSettings("N8SDR", "Lyra")
@@ -3577,6 +3904,55 @@ class Radio(QObject):
         except Exception as exc:
             print(f"[Radio] could not persist squelch_threshold: {exc}")
         self.squelch_threshold_changed.emit(v)
+
+    def _push_wdsp_squelch_state(self) -> None:
+        """Re-route WDSP squelch modules to match the active mode.
+
+        Called from set_squelch_enabled and from set_mode (so that
+        switching modes hands off cleanly between FM ↔ AM ↔ SSQL).
+        Disables the inactive modules; enables the right one for the
+        current mode if the operator's master toggle is on.
+        """
+        if self._wdsp_rx is None:
+            return
+        on = bool(self._rx_channel.squelch_enabled)
+        try:
+            mode = self._mode
+            # First, disable any module that doesn't apply to this mode.
+            if mode != "FM":
+                self._wdsp_rx.set_fm_squelch(False)
+            if mode not in ("AM", "SAM", "DSB"):
+                self._wdsp_rx.set_am_squelch(False)
+            if mode in ("FM", "AM", "SAM", "DSB"):
+                self._wdsp_rx.set_ssql_run(False)
+            # Now enable + (re-)threshold the active module.
+            if not on:
+                # Master off — make sure SSQL is also off (it may have
+                # been enabled in a previous mode).
+                self._wdsp_rx.set_ssql_run(False)
+                return
+            if mode == "FM":
+                self._wdsp_rx.set_fm_squelch(True)
+            elif mode in ("AM", "SAM", "DSB"):
+                v = float(self._rx_channel.squelch_threshold)
+                am_db = -160.0 + 110.0 * v
+                self._wdsp_rx.set_am_squelch(True, am_db)
+            else:
+                # SSB / CW / DIG / SPEC — SSQL handles all-mode squelch.
+                # Scale matches set_squelch_threshold (see _SSQL_SCALE
+                # docstring for the operator-friendly mapping rationale).
+                v = float(self._rx_channel.squelch_threshold)
+                self._wdsp_rx.set_ssql_threshold(v * self._SSQL_SCALE)
+                # Override WDSP's create_ssql tau defaults — see
+                # _SSQL_TAU_MUTE / _SSQL_TAU_UNMUTE docstrings for the
+                # "starts okay then clamps" field-test rationale.
+                # Push these BEFORE enabling so the new run takes
+                # effect with the right time constants from the start.
+                self._wdsp_rx.set_ssql_tau_mute(self._SSQL_TAU_MUTE)
+                self._wdsp_rx.set_ssql_tau_unmute(self._SSQL_TAU_UNMUTE)
+                self._wdsp_rx.set_ssql_run(True)
+        except Exception as exc:
+            print(f"[Radio] WDSP squelch re-route error: {exc}")
 
     def autoload_squelch_settings(self) -> None:
         """Restore squelch toggle + threshold from QSettings."""
@@ -3624,6 +4000,54 @@ class Radio(QObject):
         except Exception as exc:
             print(f"[Radio] could not persist nr1 strength: {exc}")
         self.nr1_strength_changed.emit(self._rx_channel.nr1_strength)
+
+    def autoload_nr_mode_settings(self) -> None:
+        """Restore NR mode (1..4) and AEPF toggle from QSettings.
+
+        Operators upgrading from the legacy NR1/NR2 backend dropdown
+        get migrated automatically:
+          * saved ``nr/profile = nr2`` → mode 1 (Wiener+SPP)
+          * saved ``nr/profile = nr1`` (or anything else) → mode 3
+            (MMSE-LSA — current default behavior)
+          * AEPF defaults to ON for all migrations
+        """
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            # Load mode — direct or via legacy migration.
+            if s.contains("noise/nr_mode"):
+                mode = int(s.value("noise/nr_mode", 3, type=int))
+            else:
+                legacy = ""
+                for legacy_key in ("nr/profile", "noise/nr_profile"):
+                    val = str(s.value(legacy_key, "") or "").strip().lower()
+                    if val:
+                        legacy = val
+                        break
+                if legacy == "nr2":
+                    mode = 1
+                else:
+                    mode = self.NR_MODE_DEFAULT
+            mode = max(self.NR_MODE_MIN,
+                       min(self.NR_MODE_MAX, int(mode)))
+            self._nr_mode = mode
+            # Load AEPF toggle — default True if no saved value.
+            aepf = bool(s.value("noise/aepf_enabled", True, type=bool))
+            self._aepf_enabled = aepf
+            # Load NPE method — default OSMS (0) if no saved value.
+            npe = int(s.value("noise/npe_method", self.NPE_OSMS, type=int))
+            if npe not in (self.NPE_OSMS, self.NPE_MCRA):
+                npe = self.NPE_OSMS
+            self._npe_method = npe
+            # Push to WDSP if engine is up.
+            if self._wdsp_rx is not None:
+                self._push_wdsp_nr_state()
+            # Inform the UI of the current values so it paints right.
+            self.nr_mode_changed.emit(self._nr_mode)
+            self.aepf_enabled_changed.emit(self._aepf_enabled)
+            self.npe_method_changed.emit(self._npe_method)
+        except Exception as exc:
+            print(f"[Radio] could not autoload NR mode/AEPF: {exc}")
 
     def autoload_nr1_settings(self) -> None:
         """Restore NR1's strength from QSettings.
@@ -3810,6 +4234,17 @@ class Radio(QObject):
             return
         self._apf_enabled = on
         self._rx_channel.set_apf_enabled(on)
+        # WDSP path: APF lives on the RXA chain as the SPEAK biquad
+        # stage.  Mode-gate to CW only — outside CWU/CWL the legacy
+        # AudioPeakFilter passes audio through; we mirror that by
+        # only running WDSP's biquad when in CW mode.  Operator's
+        # toggle state is preserved across mode switches via
+        # _apf_enabled.
+        if self._use_wdsp_engine and self._wdsp_rx is not None:
+            try:
+                self._push_wdsp_apf_state()
+            except Exception as exc:
+                print(f"[Radio] WDSP APF toggle: {exc}")
         self.apf_enabled_changed.emit(on)
 
     def set_apf_bw_hz(self, bw_hz: int) -> None:
@@ -3822,6 +4257,11 @@ class Radio(QObject):
             return
         self._apf_bw_hz = bw
         self._rx_channel.set_apf_bw_hz(bw)
+        if self._use_wdsp_engine and self._wdsp_rx is not None:
+            try:
+                self._wdsp_rx.set_apf_bw(float(bw))
+            except Exception as exc:
+                print(f"[Radio] WDSP APF bw: {exc}")
         self.apf_bw_changed.emit(bw)
 
     def set_apf_gain_db(self, gain_db: float) -> None:
@@ -3831,7 +4271,46 @@ class Radio(QObject):
             return
         self._apf_gain_db = g
         self._rx_channel.set_apf_gain_db(g)
+        if self._use_wdsp_engine and self._wdsp_rx is not None:
+            try:
+                self._wdsp_rx.set_apf_gain_db(float(g))
+            except Exception as exc:
+                print(f"[Radio] WDSP APF gain: {exc}")
         self.apf_gain_changed.emit(g)
+
+    def _push_wdsp_apf_state(self) -> None:
+        """Push APF run flag + center freq to WDSP, mode-gated to CW.
+
+        Outside CWU/CWL the APF is forced off regardless of operator
+        toggle state — same behavior as legacy AudioPeakFilter, which
+        passes audio through in non-CW modes.  Re-entering CW restores
+        the operator's prior on/off state automatically because
+        _apf_enabled is the source of truth.
+        """
+        if not self._use_wdsp_engine or self._wdsp_rx is None:
+            return
+        # Init-order guard: _open_wdsp_rx runs early in __init__,
+        # before _apf_enabled / _apf_bw_hz / _apf_gain_db are set.
+        # Use getattr defaults so the initial push is a no-op rather
+        # than an AttributeError (which gets caught by the try/except
+        # in _open_wdsp_rx but emits a noisy warning).
+        apf_enabled = bool(getattr(self, "_apf_enabled", False))
+        apf_bw_hz = float(getattr(self, "_apf_bw_hz", 100.0))
+        apf_gain_db = float(getattr(self, "_apf_gain_db", 12.0))
+        # Only run in CW.
+        active = apf_enabled and self._mode in ("CWU", "CWL")
+        # Center frequency = current CW pitch (same as legacy
+        # AudioPeakFilter).  WDSP's BiQuad takes the freq in absolute
+        # audio-domain Hz — at 48 kHz audio rate, the operator's CW
+        # pitch directly drives the peak.
+        if active:
+            try:
+                self._wdsp_rx.set_apf_freq(float(self._cw_pitch_hz))
+                self._wdsp_rx.set_apf_bw(apf_bw_hz)
+                self._wdsp_rx.set_apf_gain_db(apf_gain_db)
+            except Exception as exc:
+                print(f"[Radio] WDSP APF param push: {exc}")
+        self._wdsp_rx.set_apf(active)
 
     # ── BIN (Binaural pseudo-stereo) ───────────────────────────────
     @property
@@ -4264,6 +4743,15 @@ class Radio(QObject):
 
     def set_notch_enabled(self, enabled: bool):
         self._notch_enabled = bool(enabled)
+        # WDSP path: master notch run flag.  When disabled, the WDSP
+        # NotchDB is bypassed even if individual notches have
+        # active=1 — saves CPU and lets the operator A/B the notch
+        # bank in one click.
+        if self._use_wdsp_engine and self._wdsp_rx is not None:
+            try:
+                self._wdsp_rx.set_notches_master_run(self._notch_enabled)
+            except Exception as exc:
+                print(f"[Radio] WDSP notch master toggle: {exc}")
         self.notch_enabled_changed.emit(self._notch_enabled)
 
     # ── Per-band memory ───────────────────────────────────────────────
@@ -5146,11 +5634,13 @@ class Radio(QObject):
         m = mode if mode in self.SMETER_MODES else "peak"
         if m == self._smeter_mode:
             return
-        # Reset the linear-power average when switching INTO avg mode
-        # so the meter doesn't briefly show a stale value from last
-        # time avg mode was active.
+        # Reset whichever filter is about to become active so the
+        # meter doesn't briefly show a stale value carried over from
+        # the last time that mode was used.
         if m == "avg":
             self._smeter_avg_lin = 0.0
+        else:
+            self._smeter_peak_hold_lin = 0.0
         self._smeter_mode = m
         self.smeter_mode_changed.emit(m)
 
@@ -5760,6 +6250,10 @@ class Radio(QObject):
         if self._wdsp_agc is not None:
             self._wdsp_agc.reset()
         self._smeter_avg_lin = 0.0
+        self._smeter_peak_hold_lin = 0.0
+        # WDSP SSQL state lives inside the DLL and resets via WDSP's
+        # internal flush_ssql when the channel is reopened.  No
+        # Python-side state to clear here.
         self._binaural.reset()
         # Leveler envelope follower (_env_db) — without this reset,
         # switching from a loud LSB signal to a weak CW one would
@@ -5950,6 +6444,34 @@ class Radio(QObject):
             self._wdsp_rx.set_filter(low, high)
             self._wdsp_rx.set_agc(self._wdsp_agc_for(self._agc_profile))
             self._wdsp_rx.set_panel_gain(1.0)
+            # NB + manual notches: only meaningful after init_blankers /
+            # the notchdb exists.  RxChannel.__init__ does init_blankers
+            # for us; the notchdb is created with the channel.
+            self._push_wdsp_nb_state()
+            self._wdsp_rx.set_notch_tune_frequency(float(self._freq_hz))
+            self._push_wdsp_notches()
+            # APF (CW peaking) — mode-gated on/off.  Push current state
+            # so a freshly-opened channel inherits the operator's
+            # toggle (which gets activated only in CWU/CWL anyway).
+            self._push_wdsp_apf_state()
+            # All-mode squelch — route to the right WDSP module
+            # (FM SQ / AM SQ / SSQL) based on current mode and apply
+            # the operator's persisted enable + threshold.
+            self._push_wdsp_squelch_state()
+            # Push initial NR state — sets gain_method per backend
+            # (NR1=MMSE-LSA, NR2=Wiener) and emnr/anr run flags.
+            self._push_wdsp_nr_state()
+            # Push the operator's persisted LMS strength so the
+            # WDSP ANR step size matches the slider's saved value
+            # from session start (otherwise WDSP runs at its
+            # internal default 0.0001 until operator touches the
+            # slider).
+            try:
+                lms_strength = getattr(
+                    self._rx_channel, "lms_strength", 0.5)
+                self.set_lms_strength(float(lms_strength))
+            except Exception as exc:
+                print(f"[Radio] WDSP LMS initial-strength push: {exc}")
         except Exception as exc:
             print(f"[Radio] WDSP rx initial-state push error: {exc}")
         try:
@@ -5997,6 +6519,96 @@ class Radio(QObject):
             "auto":   "MED",       # auto rides MED with periodic threshold tweaks
             "custom": "CUSTOM",
         }.get(profile.lower() if profile else "med", "MED")
+
+    # ── WDSP NB profile ↔ threshold mapping ───────────────────────
+    #
+    # Lyra's NB profile slider maps to a single WDSP NOB threshold
+    # value.  Lower threshold → more aggressive blanking (more
+    # noise samples cross the impulse-detection bar) at the cost of
+    # more false positives chewing into wanted signal transients.
+    # The numbers below are starting points calibrated against the
+    # Thetis Console default of 3.3; field-tuning may move them.
+    _WDSP_NB_THRESHOLDS = {
+        "off":    None,
+        "light":  10.0,
+        "medium": 5.0,
+        "heavy":  2.5,
+        "custom": None,        # uses _rx_channel.nb_threshold instead
+    }
+
+    def _push_wdsp_nb_state(self) -> None:
+        """Push the current Lyra NB profile to the WDSP NOB blanker.
+
+        The legacy ``_rx_channel`` is the source of truth for the
+        current profile + custom threshold.  We mirror its state
+        into the DLL's NOB module via ``set_nob`` + ``set_nob_threshold``.
+        """
+        if not self._use_wdsp_engine or self._wdsp_rx is None:
+            return
+        profile = (self._rx_channel.nb_profile or "off").lower()
+        if profile == "off":
+            try:
+                self._wdsp_rx.set_nob(False)
+                self._wdsp_rx.set_anb(False)
+            except Exception as exc:
+                print(f"[Radio] WDSP NB push (off): {exc}")
+            return
+        if profile == "custom":
+            thresh = float(self._rx_channel.nb_threshold)
+        else:
+            thresh = self._WDSP_NB_THRESHOLDS.get(profile, 5.0) or 5.0
+        try:
+            self._wdsp_rx.set_nob_threshold(thresh)
+            self._wdsp_rx.set_nob(True)
+            # ANB stays off by default — NOB alone covers the
+            # narrowband impulse-noise case Lyra's UI is targeting.
+            # Heavy operator demand for broadband blanking would
+            # justify a separate "NB2" UI option that toggles ANB.
+            self._wdsp_rx.set_anb(False)
+        except Exception as exc:
+            print(f"[Radio] WDSP NB push: {exc}")
+
+    def _push_wdsp_notches(self) -> None:
+        """Push Lyra's manual notch list to WDSP's RX notch database.
+
+        Tile changes (active flag, width, depth, cascade) all trigger
+        a fresh push.  Inactive notches are still added to the
+        database with active=0 — that way operator-toggled visibility
+        survives the round-trip.
+        """
+        if not self._use_wdsp_engine or self._wdsp_rx is None:
+            return
+        # Init-order guard: _open_wdsp_rx runs before self._notches /
+        # self._notch_enabled are populated in __init__.  An empty
+        # push at that point is harmless (no operator notches yet),
+        # but the attribute lookup would AttributeError.
+        notches_list = getattr(self, "_notches", None)
+        notch_enabled = getattr(self, "_notch_enabled", False)
+        if notches_list is None:
+            return
+        # WDSP's NotchDB takes ABSOLUTE RF center frequencies.  It
+        # subtracts ``tunefreq`` internally, which we set on every
+        # VFO change via set_notch_tune_frequency.  Width is positive.
+        # Lyra's "deep + cascade" model collapses onto WDSP's single
+        # notch — a deep+cascade notch becomes one wider+lower
+        # notch by approximation.  Operators who care about depth
+        # tune the width; the cascade integer doesn't have a direct
+        # WDSP analog.  Future: stack multiple WDSP notches for
+        # cascade > 1.
+        notches: list[tuple[float, float, bool]] = []
+        for n in notches_list:
+            try:
+                notches.append((
+                    float(n.abs_freq_hz),
+                    float(max(1.0, n.width_hz)),
+                    bool(n.active),
+                ))
+            except Exception:
+                continue
+        try:
+            self._wdsp_rx.set_notches(notches, master_run=notch_enabled)
+        except Exception as exc:
+            print(f"[Radio] WDSP notch push: {exc}")
 
     def _do_demod(self, iq):
         """Route IQ through the RX channel, then apply AGC + volume,
@@ -6094,6 +6706,14 @@ class Radio(QObject):
         except Exception as e:
             print(f"audio sink error: {e}")
 
+    # NOTE: an earlier Python-side spectrum-SNR squelch gate lived
+    # here (and even earlier, an audio-domain RMS gate).  Both were
+    # superseded 2026-05-07 by WDSP's native SSQL — see
+    # `_push_wdsp_squelch_state` and CLAUDE.md §14.8 for the full
+    # design history.  WDSP SSQL operates pre-AGC inside the RXA
+    # pipeline, exactly where Pratt designed it; no Python-side
+    # gate can match that integration.
+
     def _do_demod_wdsp(self, iq):
         """WDSP-engine RX audio path (v0.0.9.6).
 
@@ -6130,6 +6750,13 @@ class Radio(QObject):
         if audio.size == 0:
             return
 
+        # Squelch is handled inside WDSP (FM SQ / AM SQ / SSQL all-
+        # mode) via `_push_wdsp_squelch_state` — no Python-side audio
+        # gating needed here.  WDSP's SSQL operates pre-AGC on the
+        # IQ envelope, so AGC compression doesn't blind it the way
+        # earlier audio-domain RMS / spectrum-SNR Python gates did.
+        # See `set_squelch_enabled` and `_push_wdsp_squelch_state`.
+
         # Output-stage volume + mute. WDSP's own PanelGain1 handles the
         # operator-level gain; volume and mute live above the engine so
         # quick mute/unmute transitions don't ride through WDSP's slew
@@ -6141,6 +6768,55 @@ class Radio(QObject):
             v = float(self._volume)
             if v != 1.0:
                 audio = audio * np.float32(v)
+
+        # Capture-active path — when the operator presses "Cap", NR1
+        # (which owns the FFT magnitude accumulator) needs to see the
+        # post-demod audio so it can build the captured profile.  In
+        # legacy mode this happened inside _rx_channel.process(); in
+        # WDSP mode that chain is bypassed, so we feed the WDSP audio
+        # output directly to nr.process() with enabled forced to False
+        # — that triggers nr.py's lightweight "capture-without-NR"
+        # branch which accumulates magnitudes and returns audio
+        # untouched.  When capture finalizes, NR1's done-callback
+        # (already wired to _on_nr_capture_done) loads the profile
+        # into both NR1 and NR2 and fires noise_capture_done so the
+        # UI prompts for a save name.
+        nr1 = getattr(self._rx_channel, "_nr", None)
+        if nr1 is not None and getattr(nr1, "_capture_state", "idle") == "capturing":
+            try:
+                was_enabled = nr1.enabled
+                nr1.enabled = False
+                mono_for_capture = audio[:, 0] if audio.ndim == 2 else audio
+                nr1.process(mono_for_capture)
+                nr1.enabled = was_enabled
+            except Exception as exc:
+                print(f"[Radio] WDSP capture feed error: {exc}")
+
+        # Captured-profile spectral-subtraction apply path is INERT
+        # in WDSP mode (surgical revert 2026-05-07 evening).  Multiple
+        # rounds of iteration (initial post-WDSP pass, Path A gentle
+        # Wiener, Path B adaptive scaling, Plan C gain floor) didn't
+        # eliminate audible artifacts.  Capture itself works (the
+        # capture-feed wiring above this comment routes audio into
+        # NR1's accumulator), profiles save/load/persist, but the
+        # apply step is skipped to avoid degrading the audio.
+        # See CLAUDE.md §14.6 for the full history.
+        # WDSP returns mono-equivalent stereo (L == R) so we hand the
+        # left channel to BinauralFilter, which on enabled returns a
+        # genuinely-different (N, 2) Hilbert-pair stereo that the
+        # operator hears as widened.  CPU is negligible (~63-tap FIR
+        # at 48 kHz) and Python-side work runs after WDSP's hot path
+        # so it doesn't compete for the GIL with the EP2 writer.
+        # When BIN is disabled the filter returns mono untouched and
+        # we keep WDSP's stereo as-is.
+        if self._bin_enabled and self._binaural.enabled:
+            try:
+                mono_in = audio[:, 0] if audio.ndim == 2 else audio
+                bin_out = self._binaural.process(mono_in)
+                if bin_out.ndim == 2 and bin_out.shape[1] == 2:
+                    audio = bin_out.astype(np.float32, copy=False)
+            except Exception as exc:
+                print(f"[Radio] WDSP BIN error: {exc}")
 
         try:
             self._audio_sink.write(audio)
@@ -6497,6 +7173,10 @@ class Radio(QObject):
             try:
                 low, high = self._wdsp_filter_for(self._mode)
                 self._wdsp_rx.set_filter(low, high)
+                # APF center frequency tracks CW pitch.  Push freq
+                # without disturbing run state — set_apf_freq is safe
+                # to call while APF is on.
+                self._wdsp_rx.set_apf_freq(float(new_pitch))
             except Exception as exc:
                 print(f"[Radio] WDSP rx cw-pitch error: {exc}")
         # Recompute + re-emit passband so the panadapter overlay
@@ -6849,52 +7529,68 @@ class Radio(QObject):
             # smeter cal is added below so the operator can shift the
             # meter without touching the spectrum scale.
             band = spec_db[lo:hi]
-            # Both modes report INTEGRATED power across the passband
-            # (sum of linear power per bin, not per-bin mean and not
-            # max single bin). That's what an S-meter conventionally
-            # measures — total signal energy in the RX BW.
-            #
-            # Difference between the modes is the temporal response:
-            #   "peak"  — instantaneous integrated power, no smoothing
-            #             (jumpier, follows transient signal energy)
-            #   "avg"   — EWMA-smoothed integrated power (~1 s at 5 fps)
-            #             so the meter feels stable rather than twitchy
-            #
-            # Earlier the modes diverged in shape (peak = single bin
-            # max, avg = per-bin mean). Both produced readings ~18-30
-            # dB below an external reference receiver on the same
-            # antenna/signal. Now they're both in the right ballpark;
-            # cal trim covers the residual absolute offset.
             lin = 10.0 ** (band / 10.0)            # dB → linear power
-            total_lin = float(np.sum(lin))
             # Cache passband peak (max bin in dBFS) for Auto-LNA
             # pull-up's passband-signal gate. Use the unsmoothed
             # spectrum so the gate reacts to real signal arrivals
             # within one FFT (~150 ms) rather than waiting for
             # smeter EWMA to catch up.
             self._lna_passband_peak_dbfs = float(np.max(band))
-            # LNA-invariant S-meter: subtract the current LNA gain
-            # from the dBFS reading so the displayed dBm reflects the
-            # signal level AT THE ANTENNA, not at the ADC. Without
-            # this, moving the LNA slider changes the meter reading
-            # one-for-one even though no signal at the antenna has
-            # changed. Matches standard SDR-client convention —
-            # calibrate once, the meter holds across LNA changes.
-            # The +21 dB default cal in
-            # _smeter_cal_db was originally tuned at LNA=+7, so
-            # post-this-change the equivalent is +28 dB; new default
-            # bumped accordingly.
+            # ── Mode semantics (S-meter cal review v0.0.9.6) ───────
+            # Bandwidth dependence is the dominant source of S-meter
+            # confusion: integrating power across a wider passband
+            # accumulates more noise.  At a 2.4 kHz SSB filter and
+            # ~47 Hz bin width, "integrated passband" runs ~+17 dB
+            # over single-bin noise; at 8 kHz AM the offset jumps to
+            # ~+22 dB; at 500 Hz CW it drops to ~+10 dB.  The
+            # operator's +28 dB cal trim was tuned at one specific
+            # mode/BW combination, so any mode/BW change makes the
+            # reading appear "wildly incorrect" by tens of dB.
+            #
+            #   "peak"  — single brightest bin in the passband.  This
+            #             is the standard ham-radio S-meter convention:
+            #             reads the dominant tone level, BW-invariant
+            #             for narrowband signals (CW dits, FT8, SSB
+            #             voice peaks), tracks panadapter peaks
+            #             one-for-one.  Operator can cal once and
+            #             expect it to hold across mode/BW changes.
+            #
+            #   "avg"   — EWMA-smoothed peak.  Same shape as peak but
+            #             with a ~1 s time constant for less twitch.
+            #             Use for stable copy on noisy bands or to
+            #             watch a slowly-fading signal.
+            #
+            # Earlier (pre-2026-05-07) both modes summed lin across
+            # bins.  Switched to single-bin peak so the cal value
+            # tracks reality.  Operator may want to nudge the +28 dB
+            # cal trim once after this change since the absolute
+            # numbers shift by +log10(passband_bins) compared to the
+            # old integrated reading.
+            peak_lin = float(np.max(lin))
             if self._smeter_mode == "avg":
                 if self._smeter_avg_lin <= 0.0:
-                    self._smeter_avg_lin = total_lin
+                    self._smeter_avg_lin = peak_lin
                 else:
                     self._smeter_avg_lin = (0.80 * self._smeter_avg_lin
-                                            + 0.20 * total_lin)
+                                            + 0.20 * peak_lin)
                 level_db = (10.0 * float(np.log10(max(self._smeter_avg_lin, 1e-20)))
                             + self._smeter_cal_db
                             - float(self._gain_db))
-            else:  # "peak" — instantaneous integrated power
-                level_db = (10.0 * float(np.log10(max(total_lin, 1e-20)))
+            else:  # "peak" — peak-hold-with-decay
+                # Fast attack on rising peaks, slow exponential decay
+                # on falling.  Matches analog mechanical S-meters and
+                # Thetis's smooth meter feel; eliminates the per-FFT-
+                # tick jitter operators perceive on voice content.
+                if peak_lin > self._smeter_peak_hold_lin:
+                    self._smeter_peak_hold_lin = peak_lin
+                else:
+                    # Decay toward current peak.  Held value blends
+                    # toward the live peak by (1 - decay) per tick.
+                    self._smeter_peak_hold_lin = (
+                        self._SMETER_PEAK_DECAY * self._smeter_peak_hold_lin
+                        + (1.0 - self._SMETER_PEAK_DECAY) * peak_lin
+                    )
+                level_db = (10.0 * float(np.log10(max(self._smeter_peak_hold_lin, 1e-20)))
                             + self._smeter_cal_db
                             - float(self._gain_db))
             self.smeter_level.emit(level_db)

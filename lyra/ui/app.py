@@ -154,6 +154,14 @@ class MainWindow(QMainWindow):
             self.radio.autoload_nr1_settings()
         except Exception as exc:
             print(f"[app] NR1 autoload error: {exc}")
+        # NR mode + AEPF — new operator-facing controls (post-2026-05-07
+        # NR-UX overhaul) that replace the legacy NR1/NR2 backend
+        # dropdown.  Legacy nr/profile values migrate to equivalent
+        # NR mode automatically.  AEPF defaults ON.
+        try:
+            self.radio.autoload_nr_mode_settings()
+        except Exception as exc:
+            print(f"[app] NR mode autoload error: {exc}")
         # LMS (NR3 line enhancer) — independent stage in the chain.
         # Has its own enable flag and strength slider, persisted
         # under noise/lms_*.

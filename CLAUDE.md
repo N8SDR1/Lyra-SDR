@@ -1199,39 +1199,90 @@ arithmetic is GIL-free C now. That's the architectural fix that
 ended the click / motorboat saga: Python's writer / sink threads
 no longer compete with the DSP for the GIL.
 
-### 14.4 Deferred work tracked here so it doesn't get lost
+### 14.4 Deferred / open work — RX1 polish push 2026-05-07 status
 
-1. **PC Soundcard CPU optimization.** Today `lyra/dsp/rmatch.py`
-   and `lyra/dsp/varsamp.py` are pure-Python implementations of
-   the PI control loop and variable-rate resampler that
-   compensate for HL2-vs-soundcard clock drift. They run per-
-   sample with numpy and consume meaningful CPU — operator
-   reports PC Soundcard mode is ~2× HL2-jack-mode CPU. Native
-   equivalents exist in the bundled DLL; cffi-port `rmatch`
-   and `varsamp` to use them. Originally the §13.3 plan; now
-   straightforward since the DLL is already loaded.
+**Items done this session (2026-05-07 RX1 polish):**
 
-2. **NB (noise blanker) wiring.** Add `create_nob` / `create_anb`
-   to `wdsp_native._CDEF` plus default-config calls inside
-   `Radio._open_wdsp_rx` so `SetEXTNOBRun` / `SetEXTANBRun`
-   become safe to call. Then re-enable the wiring in
-   `Radio.set_nb_profile` (currently commented out with a note).
+1. ~~**PC Soundcard CPU optimization.**~~ ✓ DONE — `WdspRMatch`
+   class in `lyra/dsp/rmatch.py` cffi-wraps the bundled DLL's
+   `xrmatchIN`/`xrmatchOUT`.  `SoundDeviceSink` picks it
+   automatically when WDSP loads, falls back to pure-Python
+   `RMatch` otherwise.  Operator-confirmed CPU very close to
+   HL2-jack mode.
 
-3. **Manual notches.** Add `NotchDB*` cffi bindings, route
-   Lyra's notch-bank UI to write notches into WDSP's notch
-   database, run via the bandpass collective.
+2. ~~**NB (noise blanker) wiring.**~~ ✓ DONE — `create_nob`/
+   `create_anb` cffi bindings added; `RxChannel.init_blankers`
+   runs in `__init__`; `xnobEXT`/`xanbEXT` actually splice into
+   the IQ path before `fexchange0` (the `SetEXTNOBRun(1)` flag
+   alone is just a marker).  Profile mapping (off/light/medium/
+   heavy/custom) drives NOB threshold via `_push_wdsp_nb_state`.
 
-4. **Captured noise profile + APF + Leveler + BIN.** Decide
-   per-module whether to wire to WDSP equivalents or run as
-   Python post-processing. Each is independent.
+3. ~~**Manual notches.**~~ ✓ DONE — `RXANBPAddNotch` /
+   `RXANBPDeleteNotch` / `RXANBPSetNotchesRun` /
+   `RXANBPSetTuneFrequency` wired through
+   `RxChannel.set_notches` / `set_notches_master_run` /
+   `set_notch_tune_frequency`, hooked into `notches_changed`
+   signal in radio.py.
+
+4. **Captured noise profile + APF + Leveler + BIN — split decisions.**
+   - **APF** ✓ WIRED via WDSP `SetRXABiQuad*` (the SPEAK biquad).
+     Mode-gated to CWU/CWL.  Operator-confirmed "+12 dB measured
+     at +12.2 dB" working.
+   - **BIN** ✓ WIRED as Python post-processing on WDSP's stereo
+     output, in BOTH HL2 audio jack and PC Sound paths.  PC Sound
+     required complex-rmatch routing (L into I, R into Q) so
+     channels survive rate-matching independent.
+   - **Leveler** ✓ DROPPED — WDSP AGC subsumes it.
+   - **Captured noise profile** ⚠️ **CAPTURE-WORKS-APPLY-INERT**
+     (see §14.6 below).  Capture button still saves profiles to
+     disk in WDSP mode.  Spectral-subtraction-apply is NOT wired
+     — three rounds of fixes (post-WDSP nr2 pass + temporal
+     smoothing + auto-VAD) didn't eliminate audible artifacts.
+     Operator visible flag at toggle time + status-bar message.
 
 5. **Cleanup pass.** Once RX/TX/PS are all on the native engine,
-   audit `lyra/dsp/agc_wdsp.py`, `nr.py`, `nr2.py`, `anf.py`,
-   `lms.py`, `demod.py`, `channel.py`, `leveler.py`, `binaural.py`
-   for what's still doing real work vs dead code reachable only
-   via `LYRA_USE_LEGACY_DSP=1`. Move the latter to
-   `lyra/dsp/legacy/` or delete entirely depending on whether
-   the fallback toggle stays as a permanent feature.
+   audit `lyra/dsp/agc_wdsp.py`, `nr.py`, `anf.py`, `lms.py`,
+   `demod.py`, `channel.py`, `leveler.py`, `apf.py` for what's
+   still doing real work vs dead code reachable only via
+   `LYRA_USE_LEGACY_DSP=1`.  Modules to KEEP regardless:
+   `wdsp_native.py`, `wdsp_engine.py`, `audio_sink.py`,
+   `audio_mixer.py`, `binaural.py`, `rmatch.py`, `varsamp.py`,
+   `noise_profile_store.py`, `nr2.py` (used by capture path),
+   `worker.py`, `mix.py`, `squelch.py`.  See
+   `docs/architecture/measurements_and_cleanup.md` for the
+   four-phase plan.
+
+**Items still pending — not started:**
+
+6. **TPDF dither on HL2 audio quantization.** ✓ DONE 2026-05-07
+   — `_quantize_to_int16_be` in `lyra/protocol/stream.py`.
+   Operator-confirmed harshness gone.
+
+7. **S-meter peak-hold smoothing.** ✓ DONE 2026-05-07 —
+   fast-attack/slow-release with ~500 ms decay constant.
+   Operator-tunable via `_SMETER_PEAK_DECAY`.
+
+8. **WDSP-native S-meter switch.** Bigger structural fix per
+   Thetis A/B research: drop the FFT-derived meter, use
+   `_wdsp_rx.get_meter(MeterType.S_PK) + cal + LNA`.  Cal trim
+   would drop from ~+28 dB → ~+1 dB (Thetis HL2 default 0.98).
+   Operator's manual cal of 59.5 dB to match Thetis on WWV is
+   working well enough that this is now optional.  Documented
+   in `docs/architecture/measurements_and_cleanup.md`.
+
+### 14.4.1 Hot points to investigate when picking back up
+
+* See §14.6 for the captured-profile-apply known issue + the
+  IQ-domain architectural plan (NEW — replaces the failed
+  post-WDSP audio-domain attempts).
+* See §14.7 for the NR-mode UX overhaul status (in operator
+  testing as of 2026-05-07 evening).
+* RX2 work (v0.1) needs the audio-mixer plumbing already in
+  `mix.py` to be exercised — we built the foundation but haven't
+  driven a second WDSP channel through it.
+* TX (v0.2) will need a sibling `wdsp_tx_engine.py` modeled on
+  `wdsp_engine.py`, plus the protocol-layer power scaling per
+  `docs/architecture/measurements_and_cleanup.md` §2.2.
 
 ### 14.5 Where to look when something's off
 
@@ -1251,11 +1302,376 @@ no longer compete with the DSP for the GIL.
   Confirm `RxChannel.out_size` matches `in_size * out_rate /
   in_rate` (when in_rate ≥ out_rate).
 
+### 14.6 Known-issue flag — captured-profile-apply inert in WDSP mode
+
+**TL;DR:** in WDSP mode the operator can capture noise profiles
+(Cap button works, profiles save / load / persist), but enabling
+"use captured profile" does NOT apply spectral subtraction to the
+audio.  Capture half works, apply half doesn't.  Operator sees a
+status-bar warning at the moment of toggle.  Legacy mode unchanged.
+
+**What we tried (2026-05-07 evening):**
+1. First pass — wired `nr2.process()` as a Python post-WDSP audio
+   stage, gated on `is_using_captured_source()`.  Operator reported
+   crackle / pop on voice content.
+2. Added temporal smoothing on the Wiener-from-profile gain mask
+   (gated on the existing `musical_noise_smoothing` toggle).
+   Modest improvement; operator still heard artifacts.
+3. Added auto-VAD (`speech_aware = True`) for the WDSP captured-
+   profile path.  Per-block flip caused UI readback inversion
+   (NR1/NR2 labels swapping with VAD/captured), and operator still
+   heard a steady tick + tonal drift even with all NR backends off
+   — proving the artifacts are structural in the path, not parameter-
+   tunable.
+
+**Why fixes didn't stick:**
+
+WDSP's AGC operates inside `fexchange0`.  Audio coming out of WDSP
+is post-AGC, with dynamic levels driven by AGC's gain loop.  When
+we apply spectral subtraction on top of that audio using the
+captured profile (which represents noise levels at capture time),
+the captured noise reference is mismatched against the live audio's
+AGC-modulated noise floor.  The Wiener-from-profile gain math
+swings rapidly per FFT frame in response — that's the tick.  No
+amount of post-processing smoothing fully fixes it because the
+underlying mismatch is between a static captured reference and a
+dynamic live noise floor.
+
+**The right architecture (operator-confirmed direction
+2026-05-07 evening):** feed the captured profile into the IQ
+chain BEFORE WDSP's AGC, NOT as a post-WDSP audio-domain pass.
+Specifically — pre-WDSP IQ-domain spectral subtraction:
+
+* **Capture path:** at capture time, FFT raw IQ blocks (192k or
+  whatever rate is active), accumulate per-bin magnitudes, store
+  as the captured profile.  This captures the IQ baseband noise,
+  NOT audio-domain noise.
+* **Apply path:** at runtime, FFT each IQ block in `_do_demod_wdsp`
+  (or before WDSP's `process()`), subtract the captured profile in
+  IQ-magnitude domain via Wiener-from-profile gain, IFFT back to
+  IQ time domain, then hand the cleaned IQ to `fexchange0`.  This
+  happens BEFORE WDSP's AGC and demod — sidesteps the AGC-mismatch
+  that broke the post-WDSP audio-domain attempts.
+* **Bonus:** IQ-domain captures are MODE-INDEPENDENT (same profile
+  works for SSB/CW/AM/FM since the baseband noise pattern is the
+  same regardless of demod choice).
+* **Cost:** profiles become RATE-SPECIFIC (192k vs 96k vs 48k all
+  need their own profile, since baseband bin structure differs).
+  Profile storage needs a rate field.  `noise_profile_store.py`
+  schema-bump.
+* **Implementation cost:** ~2-3 days of focused work:
+  1. New capture flow tapping IQ pre-WDSP instead of audio post-WDSP
+  2. Apply flow with proper STFT overlap-add to avoid block-boundary
+     artifacts
+  3. Profile storage update for rate-specificity
+  4. Testing across modes / rates / bands
+
+**Operator's preference (2026-05-07 evening):** keep the captured-
+profile feature alive in WDSP mode — it's a Lyra niche they value.
+Park the apply path until we can do IQ-domain properly.  In the
+meantime:
+
+* Cap button still records data + saves profiles to QSettings.
+* Profile manager still loads/lists them.
+* Use-captured-profile toggle fires status-bar warning in WDSP mode.
+* In legacy mode (`LYRA_USE_LEGACY_DSP=1`), captured-profile applies
+  normally as before.
+
+**Other paths previously considered (not preferred):**
+
+1. Patch WDSP to expose `SetRXAEMNRNoiseProfile(channel, mag, n)`
+   or similar.  Requires maintaining a Lyra-flavored WDSP build —
+   ongoing maintenance burden.
+2. Skip captured-profile entirely in WDSP mode permanently.
+   Rejected by operator — feature is wanted.
+
+**When IQ-domain implementation work begins:**
+
+* Read `scratch/wdsp_port_status.md` first for per-attempt fix
+  history (3 failed approaches today) so we don't redo failed
+  paths.
+* See `_do_demod_wdsp` in `radio.py` for where the apply pass
+  USED to live (post-WDSP, audio domain — failed approach).
+* See `Radio.set_nr_use_captured_profile` for the existing
+  runtime status-bar warning.
+* New path: tap IQ in `_do_demod_wdsp` BEFORE `_wdsp_rx.process(iq)`,
+  apply spectral subtraction, hand cleaned IQ to WDSP.  Capture
+  path needs equivalent IQ tap.
+* Block-boundary handling: STFT with 50% overlap-add (Hann window,
+  COLA-perfect reconstruction) — same pattern as `nr2.py`'s
+  audio-domain implementation.
+
+**Operator-visible behavior to preserve:**
+
+* Capture button still works (countdown, save dialog).
+* Captured profiles persist across sessions.
+* Toggle "use captured" on while in WDSP mode → status bar shows
+  "Captured profile is currently INERT in WDSP mode (known issue,
+  needs attention)..." for 6 seconds.
+* In legacy mode (`LYRA_USE_LEGACY_DSP=1`), captured profile
+  applies normally — no regression.
+
+### 14.7 NR-mode UX overhaul (2026-05-07 evening — IN OPERATOR TESTING)
+
+**Background:** operator-driven UX redesign after extensive A/B
+testing showed the legacy NR1/NR2 backend dropdown + dual strength
+sliders was confusing in WDSP mode (sliders mostly inert; backend
+NR1/NR2 sounded similar even though we set different gain methods).
+
+**New model — Thetis-inspired but Lyra-tuned:**
+
+* **NR enable button** → master on/off (existing button repurposed)
+* **NR slider** → 4-position MODE selector (1..4) — replaces the
+  legacy "strength" semantics on the same slider widget
+* **AEPF checkbox** → anti-musical-noise post-filter (new control)
+* **NR2 aggression slider** → HIDDEN entirely in WDSP UI (still
+  constructed for legacy code paths)
+
+**Mode mapping** (see `Radio._NR_MODE_TO_GAIN_METHOD`):
+
+| Mode | gain_method (WDSP) | Character |
+|---|---|---|
+| 1 | 0 (Wiener + SPP) | Smooth, mid-aggressive |
+| 2 | 1 (Wiener simple) | Edgier, more raw subtraction |
+| 3 | 2 (MMSE-LSA) | WDSP default, smoothest **(default)** |
+| 4 | 3 (Trained adaptive) | Most aggressive |
+
+**Files touched:**
+
+* `lyra/radio.py` — `set_nr_mode`, `set_aepf_enabled`,
+  `_push_wdsp_nr_state` rewrite, `autoload_nr_mode_settings`,
+  signals `nr_mode_changed` + `aepf_enabled_changed`.
+* `lyra/dsp/wdsp_engine.py` — already had EMNR/ANR knob methods
+  from earlier Option B work this afternoon.
+* `lyra/dsp/wdsp_native.py` — already had cffi bindings.
+* `lyra/ui/panels.py` — repurposed `nr1_strength_slider` (range
+  changed from 0..100 to 1..4, label "Mode:" instead of "NR
+  strength:"), added `aepf_checkbox`, hid `nr2_agg_slider`
+  layout-wise, slot handlers `_on_nr_mode_slider`,
+  `_on_aepf_checkbox`, `_on_nr_mode_signal`,
+  `_on_aepf_enabled_signal`.
+* `lyra/ui/app.py` — new `autoload_nr_mode_settings` call at
+  startup.
+
+**QSettings migration:**
+
+* `nr/profile = nr2` → `noise/nr_mode = 1`
+* `nr/profile = nr1` (or anything else) → `noise/nr_mode = 3`
+* AEPF defaults ON (`noise/aepf_enabled = True`)
+* Old keys preserved for legacy mode
+
+**NPE dropdown — DONE 2026-05-07 evening.**  Initial design proposed
+"per-mode npe_method differentiation" (each Mode 1-4 fixed to one
+NPE method) but operator pushed for the better answer: surface NPE
+as an OPERATOR-TUNABLE control on the DSP+Audio panel.  Now
+operator picks Mode + AEPF + NPE independently → Lyra exposes more
+WDSP knobs for direct on-air tuning than Thetis / SparkSDR /
+PowerSDR (all hide NPE).  Real differentiator.  Operator-confirmed
+audible difference between OSMS and MCRA.
+
+**Future polish ideas (still on the table):**
+
+1. **Settings → DSP → NR Advanced panel** — expose `ae_zeta_thresh`,
+   `ae_psi`, additional fine-tuning knobs.  Thetis hides these in
+   registry; Lyra could expose them in advanced settings.
+   v0.0.9.6.x or v0.1 polish.
+
+2. **Mode names instead of numbers** — "Smooth/Raw/Default/
+   Aggressive" labels in the UI.  Or numbers + character hint in
+   tooltip (currently does this).
+
+**Operator-confirmed status as of 2026-05-07 late-evening:**
+
+* New UX wired + tested + working on real signals
+* AEPF checkbox = clear audible difference (operator: "no wonder
+  it's hidden and on")
+* NPE dropdown = clear audible difference between OSMS and MCRA
+* Modes 1-2 sound similar (both Wiener variants); Mode 3 = MMSE-LSA
+  smoothest; Mode 4 = "FM-like for SSB" (aggressive trained
+  adaptive — useful but distinctive)
+* LMS slider works (controls ANR step size mu logarithmically)
+* APF works (CW-only, mode-gated)
+* Captured-profile capture path works; apply path inert in WDSP
+  mode (status warning fires); IQ-domain rebuild planned per §14.6
+
+### 14.8 All-mode squelch — WDSP SSQL native (2026-05-07 night)
+
+**TL;DR:** the SQ button in WDSP mode now drives WDSP's native
+SSQL ("Single-mode Squelch Level") for SSB/CW/DIG, plus the
+existing FM-SQ and AM-SQ modules for those modes.  This is the
+WDSP-port-not-Thetis-copy principle in §13.3 applied to squelch:
+WDSP ships SSQL; Lyra calls into it via cffi.  Other WDSP
+consumers happen to use the same module the same way — they're
+sibling consumers of WDSP, not Lyra's reference.  No Python-side
+audio-domain gate — multiple attempts at one all failed because
+WDSP's AGC compresses voice/noise dynamic range to ~1.5-2×
+post-AGC, blinding any audio-RMS gate.
+
+**The journey** (preserved here so future sessions don't repeat
+it):
+
+| Attempt | Approach | Failure mode |
+|---|---|---|
+| 1 | Hand-rolled dBFS RMS gate, slider→absolute threshold | Pre-vs-post-volume position couldn't be calibrated |
+| 2 | Move pre-volume + widen dBFS map to -75..-25 | Loose at top — gate stayed open on noise floor |
+| 3 | Delegate to legacy `AllModeSquelch` (auto-tracked floor + ratio) | Erratic on real signals; floor seeding broke when SQ enabled mid-signal |
+| 4 | Tighten K_OPEN constants for AGC-compressed audio | Closed gate mid-syllable on S9 signals at slider=0.7 |
+| 5 | Smarter seed (1-sec min-window) + reverted track-up tau | Better but still hit-and-miss; root cause was AGC compression in audio domain |
+| 6 | Spectrum-domain SNR gate (pre-AGC FFT signal vs noise floor) | Worked, but operator pointed out WDSP already ships SSQL for exactly this — call WDSP's instead of building parallel |
+| 7 (final) | WDSP SSQL via cffi (`SetRXASSQLRun`/`Threshold`/`TauMute`/`TauUnMute`) | Operator-confirmed working |
+
+**Final config** (in `lyra/radio.py`):
+
+* `_SSQL_SCALE = 0.65` — slider 0..1 multiplied by 0.65 before
+  passing to `SetRXASSQLThreshold`.  WDSP's WU2O-tested-good
+  default is 0.16; with this scale, slider=0.20 → SSQL=0.13
+  (just below WU2O default — comfortable), slider=0.30 → SSQL=0.20
+  (slightly tight).  Direct 1:1 mapping put the operator's
+  typical slider zone above WU2O default = perceived as tight.
+* `_SSQL_TAU_MUTE = 0.7s` — vs WDSP `create_ssql` default 0.1s.
+  WDSP's source comment notes "reasonable wide range is 0.1 to
+  2.0".  WDSP's window detector (`wdaverage`) has a hardcoded
+  0.5s adaptation tau; on quasi-stationary signals (continuous
+  SSB conversation, digital modes) the average converges to the
+  signal level within 1-2 sec → SSQL flags "no signal" → trigger
+  voltage rises toward mute.  With the WDSP default
+  tau_mute=0.1s, that false flag becomes a clamp in 134 ms.  At
+  0.7s, trigger rise is ~940 ms — long enough that brief window-
+  detector convergences don't clamp the gate while genuine end-
+  of-transmission still mutes within ~1 sec of speech ending.
+  Operator-tuned through 1.0s → 0.7s.
+* `_SSQL_TAU_UNMUTE = 0.1s` — matches WDSP default.  Snappy
+  speech-onset response.
+
+**Routing** (`_push_wdsp_squelch_state` in radio.py):
+
+* Mode FM → `SetRXAFMSQRun` (existing FM SQ)
+* Mode AM/SAM/DSB → `SetRXAAMSQRun` + threshold (existing, dB-scaled)
+* Mode SSB/CW/DIG/SPEC → `SetRXASSQLRun` + threshold (NEW)
+* Disables the inactive modules to prevent crosstalk
+* Called from `set_squelch_enabled` (operator toggle),
+  `set_mode` (handoff between FM ↔ AM ↔ SSQL on mode change),
+  and `_open_wdsp_rx` (initial state on stream start)
+
+**Cffi bindings** (`lyra/dsp/wdsp_native.py`): `SetRXASSQLRun`,
+`SetRXASSQLThreshold`, `SetRXASSQLTauMute`, `SetRXASSQLTauUnMute`.
+**Engine wrappers** (`lyra/dsp/wdsp_engine.py`): `RxChannel.set_ssql_*`
+methods on the `RxChannel` class.
+
+**Files no longer in WDSP audio path** (legacy fallback —
+**DEPRECATED**, see §14.9 below):
+
+* `lyra/dsp/squelch.py` (`AllModeSquelch`) — only runs when
+  `LYRA_USE_LEGACY_DSP=1`.  Constants reverted to original
+  `K_OPEN_BASE=1.5 / K_OPEN_RANGE=6.0` / 150 ms seed.
+
+**Hot points to remember if it comes back up:**
+
+* Don't reach for a Python-side audio-domain gate.  The whole
+  arc proved this can't work — AGC compresses signal/noise to
+  the point that no audio-RMS threshold reliably distinguishes.
+* If operator perception drifts again, the knobs are
+  `_SSQL_SCALE` (overall slider feel), `_SSQL_TAU_MUTE` (clamp
+  delay on convergence transients), `_SSQL_TAU_UNMUTE` (unmute
+  responsiveness).  WDSP's `wdtau` (window-detector adaptation
+  speed) is hardcoded inside the DLL at 0.5 sec — would need a
+  WDSP rebuild to change.
+
+### 14.9 Legacy pure-Python DSP path — DEPRECATED
+
+**Status (2026-05-07 night):** the `LYRA_USE_LEGACY_DSP=1`
+environment-variable escape hatch is **deprecated and scheduled
+for removal**.  WDSP is the only supported DSP path going
+forward.
+
+**Why deprecated:**
+
+1. **Users can't reach it.** Lyra ships as a Windows EXE built
+   by PyInstaller + Inno Setup.  End users never see a console
+   to set environment variables — the legacy path can't be
+   invoked by anyone except the developer running from source.
+2. **It anchors refactor decisions.**  Every change to
+   `radio.py` / `channel.py` / `worker.py` has to keep the
+   legacy branch working, slowing the WDSP path's progress.
+3. **It's a trust crutch, not a real fallback.**  When something
+   breaks in WDSP, the temptation to "set the env var as a
+   workaround" delays fixing the actual bug AND lets bit rot
+   accumulate in a path nobody actually exercises.
+4. **TX/PS won't use it.**  v0.2 (TX) and v0.3 (PureSignal) will
+   call WDSP's TX-side and PS-side modules directly — they don't
+   need the pure-Python DSP modules at all.  No "we might need
+   this for TX" argument keeps the legacy alive.
+
+**Pure-legacy modules** (only reached via `LYRA_USE_LEGACY_DSP=1`,
+~3,200 lines total — scheduled for deletion):
+
+* `lyra/dsp/agc_wdsp.py` (746) — Python port of WDSP wcpAGC
+* `lyra/dsp/demod.py` (528) — Python demods (USB/LSB/AM/FM/CW)
+* `lyra/dsp/nb.py` (472) — Python noise blanker
+* `lyra/dsp/lms.py` (459) — Python LMS adaptive line enhancer
+* `lyra/dsp/anf.py` (395) — Python auto-notch filter
+* `lyra/dsp/leveler.py` (355) — Python audio leveler
+* `lyra/dsp/apf.py` (251) — Python audio peaking filter
+
+**Hybrid modules** (state container in WDSP mode + DSP body in
+legacy mode — DSP body becomes deletable when legacy is removed):
+
+* `lyra/dsp/channel.py` (933) — `_rx_channel.process()` body is
+  unused in WDSP mode; setters/state still referenced.  Slim to
+  state container on legacy removal.
+* `lyra/dsp/squelch.py` (419) — `AllModeSquelch.process()` body
+  unused in WDSP mode (WDSP SSQL handles all-mode squelch).
+  Object instance + setters still referenced as state shadow.
+* `lyra/dsp/worker.py` (781) — has WDSP and legacy branches;
+  legacy branch deletable.
+
+**Modules NOT legacy** (still essential to the WDSP audio path
+or shared DSP — KEEP):
+
+* `wdsp_native.py`, `wdsp_engine.py` — cffi bridge + wrapper
+* `audio_sink.py`, `audio_mixer.py` — output + RX1+RX2 mix
+* `binaural.py` — Python BIN post-WDSP (still post-processing)
+* `rmatch.py`, `varsamp.py` — adaptive resampler for PC sound
+* `mix.py` — pan curve for RX2 (v0.1)
+* `noise_profile_store.py` — captured-profile management
+* `nr.py` (1256), `nr2.py` (1496) — used by capture path
+  (operator presses Cap → mono audio fed to nr1.process() with
+  enabled=False to drive the FFT magnitude accumulator).  Stays
+  until captured-profile IQ-domain rebuild lands per §14.6.
+
+**Cleanup options when scheduled:**
+
+* **Option B (quarantine):** move pure-legacy modules to
+  `lyra/dsp/_legacy/` with deprecation headers.  ~30 min of
+  work; deletion follows in a later sprint.
+* **Option C (burn it down):** delete the 7 pure-legacy modules,
+  strip the env-var branch from `radio.py` / `worker.py`, slim
+  `channel.py` to a state container, slim `squelch.py` or
+  delete entirely.  ~2-3 hours; ~3,500-4,000 lines removed.
+
+When this work happens, also:
+
+* Update `lyra/dsp/__init__.py` if any module names change.
+* Sweep CLAUDE.md for `LYRA_USE_LEGACY_DSP` references and
+  remove (today's grep finds 7 sites).
+* Remove the "fallback" framing from §14.4 cleanup-pass notes.
+* Verify TX (v0.2) work has no implicit dependency on legacy
+  before deletion lands.
+
 ---
 
-*Last updated: 2026-05-06 evening — added §14 after RX1 audio
-chain went live on the native engine, USB/LSB/AM all confirmed
-correct on real signals, AGC gain readout restored. Earlier
-2026-05-06: §13 audio architecture decision; 2026-05-02 senior-
-engineering pass that produced `implementation_playbook.md`.
-Update this file when key decisions change.*
+*Last updated: 2026-05-07 night — added §14.8 (WDSP SSQL all-mode
+squelch architecture, operator-confirmed working) and §14.9
+(legacy pure-Python DSP path deprecated, deletion scheduled).
+Earlier same day: §14.7 NR-mode UX overhaul (in operator
+testing) + extended §14.6 with the IQ-domain
+overhaul, in operator testing) + extended §14.6 with the IQ-domain
+captured-profile architectural plan (operator-confirmed direction
+to keep the feature alive).  Earlier 2026-05-07: RX1 polish push
+(1-5 + APF + BIN-PC-Sound + dither + S-meter peak-hold + capture-
+feed + captured-profile-apply revert + LMS slider wiring + EMNR
+gainMethod + AEPF cffi bindings).  Earlier 2026-05-06: §14 added
+when RX1 went live on the native engine.  Earlier 2026-05-06: §13
+audio architecture decision; 2026-05-02 senior-engineering pass
+that produced `implementation_playbook.md`.  Update this file when
+key decisions change.*

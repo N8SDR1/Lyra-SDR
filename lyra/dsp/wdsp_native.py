@@ -115,6 +115,44 @@ void SetRXAFMSQRun(int channel, int run);
 void SetRXAAMSQRun(int channel, int run);
 void SetRXAAMSQThreshold(int channel, double threshold);
 
+/* SSQL — WDSP's all-mode "Single-mode Squelch Level" voice-activity
+   detector.  Used by Thetis for SSB / CW / DIG modes (FM has its
+   own FMSQ, AM has its own AMSQ).  SSQL is a frequency-to-voltage
+   converter feeding a window detector + trigger — works on the
+   pre-AGC IQ envelope, so AGC compression doesn't blind it the way
+   audio-domain RMS gates get blinded.
+   threshold: 0.0..1.0, WU2O-tested default 0.16
+   tau_mute / tau_unmute: seconds, 0.1 default both directions */
+void SetRXASSQLRun(int channel, int run);
+void SetRXASSQLThreshold(int channel, double threshold);
+void SetRXASSQLTauMute(int channel, double tau_mute);
+void SetRXASSQLTauUnMute(int channel, double tau_unmute);
+
+/* EMNR live-tuning — exposes WDSP's noise-reducer knobs that
+   determine sonic character.  WDSP defaults: gain_method=2 (MMSE-LSA),
+   npe_method=0, ae_run=1 (AEPF on; reduces musical noise).
+   Operator visibility: gain_method gives genuinely different
+   character per setting; AEPF on/off changes how aggressive the
+   musical-noise smoothing is. */
+void SetRXAEMNRgainMethod(int channel, int method);
+void SetRXAEMNRnpeMethod(int channel, int method);
+void SetRXAEMNRaeRun(int channel, int run);
+void SetRXAEMNRaeZetaThresh(int channel, double zetathresh);
+void SetRXAEMNRaePsi(int channel, double psi);
+void SetRXAEMNRtrainZetaThresh(int channel, double thresh);
+void SetRXAEMNRtrainT2(int channel, double t2);
+
+/* ANR (LMS adaptive line enhancer) live-tuning — gain ≡ LMS step
+   size (the "mu" / aggression knob); leakage is the leak factor
+   (controls stability vs adaptation speed); taps = filter length;
+   delay = decorrelation delay.  WDSP defaults: taps=64, delay=16,
+   gain=0.0001, leakage=0.1. */
+void SetRXAANRVals(int channel, int taps, int delay, double gain, double leakage);
+void SetRXAANRTaps(int channel, int taps);
+void SetRXAANRDelay(int channel, int delay);
+void SetRXAANRGain(int channel, double gain);
+void SetRXAANRLeakage(int channel, double leakage);
+
 /* Noise blanker is exposed at the EXT (top-of-channel) layer in WDSP, not
    per-RXA, because it operates on raw I/Q before the RXA chain. */
 void SetEXTNOBRun(int channel, int run);
@@ -153,6 +191,161 @@ double GetRXAMeter(int channel, int mt);
 void SetTXAMode(int channel, int mode);
 void SetTXABandpassFreqs(int channel, double low, double high);
 void SetTXAPanelGain1(int channel, double gain);
+
+/* ----- rmatch (rmatch.c) ------------------------------------------------ */
+
+/*
+ * Adaptive variable-rate resampler with PI control loop, used to bridge
+ * the dual-clock drift between Lyra's nominal 48 kHz audio rate and the
+ * PC sound card's actual rate.  Lyra previously had a pure-Python port
+ * of this module (lyra/dsp/rmatch.py + varsamp.py); v0.0.9.6 wires the
+ * native DLL implementation through cffi to recover ~50% of the CPU
+ * the PC Soundcard audio path was burning in numpy per-sample loops.
+ *
+ * Buffer convention: in/out are interleaved I/Q complex doubles, i.e.
+ *   in:  2 * insize  doubles, [I0,Q0, I1,Q1, ...]  per xrmatchIN call
+ *   out: 2 * outsize doubles, [I0,Q0, I1,Q1, ...]  per xrmatchOUT call
+ * For mono audio (Lyra's PC Sound case), feed Q=0 on input and read
+ * the I component on output.
+ *
+ * `create_rmatchV` is the convenience constructor that fills in WDSP's
+ * default tuning for ff_alpha / prop gains / ringmins+maxes / R / etc.
+ * After creation, fine-tune with the setters.
+ */
+void* create_rmatchV(int in_size, int out_size, int nom_inrate,
+                     int nom_outrate, int ringsize, double var);
+void destroy_rmatchV(void* ptr);
+
+void xrmatchIN(void* b, double* in_buf);
+void xrmatchOUT(void* b, double* out_buf);
+
+void setRMatchInsize(void* ptr, int insize);
+void setRMatchOutsize(void* ptr, int outsize);
+void setRMatchNomInrate(void* ptr, int nom_inrate);
+void setRMatchNomOutrate(void* ptr, int nom_outrate);
+void setRMatchRingsize(void* ptr, int ringsize);
+
+void getRMatchDiags(void* b, int* underflows, int* overflows,
+                    double* var, int* ringsize, int* nring);
+void resetRMatchDiags(void* b);
+void forceRMatchVar(void* b, int force, double fvar);
+
+void setRMatchFeedbackGain(void* b, double feedback_gain);
+void setRMatchSlewTime(void* b, double slew_time);
+void setRMatchSlewTime1(void* b, double slew_time);
+void setRMatchPropRingMin(void* ptr, int prop_min);
+void setRMatchPropRingMax(void* ptr, int prop_max);
+void setRMatchFFRingMin(void* ptr, int ff_ringmin);
+void setRMatchFFRingMax(void* ptr, int ff_ringmax);
+void setRMatchFFAlpha(void* ptr, double ff_alpha);
+void getControlFlag(void* ptr, int* control_flag);
+
+/* ----- EXT noise blankers (nob.c / nobII.c) ----------------------------- */
+
+/*
+ * The EXT noise blankers operate on raw I/Q before the RXA chain.
+ * They are NOT created automatically by OpenChannel — calling
+ * SetEXTNOBRun / SetEXTANBRun on an uninitialized blanker segfaults
+ * the DLL.  Lyra calls create_anbEXT / create_nobEXT once per
+ * channel during _open_wdsp_rx.
+ *
+ *   id              channel index, same space as OpenChannel
+ *   run             initial run state (0 = bypass, 1 = active)
+ *   mode            (NOB only) 0..3 — see Thetis NB2Mode for meanings
+ *   buffsize        same as in_size used for OpenChannel
+ *   samplerate      same as in_rate used for OpenChannel
+ *   tau / advtime / hangtime / backtau / threshold:
+ *     standard ANB / NOB tuning. Defaults that work for HL2-class
+ *     impulse noise are listed in wdsp_engine.RxChannel below.
+ */
+void create_anbEXT(int id, int run, int buffsize, double samplerate,
+                   double tau, double hangtime, double advtime,
+                   double backtau, double threshold);
+void destroy_anbEXT(int id);
+void flush_anbEXT(int id);
+
+void create_nobEXT(int id, int run, int mode, int buffsize, double samplerate,
+                   double slewtime, double hangtime, double advtime,
+                   double backtau, double threshold);
+void destroy_nobEXT(int id);
+void flush_nobEXT(int id);
+
+/*
+ * EXT blankers process the raw IQ in-place outside the RXA chain.
+ * SetEXTNOBRun / SetEXTANBRun ONLY set the run flag inside the
+ * blanker struct — they do NOT splice the blanker into fexchange0.
+ * Lyra has to call xnobEXT / xanbEXT explicitly on the IQ buffer
+ * BEFORE handing it to fexchange0; that's where the actual
+ * impulse-noise blanking happens.  When run=0, xnobEXT is still
+ * safe to call — but the output buffer is left untouched (NOT
+ * copied from input), so callers must check the run flag in
+ * Python and skip the call if neither blanker is active.
+ */
+void xnobEXT(int id, double* in_buf, double* out_buf);
+void xanbEXT(int id, double* in_buf, double* out_buf);
+
+/* Runtime EXT-blanker setters — used by the operator's NB profile
+   slider to nudge threshold without recreating the blanker.  The
+   create-side defaults handle most operating conditions; operator
+   typically only adjusts threshold from "light" to "heavy" presets. */
+void SetEXTNOBTau(int id, double tau);
+void SetEXTNOBHangtime(int id, double time);
+void SetEXTNOBAdvtime(int id, double time);
+void SetEXTNOBBacktau(int id, double tau);
+void SetEXTNOBThreshold(int id, double thresh);
+void SetEXTNOBMode(int id, int mode);
+
+void SetEXTANBTau(int id, double tau);
+void SetEXTANBHangtime(int id, double time);
+void SetEXTANBAdvtime(int id, double time);
+void SetEXTANBBacktau(int id, double tau);
+void SetEXTANBThreshold(int id, double thresh);
+
+/* ----- APF (Audio Peaking Filter, RXA SPEAK stage in iir.c) ------------- */
+
+/*
+ * Single-peak resonant boost centered on the operator's CW pitch.
+ * Wired into the RXA chain as the "biquad" stage (WDSP terminology
+ * — it's actually a higher-order resonator with multiple stages
+ * configured via internal nstages).  Used by ham operators who like
+ * a louder, narrower boost on the CW tone for easier copy.
+ *
+ *   freq        center frequency (Hz)
+ *   bw          -3 dB bandwidth (Hz)
+ *   gain        LINEAR gain multiplier — operator dB converted to
+ *               linear via 10^(dB/20) before passing in
+ */
+void SetRXABiQuadRun(int channel, int run);
+void SetRXABiQuadFreq(int channel, double freq);
+void SetRXABiQuadBandwidth(int channel, double bw);
+void SetRXABiQuadGain(int channel, double gain);
+
+/* ----- Notch database (nbp.c) ------------------------------------------ */
+
+/*
+ * RXA notch database: each RX channel owns a notchdb that the front-of-
+ * chain bandpass (NBP0) consults.  Manual operator-driven notches map
+ * directly onto this database.
+ *
+ *   channel       RX channel index
+ *   notch         notch slot index (0..maxnotches-1)
+ *   fcenter       center frequency (Hz, signed — negative for LSB)
+ *   fwidth        notch width (Hz, positive)
+ *   active        0 = ignore this slot, 1 = apply it
+ *
+ * Add/Edit/Delete return 0 on success, -1 on error (e.g. bad index).
+ * RXANBPSetNotchesRun is the master notch-engine on/off switch — must
+ * be 1 for any individual notches to actually attenuate.
+ * RXANBPSetTuneFrequency tells the notch engine the current VFO so
+ * that absolute notch frequencies map correctly onto baseband.
+ */
+int  RXANBPAddNotch(int channel, int notch, double fcenter, double fwidth, int active);
+int  RXANBPGetNotch(int channel, int notch, double* fcenter, double* fwidth, int* active);
+int  RXANBPDeleteNotch(int channel, int notch);
+int  RXANBPEditNotch(int channel, int notch, double fcenter, double fwidth, int active);
+void RXANBPGetNumNotches(int channel, int* nnotches);
+void RXANBPSetNotchesRun(int channel, int run);
+void RXANBPSetTuneFrequency(int channel, double tunefreq);
 """
 
 

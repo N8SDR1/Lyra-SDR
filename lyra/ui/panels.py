@@ -10,9 +10,9 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QHBoxLayout, QInputDialog, QLabel,
-    QLineEdit, QMenu, QPushButton, QSizePolicy, QSlider, QSpinBox,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QInputDialog,
+    QLabel, QLineEdit, QMenu, QPushButton, QSizePolicy, QSlider,
+    QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 
@@ -1801,38 +1801,102 @@ class DspPanel(GlassPanel):
         # below.  Visible when active NR backend is NR1 (the
         # classical spectral-subtraction path).  Maps slider 0..100
         # to NR1 strength 0.0..1.0 (parallel to NR2's 0..150 → 0..1.5).
-        self._nr1_label_widget = QLabel("NR strength:")
+        # NR Mode selector (post-2026-05-07 NR-UX overhaul).
+        # The legacy "NR strength" slider is repurposed as a 1..4
+        # mode selector that drives WDSP's EMNR gain_method.  The
+        # variable is still named nr1_strength_slider for stylesheet
+        # / Qt-name compatibility but it now selects MODE not strength.
+        # See Radio._NR_MODE_TO_GAIN_METHOD for the mapping:
+        #   Mode 1 → Wiener+SPP (smooth, mid-aggressive)
+        #   Mode 2 → Wiener simple (edgier, more raw subtraction)
+        #   Mode 3 → MMSE-LSA (WDSP default, smoothest) ← default
+        #   Mode 4 → Trained adaptive (newest, most aggressive)
+        self._nr1_label_widget = QLabel("Mode:")
         self._nr1_label_widget.setStyleSheet(
             "color: #cdd9e5; font-family: 'Segoe UI', sans-serif; "
             "font-size: 11px;")
         self.nr1_strength_slider = QSlider(Qt.Horizontal)
-        self.nr1_strength_slider.setRange(0, 100)
+        self.nr1_strength_slider.setRange(1, 4)
         self.nr1_strength_slider.setValue(
-            int(round(radio.nr1_strength * 100)))
-        self.nr1_strength_slider.setSingleStep(5)
-        self.nr1_strength_slider.setPageStep(25)
+            int(getattr(radio, "nr_mode", 3)))
+        self.nr1_strength_slider.setSingleStep(1)
+        self.nr1_strength_slider.setPageStep(1)
         self.nr1_strength_slider.setTickPosition(QSlider.TicksBelow)
-        self.nr1_strength_slider.setTickInterval(25)
-        self.nr1_strength_slider.setFixedWidth(160)
+        self.nr1_strength_slider.setTickInterval(1)
+        self.nr1_strength_slider.setFixedWidth(120)
         self.nr1_strength_slider.setToolTip(
-            "NR (classical) suppression strength.\n"
-            "  0   = barely-on, subtle hiss reduction\n"
-            "  50  = balanced (= old 'Medium' preset)\n"
-            "  100 = aggressive deep subtraction\n"
+            "NR mode (1..4) — picks WDSP's EMNR gain function.\n"
+            "  Mode 1 = Wiener + SPP soft mask (smooth, mid)\n"
+            "  Mode 2 = Wiener simple (edgier subtraction)\n"
+            "  Mode 3 = MMSE-LSA (WDSP default, smoothest) [default]\n"
+            "  Mode 4 = Trained adaptive (most aggressive)\n"
             "\n"
-            "Tick marks at 25 / 50 / 75 / 100 are convenient anchor "
-            "points (= old Light / Medium / Heavy / Heavy presets).\n"
-            "\n"
-            "Right-click the NR button to switch between NR (classical) "
-            "and NR2 (high-quality MMSE-LSA).")
+            "AEPF (anti-musical-noise) checkbox is separate.\n"
+            "Try AEPF off + different modes to find your best sound.")
         self.nr1_strength_slider.valueChanged.connect(
-            self._on_nr1_strength_slider)
+            self._on_nr_mode_slider)
         self.nr1_strength_label = QLabel(
-            f"{int(round(radio.nr1_strength * 100))} %")
-        self.nr1_strength_label.setFixedWidth(40)
+            f"{int(getattr(radio, 'nr_mode', 3))}")
+        self.nr1_strength_label.setFixedWidth(20)
         self.nr1_strength_label.setStyleSheet(
             "color: #50d0ff; font-family: Consolas, monospace; "
             "font-weight: 700; font-size: 11px;")
+        # AEPF (Adaptive Equalization Post-Filter) toggle — anti-
+        # musical-noise smoother on EMNR's gain mask.  Default ON
+        # because the un-AEPF residual is noticeably more "watery."
+        # Operator can disable to A/B raw EMNR character on clean
+        # bands where the smoothing isn't needed.  (QCheckBox +
+        # QComboBox come from the module-level import at top —
+        # earlier I imported them locally which shadowed QComboBox
+        # for the whole method and crashed line 1350's
+        # `self.out_combo = QComboBox()` with UnboundLocalError.)
+        self.aepf_checkbox = QCheckBox("AEPF")
+        self.aepf_checkbox.setChecked(
+            bool(getattr(radio, "aepf_enabled", True)))
+        self.aepf_checkbox.setToolTip(
+            "Adaptive Equalization Post-Filter — reduces musical-noise\n"
+            "artifacts in NR output.  ON (default) gives smoother,\n"
+            "less 'watery' character.  OFF gives raw EMNR — cleaner\n"
+            "noise floor on quiet bands but more pronounced subtraction\n"
+            "residue on noisier ones.")
+        self.aepf_checkbox.setStyleSheet(
+            "color: #cdd9e5; font-family: 'Segoe UI', sans-serif; "
+            "font-size: 11px;")
+        self.aepf_checkbox.toggled.connect(self._on_aepf_checkbox)
+
+        # NPE — Noise Power Estimator — operator picks how WDSP's
+        # EMNR tracks the noise floor.  Surfacing this knob is one
+        # of Lyra's WDSP-UX differentiators (other clients hide it).
+        # Two-method dropdown:
+        #   OSMS — recursive averaging (WDSP default, smoother)
+        #   MCRA — Minimum-Controlled Recursive Avg (faster-tracking)
+        self._npe_label_widget = QLabel("NPE:")
+        self._npe_label_widget.setStyleSheet(
+            "color: #cdd9e5; font-family: 'Segoe UI', sans-serif; "
+            "font-size: 11px;")
+        self.npe_combo = QComboBox()
+        self.npe_combo.addItem("OSMS", 0)
+        self.npe_combo.addItem("MCRA", 1)
+        self.npe_combo.setCurrentIndex(
+            int(getattr(radio, "npe_method", 0)))
+        self.npe_combo.setFixedWidth(80)
+        self.npe_combo.setToolTip(
+            "NPE — Noise Power Estimator\n"
+            "\n"
+            "  OSMS  Recursive averaging (default).\n"
+            "        Smoother tracking, best for stationary noise\n"
+            "        (atmospheric, broadband ambient hiss).\n"
+            "\n"
+            "  MCRA  Minimum-Controlled Recursive Averaging.\n"
+            "        Faster-tracking, better for non-stationary\n"
+            "        noise (changing band conditions, intermittent\n"
+            "        QRM).")
+        self.npe_combo.setStyleSheet(
+            "QComboBox {"
+            "  color: #cdd9e5; font-family: 'Segoe UI', sans-serif; "
+            "  font-size: 11px;"
+            "}")
+        self.npe_combo.currentIndexChanged.connect(self._on_npe_combo)
 
         # Build NR2 strength widgets — added to the row dynamically
         # below depending on whether NR2 is active.
@@ -1995,16 +2059,28 @@ class DspPanel(GlassPanel):
         nr_status_row = QHBoxLayout()
         nr_status_row.setContentsMargins(0, 0, 0, 0)
         nr_status_row.setSpacing(6)
-        # Both NR1 and NR2 strength widgets occupy the same slot —
-        # only one set is visible at a time depending on which
-        # backend is active.  NR1 widgets first, then NR2; visibility
-        # is set below + maintained on nr_profile_changed.
+        # NR-UX overhaul (2026-05-07): the legacy NR1 strength
+        # slider is repurposed as Mode selector (1..4); NR2
+        # aggression slider is HIDDEN entirely (it was only ever
+        # active when nr_profile == "nr2", which the new model
+        # collapses into Mode 1).  AEPF checkbox + NPE dropdown
+        # sit alongside the mode slider for one-click NR character
+        # tuning.  All three (Mode + AEPF + NPE) are NR character
+        # knobs — Cap button + source badge are noise-reference
+        # controls (orthogonal concept).
         nr_status_row.addWidget(self._nr1_label_widget)
         nr_status_row.addWidget(self.nr1_strength_slider)
         nr_status_row.addWidget(self.nr1_strength_label)
-        nr_status_row.addWidget(self._nr2_label_widget)
-        nr_status_row.addWidget(self.nr2_agg_slider)
-        nr_status_row.addWidget(self.nr2_agg_label)
+        nr_status_row.addSpacing(8)
+        nr_status_row.addWidget(self.aepf_checkbox)
+        nr_status_row.addSpacing(4)
+        nr_status_row.addWidget(self._npe_label_widget)
+        nr_status_row.addWidget(self.npe_combo)
+        # Legacy NR2 widgets stay constructed for code compatibility
+        # but are not added to the layout — they don't appear in the
+        # UI under the new model.  In legacy mode they're unreachable
+        # via UI but operator can still drive nr2_aggression via
+        # CAT/TCI for backward compat.
         nr_status_row.addSpacing(8)
         nr_status_row.addWidget(self.nr_cap_btn)
         nr_status_row.addWidget(self.nr_source_badge)
@@ -2028,14 +2104,17 @@ class DspPanel(GlassPanel):
         # don't try to fill horizontal space.
         nr_status_row.addStretch(1)
         self.content_layout().addLayout(nr_status_row)
-        # Apply initial visibility based on current NR backend.
-        is_nr2 = (radio.nr_profile == "nr2")
-        self._nr1_label_widget.setVisible(not is_nr2)
-        self.nr1_strength_slider.setVisible(not is_nr2)
-        self.nr1_strength_label.setVisible(not is_nr2)
-        self._nr2_label_widget.setVisible(is_nr2)
-        self.nr2_agg_slider.setVisible(is_nr2)
-        self.nr2_agg_label.setVisible(is_nr2)
+        # NR-UX overhaul: Mode + AEPF always visible (the new model
+        # has a single mode selector, not branched by backend).
+        # Legacy NR2 widgets stay hidden (they're not in the layout
+        # but ensure setVisible(False) for any code path that might
+        # query them).
+        self._nr1_label_widget.setVisible(True)
+        self.nr1_strength_slider.setVisible(True)
+        self.nr1_strength_label.setVisible(True)
+        self._nr2_label_widget.setVisible(False)
+        self.nr2_agg_slider.setVisible(False)
+        self.nr2_agg_label.setVisible(False)
         # LMS slider visibility tied to LMS enable state.
         lms_visible = bool(radio.lms_enabled)
         self._lms_label_widget.setVisible(lms_visible)
@@ -2054,6 +2133,11 @@ class DspPanel(GlassPanel):
             self._on_nr1_strength_signal)
         radio.nr2_aggression_changed.connect(
             self._on_nr2_agg_signal)
+        # NR-UX overhaul: mirror Radio's mode + AEPF + NPE state
+        # into the new widgets.
+        radio.nr_mode_changed.connect(self._on_nr_mode_signal)
+        radio.aepf_enabled_changed.connect(self._on_aepf_enabled_signal)
+        radio.npe_method_changed.connect(self._on_npe_method_signal)
         radio.squelch_threshold_changed.connect(
             self._on_sq_threshold_signal)
         radio.squelch_enabled_changed.connect(
@@ -2317,55 +2401,54 @@ class DspPanel(GlassPanel):
     }
 
     def _show_nr_menu(self, pos):
-        """Right-click on the NR button — backend picker.
+        """Right-click on the NR button — Mode 1..4 + AEPF + enable/disable.
 
-        Pre-2026-05-01 this also offered Light/Medium/Heavy strength
-        tiers, but those were replaced by a continuous slider so the
-        menu is now backend-only (parallel UX to NR2's slider-only
-        knob).  Operator picks the algorithm here, dials in strength
-        on the inline slider.
+        Post-2026-05-07 NR-UX overhaul: the legacy NR1/NR2/Neural
+        backend picker is gone; the menu now mirrors the inline
+        Mode slider + AEPF checkbox.  Operator can pick mode here
+        as a quick-access alternative to the slider, plus toggle
+        AEPF and master enable.
         """
         btn = self.dsp_btns["NR"]
         menu = QMenu(self)
-        current = self.radio.nr_profile
-        # Operators upgrading from the old build may have a legacy
-        # name (light/medium/heavy) saved as nr_profile until they
-        # touch the slider once — treat any of those as nr1 for the
-        # checkmark display.
-        if current in ("light", "medium", "heavy", "aggressive",
-                       "captured"):
-            current = "nr1"
-
-        # Classical NR1 (spectral subtraction).
-        nr1_act = QAction(self._NR_PROFILE_LABELS["nr1"], menu)
-        nr1_act.setCheckable(True)
-        nr1_act.setChecked(current == "nr1")
-        nr1_act.triggered.connect(
-            lambda _=False: self.radio.set_nr_profile("nr1"))
-        menu.addAction(nr1_act)
-
-        # NR2 — Ephraim-Malah MMSE-LSA (Phase 3.D #4).
-        nr2_act = QAction(self._NR_PROFILE_LABELS["nr2"], menu)
-        nr2_act.setCheckable(True)
-        nr2_act.setChecked(current == "nr2")
-        nr2_act.triggered.connect(
-            lambda _=False: self.radio.set_nr_profile("nr2"))
-        menu.addAction(nr2_act)
-
-        # Neural NR placeholder — explored in v0.0.6 dev (PyTorch /
-        # DeepFilterNet path, then onnxruntime / NSNet2 path) but
-        # ultimately deferred until after RX2 + TX work lands.
-        # The menu entry stays as a permanently-disabled "planned"
-        # marker so operators know it's on the roadmap.  When we
-        # come back to it, this entry lights up + becomes
-        # selectable.
-        neural_label = self._NR_PROFILE_LABELS["neural"]
-        neu_act = QAction(
-            f"{neural_label}  (deferred — pending RX2 + TX)", menu)
-        neu_act.setCheckable(True)
-        neu_act.setEnabled(False)
-        menu.addAction(neu_act)
-
+        current_mode = int(getattr(self.radio, "nr_mode", 3))
+        mode_labels = {
+            1: "Mode 1  —  Wiener + SPP (smooth, mid)",
+            2: "Mode 2  —  Wiener simple (edgier)",
+            3: "Mode 3  —  MMSE-LSA  (default, smoothest)",
+            4: "Mode 4  —  Trained adaptive (most aggressive)",
+        }
+        for m in (1, 2, 3, 4):
+            act = QAction(mode_labels[m], menu)
+            act.setCheckable(True)
+            act.setChecked(current_mode == m)
+            act.triggered.connect(
+                lambda _=False, mm=m: self.radio.set_nr_mode(mm))
+            menu.addAction(act)
+        menu.addSeparator()
+        # AEPF toggle — anti-musical-noise post-filter.
+        aepf_on = bool(getattr(self.radio, "aepf_enabled", True))
+        aepf_act = QAction(
+            "✓ AEPF (anti-musical-noise)" if aepf_on
+            else "  AEPF (anti-musical-noise)", menu)
+        aepf_act.setCheckable(True)
+        aepf_act.setChecked(aepf_on)
+        aepf_act.triggered.connect(
+            lambda _=False: self.radio.set_aepf_enabled(
+                not bool(getattr(self.radio, "aepf_enabled", True))))
+        menu.addAction(aepf_act)
+        # NPE method submenu — operator picks the noise tracker.
+        npe_menu = menu.addMenu("Noise Power Estimator")
+        current_npe = int(getattr(self.radio, "npe_method", 0))
+        for npe_val, npe_label in (
+                (0, "OSMS  (recursive — smoother, stationary noise)"),
+                (1, "MCRA  (faster — non-stationary noise)")):
+            npe_act = QAction(npe_label, npe_menu)
+            npe_act.setCheckable(True)
+            npe_act.setChecked(current_npe == npe_val)
+            npe_act.triggered.connect(
+                lambda _=False, v=npe_val: self.radio.set_npe_method(v))
+            npe_menu.addAction(npe_act)
         menu.addSeparator()
         toggle_act = QAction(
             "Disable NR" if self.radio.nr_enabled else "Enable NR", menu)
@@ -2751,38 +2834,98 @@ class DspPanel(GlassPanel):
         self.radio.set_nr1_strength(s)
 
     def _on_nr1_strength_signal(self, strength: float) -> None:
-        """Mirror an external NR1 strength change (Settings tab,
-        QSettings autoload, etc.) into the panel slider."""
-        target = int(round(strength * 100))
-        if self.nr1_strength_slider.value() != target:
-            self.nr1_strength_slider.blockSignals(True)
-            self.nr1_strength_slider.setValue(target)
-            self.nr1_strength_slider.blockSignals(False)
-        self.nr1_strength_label.setText(f"{target} %")
+        """LEGACY — was used to mirror NR1 strength changes into the
+        slider.  Now the slider drives Mode (1..4) instead of strength,
+        so this handler is a no-op kept for connect() compatibility.
+        Operator strength changes via CAT/TCI still update Radio
+        state for legacy mode but don't reflect in the new mode UI."""
+        return
+
+    # ── NR Mode + AEPF handlers (NR-UX overhaul 2026-05-07) ─────
+    def _on_nr_mode_slider(self, value: int) -> None:
+        """Operator dragged the Mode slider — push to Radio."""
+        try:
+            mode = int(max(1, min(4, value)))
+            self.nr1_strength_label.setText(f"{mode}")
+            self.radio.set_nr_mode(mode)
+        except Exception as exc:
+            print(f"[panels] mode slider error: {exc}")
+
+    def _on_nr_mode_signal(self, mode: int) -> None:
+        """Mirror an external NR mode change (autoload, CAT) into the
+        slider widget."""
+        try:
+            mode = int(max(1, min(4, mode)))
+            if self.nr1_strength_slider.value() != mode:
+                self.nr1_strength_slider.blockSignals(True)
+                self.nr1_strength_slider.setValue(mode)
+                self.nr1_strength_slider.blockSignals(False)
+            self.nr1_strength_label.setText(f"{mode}")
+        except Exception:
+            pass
+
+    def _on_aepf_checkbox(self, checked: bool) -> None:
+        """Operator toggled the AEPF checkbox."""
+        try:
+            self.radio.set_aepf_enabled(bool(checked))
+        except Exception as exc:
+            print(f"[panels] AEPF checkbox error: {exc}")
+
+    def _on_aepf_enabled_signal(self, enabled: bool) -> None:
+        """Mirror an external AEPF state change into the checkbox."""
+        try:
+            current = self.aepf_checkbox.isChecked()
+            if current != bool(enabled):
+                self.aepf_checkbox.blockSignals(True)
+                self.aepf_checkbox.setChecked(bool(enabled))
+                self.aepf_checkbox.blockSignals(False)
+        except Exception:
+            pass
+
+    def _on_npe_combo(self, index: int) -> None:
+        """Operator picked an NPE method from the dropdown."""
+        try:
+            method = int(self.npe_combo.itemData(index))
+            self.radio.set_npe_method(method)
+        except Exception as exc:
+            print(f"[panels] NPE combo error: {exc}")
+
+    def _on_npe_method_signal(self, method: int) -> None:
+        """Mirror an external NPE method change into the dropdown
+        (autoload, CAT, etc.)."""
+        try:
+            method = int(method)
+            # Find the index for this method value.
+            for i in range(self.npe_combo.count()):
+                if int(self.npe_combo.itemData(i)) == method:
+                    if self.npe_combo.currentIndex() != i:
+                        self.npe_combo.blockSignals(True)
+                        self.npe_combo.setCurrentIndex(i)
+                        self.npe_combo.blockSignals(False)
+                    break
+        except Exception:
+            pass
 
     def _refresh_nr2_panel_visibility(self, profile: str | None = None) -> None:
-        """Show the NR1 OR NR2 strength slider depending on which
-        backend is active (mutually exclusive — same row, different
-        widgets).  Called on construction and on every
-        nr_profile_changed signal.
+        """LEGACY method — now a no-op-ish guard.
 
-        Method is named for legacy reasons (pre-existed when only
-        NR2 had a slider) — now it manages both.
+        Pre-2026-05-07 this toggled NR1 vs NR2 strength slider
+        visibility based on backend.  After the NR-mode UX overhaul,
+        the Mode slider is always visible and the legacy NR2 widgets
+        are not added to any layout — calling setVisible(True) on
+        them would promote them to top-level windows (Qt default
+        behavior for parentless widgets), causing the "floating
+        widget mess" bug operators reported.
         """
-        try:
-            name = profile if profile is not None else self.radio.nr_profile
-        except Exception:
-            name = "nr1"
-        is_nr2 = (name == "nr2")
-        # NR1 widgets visible when NR2 isn't active.  This covers
-        # backend = "nr1", "neural" (placeholder), and any legacy
-        # profile name that hasn't been migrated yet.
-        self._nr1_label_widget.setVisible(not is_nr2)
-        self.nr1_strength_slider.setVisible(not is_nr2)
-        self.nr1_strength_label.setVisible(not is_nr2)
-        self._nr2_label_widget.setVisible(is_nr2)
-        self.nr2_agg_slider.setVisible(is_nr2)
-        self.nr2_agg_label.setVisible(is_nr2)
+        # Mode slider always visible.
+        self._nr1_label_widget.setVisible(True)
+        self.nr1_strength_slider.setVisible(True)
+        self.nr1_strength_label.setVisible(True)
+        # Legacy NR2 widgets stay hidden permanently — never call
+        # setVisible(True) on them, they'd float as windows.
+        self._nr2_label_widget.setVisible(False)
+        self.nr2_agg_slider.setVisible(False)
+        self.nr2_agg_label.setVisible(False)
 
     # ── NB (Noise Blanker) handlers — Phase 3.D #2 ───────────────────
 
@@ -3194,12 +3337,12 @@ class DspPanel(GlassPanel):
         Strength is shown via the inline slider next to the button,
         so the tooltip just names the backend now.
         """
-        # Map legacy strength-tier names to "nr1" for display.
-        display_name = name
-        if display_name in ("light", "medium", "heavy", "aggressive",
-                            "captured"):
-            display_name = "nr1"
-        label = self._NR_PROFILE_LABELS.get(display_name, display_name)
+        # NR-UX overhaul (2026-05-07): button text is always "NR".
+        # Mode (1..4) and AEPF state shown in tooltip; right-click
+        # offers mode picker + AEPF toggle.  No more NR1/NR2 backend
+        # switching from the button — that concept is gone.
+        mode = int(getattr(self.radio, "nr_mode", 3))
+        aepf_on = bool(getattr(self.radio, "aepf_enabled", True))
         if (self.radio.nr_use_captured_profile
                 and self.radio.has_captured_profile()):
             source = (f"Captured: "
@@ -3207,15 +3350,18 @@ class DspPanel(GlassPanel):
         else:
             source = "Live (VAD)"
         nr_btn = self.dsp_btns["NR"]
-        nr_btn.setText("NR2" if display_name == "nr2" else "NR")
+        nr_btn.setText("NR")
         nr_btn.setToolTip(
             f"Noise Reduction\n"
-            f"  Backend: {label}\n"
+            f"  Mode:    {mode}  (1=Wiener+SPP, 2=Wiener simple, "
+            f"3=MMSE-LSA, 4=Trained adaptive)\n"
+            f"  AEPF:    {'on' if aepf_on else 'off'}  "
+            f"(anti-musical-noise post-filter)\n"
             f"  Source:  {source}\n"
             f"\n"
-            f"Left-click: toggle on/off.\n"
-            f"Right-click: switch backend (NR / NR2 / Neural).\n"
-            f"Drag the strength slider to set suppression depth.")
+            f"Left-click: toggle NR on/off.\n"
+            f"Right-click: pick mode / toggle AEPF.\n"
+            f"Drag the Mode slider to switch modes.")
 
     # ── APF button handlers ────────────────────────────────────────
     def _show_apf_menu(self, pos):
