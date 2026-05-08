@@ -1818,28 +1818,44 @@ class Radio(QObject):
         return self._af_gain_db
 
     def set_af_gain_db(self, db: int):
-        """Integer dB, clamped 0..+80.  Originally applied in
-        _apply_agc_and_volume as a linear multiplier between AGC
-        and Volume — that method was deleted Phase 6.A as orphan
-        dead code, and AF Gain is currently NOT wired to WDSP's
-        PanelGain1 (which is hardcoded to 1.0).
+        """Integer dB, clamped 0..+80.  Pre-AGC makeup gain pushed
+        into WDSP's PanelGain1 stage (matches Thetis's AF Gain
+        semantics).
 
-        Live consumers of af_gain_linear today:
-          * _emit_tone — test-tone path uses AF + Volume so the
-            tone level matches what the operator hears on real
-            signals.
+        Routing: ``set_af_gain_db`` → ``self._af_gain_db`` →
+        ``self.af_gain_linear`` → ``_wdsp_rx.set_panel_gain``.
+        WDSP's SetRXAPanelGain1 takes a LINEAR multiplier; we
+        convert from operator-facing integer dB at push time.
 
-        For actual demodulated audio, AF Gain is currently inert.
-        Routing it to WDSP (set_panel_gain) is logged in CLAUDE.md
-        §14.9 Phase 9.5 Item 4 alongside the AGC wiring audit;
-        bundle the two when the cleanup arc finishes.
+        Phase 6.A1 (v0.0.9.6) wired this up after Phase 6.A
+        surfaced that the legacy ``_apply_agc_and_volume`` had been
+        the only consumer of ``af_gain_linear`` for live audio and
+        had been orphan since Phase 4 — meaning AF Gain had been
+        silently inert for actual demodulated signal.  The
+        ``_emit_tone`` test-tone path also reads ``af_gain_linear``
+        directly; that wasn't affected by the orphan and continues
+        unchanged.
 
         Range goes to +80 dB because AGC OFF has no other source
-        of makeup gain when AF Gain is wired back up."""
+        of makeup gain — and AGC ON internally provides up to +60
+        dB of automatic amplification, so a +50 dB AF cap left
+        AGC OFF roughly 30 dB quieter on weak signals than AGC ON.
+        +80 dB closes that gap; operators who don't need the upper
+        range simply never visit it."""
         db = max(0, min(80, int(db)))
         if db == self._af_gain_db:
             return
         self._af_gain_db = db
+        # Push to WDSP if the engine is up.  Init order: __init__
+        # creates WDSP before persisting AGC defaults call this,
+        # so the engine is normally ready by the time the slider
+        # signal connects.  getattr() guards a hot-reload edge.
+        wdsp = getattr(self, "_wdsp_rx", None)
+        if wdsp is not None:
+            try:
+                wdsp.set_panel_gain(self.af_gain_linear)
+            except Exception as exc:
+                print(f"[Radio] AF Gain → WDSP push error: {exc}")
         self.af_gain_db_changed.emit(db)
 
     @property
@@ -6326,7 +6342,14 @@ class Radio(QObject):
             low, high = self._wdsp_filter_for(self._mode)
             self._wdsp_rx.set_filter(low, high)
             self._wdsp_rx.set_agc(self._wdsp_agc_for(self._agc_profile))
-            self._wdsp_rx.set_panel_gain(1.0)
+            # AF Gain → WDSP PanelGain1 (Thetis-style pre-AGC makeup
+            # gain).  Phase 6.A1 (v0.0.9.6): wired up after Phase 6.A
+            # surfaced that the operator's AF slider was silently
+            # inert in WDSP mode (the legacy _apply_agc_and_volume
+            # was the only consumer and had been orphan since
+            # Phase 4).  WDSP's SetRXAPanelGain1 takes a LINEAR
+            # multiplier; we convert from the operator's integer dB.
+            self._wdsp_rx.set_panel_gain(self.af_gain_linear)
             # Patch panel binaural mode — set to FALSE (mono on both
             # channels).  Without this call, WDSP defaults to copy=0
             # (L=I, R=Q at panel output), which works for SSB but

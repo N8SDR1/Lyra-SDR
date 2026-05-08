@@ -1774,23 +1774,21 @@ followup, restated here for grouping):
 * Bundle with Items 1 + 2 since all three touch the same
   code path.
 
-**Item 4 — AF Gain wiring** (discovered Phase 6.A, 2026-05-08):
+**Item 4 — AF Gain wiring (FIXED Phase 6.A1, 2026-05-08):**
 
-* When `_apply_agc_and_volume` was deleted in Phase 6.A, AF
-  Gain went silently inert for actual demodulated audio.
-  WDSP's `PanelGain1` is hardcoded to 1.0 in `_open_wdsp_rx`
-  (radio.py:6324) — it never picks up `self._af_gain_db`.
-* The deletion didn't cause this — `_apply_agc_and_volume` had
-  been orphan since Phase 4 — but Phase 6.A makes it visible.
-* AF Gain still works in `_emit_tone` (test-tone path) so the
-  slider isn't entirely dead.
-* **Fix path:** route `set_af_gain_db` to push the linear value
-  to `_wdsp_rx.set_panel_gain` (which is what WDSP uses for
-  pre-AGC makeup gain).  Re-emit on every change.  Audit
-  whether the worker's `set_af_gain_db` should also route there
-  or be deleted as dead.
-* Bundle with Items 1-3 since all four touch the same
-  initial-state push path.
+* Discovered during Phase 6.A: when `_apply_agc_and_volume` was
+  deleted, AF Gain went silently inert for live demodulated
+  audio.  `_apply_agc_and_volume` had been orphan since Phase 4,
+  so AF Gain had actually been broken for that long; Phase 6.A
+  just made it visible.
+* WDSP's `PanelGain1` was hardcoded to 1.0 in `_open_wdsp_rx`;
+  the operator's `_af_gain_db` value was stored but never
+  pushed.
+* **Fix landed (Phase 6.A1):** `set_af_gain_db` now calls
+  `_wdsp_rx.set_panel_gain(af_gain_linear)` on every change,
+  and `_open_wdsp_rx` pushes the saved value at engine open
+  time instead of `1.0`.  This is the same wiring Thetis uses
+  for its AF Gain slider.
 
 **Total estimated work for Phases 3-9: 5-7 hours focused.**
 
