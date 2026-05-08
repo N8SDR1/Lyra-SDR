@@ -1,8 +1,8 @@
 """Settings dialog — tabbed, extensible.
 
-First tab: Network / TCI. Subsequent tabs: Audio, DSP, Visuals,
-Keyer, etc. — additive, each a QWidget that reads from / writes to
-the Radio or a subsystem.
+Tabs (in order): Radio, Network/TCI, Hardware, DSP, Noise, Audio,
+Visuals, Keyer, Bands, Weather.  Each tab is a QWidget that reads
+from / writes to the Radio object or a related subsystem.
 """
 from __future__ import annotations
 
@@ -1132,7 +1132,10 @@ class HardwareSettingsTab(QWidget):
 
 
 class DspSettingsTab(QWidget):
-    """DSP chain configuration — AGC, NB, NR, ANC, ANF, EQ."""
+    """DSP chain configuration — AGC profiles + advisory custom
+    sliders, CW (Pitch / APF / BIN), Auto-LNA, Equalizer (TX
+    placeholder), DSP threading.  NB / ANF / NR / Squelch /
+    Captured Profile live on the separate Noise tab."""
 
     # Description + ordering for the AGC profile radio buttons.
     # Profiles drive WDSP's canonical AGC mode presets via
@@ -1196,7 +1199,7 @@ class DspSettingsTab(QWidget):
         self.release_slider.setToolTip(
             "AGC release coefficient (advisory in WDSP mode).\n"
             "Higher = faster decay; lower = slower decay.\n"
-            "Picks a profile slides this to the profile's preset.")
+            "Picking a profile slides this to the profile's preset.")
         self.release_slider.valueChanged.connect(self._on_custom_changed)
         ga.addWidget(self.release_slider, 2, 1, 1, 3)
         self.release_label = QLabel()
@@ -1210,7 +1213,7 @@ class DspSettingsTab(QWidget):
         self.hang_slider.setToolTip(
             "AGC hang duration in audio blocks (advisory in WDSP mode).\n"
             "Each block ≈ 43 ms at 48 kHz / 2048 samples.\n"
-            "Picks a profile slides this to the profile's preset.")
+            "Picking a profile slides this to the profile's preset.")
         self.hang_slider.valueChanged.connect(self._on_custom_changed)
         ga.addWidget(self.hang_slider, 3, 1, 1, 3)
         self.hang_label = QLabel()
@@ -1890,7 +1893,7 @@ class AudioSettingsTab(QWidget):
             "Override here if your audio routes through a non-default\n"
             "card (USB audio interface, virtual cable, S/PDIF dongle, etc).\n"
             "Setting takes effect immediately when PC Soundcard is the\n"
-            "active sink. Has no effect when AK4951 is selected."
+            "active sink. Has no effect when HL2 audio jack is selected."
         )
         info.setStyleSheet("color: #8a9aac; font-size: 10px;")
         gd.addWidget(info)
@@ -2062,17 +2065,27 @@ class AudioSettingsTab(QWidget):
 class VisualsSettingsTab(QWidget):
     """Spectrum + waterfall display options.
 
-    Three groups:
-    1. **Graphics backend** — Software / OpenGL / Vulkan radio buttons.
-       Read at import time by gfx.py, so changes need a restart — we
-       surface this clearly in a help label and persist to QSettings.
-    2. **Waterfall palette** — live combo. Each palette is a 256-entry
-       LUT defined in palettes.py; switching redraws the waterfall
-       from the next row onward (old rows keep their color until they
-       scroll off).
-    3. **dB range** — four sliders (spectrum min/max, waterfall
-       min/max) with live labels. Radio clamps span to ≥ 3 dB so the
-       trace can't collapse to a flat line.
+    Eight grouped sections distributed across two columns:
+
+    1. **Graphics backend** — Software / OpenGL / Vulkan radio
+       buttons.  Read at import time by gfx.py, so changes need
+       a restart — we surface this clearly in a help label and
+       persist to QSettings.
+    2. **Waterfall palette + watermark + meteors + grid** —
+       live palette combo (each palette is a 256-entry LUT in
+       palettes.py), background watermark toggle, meteor-shower
+       overlay toggles, spectrum grid spacing.
+    3. **Signal range + auto-scale + peak markers + smoothing**
+       — four sliders (spectrum / waterfall min + max), auto-
+       scale toggles, peak-marker config, FFT smoothing factor.
+    4. **Colors** — picker grid for trace / grid / fill / peak
+       colors.
+    5. **Spectrum cal + S-meter cal** — calibration offsets.
+    6. **Update rates + zoom** — FFT FPS, panadapter / waterfall
+       refresh, default zoom level.
+
+    Radio clamps dB-range spans to ≥ 3 dB so the trace can't
+    collapse to a flat line.
     """
 
     def __init__(self, radio, parent=None):
@@ -3228,13 +3241,25 @@ class VisualsSettingsTab(QWidget):
 
 
 class NoiseSettingsTab(QWidget):
-    """Phase 3.D — Noise toolkit settings.
+    """Noise toolkit settings.
 
-    Holds the operator-tunable knobs for noise-toolkit features.
-    Day-1 contents: Captured Noise Profile (capture duration,
-    smart-guard toggle, storage location, age-warning thresholds,
-    profile manager + folder shortcuts).  As Phase 3.D #2 (NB),
-    #3 (ANF), #4 (NR2) ship, their settings join this tab.
+    Operator-tunable knobs for the noise-toolkit features:
+      * Captured Noise Profile — capture duration, staleness
+        threshold, storage location, age-warning thresholds,
+        profile manager + folder shortcuts.  Capture works;
+        live apply is currently disabled in WDSP mode (see
+        CLAUDE.md §14.6).
+      * Noise Blanker (NB) — profile picker (advisory) +
+        threshold slider (advisory).  Live engine: WDSP NOB.
+      * Auto Notch Filter (ANF) — profile picker (advisory) +
+        μ slider (advisory).  Live engine: WDSP ANF.
+      * All-Mode Squelch — master enable + threshold slider.
+        Live engine: WDSP SSQL (SSB/CW/DIG) / FMSQ / AMSQ.
+
+    Phase 7 (v0.0.9.6) removed the legacy NR2 + NR2 Gain Function
+    + LMS-duplicate groups; their operator surface lives on the
+    DSP+Audio panel (NR Mode 1-4 + AEPF + NPE for noise reduction;
+    LMS button + strength slider for the line enhancer).
     """
 
     def __init__(self, radio):
@@ -3247,32 +3272,14 @@ class NoiseSettingsTab(QWidget):
             QSpinBox, QLineEdit, QGroupBox)
         self._QSettings = QSettings   # used by setter helpers below
 
-        # Two-column layout — same pattern as VisualsSettingsTab.
-        # The Noise tab has four large grouped sections (Captured
-        # Profile, NB, ANF, NR2); stacking them in a single column
-        # makes the dialog scroll endlessly even on a tall monitor.
-        # Left column gets the Captured Noise Profile (largest /
-        # most complex section), right column gets NB + ANF + NR2.
-        # Right-column reassignments happen at the end of this
-        # method.
-        # Three-column layout (was two).  After the v0.0.6 work
-        # added LMS + Squelch + NR2-method sections, the right
-        # column was getting tall enough to feel cramped at 1080p
-        # heights.  Three columns give each section room without
-        # introducing scroll.
-        #
-        # Distribution (rebalanced v0.0.6.x — operator feedback:
-        # "middle column has much more than left or right"; the
-        # original 4/1/2 split made the middle column drive page
-        # height and pushed the bottom groups off-screen):
-        #   col_left   = Captured Noise Profile + Squelch
-        #                (Cap dominates; SQ is independent so it
-        #                 can sit under Cap to balance the column)
-        #   col_middle = NB + ANF (NB-family pair — balanced)
-        #   col_right  = NR2 + NR2 method picker + LMS
-        #                (all three are spectral / adaptive NR
-        #                 algorithms — LMS as NR3 belongs with
-        #                 NR2 conceptually anyway)
+        # Two-column layout (Phase 7 collapse from three columns):
+        #   col_left   = Captured Noise Profile + All-Mode Squelch
+        #   col_right  = NB + ANF
+        # The middle column stays in the QHBoxLayout grid as a
+        # placeholder for future expansion (e.g. when staleness
+        # controls grow into their own group).  Reassignments
+        # happen at the end of this method — see the column-
+        # reassignment block.
         outer = QHBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(12)
@@ -3668,11 +3675,12 @@ class NoiseSettingsTab(QWidget):
         sqv = QVBoxLayout(grp_sq)
         sqv.setSpacing(8)
         sq_intro = QLabel(
-            "Voice-presence detector that mutes audio between "
-            "transmissions on every modulation type (SSB, AM, FM, "
-            "CW).  Tracks RMS level vs auto-tracked noise floor "
-            "with hysteresis + hang time so natural speech pauses "
-            "don't close the gate mid-syllable.")
+            "Voice / signal presence gate that mutes audio between "
+            "transmissions across all modes.  WDSP runs the live "
+            "engine — SSQL window-detector for SSB / CW / DIG, and "
+            "the WDSP FMSQ / AMSQ modules for FM and AM.  Mode "
+            "routing happens automatically; you just set the "
+            "threshold for the noise floor on your current band.")
         sq_intro.setWordWrap(True)
         sq_intro.setStyleSheet("color: #8a9aac; font-size: 12px;")
         sqv.addWidget(sq_intro)
@@ -3713,9 +3721,10 @@ class NoiseSettingsTab(QWidget):
             "on, opens on faintest signal.  20 = voice-friendly "
             "default.  40 = mutes on quiet bands.  60+ = strong "
             "signals only.\n"
-            "Internal hang time (~300 ms) bridges natural speech "
-            "pauses — direct exposure of hang / attack / release "
-            "is on the v0.0.7 backlog.")
+            "WDSP SSQL time constants: ~700 ms mute (lets brief "
+            "speech pauses ride through), ~100 ms unmute (snappy "
+            "speech onset).  Direct sliders for those are on the "
+            "post-RX2 backlog.")
         sq_hint.setWordWrap(True)
         sq_hint.setStyleSheet("color: #7a8a9c; font-size: 11px;")
         sqv.addWidget(sq_hint)
@@ -4424,14 +4433,17 @@ class BandsSettingsTab(QWidget):
     """Bands tab — a lightweight tab-of-tabs that hosts band-related
     Settings sub-tabs.
 
-    v0.0.9 sub-tabs:
-      * Memory      -- full table view + edit/delete/reorder/CSV
-                       import/export of operator memory presets.
-      * Time Stations -- (placeholder for now, defaults to right-
-                       click menu on the TIME button.  Settings
-                       configuration arrives in a future iteration.)
-      * SW Database -- (placeholder, populated in Step 4 with EiBi
-                       master enable + download + power filter.)
+    Sub-tabs:
+      * Memory       — full table view + edit / delete / reorder /
+                       CSV import / export of operator memory
+                       presets.
+      * Time Stations — placeholder for now; quick selection is via
+                       right-click on the TIME button.  A full
+                       Settings sub-tab arrives in a future
+                       iteration.
+      * SW Database  — EiBi master enable + download + power
+                       filter + overlay behavior + per-band
+                       suppression.
 
     Each sub-tab is a self-contained QWidget; this class just wires
     them into the inner QTabWidget.
@@ -5431,7 +5443,8 @@ class SettingsDialog(QDialog):
     """App-wide tabbed settings — accessed from the main toolbar (⚙).
 
     Tab order (matches reference SDR clients layout):
-      Radio → Network/TCI → Hardware → Audio → DSP → Noise → Visuals → Keyer → Bands
+      Radio → Network/TCI → Hardware → DSP → Noise → Audio →
+      Visuals → Keyer → Bands → Weather
     """
 
     def __init__(self, radio, tci_server: TciServer, parent=None):
@@ -5459,11 +5472,8 @@ class SettingsDialog(QDialog):
         self.tab_dsp = DspSettingsTab(radio)
         self.tabs.addTab(self.tab_dsp, "DSP")
 
-        # Phase 3.D — Noise toolkit lives on its own tab so it has
-        # room to grow as NB / ANF / NR2 ship over the next releases.
-        # On day one, only the Captured Noise Profile section is
-        # populated; greyed-out reserves for unfinished features are
-        # intentionally NOT shown to avoid confusing testers.
+        # Noise tab — Captured Profile + NB + ANF + Squelch.
+        # Lives on its own tab to keep DSP from getting overcrowded.
         self.tab_noise = NoiseSettingsTab(radio)
         self.tabs.addTab(self.tab_noise, "Noise")
 
