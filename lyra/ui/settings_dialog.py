@@ -3296,13 +3296,21 @@ class NoiseSettingsTab(QWidget):
         gv.setSpacing(8)
 
         intro = QLabel(
-            "Audacity-style noise capture. Tune to a noise-only "
+            "Audacity-style noise capture.  Tune to a noise-only "
             "frequency or wait for a transmission gap, then click "
             "the 📷 Cap button on the DSP+Audio panel.  Lyra records "
-            "the band noise spectrum and uses it as a locked NR "
-            "reference — much more accurate than the live VAD-"
-            "tracked estimate.\n\n"
-            "Profiles save to disk and persist across Lyra restarts.")
+            "the band-noise spectrum and saves it to a profile "
+            "library you can name, organize, and reload across "
+            "sessions.\n\n"
+            "Profiles save to disk and persist across Lyra "
+            "restarts.\n\n"
+            "Note (v0.0.9.6): the apply step — feeding the "
+            "captured profile into live NR — is currently disabled "
+            "in WDSP mode while the IQ-domain rebuild lands.  "
+            "Capture, save, load, and management all work normally; "
+            "your library is being built for when the apply path "
+            "comes back.  See User Guide → Noise Reduction for "
+            "details.")
         intro.setWordWrap(True)
         intro.setStyleSheet("color: #8a9aac;")
         gv.addWidget(intro)
@@ -3453,9 +3461,12 @@ class NoiseSettingsTab(QWidget):
             "IQ-domain impulse suppression.  Detects narrow impulse "
             "noise (ignition, lightning crashes, switching power "
             "supplies) before the bandpass filter spreads it across "
-            "the audio passband.\n\n"
-            "Profile sets a sensitivity preset; threshold is the "
-            "underlying multiplier on the background-power reference.")
+            "the audio passband.  WDSP runs the live blanker; the "
+            "profile picker below is currently a binary on/off plus "
+            "saved-preference (Light / Medium / Heavy / Custom all "
+            "produce the same WDSP-default audio behavior — your "
+            "selection is persisted for when the threshold mapping "
+            "is wired up).")
         nb_intro.setWordWrap(True)
         nb_intro.setStyleSheet("color: #8a9aac;")
         nbv.addWidget(nb_intro)
@@ -3525,12 +3536,11 @@ class NoiseSettingsTab(QWidget):
         nbv.addLayout(thr_row)
 
         nb_hint = QLabel(
-            "Higher threshold = fewer false positives but lets more "
-            "subtle impulses through.  Lower threshold = catches "
-            "more but may clip the leading edge of fast CW dits or "
-            "sharp keying transients.\n\n"
+            "Threshold value is persisted but currently advisory — "
+            "WDSP's blanker runs with its built-in default until a "
+            "future build maps this slider to a WDSP parameter.\n\n"
             "Right-click the NB button on the DSP+Audio panel for "
-            "quick profile switching during operating.")
+            "quick on/off switching during operating.")
         nb_hint.setWordWrap(True)
         # Drop the explicit font-size override — match the intro
         # paragraph above so the operator-facing text is at the
@@ -3557,13 +3567,16 @@ class NoiseSettingsTab(QWidget):
         anfv.setSpacing(8)
 
         anf_intro = QLabel(
-            "LMS adaptive notch.  Hunts and surgically removes "
-            "narrow tonal interference — heterodynes, BFO whistles, "
+            "Adaptive notch.  Hunts and surgically removes narrow "
+            "tonal interference — heterodynes, BFO whistles, "
             "single-frequency carriers, RTTY spurs.  Operator turns "
             "it on; the filter learns whatever tones are present "
-            "and nulls them without taking out genuine speech.\n\n"
-            "Profile sets adaptation speed; μ is the underlying LMS "
-            "step size that operator hand-tunes in Custom.")
+            "and nulls them without taking out genuine speech.  "
+            "WDSP runs the live notch; the profile picker below is "
+            "currently a binary on/off plus saved-preference "
+            "(Light / Medium / Heavy / Custom all produce the same "
+            "WDSP-default audio behavior — your selection is "
+            "persisted for when the μ mapping is wired up).")
         anf_intro.setWordWrap(True)
         anf_intro.setStyleSheet("color: #8a9aac;")
         anfv.addWidget(anf_intro)
@@ -3621,10 +3634,11 @@ class NoiseSettingsTab(QWidget):
         anfv.addLayout(anf_mu_row)
 
         anf_hint = QLabel(
-            "Higher μ = faster adaptation but noisier residual; "
-            "lower μ = slower lock but cleaner output.\n\n"
+            "μ value is persisted but currently advisory — WDSP's "
+            "ANF runs with its built-in adapt rate until a future "
+            "build maps this slider to a WDSP parameter.\n\n"
             "Right-click the ANF button on the DSP+Audio panel "
-            "for quick profile switching during operating.")
+            "for quick on/off switching during operating.")
         anf_hint.setWordWrap(True)
         anf_hint.setStyleSheet("color: #7a8a9c;")
         anfv.addWidget(anf_hint)
@@ -3635,196 +3649,19 @@ class NoiseSettingsTab(QWidget):
 
         v.addWidget(grp_anf)
 
-        # ── NR2 (Ephraim-Malah MMSE-LSA, Phase 3.D #4) ───────────
-        grp_nr2 = QGroupBox("Noise Reduction (NR2 — Ephraim-Malah)")
-        nr2v = QVBoxLayout(grp_nr2)
-        nr2v.setSpacing(8)
-
-        nr2_intro = QLabel(
-            "Selectable as the 'High Quality (NR2)' entry in the "
-            "NR profile picker on the DSP+Audio panel right-click "
-            "menu.  MMSE-LSA gain function with a continuous-"
-            "spectral-minimum noise tracker — eliminates the "
-            "'musical noise' / 'underwater' artifact that NR1's "
-            "spectral subtraction can produce.  About 2× the CPU "
-            "of NR1; feels noticeably cleaner on voice and "
-            "digital signals.")
-        nr2_intro.setWordWrap(True)
-        nr2_intro.setStyleSheet("color: #8a9aac;")
-        nr2v.addWidget(nr2_intro)
-
-        # Aggression slider (mirror of the panel slider).  Same
-        # 0..200 → 0.0..2.0 mapping.
-        agg_row = QHBoxLayout()
-        agg_row.addWidget(QLabel("Aggression:"))
-        self.nr2_agg_slider_settings = QSlider(Qt.Horizontal)
-        self.nr2_agg_slider_settings.setRange(0, 200)
-        self.nr2_agg_slider_settings.setValue(
-            int(round(radio.nr2_aggression * 100)))
-        self.nr2_agg_slider_settings.setSingleStep(5)
-        self.nr2_agg_slider_settings.setPageStep(25)
-        self.nr2_agg_slider_settings.setTickPosition(
-            QSlider.TicksBelow)
-        self.nr2_agg_slider_settings.setTickInterval(50)
-        self.nr2_agg_label_settings = QLabel(
-            f"{int(round(radio.nr2_aggression * 100))} %")
-        self.nr2_agg_label_settings.setMinimumWidth(60)
-        self.nr2_agg_label_settings.setStyleSheet(
-            "color: #50d0ff; font-family: Consolas, monospace; "
-            "font-weight: 700;")
-        self.nr2_agg_slider_settings.valueChanged.connect(
-            self._on_nr2_agg_settings_slider)
-        agg_row.addWidget(self.nr2_agg_slider_settings, 1)
-        agg_row.addWidget(self.nr2_agg_label_settings)
-        nr2v.addLayout(agg_row)
-
-        agg_hint = QLabel(
-            "0 = unity gain (effectively NR off);  100 = full "
-            "MMSE-LSA;  200 = ceiling — extreme noise / stacking "
-            "with LMS line enhancer.")
-        agg_hint.setWordWrap(True)
-        agg_hint.setStyleSheet("color: #7a8a9c;")
-        nr2v.addWidget(agg_hint)
-
-        # Musical-noise smoothing toggle.
-        self.nr2_smoothing_chk = QCheckBox(
-            "Eliminate musical noise (decision-directed "
-            "smoothing)")
-        self.nr2_smoothing_chk.setToolTip(
-            "Decision-directed α=0.98 smoothing of the a-priori "
-            "SNR estimate — the key Ephraim-Malah trick that "
-            "kills the bin-flicker / 'musical noise' artifact.\n"
-            "\n"
-            "On (default): full MMSE-LSA behavior, smooth output.\n"
-            "Off: drops α to 0.5; output gets closer to NR1 "
-            "behavior (bin flicker more audible).  Useful for "
-            "diagnostic A/B comparison only — leave on for "
-            "everyday operating.")
-        self.nr2_smoothing_chk.setChecked(
-            radio.nr2_musical_noise_smoothing)
-        self.nr2_smoothing_chk.toggled.connect(
-            self._on_nr2_smoothing_toggled)
-        nr2v.addWidget(self.nr2_smoothing_chk)
-
-        # Speech-aware mode toggle.
-        self.nr2_speech_aware_chk = QCheckBox(
-            "Speech-aware mode (preserve consonants)")
-        self.nr2_speech_aware_chk.setToolTip(
-            "When enabled, a simple energy-based VAD detects "
-            "voice activity and reduces NR2's suppression "
-            "during detected speech.  Better preservation of "
-            "consonants and speech transients at the cost of "
-            "slightly less noise reduction during voice.\n"
-            "\n"
-            "Off (default): uniform suppression.\n"
-            "On:            voice-aware reduction.")
-        self.nr2_speech_aware_chk.setChecked(radio.nr2_speech_aware)
-        self.nr2_speech_aware_chk.toggled.connect(
-            self._on_nr2_speech_aware_toggled)
-        nr2v.addWidget(self.nr2_speech_aware_chk)
-
-        # Two-way sync.
-        radio.nr2_aggression_changed.connect(
-            self._on_nr2_agg_signal_settings)
-        radio.nr2_musical_noise_smoothing_changed.connect(
-            self._on_nr2_smoothing_signal)
-        radio.nr2_speech_aware_changed.connect(
-            self._on_nr2_speech_aware_signal)
-
-        v.addWidget(grp_nr2)
-
-        # ── NR2 gain-method picker ────────────────────────────────
-        # Mirrors the right-click menu on the NR2 strength slider in
-        # the DSP+Audio panel.  Operators reading Settings without
-        # right-clicking the panel slider would otherwise miss this
-        # option entirely.
-        method_box = QGroupBox("NR2 Gain Function")
-        method_v = QVBoxLayout(method_box)
-        method_v.setSpacing(4)
-        method_intro = QLabel(
-            "Choose the per-bin gain function NR2 uses.  Both are "
-            "MMSE-derived (Ephraim-Malah variants) and ported from "
-            "WDSP emnr.c.")
-        method_intro.setWordWrap(True)
-        method_intro.setStyleSheet("color: #8a9aac; font-size: 12px;")
-        method_v.addWidget(method_intro)
-
-        from PySide6.QtWidgets import QButtonGroup
-        self.nr2_method_group = QButtonGroup(self)
-        self.nr2_method_radios = {}
-        for key, label in (
-            ("mmse_lsa",
-             "MMSE-LSA  — classical, sharper attack on noise (default)"),
-            ("wiener",
-             "Wiener   — smoother per-bin transitions, fuller residue"),
-        ):
-            rb = QRadioButton(label)
-            rb.setChecked(radio.nr2_gain_method == key)
-            rb.toggled.connect(
-                lambda on, k=key:
-                    on and self.radio.set_nr2_gain_method(k))
-            method_v.addWidget(rb)
-            self.nr2_method_radios[key] = rb
-            self.nr2_method_group.addButton(rb)
-        radio.nr2_gain_method_changed.connect(self._on_nr2_method_signal)
-        v.addWidget(method_box)
-
-        # ── LMS section (NR3 line enhancer) ───────────────────────
-        grp_lms = QGroupBox("LMS Line Enhancer (NR3)")
-        lmsv = QVBoxLayout(grp_lms)
-        lmsv.setSpacing(8)
-        lms_intro = QLabel(
-            "Adaptive predictor that lifts periodic content (CW "
-            "tones, voice formants) above broadband noise.  "
-            "Predictive — runs alongside NR1/NR2 (subtractive).  "
-            "Operator slider on the DSP+Audio panel sets strength "
-            "0..100; this group is for diagnostics + the master "
-            "enable mirror.")
-        lms_intro.setWordWrap(True)
-        lms_intro.setStyleSheet("color: #8a9aac; font-size: 12px;")
-        lmsv.addWidget(lms_intro)
-
-        # Master enable mirror — same toggle as the DSP+Audio button.
-        self.lms_enable_chk = QCheckBox("Enable LMS line enhancer")
-        self.lms_enable_chk.setChecked(radio.lms_enabled)
-        self.lms_enable_chk.toggled.connect(self.radio.set_lms_enabled)
-        radio.lms_enabled_changed.connect(self.lms_enable_chk.setChecked)
-        lmsv.addWidget(self.lms_enable_chk)
-
-        # Strength slider — mirror of panel slider, finer-grained
-        # increments via the spin box for power users.
-        lms_str_row = QHBoxLayout()
-        lms_str_row.addWidget(QLabel("Strength:"))
-        self.lms_str_slider = QSlider(Qt.Horizontal)
-        self.lms_str_slider.setRange(0, 100)
-        self.lms_str_slider.setValue(int(round(radio.lms_strength * 100)))
-        self.lms_str_slider.setTickPosition(QSlider.TicksBelow)
-        self.lms_str_slider.setTickInterval(25)
-        self.lms_str_slider.valueChanged.connect(
-            lambda v: self.radio.set_lms_strength(v / 100.0))
-        radio.lms_strength_changed.connect(self._on_lms_strength_signal)
-        self.lms_str_label = QLabel(
-            f"{int(round(radio.lms_strength * 100))} %")
-        self.lms_str_label.setMinimumWidth(50)
-        self.lms_str_label.setStyleSheet(
-            "color: #50d0ff; font-family: Consolas, monospace; "
-            "font-weight: 700;")
-        lms_str_row.addWidget(self.lms_str_slider, 1)
-        lms_str_row.addWidget(self.lms_str_label)
-        lmsv.addLayout(lms_str_row)
-
-        lms_hint = QLabel(
-            "0 = light effect (slow adapt, gentle).  50 = WDSP "
-            "default (Pratt's classic-ANR tuning).  100 = aggressive "
-            "(fast adapt, stronger).  Most useful in CW mode for "
-            "weak DX in band hiss.  Underlying parameters (taps, "
-            "delay, μ, γ) are interpolated between empirically-"
-            "tuned anchors — direct exposure of those four knobs "
-            "is on the v0.0.7 backlog.")
-        lms_hint.setWordWrap(True)
-        lms_hint.setStyleSheet("color: #7a8a9c; font-size: 11px;")
-        lmsv.addWidget(lms_hint)
-        v.addWidget(grp_lms)
+        # ── NR / NR2 / NR2 Gain Function / LMS groups removed in
+        #    Phase 7 (v0.0.9.6).  The live noise reduction engine is
+        #    now WDSP's EMNR; operator controls (Mode 1-4 + AEPF +
+        #    NPE + master enable) live on the DSP+Audio panel where
+        #    they're one click away during operating.  The legacy
+        #    NR2 aggression / smoothing / speech-aware controls and
+        #    NR2 gain-method picker no longer mapped to anything
+        #    audible (WDSP's gain method is picked by Mode 1-4).
+        #    LMS strength duplicate dropped — the panel slider is
+        #    sufficient.  Persisted state for these knobs still
+        #    lives on the channel's _NR2State / _LMSState dataclasses
+        #    so future builds can reactivate them without losing
+        #    operator preferences.
 
         # ── Squelch section (all-mode SSQL) ───────────────────────
         grp_sq = QGroupBox("All-Mode Squelch")
@@ -3884,33 +3721,20 @@ class NoiseSettingsTab(QWidget):
         sqv.addWidget(sq_hint)
         v.addWidget(grp_sq)
 
-        # ── Right-column reassignments ───────────────────────────
-        # The above v.addWidget(grp_xxx) calls landed grp_nb,
-        # grp_anf, grp_nr2, method_box, grp_lms, and grp_sq in the
-        # LEFT column via the alias.  Reparent the active-filter
-        # groups into the right column to balance the layout.
-        # Captured Noise Profile (the largest section) stays alone
-        # in the left column.
-        # Three-column reassignment.  All groups landed in
-        # col_left via the alias; rebalance so each column has
-        # roughly equal vertical weight (operator feedback v0.0.6.x:
-        # original middle column had 4 groups vs 1 left / 2 right
-        # and was pushing the bottom of the tab off-screen).
-        # New distribution:
-        #   left   = Cap (already there) + SQ
-        #   middle = NB + ANF
-        #   right  = NR2 + method picker + LMS
+        # ── Column reassignments ─────────────────────────────────
+        # Phase 7 (v0.0.9.6) collapsed the right column when NR2 /
+        # NR2 Gain Function / LMS groups went away.  Two-column
+        # layout now:
+        #   left   = Captured Noise Profile (largest) + SQ
+        #   right  = NB + ANF
+        # The middle column stays in the layout grid for future
+        # expansion (e.g. when staleness controls grow into their
+        # own group) but receives no widgets at present.
         col_left.removeWidget(grp_nb)
         col_left.removeWidget(grp_anf)
-        col_left.removeWidget(grp_nr2)
-        col_left.removeWidget(method_box)
-        col_left.removeWidget(grp_lms)
         # grp_sq stays in col_left under grp_cap (no remove needed).
-        col_middle.addWidget(grp_nb)
-        col_middle.addWidget(grp_anf)
-        col_right.addWidget(grp_nr2)
-        col_right.addWidget(method_box)
-        col_right.addWidget(grp_lms)
+        col_right.addWidget(grp_nb)
+        col_right.addWidget(grp_anf)
         # Stretch on all three columns so groups stack from the
         # top rather than spreading to fill the tab height.
         col_left.addStretch(1)
@@ -4071,42 +3895,12 @@ class NoiseSettingsTab(QWidget):
     def _update_anf_mu_enabled(self, profile: str) -> None:
         self.anf_mu_slider.setEnabled(profile == "custom")
 
-    # ── NR2 section slot implementations (Phase 3.D #4) ──────────
-
-    def _on_nr2_agg_settings_slider(self, slider_int: int) -> None:
-        """Operator dragged the NR2 aggression slider in Settings.
-        Mirrors the panel slider via the change signal."""
-        agg = slider_int / 100.0
-        self.nr2_agg_label_settings.setText(f"{slider_int} %")
-        self.radio.set_nr2_aggression(agg)
-
-    def _on_nr2_agg_signal_settings(self, agg: float) -> None:
-        """Mirror an external aggression change (e.g. from the
-        panel slider) into the Settings-tab slider."""
-        target = int(round(agg * 100))
-        if self.nr2_agg_slider_settings.value() != target:
-            self.nr2_agg_slider_settings.blockSignals(True)
-            self.nr2_agg_slider_settings.setValue(target)
-            self.nr2_agg_slider_settings.blockSignals(False)
-        self.nr2_agg_label_settings.setText(f"{target} %")
-
-    def _on_nr2_smoothing_toggled(self, checked: bool) -> None:
-        self.radio.set_nr2_musical_noise_smoothing(checked)
-
-    def _on_nr2_smoothing_signal(self, on: bool) -> None:
-        if self.nr2_smoothing_chk.isChecked() != on:
-            self.nr2_smoothing_chk.blockSignals(True)
-            self.nr2_smoothing_chk.setChecked(on)
-            self.nr2_smoothing_chk.blockSignals(False)
-
-    def _on_nr2_speech_aware_toggled(self, checked: bool) -> None:
-        self.radio.set_nr2_speech_aware(checked)
-
-    def _on_nr2_speech_aware_signal(self, on: bool) -> None:
-        if self.nr2_speech_aware_chk.isChecked() != on:
-            self.nr2_speech_aware_chk.blockSignals(True)
-            self.nr2_speech_aware_chk.setChecked(on)
-            self.nr2_speech_aware_chk.blockSignals(False)
+    # NOTE: NR2 aggression / smoothing / speech-aware slot
+    # implementations removed in Phase 7 (v0.0.9.6) along with
+    # the corresponding controls in the Noise tab.  WDSP's EMNR
+    # exposes its operator surface via the DSP+Audio panel
+    # (Mode 1-4 + AEPF + NPE).  Persisted state still lives on
+    # _NR2State for forward compatibility.
 
     @staticmethod
     def _anf_mu_to_slider(mu: float) -> int:
@@ -4133,25 +3927,10 @@ class NoiseSettingsTab(QWidget):
         frac = max(0, min(200, slider_int)) / 200.0
         return 10.0 ** (log_min + frac * (log_max - log_min))
 
-    # ── NR2 method picker / LMS / Squelch slot implementations ─────
-
-    def _on_nr2_method_signal(self, method: str) -> None:
-        """Mirror an external gain-method change (e.g. via the panel
-        slider's right-click menu) into the radio buttons here."""
-        rb = self.nr2_method_radios.get(method)
-        if rb and not rb.isChecked():
-            rb.blockSignals(True)
-            rb.setChecked(True)
-            rb.blockSignals(False)
-
-    def _on_lms_strength_signal(self, value: float) -> None:
-        """Mirror an external LMS strength change into the slider."""
-        target = int(round(value * 100))
-        if self.lms_str_slider.value() != target:
-            self.lms_str_slider.blockSignals(True)
-            self.lms_str_slider.setValue(target)
-            self.lms_str_slider.blockSignals(False)
-        self.lms_str_label.setText(f"{target} %")
+    # NOTE: NR2 method-picker and LMS strength-mirror slots
+    # removed Phase 7 along with the corresponding Settings groups.
+    # The DSP+Audio panel's NR Mode 1-4 + LMS strength slider
+    # are the live operator surface for those parameters now.
 
     def _on_sq_threshold_signal(self, value: float) -> None:
         """Mirror an external squelch threshold change into slider."""
