@@ -21,9 +21,12 @@ import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from lyra.protocol.stream import HL2Stream, SAMPLE_RATES
-from lyra.dsp.demod import (
-    SSBDemod, CWDemod, AMDemod, DSBDemod, FMDemod, NotchFilter,
-)
+# Phase 6.B (v0.0.9.6): lyra.dsp.demod was deleted — its 5 demod
+# classes were dead code post-WDSP and its NotchFilter object was
+# orphan (constructed + mutated but never .process()'d, since
+# WDSP receives notch parameters as plain (freq, width, active)
+# tuples via _push_wdsp_notches).  See git history for the prior
+# Python implementations.
 from lyra.dsp.audio_sink import AK4951Sink, SoundDeviceSink, NullSink
 from lyra.hardware.oc import (
     N2ADR_PRESET, n2adr_pattern_for_band, format_bits,
@@ -58,6 +61,11 @@ class Notch:
     Backward compat: ``n.deep`` is still readable as a derived
     attribute (== ``cascade > 1``) so legacy callers keep working.
 
+    Phase 6.B (v0.0.9.6) dropped the ``filter`` field — WDSP
+    receives notch parameters directly as (freq, width, active)
+    tuples via ``_push_wdsp_notches``, so the per-notch Python
+    biquad object that used to live here was orphan state.
+
     Fields:
     - ``abs_freq_hz``: absolute sky frequency of notch center.
     - ``width_hz``: operator-set -3-dB-from-peak bandwidth in Hz.
@@ -65,17 +73,17 @@ class Notch:
       placement is preserved.  Inactive notches render in grey.
     - ``depth_db``: notch attenuation at center, in dB (negative).
       Default -50 (Normal preset).  Slider range -20 to -80.
+      Currently advisory in WDSP mode (WDSP collapses depth into
+      width approximation — see ``_push_wdsp_notches``).
     - ``cascade``: number of biquad stages (1-4).  Each stage gets
-      ``depth_db / cascade``.  Default 2.  More stages = sharper
-      transition shoulders at the cost of CPU.
-    - ``filter``: the actual DSP object.
+      ``depth_db / cascade``.  Default 2.  Currently advisory in
+      WDSP mode for the same reason.
     """
     abs_freq_hz: float          # absolute sky frequency of notch center
     width_hz: float             # -3 dB-from-peak bandwidth in Hz
     active: bool                # individually enableable; False = bypass
     depth_db: float             # notch attenuation at center (dB, negative)
     cascade: int                # number of biquad stages (1-4)
-    filter: NotchFilter         # the actual DSP object
 
     @property
     def deep(self) -> bool:
@@ -1559,33 +1567,13 @@ class Radio(QObject):
         baseband offset that the filter is centered on).  Preserves
         each notch's width, depth, cascade, and active flag.
 
-        Quiet-pass v0.0.7.1: even though the FILTER COEFFICIENTS have
-        to be rebuilt (different baseband offset → different biquad),
-        we use ``update_coeffs`` on the existing filter instance
-        rather than constructing a fresh NotchFilter.  This way the
-        two-filter crossfade kicks in automatically and the freq
-        change is click-free.
+        Phase 6.B (v0.0.9.6) simplified this method: WDSP's notch
+        DB takes ABSOLUTE frequencies and does its own VFO-relative
+        mapping internally via ``set_notch_tune_frequency``, so
+        the per-notch coefficient rebuild this loop used to do (on
+        the deleted Lyra-side NotchFilter) is no longer needed.
+        Push WDSP the new tunefreq + the notch list and we're done.
         """
-        for n in self._notches:
-            try:
-                # Recompute the absolute baseband offset for this
-                # notch under the new VFO freq.
-                NOTCH_RATE = 48000
-                offset = n.abs_freq_hz - self._freq_hz
-                max_off = NOTCH_RATE / 2 - 100
-                offset = max(-max_off, min(max_off, offset))
-                eff_freq = abs(offset)
-                # update_coeffs preserves filter state and crossfades
-                # to the new coefficients over 5 ms — no click on
-                # freq change.
-                n.filter.update_coeffs(
-                    freq_hz=eff_freq,
-                    width_hz=n.width_hz,
-                    depth_db=n.depth_db,
-                    cascade=n.cascade,
-                )
-            except Exception as e:
-                self.status_message.emit(f"Notch error: {e}", 3000)
         # WDSP path: tell the notch engine the current VFO so it can
         # do its own absolute→baseband mapping, then push the notch
         # list (in case widths / active flags changed).  Both calls
@@ -4908,9 +4896,12 @@ class Radio(QObject):
             self.status_message.emit(f"USB-BCD write failed: {e}", 4000)
 
     # ── Notch bank API ────────────────────────────────────────────────
-    # All operator-facing notch operations live here. Width is the
-    # primary parameter (Hz, not Q). The IIR filter design is in
-    # _make_notch_filter; this layer just manages the bank.
+    # All operator-facing notch operations live here.  Width is the
+    # primary parameter (Hz, not Q).  Phase 6.B (v0.0.9.6): per-notch
+    # IIR filter coefficient design is gone — WDSP runs the live
+    # notch filtering and reads the operator's notch list as
+    # (abs_freq_hz, width_hz, active) tuples via
+    # ``_push_wdsp_notches``.  This layer just manages the bank.
 
     NOTCH_WIDTH_MIN_HZ = 5.0       # narrowest practical width
     NOTCH_WIDTH_MAX_HZ = 2000.0    # widest practical width
@@ -4975,15 +4966,10 @@ class Radio(QObject):
                        min(self.NOTCH_DEPTH_MAX_DB, float(depth_db)))
         cascade = max(self.NOTCH_CASCADE_MIN,
                       min(self.NOTCH_CASCADE_MAX, int(cascade)))
-        nf = self._make_notch_filter(
-            abs_freq_hz, w, depth_db=depth_db, cascade=cascade)
-        if nf is None:
-            return
         self._notches.append(Notch(
             abs_freq_hz=float(abs_freq_hz), width_hz=w,
             active=bool(active),
             depth_db=depth_db, cascade=cascade,
-            filter=nf,
         ))
         if not self._notch_enabled:
             self.set_notch_enabled(True)
@@ -5002,11 +4988,10 @@ class Radio(QObject):
         new width.  Used by mouse-wheel and drag gestures over an
         existing notch.  Returns True if a notch was matched + updated.
 
-        Quiet-pass v0.0.7.1: routes through ``filter.update_coeffs``
-        instead of constructing a fresh NotchFilter, which means the
-        filter STATE is preserved across the width change and the
-        two-filter crossfade kicks in to mask any IIR transient at
-        the swap boundary.  Drag-tick clicks gone.
+        Phase 6.B (v0.0.9.6): the per-notch ``filter.update_coeffs``
+        coefficient swap is no longer needed — WDSP picks up the
+        new width through ``_push_wdsp_notches`` (called by the
+        ``notches_changed`` signal handler).
 
         Width-change throttle: drag gestures fire many events per
         second.  We skip updates where the width changed by less than
@@ -5021,17 +5006,11 @@ class Radio(QObject):
                 min(self.NOTCH_WIDTH_MAX_HZ, float(new_width_hz)))
         if n.width_hz > 0 and abs(w - n.width_hz) / n.width_hz < 0.04:
             return False
-        try:
-            n.filter.update_coeffs(width_hz=w)
-        except Exception as e:
-            self.status_message.emit(f"Notch error: {e}", 3000)
-            return False
         # Replace the dataclass entry with updated width (immutable
         # for clean signal emission).
         self._notches[idx] = Notch(
             abs_freq_hz=n.abs_freq_hz, width_hz=w,
             active=n.active, depth_db=n.depth_db, cascade=n.cascade,
-            filter=n.filter,
         )
         self.notches_changed.emit(self.notch_details)
         return True
@@ -5052,7 +5031,6 @@ class Radio(QObject):
             abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
             active=bool(active),
             depth_db=n.depth_db, cascade=n.cascade,
-            filter=n.filter,
         )
         self.notches_changed.emit(self.notch_details)
         return True
@@ -5090,8 +5068,12 @@ class Radio(QObject):
     def set_notch_depth_db_at(self, abs_freq_hz: float, depth_db: float,
                               tolerance_hz: float | None = None) -> bool:
         """Set the notch attenuation depth (dB, negative) on the
-        notch nearest ``abs_freq_hz``.  Routed through
-        ``filter.update_coeffs`` so the swap is click-free.
+        notch nearest ``abs_freq_hz``.  Phase 6.B (v0.0.9.6):
+        depth_db is currently advisory only — WDSP collapses
+        depth into width approximation in ``_push_wdsp_notches``.
+        We persist the operator's value so the UI keeps showing
+        their setting and so a future cascade-of-WDSP-notches
+        upgrade can read it.
 
         ``depth_db`` is clamped to [NOTCH_DEPTH_MIN_DB,
         NOTCH_DEPTH_MAX_DB]."""
@@ -5104,15 +5086,9 @@ class Radio(QObject):
         if abs(d - n.depth_db) < 0.5:
             # Sub-half-dB change is sub-perceptible; skip.
             return True
-        try:
-            n.filter.update_coeffs(depth_db=d)
-        except Exception as e:
-            self.status_message.emit(f"Notch error: {e}", 3000)
-            return False
         self._notches[idx] = Notch(
             abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
             active=n.active, depth_db=d, cascade=n.cascade,
-            filter=n.filter,
         )
         self.notches_changed.emit(self.notch_details)
         return True
@@ -5120,8 +5096,10 @@ class Radio(QObject):
     def set_notch_cascade_at(self, abs_freq_hz: float, cascade: int,
                              tolerance_hz: float | None = None) -> bool:
         """Set the notch cascade depth (1-4 stages) on the notch
-        nearest ``abs_freq_hz``.  Routed through
-        ``filter.update_coeffs`` so the swap is click-free."""
+        nearest ``abs_freq_hz``.  Phase 6.B (v0.0.9.6): currently
+        advisory only — WDSP collapses cascade onto a single
+        notch.  Persisted so a future cascade-of-WDSP-notches
+        upgrade can read the operator's intent."""
         idx = self._find_nearest_notch_idx(abs_freq_hz, tolerance_hz)
         if idx is None:
             return False
@@ -5130,15 +5108,9 @@ class Radio(QObject):
                 min(self.NOTCH_CASCADE_MAX, int(cascade)))
         if c == n.cascade:
             return True
-        try:
-            n.filter.update_coeffs(cascade=c)
-        except Exception as e:
-            self.status_message.emit(f"Notch error: {e}", 3000)
-            return False
         self._notches[idx] = Notch(
             abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
             active=n.active, depth_db=n.depth_db, cascade=c,
-            filter=n.filter,
         )
         self.notches_changed.emit(self.notch_details)
         return True
@@ -5159,20 +5131,11 @@ class Radio(QObject):
         if idx is None:
             return False
         n = self._notches[idx]
-        try:
-            n.filter.update_coeffs(
-                depth_db=params["depth_db"],
-                cascade=params["cascade"],
-            )
-        except Exception as e:
-            self.status_message.emit(f"Notch error: {e}", 3000)
-            return False
         self._notches[idx] = Notch(
             abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
             active=n.active,
             depth_db=params["depth_db"],
             cascade=params["cascade"],
-            filter=n.filter,
         )
         self.notches_changed.emit(self.notch_details)
         return True
@@ -6897,52 +6860,14 @@ class Radio(QObject):
     # instances Radio still uses directly (post-AGC APF, captured-
     # noise capture on NR1).  See lyra/dsp/channel.py docstring.
 
-    def _make_notch_filter(self, abs_freq_hz: float,
-                           width_hz: float,
-                           depth_db: float = -50.0,
-                           cascade: int = 2,
-                           deep: bool | None = None
-                           ) -> NotchFilter | None:
-        """Design one notch filter at the given sky frequency with the
-        given -3 dB bandwidth.  The DSP pipeline runs at a fixed
-        48 kHz (decimation happens before notching) — coefficients
-        always designed for 48 kHz regardless of the RX sample rate.
-
-        v0.0.7.1 notch v2 (notch_v2_design.md):
-          - Off-DC: parametric peaking-EQ biquad with operator-set
-            ``depth_db`` (default -50) and ``cascade`` integer
-            (default 2).  Replaces ``scipy.signal.iirnotch`` which
-            had only -3 dB at the visible width edges.
-          - Near-DC: 4th-order Butterworth high-pass (unchanged).
-
-        Backward-compat: the legacy ``deep`` keyword is accepted and
-        translates to (cascade=2 if True else 1) so older callers
-        still work.  When ``deep`` is passed explicitly it overrides
-        ``cascade``.
-        """
-        NOTCH_RATE = 48000
-        offset = abs_freq_hz - self._freq_hz
-        max_off = NOTCH_RATE / 2 - 100
-        offset = max(-max_off, min(max_off, offset))
-        eff_freq = abs(offset)
-        # If the visible notch extent (freq ± width/2) crosses DC,
-        # the peaking-EQ math degenerates (sin(w0) → 0).  Switch to
-        # the high-pass DC-blocker path so the actual filter shape
-        # matches the rectangle the operator sees on the spectrum.
-        try:
-            if eff_freq < (width_hz * 0.5 + 10.0):
-                return NotchFilter(
-                    NOTCH_RATE, eff_freq, width_hz,
-                    dc_blocker=True,
-                    depth_db=depth_db, cascade=cascade, deep=deep,
-                )
-            return NotchFilter(
-                NOTCH_RATE, eff_freq, width_hz,
-                depth_db=depth_db, cascade=cascade, deep=deep,
-            )
-        except Exception as e:
-            self.status_message.emit(f"Notch error: {e}", 3000)
-            return None
+    # NOTE: _make_notch_filter removed in Phase 6.B (v0.0.9.6).
+    # Built per-mode peaking-EQ + DC-blocker biquads on the
+    # legacy NotchFilter class; that class lived in
+    # lyra/dsp/demod.py which got deleted alongside this method.
+    # WDSP receives notch parameters as plain (abs_freq_hz,
+    # width_hz, active) tuples via _push_wdsp_notches and runs
+    # the actual filtering inside the cffi engine — no Lyra-side
+    # biquad design needed.
 
     @property
     def pc_audio_host_api(self) -> str:
