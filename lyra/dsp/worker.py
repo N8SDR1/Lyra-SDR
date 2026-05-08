@@ -187,11 +187,12 @@ class DspWorker(QObject):
         self._stop_requested: bool = False
         self._reset_requested: bool = False
         # Phase 3.B B.3 — back-reference to Radio for the audio chain.
-        # The worker calls radio._rx_channel.process(), radio._apply_
-        # agc_and_volume(), radio._binaural.process() from worker thread
-        # when worker mode is active.  Future sub-tasks (B.6 / B.8 / B.9)
-        # progressively migrate the ownership of LNA peak tracking,
-        # FFT, and reset state from Radio to the worker.  Wired by
+        # The worker calls radio._do_demod_wdsp() (the WDSP cffi
+        # engine), radio._emit_tone(), and reads radio._mode +
+        # radio._wdsp_rx from the worker thread.  Phase 5 (v0.0.9.6)
+        # eliminated the legacy radio._rx_channel.process() /
+        # radio._apply_agc_and_volume() / radio._binaural.process()
+        # call sites — WDSP handles those internally.  Wired by
         # Radio after construction via ``attach_to_radio()``.
         self._radio = None
         # Phase 3.B B.5 — worker-owned audio sink reference.  Seeded
@@ -455,32 +456,19 @@ class DspWorker(QObject):
     def process_block(self, samples: np.ndarray) -> None:
         """Run DSP on one block of complex64 IQ samples.
 
-        Phase 3.B B.3 — mirrors ``Radio._do_demod`` body, running on
-        the worker thread instead of the main thread.  Calls Radio's
-        existing DSP machinery (channel, AGC, BIN, sink) via the
-        back-reference set by ``attach_to_radio()``.
-
-        Future sub-tasks migrate ownership of these objects directly
-        into the worker; B.3 only shifts WHERE the calls happen, not
-        WHERE the state lives.
-
-        What this commit (B.3) covers:
+        Originally (Phase 3.B B.3) this mirrored ``Radio._do_demod``
+        body running on the worker thread instead of the main thread,
+        wrapping the legacy DSP chain (channel.process → AGC → BIN →
+        sink).  Phase 3 (v0.0.9.6) deleted that legacy chain and
+        Phase 5 finished retiring the channel.process() entry point
+        — what remains here is just:
 
         - Mode dispatch (Off / Tone / regular)
-        - Notch state push to channel (matches single-thread cadence)
-        - ``rx_channel.process(iq)`` — full RX channel pipeline
-          (decim → notches → demod → NR → APF → audio)
-        - AGC + AF Gain + Volume + tanh limiter (via
-          ``radio._apply_agc_and_volume``)
-        - BIN — Hilbert phase split (via ``radio._binaural.process``)
-        - Audio sink write (via ``radio._audio_sink.write``)
-
-        What's NOT in B.3 (covered later):
-
-        - LNA peak / RMS tracking + ``lna_peak_update`` emit (B.6)
+        - LNA peak / RMS tracking on the IQ block (B.6 carryover)
+        - ``radio._do_demod_wdsp(samples)`` — the WDSP cffi engine
+          (handles decimation + notches + demod + NR + AGC + audio
+          internally; result lands in radio._audio_sink directly)
         - Sample-ring update + FFT + ``spectrum_ready`` emit (B.8)
-        - S-meter linear-power averaging + ``smeter_reading`` (B.4/5)
-        - Reset/flush via ``request_reset()`` (B.9)
 
         Errors at any stage are logged but never crash the worker
         thread — operator hears a single block of silence at worst,

@@ -1718,8 +1718,11 @@ deleting.
 * Bump `_open_wdsp_rx` audit reminder from §14.10 to higher
   priority — natural followup work after legacy cleanup lands.
 
-**Phase 9.5 — AGC behaviour audit** (operator-reported 2026-05-08
-during Phase 4 verification):
+**Phase 9.5 — Post-cleanup audit bundle** (operator-reported
+during Phase 4 + Phase 5 verification, 2026-05-08).  Three items
+to investigate together once the codebase is clean:
+
+**Item 1 — AGC behaviour audit:**
 
 * **Symptom:** AGC mode dropdown (Slow / Medium / Fast / Off)
   only audibly changes behaviour for OFF.  Slow/Medium/Fast all
@@ -1741,6 +1744,35 @@ during Phase 4 verification):
   through `lyra/dsp/agc_wdsp.py` (Phase 6 delete target) plus
   legacy `channel.py` (Phase 5 slim target) plus `radio.py`
   setters.  After Phase 6 there's exactly one path to audit.
+
+**Item 2 — HL2 audio output smoothing (regression check):**
+
+* **Symptom:** During the v0.0.9.6 audio rebuild on 2026-05-07,
+  one of the iterations added a "smoothing" stage to the HL2
+  audio output (AK4951 sink path) to make the sound less harsh.
+  Operator confirms it was audible at the time.  Several
+  subsequent reverts (the "oh shit" 0x17 fix landed on top of
+  a couple of underrun-related Option Z / diagnostic reverts —
+  see commits c7916bc, f29f53d, a56ed87) may have dropped the
+  smoothing change without re-adding it.
+* **What to check:** `git log --all -p -- lyra/dsp/audio_sink.py`
+  around 2026-05-07 for any commit that added a smoothing /
+  low-pass / DC-block / soft-clip filter ahead of the AK4951
+  EP2 builder, then verify the corresponding code is or isn't
+  present in HEAD.  If missing, port it forward.
+* **Defer until Phase 9 done** — same reasoning: cleaner sink
+  code makes the diff easier to read.
+
+**Item 3 — `_open_wdsp_rx` initial-state push audit** (§14.10
+followup, restated here for grouping):
+
+* WDSP RXA channel needs explicit initial-state pushes for
+  every operator-tunable parameter so cold-start matches the
+  saved QSettings.  Earlier audit suggests several setters are
+  missing from the open path (AGC mode + threshold, possibly
+  squelch threshold, possibly NR backend).
+* Bundle with Items 1 + 2 since all three touch the same
+  code path.
 
 **Total estimated work for Phases 3-9: 5-7 hours focused.**
 

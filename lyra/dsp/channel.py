@@ -1,90 +1,56 @@
-"""DSP channel abstraction — the WDSP integration seam.
+"""DSP channel — state container for Radio's DSP module instances.
 
-This module defines the contract between Lyra's network/protocol
-layer and its DSP layer:
+Phase 5 (v0.0.9.6) shrunk this module dramatically.  Originally it
+implemented the full RX chain in pure Python (decimator + custom
+demods + NR + notches + APF + binaural + sink), wrapped by a
+``DspChannel`` ABC so a future ``WdspChannel`` could swap in.
 
-  ┌─────────────┐   IQ at any rate   ┌──────────────────┐  Audio @ 48k
-  │ HL2Stream   │ ─────────────────▶ │   DspChannel     │ ─────────────▶
-  │ (network)   │                    │  (decim+demod)   │
-  └─────────────┘                    └──────────────────┘
+The "future WDSP path" landed on the WDSP cffi engine living
+directly in ``Radio._do_demod_wdsp`` — not as a DspChannel subclass
+— so the abstract façade no longer pulls its weight.  What remains
+here is a thin state container that:
 
-Today the only concrete implementation is `PythonRxChannel`, which
-wraps Lyra's existing scipy-based custom demods (SSB / CW / AM / DSB
-/ FM). When WDSP integration lands, a future `WdspChannel(DspChannel)`
-will call `wdsp.dll`'s `fexchange0()` instead — and no other code
-outside this module will need to change.
+  * Owns the live DSP module instances (NR1, NR2, NB, ANF, LMS,
+    SSQL, APF) that were ported in Phases 3.D #1-#4 and reused by
+    Radio's WDSP path for things WDSP doesn't ship by default
+    (post-AGC APF, captured-noise profile capture, etc.).
+  * Exposes setters / getters Radio uses to mirror operator state
+    (mode, rx-bw, cw-pitch, notches) onto whichever module needs
+    it (e.g. APF center follows the CW pitch).
+  * Holds the captured-noise capture machinery on its embedded NR1
+    instance — which is the only nr.py interface still alive even
+    when NR2 is the active processor (NR1 owns the FFT-magnitude
+    accumulator + smart-guard logic).
 
-Architectural intent (mirrors WDSP RXA, 100% clean-room):
-  - Channel owns ALL its DSP state internally: decimator, demods,
-    audio buffer, NR, notch chain.
-  - Radio configures the channel via setters; the channel never
-    looks back at Radio's attributes.
-  - All sample-rate matching happens INSIDE the channel — outputs
-    are always 48 kHz audio regardless of input IQ rate, so the
-    EP2 frame builder always sees a clean 48 kHz audio stream.
-  - AGC and final volume staging live OUTSIDE the channel (in
-    Radio) — those are routing-side concerns. WDSP later puts
-    them in too; we'll move them when we wire WDSP.
-  - Notches are inside the channel (they operate on baseband IQ
-    before demod, so they have to be in this scope).
+The ``DspChannel`` ABC is kept for documentation / future
+swap-in possibilities, but the legacy ``process()`` abstractmethod
+is gone — channels no longer process IQ in this layer.
+
+Phases 6-8 will continue trimming this file (replacing live DSP
+instances with dataclasses, deleting now-orphan setters).
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, Sequence
-
-import numpy as np
-
-from lyra.dsp.demod import (
-    SSBDemod, CWDemod, AMDemod, DSBDemod, FMDemod,
-)
-
-
-# ── Stateful complex-signal decimator ──────────────────────────────
-#
-# Used by PythonRxChannel when in_rate > audio_rate. Persistent
-# filter state across blocks so back-to-back chunks don't introduce
-# FIR startup transients at block boundaries.
-class _Decimator:
-    """Anti-aliased integer-rate complex decimator."""
-
-    def __init__(self, rate_in: int, rate_out: int, taps: int = 257):
-        from scipy.signal import firwin
-        self.decim = rate_in // rate_out
-        # Anti-alias cutoff at 90% of output Nyquist
-        cutoff = (rate_out / 2.0) * 0.90
-        self.taps = firwin(taps, cutoff, fs=rate_in, window="hann").astype(np.float64)
-        self.state_i = np.zeros(taps - 1, dtype=np.float64)
-        self.state_q = np.zeros(taps - 1, dtype=np.float64)
-        self._phase = 0   # decimation stride offset across block boundaries
-
-    def process(self, iq: np.ndarray) -> np.ndarray:
-        from scipy.signal import lfilter
-        i_out, self.state_i = lfilter(self.taps, 1.0, iq.real, zi=self.state_i)
-        q_out, self.state_q = lfilter(self.taps, 1.0, iq.imag, zi=self.state_q)
-        start = (-self._phase) % self.decim
-        i_dec = i_out[start::self.decim]
-        q_dec = q_out[start::self.decim]
-        consumed_to_end = len(i_out) - start
-        self._phase = (self._phase + consumed_to_end) % self.decim
-        return (i_dec + 1j * q_dec).astype(np.complex64)
 
 
 # ── Abstract channel ───────────────────────────────────────────────
 class DspChannel(ABC):
-    """Abstract RX DSP channel.
+    """Abstract RX DSP state container.
 
-    Contract:
-      - Inputs: complex64 IQ at `in_rate` Hz, arbitrary block size
-      - Outputs: float32 audio at `audio_rate` Hz (default 48 kHz)
-      - Stateful: maintains demod / filter / buffer state across
-        process() calls. Caller must call reset() on freq change
-        to avoid stale-buffer artifacts.
+    Phase 5 (v0.0.9.6) reduced this from a "drives the audio
+    pipeline" contract to a "owns operator-mirrored DSP state"
+    contract.  The actual demod path lives in
+    ``Radio._do_demod_wdsp`` (the WDSP cffi engine); the channel
+    holds whichever DSP modules Radio still calls into directly
+    (post-AGC APF, captured-noise capture on NR1, NR profile
+    state) plus operator-mirrored fields (mode, rx-bw, cw-pitch,
+    notches).
 
-    All concrete implementations must satisfy the same interface so
-    swapping (e.g. PythonRxChannel → WdspChannel) is transparent to
-    callers.
+    The ABC is kept for forward-compatibility — if a future DSP
+    backend wants to ship its own state container shape, it can
+    subclass here and Radio's setter calls Just Work.
     """
 
     AUDIO_RATE = 48000
@@ -116,13 +82,6 @@ class DspChannel(ABC):
         """Update CW pitch — affects CWL/CWU demods' tone."""
 
     @abstractmethod
-    def set_notches(self, notches: Sequence, enabled: bool) -> None:
-        """Update the notch filter chain. `notches` is a sequence of
-        objects with a `.filter` attribute (a NotchFilter or None) and
-        a `.active` bool, matching Radio's Notch dataclass shape.
-        `enabled` is the master notch-engine on/off."""
-
-    @abstractmethod
     def set_nr_enabled(self, enabled: bool) -> None:
         """Master noise-reduction on/off."""
 
@@ -148,54 +107,47 @@ class DspChannel(ABC):
         """Drop in-flight buffers + transient state. Called on
         frequency change, mode change, stream restart."""
 
-    # ── DSP entry point ────────────────────────────────────────────
-
-    @abstractmethod
-    def process(self, iq: np.ndarray) -> np.ndarray:
-        """Run the full channel: IQ in (any rate) → audio out (48 kHz).
-
-        Returns an empty float32 array if the channel is in a no-audio
-        state (mode == 'Off' / 'Tone', or insufficient samples to
-        produce a complete demod block yet)."""
-
 
 # ── Concrete: Lyra's native Python channel ─────────────────────────
 class PythonRxChannel(DspChannel):
-    """Lyra's stock RX channel built on its scipy-based custom demods.
+    """RX state container Radio uses to mirror operator state +
+    house DSP module instances.
 
-    Owns the decimator, audio buffer, demod instances (one per mode),
-    NR processor, and notch chain. Radio configures via setters and
-    feeds IQ into process().
+    Live callers of the embedded DSP instances (as of v0.0.9.6
+    Phase 5):
 
-    WDSP integration path: a future WdspChannel will call into the
-    DLL's fexchange0() and ignore most of this state. Both classes
-    satisfy the same DspChannel ABC, so Radio doesn't care which
-    one it has.
+      * ``_apf``  → Radio calls ``_apf.process()`` directly in its
+                    post-AGC audio path (lines 6803, 6853 in
+                    radio.py); ``set_cw_pitch_hz`` keeps its
+                    center frequency tracking the CW pitch.
+      * ``_nr``   → Radio drives the captured-noise capture
+                    machinery through it (see ``begin_noise_capture``
+                    and friends below).  The ``feed_capture()`` API
+                    on this instance is the only nr.py interface
+                    still alive when NR2 is the active processor.
+      * ``_nr2`` → Radio reads/writes ``gain_method`` for the NR2
+                    method picker (see set_nr2_*); also receives
+                    set_use_captured_profile / load_captured_profile
+                    so switching NR1↔NR2 mid-session keeps the
+                    same profile loaded.
+
+    The other instances (``_nb``, ``_lms``, ``_anf``, ``_squelch``)
+    are operator-state containers — Radio sets profile / strength /
+    threshold / enabled on them, but their ``process()`` methods are
+    no longer called.  Phase 6 replaces them with dataclasses.
+
+    The ``block_size`` constructor parameter is accepted but ignored
+    — it used to size the legacy ``_audio_buf`` drain unit.  Kept on
+    the signature for one cleanup cycle so radio.py doesn't need a
+    same-commit signature change; will be dropped in Phase 8.
     """
 
     def __init__(self, in_rate: int, block_size: int = 1024):
         super().__init__(in_rate)
-        self._block_size: int = int(block_size)
+        # block_size accepted but unused — see class docstring.
+        del block_size
         self._mode: str = "USB"
-
-        # Per-mode RX bandwidth — operator-set, persists across mode
-        # switches. Matches Radio.BW_DEFAULTS so the channel produces
-        # the same audio characteristics as the pre-refactor pipeline.
-        self._rx_bw_by_mode: dict[str, int] = {
-            "LSB":  2400, "USB":  2400,
-            "CWL":  250,  "CWU":  250,
-            "DSB":  5000,
-            "AM":   6000,
-            "FM":   10000,
-            "DIGL": 3000, "DIGU": 3000,
-        }
         self._cw_pitch_hz: float = 650.0
-
-        # State that gets (re)built lazily.
-        self._decimator: Optional[_Decimator] = None
-        self._audio_buf: list = []
-        self._demods: dict = {}
-        self._rebuild_demods()
 
         # NR processor — owned by the channel.
         from lyra.dsp.nr import SpectralSubtractionNR
@@ -274,12 +226,6 @@ class PythonRxChannel(DspChannel):
             center_hz=self._cw_pitch_hz,
         )
 
-        # Notch chain — list of objects with .filter and .active
-        # attrs. Channel doesn't own these (Radio's notch-management
-        # state machine does); it just applies them inside process().
-        self._notches: Sequence = ()
-        self._notch_enabled: bool = False
-
     # ── Setters ────────────────────────────────────────────────────
 
     def set_in_rate(self, rate: int) -> None:
@@ -287,58 +233,56 @@ class PythonRxChannel(DspChannel):
         if rate == self.in_rate:
             return
         self.in_rate = rate
-        # Force decimator rebuild on next IQ block. We don't build
-        # eagerly because rate may be set before the first sample
-        # arrives, and we want the first build to use the rate that's
-        # actually in effect when audio starts.
-        self._decimator = None
-        self._audio_buf.clear()
-        # NB tracks the input rate (it operates pre-decimation).
-        # ImpulseBlanker.set_rate is a no-op when rate is unchanged
-        # and recomputes coefficients + resets state otherwise.
+        # NB tracks the input rate via its ``set_rate`` method.
+        # Even though Radio no longer feeds IQ through ``_nb.process``
+        # (Phase 5 deleted that legacy path), the rate field is part
+        # of the operator-mirrored state and may be reused when
+        # Phase 6 swaps NB for a dataclass equivalent — keeping the
+        # call here means that swap is a one-liner.
         self._nb.set_rate(rate)
 
     def set_mode(self, mode: str) -> None:
         if mode == self._mode:
             return
         self._mode = mode
-        self._audio_buf.clear()
-        # Demods themselves don't change on mode switch (they're all
-        # built up-front in _rebuild_demods); we just route to a
-        # different one. NR state is mode-dependent in character (a
-        # CW noise floor is different from AM), so flush both NR
-        # processors — operator may toggle between them at any time
-        # and we don't want NR2's decision-directed smoothing to
-        # blend in stale spectral state from the previous mode.
+        # NR state is mode-dependent in character (a CW noise floor
+        # is different from AM), so flush both NR processors —
+        # operator may toggle between them at any time and we don't
+        # want NR2's decision-directed smoothing to blend in stale
+        # spectral state from the previous mode.  Even with NR1/NR2
+        # no longer in the live audio path, the captured-profile
+        # capture accumulator (which IS still live, on _nr) wants a
+        # fresh noise reference per mode.
         self._nr.reset()
         self._nr2.reset()
-        # LMS weights/delay line are similarly mode-dependent — a
-        # converged CW lock would mispredict on switching to SSB.
+        # LMS / Squelch state mirrors — kept fresh per mode for the
+        # same reason set_in_rate keeps NB's rate field current:
+        # Phase 6 dataclass swap is a one-line change if the call
+        # site already exists.
         self._lms.reset()
-        # Squelch detector retrains for the new mode's noise floor.
         self._squelch.reset()
 
-    def set_rx_bw(self, mode: str, bw_hz: int) -> None:
-        self._rx_bw_by_mode[mode] = int(bw_hz)
-        # Rebuild only the affected demod — cheaper than rebuilding all.
-        self._rebuild_demods()
+    def set_rx_bw(self, mode: str, bw_hz: int) -> None:  # noqa: ARG002
+        # Phase 5: Radio is the authoritative store for per-mode
+        # bandwidth (``Radio._rx_bw_by_mode``); the channel no longer
+        # needs its own copy.  Setter kept on the API so radio.py's
+        # call site doesn't need a same-commit signature change.
+        # Phase 6 deletes this method entirely along with the orphan
+        # setter sweep.
+        return
 
     def set_cw_pitch_hz(self, pitch_hz: float) -> None:
         new_pitch = float(pitch_hz)
         if new_pitch == self._cw_pitch_hz:
             return
         self._cw_pitch_hz = new_pitch
-        # CW demods reference pitch; rebuild so they pick up the change.
-        self._rebuild_demods()
         # APF center follows pitch automatically — that's the natural
         # operator mental model ("I tuned to the pitch, now boost
-        # what I tuned to"). Coefficient swap is smooth on a
-        # populated zi (low-Q peaking filter), so no click.
+        # what I tuned to").  This is a LIVE call: Radio runs the
+        # APF in its post-AGC chain (radio.py:6803, 6853), so the
+        # coefficient swap matters audibly.  Smooth on a populated
+        # zi (low-Q peaking filter), so no click.
         self._apf.set_center_hz(new_pitch)
-
-    def set_notches(self, notches: Sequence, enabled: bool) -> None:
-        self._notches = notches
-        self._notch_enabled = bool(enabled)
 
     def set_nr_enabled(self, enabled: bool) -> None:
         """Master enable for whichever NR is currently active.
@@ -686,65 +630,36 @@ class PythonRxChannel(DspChannel):
         self._apf.set_gain_db(float(gain_db))
 
     def reset(self) -> None:
-        """Drop in-flight buffers + band-specific transient state.
+        """Reset band-specific transient state on operator-driven
+        discontinuities (freq change, mode change, stream restart).
 
-        Called on freq change, mode change, and stream restart — all
-        operator-driven discontinuities where stale band-specific
-        state (NR noise floor, ANF / LMS adaptive weights, squelch
-        floor) is no longer correct for the new band.
+        Phase 5 (v0.0.9.6): the legacy ``_audio_buf`` and
+        ``_decimator`` are gone, so this method only forwards the
+        reset to the embedded DSP modules.  Of those, only ``_nr``
+        and ``_apf`` see live calls in the current build:
 
-        Quiet-pass v0.0.7.1: this method NO LONGER drops the
-        decimator state.  The previous behaviour (force-rebuild
-        ``self._decimator = None``) was a defensive measure against a
-        historical "audio stuck silent" bug observed on big freq /
-        mode jumps (AM 10 MHz WWV → DIGU 7.074 MHz FT8).  But that
-        rebuild had a real cost: the new decimator's FIR state starts
-        at all zeros, producing a ~1 ms ramp-up transient on the
-        first IQ block after every reset — i.e., a click on every
-        tune.  Operators reported this as "consistent audio pops on
-        tune."  See ``docs/architecture/audio_pops_audit.md`` §3 P0.2.
+          * ``_nr.reset()`` clears the noise estimate so a fresh
+            ``feed_capture()`` round starts clean.
+          * ``_apf.reset()`` clears the post-AGC peaking biquad's
+            zi state so the CW tone-track has no carry-over from
+            the previous band.
 
-        The decimator's anti-alias FIR coefficients depend on
-        ``in_rate`` only — not on freq, mode, or anything we touch in
-        ``reset()``.  As long as the rate hasn't changed (which it
-        hasn't, by construction — ``set_in_rate`` handles its own
-        decimator rebuild on actual rate changes), the existing FIR
-        state is still mathematically valid for the next IQ block.
-        Carrying it over removes the click.
-
-        The ``_audio_buf.clear()`` below remains.  That covers the
-        original "stuck silent" symptom too (any backlogged audio
-        from the old band gets dropped, so the channel doesn't try
-        to drain stale samples through new-band demods)."""
-        self._audio_buf.clear()
+        The other resets (``_nb``, ``_anf``, ``_nr2``, ``_lms``,
+        ``_squelch``) are state-mirror plumbing — kept here so
+        Phase 6's dataclass swap is a one-line change at each call
+        site, with no need to also re-thread ``reset()``.
+        """
         self._nr.reset()
-        # NB state — bg tracker, last-clean memory, blank-run counter.
-        # Same justification as the others: reset() runs on operator-
-        # driven discontinuities (freq/mode change) where a fresh
-        # bg tracker is appropriate.
+        # State-mirror resets (kept for Phase 6 forward-compat;
+        # see method docstring).
         self._nb.reset()
-        # ANF state — adaptive weights + delay line.  Tones learned
-        # on the prior band are unlikely to be present on the new
-        # one, so a fresh start is right.  Profile + enabled flag
-        # are preserved (operator's setting sticks).
         self._anf.reset()
-        # NR2 state — noise estimate per bin, prev-frame gain,
-        # decision-directed memory.  Discontinuity = clean start.
         self._nr2.reset()
-        # LMS state — adaptive weights + delay line ring.  Same
-        # rationale as ANF: a stale converged state for a different
-        # signal would mispredict on the new band/mode.
         self._lms.reset()
-        # Squelch state — window-detector average and trigger
-        # voltage.  A new band has a different noise floor, so the
-        # SSQL detector needs to re-track.
         self._squelch.reset()
-        # APF state — safe to clear here because reset() is only
-        # called on freq/mode changes, where an audio discontinuity
-        # is already expected.
+        # Live: Radio's post-AGC chain runs ``_apf.process()``,
+        # so its zi state matters.
         self._apf.reset()
-        # NOTE: self._decimator is intentionally NOT reset here.
-        # See the docstring above for the full reasoning.
 
     # ── Misc accessors for Radio (read-only views into channel state) ─
 
@@ -755,179 +670,3 @@ class PythonRxChannel(DspChannel):
     @property
     def cw_pitch_hz(self) -> float:
         return self._cw_pitch_hz
-
-    @property
-    def block_size(self) -> int:
-        return self._block_size
-
-    # ── Internals ──────────────────────────────────────────────────
-
-    def _rebuild_demods(self) -> None:
-        """Construct one demod instance per supported mode at the
-        channel's audio rate. Called on init, on rx_bw change, and
-        on cw_pitch change."""
-        try:
-            bw = self._rx_bw_by_mode
-            ar = self.audio_rate
-            self._demods = {
-                "LSB":  SSBDemod(ar, "LSB", low_hz=300,
-                                 high_hz=300 + bw.get("LSB", 2400)),
-                "USB":  SSBDemod(ar, "USB", low_hz=300,
-                                 high_hz=300 + bw.get("USB", 2400)),
-                "CWL":  CWDemod(ar, pitch_hz=self._cw_pitch_hz,
-                                bw_hz=bw.get("CWL", 250), sideband="L"),
-                "CWU":  CWDemod(ar, pitch_hz=self._cw_pitch_hz,
-                                bw_hz=bw.get("CWU", 250), sideband="U"),
-                "DSB":  DSBDemod(ar, bw_hz=bw.get("DSB", 5000)),
-                "AM":   AMDemod(ar, bw_hz=bw.get("AM", 6000) / 2),
-                "FM":   FMDemod(ar, deviation_hz=5000,
-                                audio_bw_hz=bw.get("FM", 10000) / 2),
-                "DIGL": SSBDemod(ar, "LSB", low_hz=200,
-                                 high_hz=200 + bw.get("DIGL", 3000)),
-                "DIGU": SSBDemod(ar, "USB", low_hz=200,
-                                 high_hz=200 + bw.get("DIGU", 3000)),
-            }
-        except RuntimeError as e:
-            print(f"[channel] demod init failed: {e}")
-            self._demods = {}
-
-    def _decimate_to_48k(self, iq: np.ndarray) -> np.ndarray:
-        if self.in_rate == self.audio_rate:
-            return iq
-        if self._decimator is None:
-            self._decimator = _Decimator(self.in_rate, self.audio_rate)
-        return self._decimator.process(iq)
-
-    # ── Main DSP entry point ───────────────────────────────────────
-
-    def process(self, iq: np.ndarray) -> np.ndarray:
-        """Run the full channel. Returns concatenated 48 kHz audio
-        for any complete demod blocks ready in the buffer; empty
-        array otherwise."""
-        mode = self._mode
-        if mode in ("Off", "Tone"):
-            # Channel produces no audio for these — Radio handles them.
-            return np.zeros(0, dtype=np.float32)
-
-        # ── Impulse blanker (NB, Phase 3.D #2) ────────────────────
-        # Runs PRE-decimation so impulses are still narrow time-
-        # domain spikes that the detect-then-replace algorithm can
-        # surgically blank.  Bypass-fast when NB is disabled (the
-        # default).
-        iq = self._nb.process(iq)
-
-        iq_48k = self._decimate_to_48k(iq)
-        if iq_48k.size == 0:
-            return np.zeros(0, dtype=np.float32)
-
-        self._audio_buf.extend(iq_48k.tolist())
-
-        block = self._block_size
-        demod = self._demods.get(mode)
-        if demod is None:
-            return np.zeros(0, dtype=np.float32)
-
-        # Drain complete blocks. Each block runs through
-        #   notches (baseband IQ) → demod (audio) → NR (audio)
-        #                        → APF (audio, CW-only).
-        # AGC + volume happen OUTSIDE the channel. APF is the last
-        # in-channel audio stage — it sits before AGC so AGC chases
-        # the boosted tone (which is the whole point: operator hears
-        # the CW signal at AGC target, not target-minus-boost).
-        is_cw = mode in ("CWU", "CWL")
-        out_chunks: list[np.ndarray] = []
-        while len(self._audio_buf) >= block:
-            chunk = np.asarray(
-                self._audio_buf[:block], dtype=np.complex64,
-            )
-            del self._audio_buf[:block]
-            try:
-                if self._notch_enabled:
-                    for n in self._notches:
-                        if getattr(n, "active", False) and \
-                                getattr(n, "filter", None) is not None:
-                            chunk = n.filter.process(chunk)
-                audio = demod.process(chunk)
-                # Chain order — corrected v0.0.7.x per nr_audit §3:
-                #
-                #   demod -> LMS -> ANF -> SQ -> NR -> APF
-                #
-                # Why this order:
-                #   * LMS is a *predictor* — it lifts periodic
-                #     content (CW carriers, voice formants) above
-                #     broadband noise.  It needs to see the FULL
-                #     periodic spectrum to learn from.
-                #   * ANF is a *remover* — it cancels periodic
-                #     content (whistles, heterodynes).  Running ANF
-                #     before LMS would feed LMS the residual *with
-                #     the periodic content already removed*, which
-                #     defeats LMS's predictor entirely.
-                #   * SQ comes after the adaptive filters so they
-                #     keep adapting during gate-closed periods —
-                #     fixes the "LMS weights stale on gate-open"
-                #     issue.
-                #   * SQ stays BEFORE NR so the voice-presence
-                #     detector sees audio with full noise variance
-                #     (NR-smoothed audio confuses the detector and
-                #     causes over-muting).
-                #
-                # Pre-v0.0.7.x order was demod -> ANF -> SQ -> LMS
-                # -> NR which had ANF stripping the very content
-                # LMS was trying to predict.
-                #
-                # LMS adaptive line enhancer — predictive; lifts
-                # periodic content (CW, voice formants) above
-                # broadband noise.  Bypass-fast when disabled
-                # (single attribute check).
-                audio = self._lms.process(audio)
-                # ANF (Phase 3.D #3) — LMS adaptive notch.  Cancels
-                # KNOWN-but-drifting tones (heterodynes that the
-                # operator hasn't manually notched, BC-station
-                # bleed-through, etc.).  Sits AFTER LMS so LMS sees
-                # the periodic content it needs to predict; sits
-                # BEFORE NR so NR cleans up whatever broadband
-                # residual is left.
-                audio = self._anf.process(audio)
-                # All-mode squelch — slotted BEFORE the NR stage
-                # but AFTER the adaptive filters (LMS + ANF).  The
-                # voice-presence detector sees audio with its full
-                # noise variance (no NR smoothing); LMS / ANF
-                # continue adapting during gate-closed periods.
-                # When the squelch is closed, downstream NR / APF
-                # see silence and consume essentially zero CPU.
-                audio = self._squelch.process(audio)
-                # Route NR through whichever processor the operator
-                # selected.  Both have identical STFT framing and
-                # length-preserving contracts, so switching is
-                # sample-accurate.  Inactive processor's process()
-                # returns input unchanged (when its .enabled is
-                # False) — bypass cost is one attribute-check per
-                # block.
-                if self._active_nr == "nr2":
-                    # Keep the Cap button working in NR2 mode: NR1
-                    # owns the capture accumulator (it's the only
-                    # processor with the FFT-magnitude collector +
-                    # smart-guard logic), so feed it on the side
-                    # whenever a capture is in progress.  Cheap when
-                    # idle (single state-check + early return).
-                    self._nr.feed_capture(audio)
-                    audio = self._nr2.process(audio)
-                else:
-                    audio = self._nr.process(audio)
-                # APF call moved POST-AGC in v0.0.9.3 -- runs in
-                # Radio._apply_agc_and_volume after AGC+Vol so the
-                # operator's +18 dB boost is a literal audible boost
-                # on the CW tone, not something the AGC compensates
-                # for.  The APF object still lives on the Channel
-                # (so set_apf_* / set_center_hz live here and follow
-                # the CW pitch automatically), but its .process()
-                # call site moved out.
-                out_chunks.append(audio)
-            except Exception as e:
-                print(f"[channel] demod error: {e}")
-                # Don't propagate — keep the audio thread alive.
-                break
-
-        if not out_chunks:
-            return np.zeros(0, dtype=np.float32)
-        return np.concatenate(out_chunks)

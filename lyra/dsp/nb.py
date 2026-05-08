@@ -64,8 +64,11 @@ energy spreads across many more output samples — by the time the
 demod sees it, you can't tell which audio samples are impulse.
 
 Running NB at the input rate, before decimation, keeps the
-impulses narrow and easy to detect.  This module is therefore
-slotted into Radio's IQ pipeline ahead of ``rx_channel.process``.
+impulses narrow and easy to detect.  This module was originally
+slotted into Radio's IQ pipeline ahead of the legacy
+``rx_channel.process``; that pipeline was retired in v0.0.9.6
+(WDSP handles NB internally), and this module now exists only as
+an operator-state container (Phase 6 deletion target).
 
 Performance
 -----------
@@ -99,8 +102,10 @@ class ImpulseBlanker:
 
     Operates on complex64 IQ blocks at the input sample rate.
     Length-preserving: process() returns an array of the same shape
-    as its input.  Designed to live ahead of channel.process() in
-    Lyra's audio chain.
+    as its input.  Originally lived ahead of channel.process() in
+    Lyra's audio chain; v0.0.9.6 retired that path in favor of
+    WDSP's internal noise blanker.  Kept here as an operator-state
+    container (Phase 6 deletion target).
     """
 
     # ── Profile presets ──────────────────────────────────────────

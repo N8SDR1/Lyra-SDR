@@ -708,29 +708,25 @@ class Radio(QObject):
         # so no GIL pressure.  Lands as the next v0.0.9.6 task.
         self._audio_mixer = None
         self._audio_sink = NullSink()
-        # Audio block size — channel.process produces audio in chunks
-        # of this many samples per inner-loop iteration.  v0.0.9.1
-        # reduced this from 2048 to 512 to fix audio-sink underrun
-        # symptoms.  Operator data: with block_size=2048, worker
-        # produces 43 ms bursts, deque oscillates by ±2050 samples
-        # between bursts -- the AK4951 EP2 builder polls every 2.6 ms
-        # and consumes 2050 samples in that 43 ms gap.  Any small
-        # producer jitter (worker scheduling, FFT compute, GC) tipped
-        # the deque into empty -> zero-padding -> click.  Operator
-        # measured ~1.5 underruns/sec sustained even with 100 ms
-        # pre-fill in v0.0.9.1.
-        #
-        # block_size=512 -> 10.7 ms bursts -> deque oscillates by
-        # ±500 samples (small fraction of the 4800-sample pre-fill).
-        # Worker has plenty of margin for any jitter up to ~85 ms
-        # before approaching empty.  Cost: ~4× more inner-loop
-        # iterations per second (4× worker overhead, but 2.6 % CPU
-        # base on the operator's machine -> projected <12 % under
-        # load -- well within budget).  Latency: 2048 -> 512 reduces
-        # audio-block latency from 43 ms to 11 ms.  Net latency to
-        # speaker drops slightly.  No DSP module depends on a
-        # specific block_size (NR FFTs use their own internal frame
-        # size; demods are length-agnostic).
+        # Audio block size — historical inner-loop drain unit for
+        # the legacy channel.process() path (deleted in Phase 5,
+        # v0.0.9.6).  WDSP picks its own internal frame size, so
+        # this constant no longer drives anything in the live audio
+        # chain.  Kept on the Radio object because:
+        #   1. ``_emit_tone(len(samples))`` reads ``samples`` length
+        #      directly, but a few legacy callers still pass
+        #      ``self._audio_block`` to size test buffers; rather
+        #      than chase those down with Phase 5's surgery, we
+        #      retire the field in the Phase 8 orphan setter sweep.
+        #   2. ``PythonRxChannel.__init__`` still accepts a
+        #      ``block_size`` kwarg (no-op, will be dropped in
+        #      Phase 8); passing the constant keeps the call site
+        #      diff-free this commit.
+        # Original tuning rationale: 512 was chosen v0.0.9.1 to bring
+        # worker burst length down from 43 ms (block_size=2048) to
+        # 10.7 ms so the AK4951 EP2 builder's 2.6 ms polling cadence
+        # could keep its 4800-sample pre-fill from draining empty
+        # under producer jitter.
         self._audio_block = 512
         self._tone_phase = 0.0
 
@@ -1341,11 +1337,15 @@ class Radio(QObject):
         self._sample_ring: deque = deque(maxlen=self._fft_size * 4)
         self._ring_lock = threading.Lock()
 
-        # ── Demods ─────────────────────────────────────────────────────
-        # Demod instances live inside self._rx_channel (one per mode,
-        # built from the channel's _rx_bw_by_mode + _cw_pitch_hz).
-        # Sync the channel's per-mode BW with Radio's current values
-        # so the UI's saved BW state takes effect immediately.
+        # ── Channel state-mirror sync ──────────────────────────────────
+        # Push Radio's authoritative per-mode bandwidth + CW pitch +
+        # current mode onto the channel.  Phase 5 (v0.0.9.6) reduced
+        # the channel to a state container — set_rx_bw is now a
+        # no-op (Radio's _rx_bw_by_mode is the only authoritative
+        # store), but set_cw_pitch_hz still drives the post-AGC
+        # APF's center frequency on _rx_channel._apf, and set_mode
+        # flushes the noise-floor estimators on the captured-profile
+        # NR1 instance so a fresh capture starts clean.
         for _m, _bw in self._rx_bw_by_mode.items():
             self._rx_channel.set_rx_bw(_m, int(_bw))
         self._rx_channel.set_cw_pitch_hz(float(self._cw_pitch_hz))
@@ -6598,16 +6598,15 @@ class Radio(QObject):
 
         # Capture-active path — when the operator presses "Cap", NR1
         # (which owns the FFT magnitude accumulator) needs to see the
-        # post-demod audio so it can build the captured profile.  In
-        # legacy mode this happened inside _rx_channel.process(); in
-        # WDSP mode that chain is bypassed, so we feed the WDSP audio
-        # output directly to nr.process() with enabled forced to False
-        # — that triggers nr.py's lightweight "capture-without-NR"
-        # branch which accumulates magnitudes and returns audio
-        # untouched.  When capture finalizes, NR1's done-callback
-        # (already wired to _on_nr_capture_done) loads the profile
-        # into both NR1 and NR2 and fires noise_capture_done so the
-        # UI prompts for a save name.
+        # post-demod audio so it can build the captured profile.
+        # WDSP doesn't ship a capture facility, so we feed the WDSP
+        # audio output directly to nr.process() with enabled forced
+        # to False — that triggers nr.py's lightweight "capture-
+        # without-NR" branch which accumulates magnitudes and returns
+        # audio untouched.  When capture finalizes, NR1's done-
+        # callback (already wired to _on_nr_capture_done) loads the
+        # profile into both NR1 and NR2 and fires noise_capture_done
+        # so the UI prompts for a save name.
         nr1 = getattr(self._rx_channel, "_nr", None)
         if nr1 is not None and getattr(nr1, "_capture_state", "idle") == "capturing":
             try:
@@ -7036,10 +7035,12 @@ class Radio(QObject):
             3000)
         return target
 
-    # Note: _decimate_to_48k and _rebuild_demods used to live here.
-    # Both are now owned by self._rx_channel (lyra/dsp/channel.py),
-    # which is the WDSP integration seam. Radio configures the channel
-    # via setters and feeds IQ into self._rx_channel.process(iq).
+    # Note: _decimate_to_48k and _rebuild_demods used to live here,
+    # then moved to self._rx_channel.  Phase 5 (v0.0.9.6) deleted
+    # both — WDSP performs decimation + demod inside the cffi engine,
+    # and self._rx_channel is now a thin state container for module
+    # instances Radio still uses directly (post-AGC APF, captured-
+    # noise capture on NR1).  See lyra/dsp/channel.py docstring.
 
     def _make_notch_filter(self, abs_freq_hz: float,
                            width_hz: float,
