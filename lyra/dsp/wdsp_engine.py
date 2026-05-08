@@ -506,6 +506,26 @@ class RxChannel:
         with self._lock:
             self._lib.SetRXAANRLeakage(self.channel, float(leakage))
 
+    def set_anf_vals(self, taps: int, delay: int,
+                     gain: float, leakage: float) -> None:
+        """Push all four ANF tuning params atomically.
+
+        ``taps``    — filter length (anf.c default 64)
+        ``delay``   — decorrelation delay samples (default 16)
+        ``gain``    — adaptation step size (anf.c hint: ≈ 1e-4)
+        ``leakage`` — leakage factor (anf.c hint: ≈ 0.10)
+
+        Calls ``flush_anf`` internally to clear adaptive state.
+        Without this push, ANF runs at WDSP create-time defaults
+        (n_taps=64, delay=16, two_mu=1e-4, gamma=0.001) and the
+        operator's μ slider in Settings → Noise has no effect.
+        """
+        with self._lock:
+            self._lib.SetRXAANFVals(
+                self.channel, int(taps), int(delay),
+                float(gain), float(leakage),
+            )
+
     # ── EXT noise-blanker lifecycle ────────────────────────────────
     #
     # The EXT noise blankers (NOB / ANB) are NOT created by
@@ -635,10 +655,32 @@ class RxChannel:
         with self._lock:
             self._lib.SetRXAFMSQRun(self.channel, int(bool(run)))
 
+    def set_fm_squelch_threshold(self, threshold: float) -> None:
+        """FM squelch threshold (fmsq.c::SetRXAFMSQThreshold).
+        Sets ``tail_thresh`` directly and ``unmute_thresh`` to
+        0.9 × threshold.  Higher value = tighter squelch.
+
+        Wired in Phase 6.A4 — previously the operator's squelch
+        threshold slider drove SSQL but never reached FM's
+        independent threshold, so FM-mode squelch ran at the
+        WDSP default regardless of the slider position.
+        """
+        with self._lock:
+            self._lib.SetRXAFMSQThreshold(self.channel, float(threshold))
+
     def set_am_squelch(self, run: bool, threshold_db: float = -100.0) -> None:
         with self._lock:
             self._lib.SetRXAAMSQRun(self.channel, int(bool(run)))
             self._lib.SetRXAAMSQThreshold(self.channel, float(threshold_db))
+
+    def set_am_squelch_max_tail(self, tail: float) -> None:
+        """AM squelch maximum tail-decay time
+        (amsq.c::SetRXAAMSQMaxTail).  WDSP clamps internally to
+        ``min_tail`` (set at create time).  Wired in Phase 6.A4
+        for operator-tunable AM-squelch hold behavior.
+        """
+        with self._lock:
+            self._lib.SetRXAAMSQMaxTail(self.channel, float(tail))
 
     # ── SSQL — WDSP's all-mode (SSB/CW/DIG) voice-activity squelch ─
     #

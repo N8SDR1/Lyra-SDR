@@ -3405,8 +3405,24 @@ class Radio(QObject):
 
         Switches profile to 'custom'.  Clamped to ANF's
         [MU_MIN, MU_MAX].  Persists via QSettings.
+
+        Phase 6.A4: also pushes the value to WDSP via
+        SetRXAANFVals (anf.c) so the slider actually drives ANF
+        behavior — previously the value was persisted on the
+        channel but never reached the engine.
         """
         self._rx_channel.set_anf_mu(float(mu))
+        # Push the new μ to WDSP.  Keep taps=64 / delay=16 /
+        # gamma=0.10 (anf.c-recommended) and just update two_mu.
+        if self._wdsp_rx is not None:
+            try:
+                two_mu = float(self._rx_channel.anf_mu)
+                self._wdsp_rx.set_anf_vals(
+                    taps=64, delay=16,
+                    gain=two_mu, leakage=0.10,
+                )
+            except Exception as exc:
+                print(f"[Radio] WDSP ANF μ push: {exc}")
         try:
             from PySide6.QtCore import QSettings
             s = QSettings("N8SDR", "Lyra")
@@ -3826,6 +3842,18 @@ class Radio(QObject):
                 self._wdsp_rx.set_ssql_run(False)
                 return
             if mode == "FM":
+                # FM SQ has its own threshold field independent of
+                # AM SQ / SSQL.  Wired in Phase 6.A4 — previously
+                # FM mode just got the master run flag and sat at
+                # the WDSP create-time default (tail_thresh=0.750).
+                # Mapping mirrors the reference 10^(-2*v) curve so
+                # operators get fine control on the tight end:
+                #   v=0   → 1.000 (loosest, squelch effectively off)
+                #   v=0.5 → 0.100
+                #   v=1   → 0.010 (tightest)
+                v = float(self._rx_channel.squelch_threshold)
+                fm_threshold = 10.0 ** (-2.0 * v)
+                self._wdsp_rx.set_fm_squelch_threshold(fm_threshold)
                 self._wdsp_rx.set_fm_squelch(True)
             elif mode in ("AM", "SAM", "DSB"):
                 v = float(self._rx_channel.squelch_threshold)
@@ -6401,6 +6429,37 @@ class Radio(QObject):
                 self.set_lms_strength(float(lms_strength))
             except Exception as exc:
                 print(f"[Radio] WDSP LMS initial-strength push: {exc}")
+            # Phase 6.A4 — push the remaining Thetis-init-pattern
+            # parameters that wcpAGC.c / anf.c / amsq.c create-time
+            # defaults leave at values Lyra would prefer to override.
+            #
+            # ANF Vals: anf.c::create_anf defaults are n_taps=64,
+            # delay=16, two_mu=1e-4, gamma=0.001.  The gamma=0.001
+            # default is too low — anf.c's own comment in
+            # SetRXAANFVals body suggests "try gamma = 0.10".  We
+            # push the operator's persisted μ value as two_mu and
+            # use 0.10 for gamma.  Without this, ANF runs with the
+            # too-low leakage and adapts more aggressively than
+            # operators expect.
+            try:
+                two_mu = float(getattr(
+                    self._rx_channel, "anf_mu", 1.5e-4))
+                self._wdsp_rx.set_anf_vals(
+                    taps=64, delay=16,
+                    gain=two_mu, leakage=0.10,
+                )
+            except Exception as exc:
+                print(f"[Radio] WDSP ANF initial-vals push: {exc}")
+            # AM squelch max tail — amsq.c default leaves it at
+            # the create-time value (1.5 s per RXA.c).  Lyra's
+            # AM SQ behavior felt "too long" on field testing;
+            # 0.5 s is a more operator-friendly tail without
+            # cutting off the natural carrier-decay sound on
+            # weak AM signals.
+            try:
+                self._wdsp_rx.set_am_squelch_max_tail(0.5)
+            except Exception as exc:
+                print(f"[Radio] WDSP AM SQ tail init: {exc}")
         except Exception as exc:
             print(f"[Radio] WDSP rx initial-state push error: {exc}")
         try:

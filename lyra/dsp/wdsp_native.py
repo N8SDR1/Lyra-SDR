@@ -115,6 +115,29 @@ void SetRXAFMSQRun(int channel, int run);
 void SetRXAAMSQRun(int channel, int run);
 void SetRXAAMSQThreshold(int channel, double threshold);
 
+/* FM squelch threshold (fmsq.c::SetRXAFMSQThreshold).  Sets both
+   tail_thresh and unmute_thresh (latter at 0.9× threshold).  Lyra
+   was previously calling SetRXAFMSQRun but never the threshold
+   setter — operator's FM-mode squelch slider had no effect.  Wired
+   in Phase 6.A4. */
+void SetRXAFMSQThreshold(int channel, double threshold);
+
+/* AM squelch hold-tail (amsq.c::SetRXAAMSQMaxTail).  Maximum
+   tail-decay length after speech ends; clamped internally to
+   `min_tail`.  Wired in Phase 6.A4. */
+void SetRXAAMSQMaxTail(int channel, double tail);
+
+/* Auto-Notch Filter parameters (anf.c::SetRXAANFVals).  Sets
+   the four LMS-predictor knobs in one call:
+     n_taps   — filter length (default 64)
+     delay    — decorrelation delay samples (default 16)
+     two_mu   — adaptation step size (≈ 1e-4; see anf.c hint)
+     gamma    — leakage factor (≈ 0.10; see anf.c hint)
+   Calls flush_anf to clear adaptive state.  Wired in Phase 6.A4
+   so operator's μ slider in Settings → Noise actually drives
+   ANF behavior. */
+void SetRXAANFVals(int channel, int taps, int delay, double gain, double leakage);
+
 /* Patch panel — output stage of WDSP's RXA chain.  The panel's
    `copy` field controls how the (I, Q) at the panel's input gets
    written to (L, R) at the output.  WDSP's create_panel default is
