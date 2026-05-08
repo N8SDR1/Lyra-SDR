@@ -296,42 +296,56 @@ class RxChannel:
         with self._lock:
             self._lib.SetRXAAGCTop(self.channel, float(max_gain_db))
 
-    # ── Per-profile AGC time constants ─────────────────────────────────
+    # ── Per-parameter AGC setters ─────────────────────────────────────
     #
-    # SetRXAAGCMode picks the canonical mode preset, but Thetis (and
-    # WDSP best-practice) ALSO push the per-profile Decay/Hang/HangThresh
-    # values explicitly because the WDSP DLL's mode-preset table doesn't
-    # always update those fields when SetRXAAGCMode runs alone.  Without
-    # these explicit pushes, FAST / MED / SLOW / LONG all behave like
-    # whatever Decay/Hang was last loaded (or the init default), making
-    # them sound identical to operators.  See Thetis comboAGC handler
-    # in console.cs for the canonical per-profile values.
+    # Thin wrappers around WDSP's individual AGC parameter setters
+    # (wcpAGC.c).  ``SetRXAAGCMode`` already sets the per-profile
+    # ``hangtime`` and ``tau_decay`` fields directly inside its switch
+    # statement (wcpAGC.c lines 384-407), so the Decay/Hang setters
+    # below are redundant for the canonical FAST/MED/SLOW/LONG
+    # presets.  They exist for the Custom profile and for any future
+    # operator-facing time-constant sliders.
+    #
+    # Threshold / Slope / Top / Fixed all write to engine fields that
+    # ``SetRXAAGCMode`` does NOT touch — those need explicit pushes if
+    # the operator wants to override the wcpAGC.c create-time defaults
+    # (see RXA.c ``create_wcpagc`` for the init values).
 
     def set_agc_attack_ms(self, attack_ms: int) -> None:
-        """AGC attack time in milliseconds.  Thetis default ~2 ms."""
+        """AGC attack time in milliseconds.  WDSP's wcpAGC.c init
+        default is 1 ms (RXA.c create_wcpagc tau_attack=0.001)."""
         with self._lock:
             self._lib.SetRXAAGCAttack(self.channel, int(attack_ms))
 
     def set_agc_decay_ms(self, decay_ms: int) -> None:
-        """AGC decay time in milliseconds.  Thetis profile values:
-        LONG=2000, SLOW=500, MED=250, FAST=50."""
+        """AGC decay time in milliseconds.  Redundant with the
+        per-profile values inside SetRXAAGCMode (wcpAGC.c case
+        statements 1=LONG/2000, 2=SLOW/500, 3=MED/250, 4=FAST/50);
+        useful for the Custom profile only."""
         with self._lock:
             self._lib.SetRXAAGCDecay(self.channel, int(decay_ms))
 
     def set_agc_hang_ms(self, hang_ms: int) -> None:
-        """AGC hang time in milliseconds.  Thetis profile values:
-        LONG=2000, SLOW=1000, MED=0, FAST=0."""
+        """AGC hang time in milliseconds.  Redundant with the
+        per-profile values inside SetRXAAGCMode (wcpAGC.c:
+        LONG=2000, SLOW=1000, MED=0, FAST=0); useful for the
+        Custom profile only."""
         with self._lock:
             self._lib.SetRXAAGCHang(self.channel, int(hang_ms))
 
     def set_agc_slope(self, slope: float) -> None:
-        """AGC compression slope (dB).  Thetis init default 0."""
+        """AGC compression slope (dB).  Pushes to engine field
+        ``var_gain``; affects the threshold→max_gain calculation
+        in SetRXAAGCThresh.  WDSP default at create time = 1.5
+        (RXA.c create_wcpagc var_gain=1.5)."""
         with self._lock:
             self._lib.SetRXAAGCSlope(self.channel, float(slope))
 
     def set_agc_hang_threshold(self, hang_threshold: int) -> None:
-        """AGC hang-engagement threshold.  Operator-tunable; Thetis
-        runs MED/FAST with 100, others with operator value (default 0)."""
+        """AGC hang-engagement threshold (operator-tunable).
+        SetRXAAGCMode sets hang_thresh=1.0 for MED/FAST cases;
+        SLOW/LONG inherit whatever was last set (operator-tunable
+        or create-time default 0.250)."""
         with self._lock:
             self._lib.SetRXAAGCHangThreshold(self.channel, int(hang_threshold))
 
@@ -339,10 +353,16 @@ class RxChannel:
                           thresh_db: float,
                           fft_size: int,
                           sample_rate: int) -> None:
-        """AGC threshold dB (where AGC starts engaging above noise
-        floor).  WDSP needs the FFT size and sample rate to translate
-        the threshold-dB into per-bin reference power.  Thetis
-        defaults to ``fft_size=4096``, ``sample_rate=48000``."""
+        """AGC threshold dB (where AGC engages above noise floor).
+        Computes max_gain = out_target / (var_gain *
+        10^((thresh + noise_offset)/20)) where noise_offset
+        depends on the active passband, FFT size, and sample
+        rate.  See wcpAGC.c::SetRXAAGCThresh for the exact math.
+
+        WARNING: this setter writes the same engine field as
+        SetRXAAGCTop (max_gain).  Do not call both unless the
+        intent is to override Threshold's calculation; the
+        later call wins."""
         with self._lock:
             self._lib.SetRXAAGCThresh(
                 self.channel,

@@ -6304,39 +6304,51 @@ class Radio(QObject):
             low, high = self._wdsp_filter_for(self._mode)
             self._wdsp_rx.set_filter(low, high)
             self._wdsp_rx.set_agc(self._wdsp_agc_for(self._agc_profile))
-            # Phase 6.A3: push the full AGC parameter set Thetis
-            # configures at init.  SetRXAAGCMode alone doesn't
-            # propagate the timing presets in all WDSP builds, AND
-            # it doesn't touch threshold / slope / max-gain at all —
-            # those need explicit pushes for AGC to actually engage
-            # against signal vs noise floor.  Without these, the
-            # AGC gain meter sits static and FAST/MED/SLOW/LONG all
-            # sound identical (operator-reported pre-Phase-6.A3).
+            # Phase 6.A3: push AGC parameters that wcpAGC.c's
+            # create_wcpagc (RXA.c lines 353-378) sets at engine
+            # creation time but Lyra had been leaving at the
+            # create-time defaults.
             #
-            # Values match Thetis's RadioDSPRX.SyncAll() canonical
-            # init dump (radio.cs:386+) so Lyra's audio character
-            # matches Thetis on the same hardware out of the box.
-            self._push_wdsp_agc_timings(self._agc_profile)
+            # Why this matters: wcpAGC.c's defaults assume signals
+            # at typical-Thetis-tuned levels.  When Lyra's audio
+            # path delivers signals at different levels (we have a
+            # different gain stage chain — see CLAUDE.md §13.2),
+            # the AGC may stay parked at max_gain (=10000 linear
+            # / 80 dB) and never engage on real signals, which is
+            # the operator-reported "AGC profiles all sound the
+            # same / gain meter doesn't move" symptom.
+            #
+            # We push only what's NOT already covered by
+            # SetRXAAGCMode.  Per wcpAGC.c::SetRXAAGCMode (lines
+            # 384-407), Mode already sets hangtime + tau_decay
+            # per profile and recomputes coefficients via
+            # loadWcpAGC, so per-profile Decay/Hang pushes are
+            # redundant.
+            #
+            # Threshold push: writes the same engine field
+            # (max_gain) that SetRXAAGCTop writes — calling both
+            # would have the second clobber the first.  We push
+            # Threshold here (Slope-aware computation) and DO
+            # NOT push Top.  See wcpAGC.c::SetRXAAGCThresh for
+            # the math.
             try:
-                # Threshold (dBFS, fft_size, sample_rate) — WDSP needs
-                # the FFT size + RX rate to translate threshold-dB
-                # into per-bin reference power.  Thetis uses fft_size
-                # 4096 and the live RX sample rate; we match.
-                # Operator's _agc_threshold is a linear 0..1 multiplier
-                # of full scale; convert to dBFS at threshold.
+                # Slope first — SetRXAAGCThresh's noise_offset
+                # calculation depends on var_gain (set by Slope).
+                # WDSP create-time default is var_gain=1.5 which
+                # corresponds to slope ≈ 3.5 dB.  We pass 0 here
+                # (linear ratio); operator could surface this in
+                # a future Settings slider.
+                self._wdsp_rx.set_agc_slope(0.0)
+                # Threshold (dBFS, fft_size, sample_rate) — drives
+                # the noise-floor-relative max_gain calculation.
+                # Lyra's operator-facing _agc_threshold is a linear
+                # 0..1 multiplier of full scale (legacy from the
+                # pre-WDSP AGC engine); convert to dBFS for WDSP.
                 import math as _m
                 thresh_lin = max(self._agc_threshold, 1e-6)
                 thresh_db = float(20.0 * _m.log10(thresh_lin))
                 self._wdsp_rx.set_agc_threshold(
                     thresh_db, 4096, in_rate)
-                # Slope: Thetis defaults to 0 (linear ratio); leave
-                # as-is unless operator surfaces a slider for it.
-                self._wdsp_rx.set_agc_slope(0.0)
-                # Max gain ceiling: Thetis default 90 dB.
-                self._wdsp_rx.set_agc_max_gain_db(90.0)
-                # Fixed gain (used only when mode = FIXED): Thetis
-                # default 20 dB.
-                self._wdsp_rx.set_agc_fixed_gain_db(20.0)
             except Exception as exc:
                 print(f"[Radio] WDSP AGC init-state push: {exc}")
             # AF Gain → WDSP PanelGain1 (Thetis-style pre-AGC makeup
@@ -6438,42 +6450,21 @@ class Radio(QObject):
             "custom": "CUSTOM",
         }.get(profile.lower() if profile else "med", "MED")
 
-    # Per-profile Decay/Hang/HangThreshold values matching Thetis's
-    # comboAGC_SelectedIndexChanged in console.cs (audited 2026-05-08).
-    # These are the canonical WDSP timings for each profile; they MUST
-    # be pushed explicitly via SetRXAAGCDecay / SetRXAAGCHang etc. —
-    # SetRXAAGCMode alone doesn't propagate them to the engine's
-    # working-state fields in some WDSP builds, which is why FAST /
-    # MED / SLOW / LONG all sounded identical pre-fix.
-    _WDSP_AGC_TIMINGS = {
-        # profile → (decay_ms, hang_ms, hang_threshold)
-        "off":    (250,   0,   0),     # FIXED — values irrelevant
-        "fast":   (50,    0,   100),   # quick attack/decay, no hang
-        "med":    (250,   0,   100),   # WDSP default
-        "slow":   (500,   1000, 0),    # 500 ms decay, 1 s hang
-        "long":   (2000,  2000, 0),    # 2 s decay, 2 s hang
-        "auto":   (250,   0,   100),   # rides MED today
-        "custom": (250,   0,   0),     # operator-controlled (advisory)
-    }
-
-    def _push_wdsp_agc_timings(self, profile: str) -> None:
-        """Push the per-profile Decay/Hang/HangThreshold values to
-        WDSP.  Phase 6.A3 fix for the "all AGC profiles sound the
-        same" operator-reported bug.  Called from set_agc_profile +
-        _open_wdsp_rx.
-        """
-        if self._wdsp_rx is None:
-            return
-        decay_ms, hang_ms, hang_thresh = self._WDSP_AGC_TIMINGS.get(
-            profile.lower() if profile else "med",
-            self._WDSP_AGC_TIMINGS["med"],
-        )
-        try:
-            self._wdsp_rx.set_agc_decay_ms(decay_ms)
-            self._wdsp_rx.set_agc_hang_ms(hang_ms)
-            self._wdsp_rx.set_agc_hang_threshold(hang_thresh)
-        except Exception as exc:
-            print(f"[Radio] WDSP AGC timings push: {exc}")
+    # NOTE: a previous Phase 6.A3 attempt added a per-profile
+    # _WDSP_AGC_TIMINGS dict + _push_wdsp_agc_timings helper that
+    # called SetRXAAGCDecay / SetRXAAGCHang explicitly on each
+    # profile change.  Reading WDSP source (wcpAGC.c lines 384-407,
+    # SetRXAAGCMode switch statement) confirmed those calls are
+    # REDUNDANT — SetRXAAGCMode itself sets `hangtime` and
+    # `tau_decay` per profile and calls loadWcpAGC to recompute
+    # coefficients.  The redundant push was harmless but added
+    # confusion; removed in the Phase 6.A3 fix-up.
+    #
+    # Real init-state pushes that ARE needed (to override
+    # WDSP's wcpAGC.c create-time defaults set in RXA.c
+    # create_wcpagc): SetRXAAGCThresh OR SetRXAAGCTop (NOT both —
+    # they write the same engine field), and optionally
+    # SetRXAAGCSlope.  See _open_wdsp_rx for the live-call sequence.
 
     # ── WDSP NB profile ↔ threshold mapping ───────────────────────
     #
@@ -6810,14 +6801,13 @@ class Radio(QObject):
         if preset is not None and name != "custom":
             self._agc_release = float(preset.get("release", self._agc_release))
             self._agc_hang_blocks = int(preset.get("hang_blocks", self._agc_hang_blocks))
-        # WDSP native engine — push mode + per-profile timings.
-        # SetRXAAGCMode alone doesn't reliably update Decay/Hang in
-        # all WDSP builds, so we push them explicitly via
-        # _push_wdsp_agc_timings to match Thetis's comboAGC handler.
+        # WDSP native engine — AGC mode lives inside the engine.
+        # SetRXAAGCMode (wcpAGC.c) sets the per-profile hangtime
+        # and tau_decay AND calls loadWcpAGC() to recompute
+        # coefficients, so a single mode push is sufficient.
         if self._wdsp_rx is not None:
             try:
                 self._wdsp_rx.set_agc(self._wdsp_agc_for(name))
-                self._push_wdsp_agc_timings(name)
             except Exception as exc:
                 print(f"[Radio] WDSP rx agc-change error: {exc}")
         # Auto-track the threshold only in "auto" profile; everything else
