@@ -1185,11 +1185,18 @@ class DspSettingsTab(QWidget):
 
         # Custom sliders — always visible but disabled unless
         # Custom is picked.  Currently advisory (see note above).
+        # Slider range covers all preset values (Fast = 0.300,
+        # Med = 0.158, Slow = 0.083, Long = 0.040) so picking a
+        # profile visibly slides the markers to the right spot.
         ga.addWidget(QLabel("Release"), 2, 0)
         self.release_slider = QSlider(Qt.Horizontal)
-        self.release_slider.setRange(1, 100)   # 0.001 .. 0.100
+        self.release_slider.setRange(1, 300)   # 0.001 .. 0.300
         self.release_slider.setValue(int(radio.agc_release * 1000))
         self.release_slider.setFixedWidth(200)
+        self.release_slider.setToolTip(
+            "AGC release coefficient (advisory in WDSP mode).\n"
+            "Higher = faster decay; lower = slower decay.\n"
+            "Picks a profile slides this to the profile's preset.")
         self.release_slider.valueChanged.connect(self._on_custom_changed)
         ga.addWidget(self.release_slider, 2, 1, 1, 3)
         self.release_label = QLabel()
@@ -1200,6 +1207,10 @@ class DspSettingsTab(QWidget):
         self.hang_slider.setRange(0, 100)  # blocks → roughly 0..4.5 s
         self.hang_slider.setValue(int(radio.agc_hang_blocks))
         self.hang_slider.setFixedWidth(200)
+        self.hang_slider.setToolTip(
+            "AGC hang duration in audio blocks (advisory in WDSP mode).\n"
+            "Each block ≈ 43 ms at 48 kHz / 2048 samples.\n"
+            "Picks a profile slides this to the profile's preset.")
         self.hang_slider.valueChanged.connect(self._on_custom_changed)
         ga.addWidget(self.hang_slider, 3, 1, 1, 3)
         self.hang_label = QLabel()
@@ -1559,14 +1570,24 @@ class DspSettingsTab(QWidget):
         self._update_labels()
 
     def _update_labels(self):
+        import math
         release = self.release_slider.value() / 1000.0
         hang = self.hang_slider.value()
         # Hang time in ms (each block ≈ 43 ms at 48 kHz, 2048 samples)
         hang_ms = int(hang * 43)
-        self.release_label.setText(f"{release:.3f}")
+        # Release coefficient → 1/e decay time in milliseconds.
+        # For 1-pole exp filter: tau_blocks = -1 / ln(1 - alpha),
+        # converted to ms via the same 43 ms/block factor.  Lets
+        # the operator SEE the difference between Fast (≈120 ms),
+        # Med (≈250 ms), Slow (≈495 ms), Long (≈1050 ms).
+        if release > 0.0:
+            tau_blocks = -1.0 / math.log(max(1.0 - release, 1e-6))
+            tau_ms = int(tau_blocks * 43)
+            self.release_label.setText(f"{release:.3f}  (≈{tau_ms} ms decay)")
+        else:
+            self.release_label.setText(f"{release:.3f}  (no decay)")
         self.hang_label.setText(f"{hang} blk  ({hang_ms} ms)")
         t = self.threshold_slider.value() / 100.0
-        import math
         self.threshold_label.setText(
             f"{t:.2f}  ({20 * math.log10(max(t, 1e-6)):+.0f} dBFS)")
 

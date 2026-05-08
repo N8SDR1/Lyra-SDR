@@ -6729,6 +6729,15 @@ class Radio(QObject):
         # / hang_thresh) and applies them via _wdsp_rx.set_agc().
         # The legacy Python `_wdsp_agc.set_mode()` call was removed
         # Phase 6.A.
+        # Mirror the preset's release/hang values onto Radio's
+        # advisory state fields so the Settings AGC tab sliders
+        # reflect the active profile (operators expect to SEE the
+        # profile change reflected in the sliders).  Custom is
+        # excluded so the operator's manual values aren't clobbered.
+        preset = self.AGC_PRESETS.get(name)
+        if preset is not None and name != "custom":
+            self._agc_release = float(preset.get("release", self._agc_release))
+            self._agc_hang_blocks = int(preset.get("hang_blocks", self._agc_hang_blocks))
         # WDSP native engine — AGC mode lives inside the engine.
         if self._wdsp_rx is not None:
             try:
@@ -6756,8 +6765,12 @@ class Radio(QObject):
         These slider values are kept for UI persistence and may
         map back to operator-facing WDSP knobs (attack/decay/hang
         in seconds) in a future Settings panel.  For now, picking
-        'custom' produces the same audio behavior as 'med'."""
-        self._agc_release = max(0.0, min(0.1, float(release)))
+        'custom' produces the same audio behavior as 'med'.
+
+        Release range [0.0, 0.300] covers all preset values
+        (Fast=0.30, Med=0.158, Slow=0.083, Long=0.04) so
+        round-tripping through the slider doesn't clamp values."""
+        self._agc_release = max(0.0, min(0.300, float(release)))
         self._agc_hang_blocks = max(0, min(200, int(hang_blocks)))
         self._agc_profile = "custom"
         self.agc_profile_changed.emit("custom")
