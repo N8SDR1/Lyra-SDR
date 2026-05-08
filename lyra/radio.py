@@ -6444,6 +6444,20 @@ class Radio(QObject):
             self._wdsp_rx.set_filter(low, high)
             self._wdsp_rx.set_agc(self._wdsp_agc_for(self._agc_profile))
             self._wdsp_rx.set_panel_gain(1.0)
+            # Patch panel binaural mode — set to FALSE (mono on both
+            # channels).  Without this call, WDSP defaults to copy=0
+            # (L=I, R=Q at panel output), which works for SSB but
+            # silences the right channel for AM/FM/DSB whenever EMNR
+            # is enabled (EMNR zeroes Q on output, and the post-EMNR
+            # BP1 has a symmetric passband for those modes so it
+            # can't reconstruct Q).  set_panel_binaural(False) sets
+            # panel.copy=1 so the panel always copies I to Q at its
+            # output, giving mono on both channels regardless of
+            # upstream Q-zeroing.  Same call Thetis makes at channel
+            # init.  Lyra's BIN feature is implemented as a Python
+            # post-WDSP BinauralFilter in BinauralFilter, so we don't
+            # need WDSP's own binaural mode.  See CLAUDE.md §14.10.
+            self._wdsp_rx.set_panel_binaural(False)
             # NB + manual notches: only meaningful after init_blankers /
             # the notchdb exists.  RxChannel.__init__ does init_blankers
             # for us; the notchdb is created with the channel.

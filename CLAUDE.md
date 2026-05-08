@@ -1658,16 +1658,112 @@ When this work happens, also:
 * Verify TX (v0.2) work has no implicit dependency on legacy
   before deletion lands.
 
+### 14.10 AM/FM/DSB right-channel-silent bug — FIXED (2026-05-07 night)
+
+**Operator-reported symptom:** in AM, DSB, and FM modes, only the
+LEFT audio channel produced sound; the BAL slider had no effect on
+the right (full-right = silence).  SSB (USB/LSB/CWU/CWL) worked
+normally.  Affected both HL2 audio jack and PC Soundcard paths.
+Bug was present in `ce70e97` ("RX1 audio foundation milestone")
+but had escaped operator verification because the prior test pass
+focused on SSB modes.
+
+**Root cause:** WDSP's EMNR (`emnr.c:1247-1248`) explicitly zeroes
+the Q channel on output:
+```c
+a->out[2 * i + 0] = a->outaccum[a->oaoutidx];   // I = noise-reduced audio
+a->out[2 * i + 1] = 0.0;                         // Q forced to zero
+```
+
+For SSB modes, the post-EMNR `xbandpass(bp1)` stage has an
+**asymmetric** passband (USB = positive freq only, LSB = negative
+freq only).  A complex bandpass with one-sided passband acts as a
+Hilbert restorer — the output Q is reconstructed analytically from
+the real input I, and stereo content survives.
+
+For AM/FM/DSB, the post-EMNR BP1 has a **symmetric** passband
+(`-W..+W` around DC).  Real input through symmetric complex
+bandpass → real output (output Q stays zero).  Q remains zero
+through the patch panel and all the way out the audio sink.
+
+The patch panel's behaviour is determined by its `copy` field:
+* `copy=0` (default from `create_panel`): no copy.  L = gain1 * I,
+  R = gain2Q * Q.  Q=0 → R=silence.
+* `copy=1`: copy I to Q at panel output.  L = gain1 * I,
+  R = gain2Q * I.  Mono on both channels regardless of upstream Q.
+
+WDSP's `create_panel` defaults to `copy=0`.  Thetis explicitly
+calls `SetRXAPanelBinaural(0)` at channel init, which sets
+`panel.copy = 1 - 0 = 1` — overriding the create-time default.
+Lyra never made that call, so we inherited `copy=0` and AM/FM/DSB
+silenced the right channel whenever EMNR was active (which is
+"basically always" since NR Mode 1-4 are EMNR variants).
+
+**The fix:**
+
+* `lyra/dsp/wdsp_native.py`: cdef `SetRXAPanelBinaural`
+* `lyra/dsp/wdsp_engine.py`: `RxChannel.set_panel_binaural(bool)`
+  wrapper.  `False` = mono on both channels (= panel.copy=1,
+  matches Thetis's default listening setup).  `True` = no copy
+  (= panel.copy=0, raw I/Q routed to L/R, available as an escape
+  hatch for raw-IQ binaural listening if anyone ever asks).
+* `lyra/radio.py` `_open_wdsp_rx`: call `set_panel_binaural(False)`
+  right after `set_panel_gain(1.0)`.  Persists for the life of the
+  WDSP channel; mode changes don't disturb it.
+
+**Verified across all modes** with EMNR enabled:
+
+| Mode | L_rms | R_rms | Status |
+|---|---|---|---|
+| LSB | 0.5325 | 0.5325 | ✓ |
+| USB | 0.5507 | 0.5507 | ✓ |
+| AM | 0.7701 | 0.7701 | ✓ |
+| FM | 0.5454 | 0.5454 | ✓ |
+| DSB | 0.7071 | 0.7071 | ✓ (operator confirmed BAL pans cleanly) |
+| CWU | 0.5636 | 0.5636 | ✓ |
+
+**Compatibility note for v0.1 RX2 stereo split** (per operator
+question 2026-05-07 night): this fix is the *correct* foundation
+for split-mode stereo, not a problem for it.  WDSP's per-channel
+`SetRXAPanelBinaural` controls intra-RX I/Q-to-L/R routing
+(unrelated to multi-RX stereo).  Lyra's RX2 stereo split lives
+in `AudioMixer` per §6.1: each RX produces mono-on-stereo, then
+the mixer pan-curves RX1 hard-left and RX2 hard-right.  With our
+fix, each individual RX channel reliably produces mono output
+that the mixer can spatially pan; without our fix, panning RX1
+hard-left would lose audio (only the I component would survive,
+and EMNR could zero it on the way through).
+
+**Audit reminder:** this bug surfaced because Lyra's
+`_open_wdsp_rx` skipped a setter Thetis calls.  There are likely
+more.  Future audit: diff the `SetRXA*` calls in our
+`_open_wdsp_rx` against Thetis's channel-init sequence in
+`Console/radio.cs`, looking for siblings like:
+
+* `SetRXAPanelGain1`/`Gain2` defaults — we set Gain1=1.0, leave
+  Gain2I/Gain2Q at create_panel defaults of 1.0 each.  Probably OK.
+* FM-deemphasis settings — Thetis sets these per-mode.
+* SBNR / RNNR (NR3 / NR4 in Thetis) — we don't bind them at all.
+* Notch DB filter coefficients — currently push freqs only;
+  Thetis pushes BW + run + tune freq.
+* AGC fixed-gain / hang threshold per AGC mode.
+* CESSB / CFC TX-side equivalents (when v0.2 TX work begins).
+
+Track in `docs/architecture/measurements_and_cleanup.md` as a
+phase before TX work starts.
+
 ---
 
-*Last updated: 2026-05-07 night — added §14.8 (WDSP SSQL all-mode
-squelch architecture, operator-confirmed working) and §14.9
-(legacy pure-Python DSP path deprecated, deletion scheduled).
-Earlier same day: §14.7 NR-mode UX overhaul (in operator
-testing) + extended §14.6 with the IQ-domain
-overhaul, in operator testing) + extended §14.6 with the IQ-domain
-captured-profile architectural plan (operator-confirmed direction
-to keep the feature alive).  Earlier 2026-05-07: RX1 polish push
+*Last updated: 2026-05-07 night — added §14.10 (AM/FM/DSB
+right-channel-silent bug, root-caused to EMNR-zeroes-Q +
+WDSP-default-copy=0, fixed via SetRXAPanelBinaural(0); operator-
+verified on WWV AM and across all modes).  Earlier same night:
+§14.8 (WDSP SSQL all-mode squelch architecture) + §14.9 (legacy
+pure-Python DSP path deprecated, deletion scheduled).  Earlier
+same day: §14.7 NR-mode UX overhaul (in operator testing) +
+extended §14.6 with the IQ-domain captured-profile architectural
+plan (operator-confirmed direction to keep the feature alive).
+Earlier 2026-05-07: RX1 polish push
 (1-5 + APF + BIN-PC-Sound + dither + S-meter peak-hold + capture-
 feed + captured-profile-apply revert + LMS slider wiring + EMNR
 gainMethod + AEPF cffi bindings).  Earlier 2026-05-06: §14 added

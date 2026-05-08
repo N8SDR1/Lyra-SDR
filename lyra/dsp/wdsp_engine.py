@@ -296,6 +296,25 @@ class RxChannel:
         with self._lock:
             self._lib.SetRXAAGCTop(self.channel, float(max_gain_db))
 
+    def set_panel_binaural(self, binaural: bool) -> None:
+        """Set the panel's binaural mode.
+
+        binaural=False (default): panel.copy=1, copies I to Q at the
+            panel output → mono on both channels (L=R) regardless
+            of any upstream stage that zeroed Q (e.g. EMNR).  This
+            is what Thetis uses for the default listening mode and
+            what fixes the AM/FM/DSB-only-left-channel bug for
+            Lyra (see CLAUDE.md §14.10).
+        binaural=True: panel.copy=0, no copy.  L=I, R=Q from the
+            panel's input.  Use this only when the upstream chain
+            is genuinely producing distinct I/Q audio that the
+            operator wants split L/R.  Lyra normally uses Python
+            post-WDSP BinauralFilter for the BIN feature instead.
+        """
+        with self._lock:
+            self._lib.SetRXAPanelBinaural(
+                self.channel, 1 if bool(binaural) else 0)
+
     def set_panel_gain(self, gain: float) -> None:
         """Linear gain on the post-DSP audio (0..1+, 1.0 = unity)."""
         with self._lock:

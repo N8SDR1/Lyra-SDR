@@ -115,6 +115,21 @@ void SetRXAFMSQRun(int channel, int run);
 void SetRXAAMSQRun(int channel, int run);
 void SetRXAAMSQThreshold(int channel, double threshold);
 
+/* Patch panel — output stage of WDSP's RXA chain.  The panel's
+   `copy` field controls how the (I, Q) at the panel's input gets
+   written to (L, R) at the output.  WDSP's create_panel default is
+   copy=0 (no copy: L=I, R=Q).  CRITICAL: EMNR (and possibly other
+   spectral stages) ZERO the Q channel on output (`a->out[2i+1]=0`).
+   For SSB modes this is fine because the post-EMNR BP1 has an
+   asymmetric passband that acts as a Hilbert restorer and brings
+   Q back analytically.  For AM/FM/DSB with symmetric passband
+   around DC, BP1 doesn't restore Q — so Q stays zero through the
+   panel and the operator hears only the LEFT channel.
+   SetRXAPanelBinaural(0) sets panel.copy=1 (copy I to Q at panel
+   output), giving mono on both channels regardless of upstream
+   stage behaviour.  This is what Thetis does at channel init. */
+void SetRXAPanelBinaural(int channel, int bin);
+
 /* SSQL — WDSP's all-mode "Single-mode Squelch Level" voice-activity
    detector.  Used by Thetis for SSB / CW / DIG modes (FM has its
    own FMSQ, AM has its own AMSQ).  SSQL is a frequency-to-voltage
