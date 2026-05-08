@@ -2767,7 +2767,11 @@ class Radio(QObject):
         # Legacy "lms" backend still routes to ANR via this method
         # so external CAT calling set_nr_profile("lms") still works.
         # New code paths use set_lms_enabled directly.
-        legacy_backend = (self._nr_profile or "").lower()
+        # Init-order guard: _open_wdsp_rx runs in __init__ before
+        # self._nr_profile is set.  getattr defaults the legacy
+        # backend to "" so the initial push runs cleanly without
+        # an AttributeError (caught + printed by _open_wdsp_rx).
+        legacy_backend = (getattr(self, "_nr_profile", "") or "").lower()
         anr_on = on and legacy_backend == "lms"
         # EMNR runs whenever NR is on and the operator hasn't
         # specifically picked LMS.

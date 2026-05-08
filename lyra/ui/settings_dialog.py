@@ -1814,12 +1814,22 @@ class AudioSettingsTab(QWidget):
             """Sync combo when Radio changes the output elsewhere
             (e.g., rate-driven auto-fallback when AK4951 hits a >48k
             stream).  Uses userData lookup so the operator-facing
-            label and internal value stay synced."""
-            for idx in range(self._sink_combo.count()):
-                if self._sink_combo.itemData(idx) == stored:
-                    if self._sink_combo.currentIndex() != idx:
-                        self._sink_combo.setCurrentIndex(idx)
-                    return
+            label and internal value stay synced.
+
+            The try/except RuntimeError catches Qt's zombie-wrapper
+            crash when this slot fires after the dialog widgets have
+            been torn down but Radio's signal still holds the closure
+            reference.  Same defensive pattern as
+            `_on_radio_apf_enabled_changed` (CHANGELOG v0.0.9.5).
+            """
+            try:
+                for idx in range(self._sink_combo.count()):
+                    if self._sink_combo.itemData(idx) == stored:
+                        if self._sink_combo.currentIndex() != idx:
+                            self._sink_combo.setCurrentIndex(idx)
+                        return
+            except RuntimeError:
+                pass
         radio.audio_output_changed.connect(_sync_sink_combo)
 
         # ── Output device (PC Soundcard sink) ──────────────────────

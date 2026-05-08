@@ -3519,10 +3519,12 @@ class DspPanel(GlassPanel):
             "Right-click: pick depth, or open Settings.")
 
     def _on_notches_changed(self, items):
-        # items is list[(freq_hz, width_hz, active, deep)]. Compact
-        # counter only — gesture hints live on the NF button's
-        # tooltip. Shows widths in Hz so shape is readable at a
-        # glance. Markers:
+        # items is list[(freq_hz, width_hz, active, deep, depth_db,
+        # cascade)] — see Radio.notch_details (6-tuple as of v0.0.7.1
+        # notch v2; was 4-tuple before).  We only need the first four
+        # fields here so the destructure ignores the trailing depth_db
+        # / cascade with `*_`.  Compact counter only — gesture hints
+        # live on the NF button's tooltip.  Markers:
         #   *  inactive (bypassed, kept for A/B)
         #   ^  deep (cascaded for ~2× attenuation)
         n = len(items)
@@ -3530,15 +3532,15 @@ class DspPanel(GlassPanel):
             self.notch_info.setText("0 notches")
             return
         widths = []
-        for _, w, active, deep in items:
+        for _, w, active, deep, *_ in items:
             mark = ""
             if not active:
                 mark += "*"
             if deep:
                 mark += "^"
             widths.append(f"{int(round(w))}{mark}")
-        n_off = sum(1 for _, _, a, _ in items if not a)
-        n_deep = sum(1 for _, _, _, d in items if d)
+        n_off = sum(1 for item in items if not item[2])
+        n_deep = sum(1 for item in items if item[3])
         suffix_parts = []
         if n_off:
             suffix_parts.append(f"{n_off} off")
