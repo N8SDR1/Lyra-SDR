@@ -44,10 +44,18 @@ class Segment(TypedDict):
     label: str          # human label (drawn in strip when room permits)
 
 
-class Landmark(TypedDict):
+class Landmark(TypedDict, total=False):
     freq: int           # Hz
-    label: str          # "FT8" / "FT4" / "WSPR" / "PSK31" / etc
+    label: str          # "FT8" / "FT4" / "WSPR" / "PSK31" / "NCDXF" / etc
     mode: str           # suggested demod mode for click-to-tune
+    # category: optional — distinguishes the operator-toggleable groups.
+    # Currently:
+    #   "DIGITAL" (default if absent) — FT8 / FT4 / WSPR / PSK
+    #   "BEACON"                       — NCDXF International Beacon Project
+    # Used by visible_landmarks to filter independently of the master
+    # "show landmarks" switch, so an operator can hide FT8 triangles
+    # while keeping NCDXF markers (or vice versa).
+    category: str
 
 
 class Band(TypedDict):
@@ -167,11 +175,11 @@ _COMMON_LANDMARKS: list[Landmark] = [
     # transmitting: <callsign>" info appears in the hover tooltip
     # (driven by lyra.propagation.ncdxf_station_for_freq_khz at
     # paint time).
-    {"freq": 14_100_000, "label": "NCDXF", "mode": "CWU"},
-    {"freq": 18_110_000, "label": "NCDXF", "mode": "CWU"},
-    {"freq": 21_150_000, "label": "NCDXF", "mode": "CWU"},
-    {"freq": 24_930_000, "label": "NCDXF", "mode": "CWU"},
-    {"freq": 28_200_000, "label": "NCDXF", "mode": "CWU"},
+    {"freq": 14_100_000, "label": "NCDXF", "mode": "CWU", "category": "BEACON"},
+    {"freq": 18_110_000, "label": "NCDXF", "mode": "CWU", "category": "BEACON"},
+    {"freq": 21_150_000, "label": "NCDXF", "mode": "CWU", "category": "BEACON"},
+    {"freq": 24_930_000, "label": "NCDXF", "mode": "CWU", "category": "BEACON"},
+    {"freq": 28_200_000, "label": "NCDXF", "mode": "CWU", "category": "BEACON"},
 ]
 
 
@@ -308,10 +316,32 @@ def visible_segments(region_id: str,
 
 
 def visible_landmarks(region_id: str,
-                      center_hz: float, span_hz: float) -> list[Landmark]:
+                      center_hz: float, span_hz: float,
+                      *,
+                      show_digital: bool = True,
+                      show_beacons: bool = True) -> list[Landmark]:
+    """Return landmarks visible in the current panadapter span.
+
+    ``show_digital``  — gate FT8 / FT4 / WSPR / PSK markers.
+    ``show_beacons``  — gate NCDXF International Beacon Project markers.
+
+    Both default True so existing callers keep their old behavior.
+    Callers that want category-aware filtering pass the flags
+    explicitly.  A landmark with no ``category`` key is treated as
+    ``DIGITAL`` (back-compat for the original FT8/FT4/WSPR/PSK list).
+    """
     if span_hz <= 0 or region_id == "NONE":
         return []
     lo = center_hz - span_hz / 2
     hi = center_hz + span_hz / 2
-    return [m for m in get_region(region_id)["landmarks"]
-            if lo <= m["freq"] <= hi]
+    out: list[Landmark] = []
+    for m in get_region(region_id)["landmarks"]:
+        if not (lo <= m["freq"] <= hi):
+            continue
+        cat = m.get("category", "DIGITAL")
+        if cat == "BEACON" and not show_beacons:
+            continue
+        if cat == "DIGITAL" and not show_digital:
+            continue
+        out.append(m)
+    return out

@@ -1769,9 +1769,17 @@ class DspPanel(GlassPanel):
         # Live AGC readout — profile | threshold | current gain action.
         # The whole cluster (including the three labels) hosts a right-click
         # context menu to cycle profile without opening Settings.
+        # NOTE: every QLabel below uses an explicit `QLabel { ... }`
+        # selector in setStyleSheet.  Without the selector, Qt
+        # cascades the bare property rules to the QToolTip popup
+        # spawned by the same widget — making the right-click hint
+        # tooltip render at the label's bold + heavy-weight styling
+        # instead of the global tooltip rule.  Same bug pattern as
+        # the toolbar clock tooltips (fixed earlier).
         agc_panel_label = QLabel("AGC")
         agc_panel_label.setStyleSheet(
-            "color: #00e5ff; font-weight: 800; letter-spacing: 1px;")
+            "QLabel { color: #00e5ff; font-weight: 800; "
+            "letter-spacing: 1px; }")
         agc_panel_label.setToolTip(
             "Right-click to change AGC profile (Off / Fast / Med / Slow)")
         dsp_row.addWidget(agc_panel_label)
@@ -1785,21 +1793,23 @@ class DspPanel(GlassPanel):
         dsp_row.addWidget(self.agc_profile_lbl)
 
         thr_label = QLabel("thr")
-        thr_label.setStyleSheet("color: #8a9aac; font-size: 9px;")
+        thr_label.setStyleSheet(
+            "QLabel { color: #8a9aac; font-size: 9px; }")
         dsp_row.addWidget(thr_label)
         self.agc_threshold_lbl = QLabel("—")
         self.agc_threshold_lbl.setStyleSheet(
-            "color: #cdd9e5; font-family: Consolas, monospace; "
-            "font-weight: 700; min-width: 70px;")
+            "QLabel { color: #cdd9e5; font-family: Consolas, monospace; "
+            "font-weight: 700; min-width: 70px; }")
         dsp_row.addWidget(self.agc_threshold_lbl)
 
         action_label = QLabel("gain")
-        action_label.setStyleSheet("color: #8a9aac; font-size: 9px;")
+        action_label.setStyleSheet(
+            "QLabel { color: #8a9aac; font-size: 9px; }")
         dsp_row.addWidget(action_label)
         self.agc_action_lbl = QLabel("—")
         self.agc_action_lbl.setStyleSheet(
-            "color: #50d0ff; font-family: Consolas, monospace; "
-            "font-weight: 700; min-width: 58px;")
+            "QLabel { color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700; min-width: 58px; }")
         dsp_row.addWidget(self.agc_action_lbl)
 
         # Right-click menu on the AGC widgets to pick profile without
@@ -3607,9 +3617,11 @@ class DspPanel(GlassPanel):
         key = profile if profile in self._AGC_PROFILE_COLORS else "med"
         color = self._AGC_PROFILE_COLORS[key]
         text = self._AGC_PROFILE_TEXT[key]
+        # QLabel selector required so the QSS doesn't cascade to the
+        # tooltip popup — see comment block where this label is built.
         self.agc_profile_lbl.setStyleSheet(
-            f"color: {color}; font-weight: 700; min-width: 48px;"
-            " letter-spacing: 1px;")
+            f"QLabel {{ color: {color}; font-weight: 700; "
+            f"min-width: 48px; letter-spacing: 1px; }}")
         self.agc_profile_lbl.setText(text)
 
     def _update_agc_threshold(self, threshold: float):
@@ -3621,14 +3633,16 @@ class DspPanel(GlassPanel):
     # so we don't force Qt to reparse CSS on every repaint.
     _AGC_ACTION_STYLES = (
         # bucket 0: green  (|action| < 3 dB — AGC barely doing anything)
-        "color: #39ff14; font-family: Consolas, monospace; "
-        "font-weight: 700; min-width: 58px;",
+        # QLabel selector required so QSS doesn't cascade to the tooltip
+        # popup — same bug pattern as the toolbar clock tooltips.
+        "QLabel { color: #39ff14; font-family: Consolas, monospace; "
+        "font-weight: 700; min-width: 58px; }",
         # bucket 1: amber  (3..10 dB — working)
-        "color: #ffab47; font-family: Consolas, monospace; "
-        "font-weight: 700; min-width: 58px;",
+        "QLabel { color: #ffab47; font-family: Consolas, monospace; "
+        "font-weight: 700; min-width: 58px; }",
         # bucket 2: red-orange  (>10 dB — hitting hard / strong signal)
-        "color: #ff6b35; font-family: Consolas, monospace; "
-        "font-weight: 700; min-width: 58px;",
+        "QLabel { color: #ff6b35; font-family: Consolas, monospace; "
+        "font-weight: 700; min-width: 58px; }",
     )
 
     def _on_agc_action(self, action_db: float):
@@ -4254,6 +4268,11 @@ class SpectrumPanel(GlassPanel):
         # radio.spectrum_db_range fresh in _gpu_on_spectrum_ready).
         self.widget.db_scale_drag.connect(
             lambda lo, hi: self.radio.set_spectrum_db_range(lo, hi))
+        # Right-click on dB scale → "Reset display range" menu, so the
+        # operator can clear floor/ceiling edge-locks set by previous
+        # drags without opening Settings.
+        self.widget.db_scale_right_clicked.connect(
+            self._show_db_scale_menu)
         # Noise-floor reference line (Phase B.10).
         self.radio.noise_floor_changed.connect(
             self.widget.set_noise_floor_db)
@@ -4324,6 +4343,8 @@ class SpectrumPanel(GlassPanel):
             self.radio.band_plan_show_segments)
         self.widget.set_band_plan_show_landmarks(
             self.radio.band_plan_show_landmarks)
+        self.widget.set_band_plan_show_ncdxf(
+            self.radio.band_plan_show_ncdxf)
         self.widget.set_band_plan_show_edge_warn(
             self.radio.band_plan_edge_warn)
         self.widget.set_segment_color_overrides(self.radio.segment_colors)
@@ -4333,6 +4354,8 @@ class SpectrumPanel(GlassPanel):
             self.widget.set_band_plan_show_segments)
         self.radio.band_plan_show_landmarks_changed.connect(
             self.widget.set_band_plan_show_landmarks)
+        self.radio.band_plan_show_ncdxf_changed.connect(
+            self.widget.set_band_plan_show_ncdxf)
         self.radio.band_plan_edge_warn_changed.connect(
             self.widget.set_band_plan_show_edge_warn)
         self.radio.segment_colors_changed.connect(
@@ -4460,6 +4483,7 @@ class SpectrumPanel(GlassPanel):
         self.widget.set_band_plan_region(radio.band_plan_region)
         self.widget.set_band_plan_show_segments(radio.band_plan_show_segments)
         self.widget.set_band_plan_show_landmarks(radio.band_plan_show_landmarks)
+        self.widget.set_band_plan_show_ncdxf(radio.band_plan_show_ncdxf)
         self.widget.set_band_plan_show_edge_warn(radio.band_plan_edge_warn)
         radio.band_plan_region_changed.connect(
             self.widget.set_band_plan_region)
@@ -4467,6 +4491,8 @@ class SpectrumPanel(GlassPanel):
             self.widget.set_band_plan_show_segments)
         radio.band_plan_show_landmarks_changed.connect(
             self.widget.set_band_plan_show_landmarks)
+        radio.band_plan_show_ncdxf_changed.connect(
+            self.widget.set_band_plan_show_ncdxf)
         radio.band_plan_edge_warn_changed.connect(
             self.widget.set_band_plan_show_edge_warn)
         # Peak markers — in-passband peak-hold overlay.
@@ -4510,6 +4536,42 @@ class SpectrumPanel(GlassPanel):
         # Y-axis drag-to-scale → push back to Radio spectrum_db_range
         self.widget.db_scale_drag.connect(
             lambda lo, hi: self.radio.set_spectrum_db_range(lo, hi))
+        # Right-click on dB scale → "Reset display range" menu.
+        self.widget.db_scale_right_clicked.connect(
+            self._show_db_scale_menu)
+
+    def _show_db_scale_menu(self, gpos):
+        """Pop a small context menu over the dB-scale zone.
+
+        Single item for now: "Reset display range".  Clears the
+        operator's floor/ceiling edge-locks so auto-scale fully
+        recomputes the dB window on the next tick — the escape
+        hatch when a previous drag accidentally pinned the floor
+        or ceiling somewhere awkward.
+        """
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        # Make the locked / unlocked state visible to the operator
+        # so they know whether the action will do anything.
+        floor = bool(getattr(self.radio, "_user_floor_locked", False))
+        ceil  = bool(getattr(self.radio, "_user_ceiling_locked", False))
+        if floor or ceil:
+            sides = []
+            if floor: sides.append("floor")
+            if ceil:  sides.append("ceiling")
+            label = f"Reset display range ({' + '.join(sides)} locked)"
+        else:
+            label = "Reset display range (no edges locked)"
+        reset_act = menu.addAction(label)
+        reset_act.setToolTip(
+            "Clear the operator-set floor / ceiling for the current\n"
+            "band so auto-scale fully recomputes the dB display\n"
+            "window on the next tick.\n\n"
+            "Use this if a previous drag pinned the floor or ceiling\n"
+            "somewhere awkward and the auto-fit is no longer adapting\n"
+            "to band conditions.")
+        reset_act.triggered.connect(self.radio.reset_spectrum_db_locks)
+        menu.exec(gpos)
 
     def _on_spectrum_ready(self, spec_db, center_hz, rate):
         self.widget.set_spectrum(spec_db, center_hz, rate)

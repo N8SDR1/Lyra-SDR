@@ -386,6 +386,7 @@ class Radio(QObject):
     band_plan_region_changed = Signal(str)
     band_plan_show_segments_changed = Signal(bool)
     band_plan_show_landmarks_changed = Signal(bool)
+    band_plan_show_ncdxf_changed    = Signal(bool)
     band_plan_edge_warn_changed      = Signal(bool)
 
     # Peak-markers — a persistent "peak hold" overlay drawn only within
@@ -976,6 +977,23 @@ class Radio(QObject):
         # narrows them.
         self._user_range_min_db = self._spectrum_min_db
         self._user_range_max_db = self._spectrum_max_db
+        # Edge-lock flags (2026-05-08).  Tracks whether the operator
+        # has explicitly set the floor or ceiling via drag / slider
+        # / settings.  When True, auto-scale honors that side:
+        #   * Floor lock — auto never moves the floor; operator owns it.
+        #   * Ceiling lock — auto can RAISE above the operator's value
+        #     if signals exceed it, but never lowers below it.
+        # The asymmetry is deliberate: if a strong signal arrives we
+        # WANT the display to show it (don't squeeze it off-screen),
+        # but the floor is purely about how much noise space the
+        # operator wants to see — auto has no business overriding
+        # that.  Set per-edge by `set_spectrum_db_range(from_user=True)`
+        # based on which edge changed.  Persisted per-band via
+        # _save_current_band_range / _apply_band_range.  Cleared by
+        # reset_spectrum_db_locks() (right-click on dB zone, or the
+        # "Reset display range" Settings affordance).
+        self._user_floor_locked   = False
+        self._user_ceiling_locked = False
         # Auto-fit the dB scale to current band conditions when on.
         # Engineering: every AUTO_SCALE_INTERVAL_TICKS, recompute
         # (noise_floor - 15) .. (peak + 15), CLAMP to user range,
@@ -1067,6 +1085,7 @@ class Radio(QObject):
         self._band_plan_region = DEFAULT_REGION
         self._band_plan_show_segments = True
         self._band_plan_show_landmarks = True
+        self._band_plan_show_ncdxf = True   # NCDXF beacon markers — independent toggle
         self._band_plan_edge_warn = True
 
         # Operator / Station identification.  Global settings used
@@ -2504,6 +2523,21 @@ class Radio(QObject):
             return
         self._band_plan_show_landmarks = on
         self.band_plan_show_landmarks_changed.emit(on)
+
+    @property
+    def band_plan_show_ncdxf(self) -> bool:
+        """NCDXF beacon markers — independent of the digital
+        watering-hole landmarks (FT8 / FT4 / WSPR / PSK).  Operators
+        who don't care about beacons can hide just those triangles
+        without losing the digital ones, and vice versa."""
+        return self._band_plan_show_ncdxf
+
+    def set_band_plan_show_ncdxf(self, on: bool):
+        on = bool(on)
+        if on == self._band_plan_show_ncdxf:
+            return
+        self._band_plan_show_ncdxf = on
+        self.band_plan_show_ncdxf_changed.emit(on)
 
     @property
     def band_plan_edge_warn(self) -> bool:
@@ -4754,26 +4788,52 @@ class Radio(QObject):
         existing = self._band_memory.get(band.name, {})
         existing["range_min_db"] = float(self._user_range_min_db)
         existing["range_max_db"] = float(self._user_range_max_db)
+        # Persist per-edge locks too — switching bands and back
+        # should restore both the bounds AND which edges were
+        # locked, otherwise auto-scale would re-take control of
+        # an edge the operator had pinned.
+        existing["floor_locked"]   = bool(self._user_floor_locked)
+        existing["ceiling_locked"] = bool(self._user_ceiling_locked)
         self._band_memory[band.name] = existing
 
     def _apply_band_range(self, band_name: str):
         """Pull the saved range bounds for `band_name` (or the factory
         default for that band group) and apply them as the auto-scale
         bounds. Called from recall_band on band change so auto-scale
-        re-fits within the new band's appropriate window."""
+        re-fits within the new band's appropriate window.
+
+        Restoration goes through from_user=False so the per-edge
+        edge-lock auto-detection in set_spectrum_db_range doesn't
+        re-trigger on the band-switch itself (that would falsely
+        relock edges the operator had never touched).  We set the
+        user-range fields + lock flags manually here.
+        """
         memory = self._band_memory.get(band_name, {})
-        if "range_min_db" in memory and "range_max_db" in memory:
+        from_memory = (
+            "range_min_db" in memory and "range_max_db" in memory)
+        if from_memory:
             lo, hi = memory["range_min_db"], memory["range_max_db"]
+            floor_lock = bool(memory.get("floor_locked", False))
+            ceil_lock  = bool(memory.get("ceiling_locked", False))
         elif band_name in self._DEFAULT_BAND_RANGE_DB:
             lo, hi = self._DEFAULT_BAND_RANGE_DB[band_name]
+            # Factory-default branch — first visit to this band.
+            # Locks default to False so auto fully governs.
+            floor_lock = False
+            ceil_lock  = False
         else:
             # Unknown band (broadcast-only / GEN sub-segment) — leave
             # bounds at whatever they currently are, no change.
             return
-        # Update bounds + display range. from_user=True so the user
-        # bounds are stored; the band's saved range becomes the new
-        # baseline for auto.
-        self.set_spectrum_db_range(lo, hi, from_user=True)
+        self._user_range_min_db = float(lo)
+        self._user_range_max_db = float(hi)
+        self._user_floor_locked   = floor_lock
+        self._user_ceiling_locked = ceil_lock
+        # Push display range through from_user=False so we DON'T
+        # re-trigger edge-detection / band-memory save (we're already
+        # restoring from memory; saving again would be a no-op at
+        # best, lock-misdetection at worst).
+        self.set_spectrum_db_range(lo, hi, from_user=False)
 
     def recall_band(self, band_name: str, defaults_freq: int,
                     defaults_mode: str):
@@ -5608,16 +5668,59 @@ class Radio(QObject):
         lo, hi = float(min_db), float(max_db)
         if hi - lo < 3.0:
             hi = lo + 3.0
+        # Detect which edge actually moved BEFORE we update the live
+        # range — used below to set per-edge locks.  Threshold of
+        # 0.5 dB skips dust-jitter (mid-drag emits, settings dialog
+        # rewriting identical values, etc.).
+        old_lo = self._spectrum_min_db
+        old_hi = self._spectrum_max_db
+        floor_moved = abs(lo - old_lo) > 0.5
+        ceiling_moved = abs(hi - old_hi) > 0.5
         self._spectrum_min_db, self._spectrum_max_db = lo, hi
         if from_user:
-            # Operator just set their preferred range — store as the
-            # bounds within which auto-scale is allowed to move, AND
-            # save them as this band's preferred bounds so switching
-            # to another band and back restores them.
+            # Operator-driven change (drag, slider, settings dialog).
+            # Lock whichever edge they actually moved, so the
+            # auto-scale tick respects it.  This is what the Settings
+            # tooltip has always promised — earlier code lost the
+            # behavior when an unrelated pinch-bug fix removed the
+            # clamp wholesale (see auto-scale tick for history).
             self._user_range_min_db = lo
             self._user_range_max_db = hi
+            if floor_moved:
+                self._user_floor_locked = True
+            if ceiling_moved:
+                self._user_ceiling_locked = True
             self._save_current_band_range()
         self.spectrum_db_range_changed.emit(lo, hi)
+
+    def reset_spectrum_db_locks(self) -> None:
+        """Clear both floor + ceiling edge locks so auto-scale fully
+        recomputes the range on the next tick.  Called from the
+        right-click "Reset display range" item on the dB scale zone.
+        Also clears the saved range from the current band's memory
+        so a future band switch doesn't drag the old preference back.
+        """
+        self._user_floor_locked = False
+        self._user_ceiling_locked = False
+        # Drop the per-band saved bounds so the band defaults take
+        # over on next recall.
+        try:
+            band = band_for_freq(self._freq_hz)
+        except Exception:
+            band = None
+        if band is not None:
+            existing = self._band_memory.get(band.name, {})
+            existing.pop("range_min_db", None)
+            existing.pop("range_max_db", None)
+            existing.pop("floor_locked", None)
+            existing.pop("ceiling_locked", None)
+            if existing:
+                self._band_memory[band.name] = existing
+            else:
+                self._band_memory.pop(band.name, None)
+        # Force the next auto-scale tick to fire immediately so the
+        # operator gets visible feedback rather than waiting ~2 sec.
+        self._auto_scale_tick_counter = self.AUTO_SCALE_INTERVAL_TICKS
 
     # ── Spectrum auto-scale ──────────────────────────────────────────
     AUTO_SCALE_INTERVAL_TICKS = 60   # ~2 sec at 30 fps; ~1 sec at 60 fps
@@ -7578,31 +7681,47 @@ class Radio(QObject):
                 # Rolling max — the strongest peak in the last
                 # ~10 seconds, NOT just the current frame.
                 pk_max = max(self._auto_scale_peak_history)
-                target_lo = nf - self.AUTO_SCALE_NOISE_HEADROOM_DB
-                target_hi = pk_max + self.AUTO_SCALE_PEAK_HEADROOM_DB
+                # Per-edge user locks (2026-05-08).  See __init__
+                # comment for the design rationale.  Earlier rev
+                # ignored the user range entirely to dodge a pinch
+                # bug; now we lock per-edge instead of the whole
+                # window, so the floor (which has no auto-driven
+                # reason to ever change) honors the operator's drag
+                # while the ceiling still rises to fit signals.
+                #
+                #   Floor lock: hard.  target_lo = operator's value.
+                #     A strong signal can't push the floor down; that
+                #     would make no sense (the noise floor sets the
+                #     visual reference, not the peaks).
+                #
+                #   Ceiling lock: soft.  target_hi = max(operator,
+                #     peak + headroom).  If a strong signal arrives
+                #     we still show it; if everything's weak, the
+                #     ceiling sits at the operator's preferred
+                #     headroom so weak signals don't get squeezed
+                #     into the bottom of the display.
+                #
+                # The original "pinch" failure case (operator
+                # accidentally narrows to -121..-109) becomes
+                # benign: the floor stays at -121, but the ceiling
+                # rises to peak+15 if signals exceed -109.  No more
+                # off-scale clipping.
+                if self._user_floor_locked:
+                    target_lo = self._user_range_min_db
+                else:
+                    target_lo = nf - self.AUTO_SCALE_NOISE_HEADROOM_DB
+                peak_target = pk_max + self.AUTO_SCALE_PEAK_HEADROOM_DB
+                if self._user_ceiling_locked:
+                    target_hi = max(self._user_range_max_db, peak_target)
+                else:
+                    target_hi = peak_target
                 # Guarantee a comfortably wide scale even on bands
                 # with vanishingly small dynamic range (very weak
-                # signals on a quiet noise floor) — without this,
-                # the auto-fit could produce a 10-15 dB display
-                # span that left no room for stronger signals to
-                # appear above the current peaks.
+                # signals on a quiet noise floor).
                 if target_hi - target_lo < self.AUTO_SCALE_MIN_SPAN_DB:
                     target_hi = target_lo + self.AUTO_SCALE_MIN_SPAN_DB
-                # No user-range clamp on auto-scale.
-                #
-                # An earlier design used self._user_range_min/max as a
-                # CLAMP that auto-scale couldn't escape — meant to honor
-                # an operator who'd narrowed the display to a specific
-                # window. In practice, an accidental Y-axis drag would
-                # pinch the bounds (e.g. -121..-109, a 12 dB window)
-                # and auto-scale could never expand again, so on a band
-                # with strong signals the trace clipped against the top
-                # and looked broken ("upside down" was the user's
-                # description). Now auto-scale always finds a range
-                # that fits the actual signals; an operator who really
-                # wants a narrow window just turns auto-scale off via
-                # the Settings checkbox to lock it. Final safety clamp
-                # below still guards against pathological values.
+                # Final safety clamp guards against pathological
+                # values (corrupt persistence, etc.).
                 target_lo = max(-150.0, min(-3.0, target_lo))
                 target_hi = max(target_lo + 3.0, min(0.0, target_hi))
                 # Internal call — `from_user=False` updates only the

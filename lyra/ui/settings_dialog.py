@@ -774,10 +774,23 @@ class RadioSettingsTab(QWidget):
         self.bp_marks_chk.setChecked(radio.band_plan_show_landmarks)
         self.bp_marks_chk.setToolTip(
             "Small amber triangles marking digimode watering holes. "
-            "Future: click-to-tune.")
+            "Click-to-tune jumps to the freq + suggested mode.")
         self.bp_marks_chk.toggled.connect(
             self.radio.set_band_plan_show_landmarks)
         gbp.addWidget(self.bp_marks_chk, 2, 0, 1, 3)
+
+        self.bp_ncdxf_chk = QCheckBox(
+            "Show NCDXF beacon markers (cyan triangles, 5 fixed freqs)")
+        self.bp_ncdxf_chk.setChecked(radio.band_plan_show_ncdxf)
+        self.bp_ncdxf_chk.setToolTip(
+            "Cyan triangles at the 5 NCDXF International Beacon Project\n"
+            "frequencies (14.100 / 18.110 / 21.150 / 24.930 / 28.200 MHz).\n"
+            "Hover one to see which of the 18 worldwide stations is\n"
+            "transmitting on that band right now.  Independent from\n"
+            "the digimode landmark toggle above.")
+        self.bp_ncdxf_chk.toggled.connect(
+            self.radio.set_band_plan_show_ncdxf)
+        gbp.addWidget(self.bp_ncdxf_chk, 3, 0, 1, 3)
 
         self.bp_edge_chk = QCheckBox(
             "Show band-edge warnings + out-of-band toast")
@@ -787,7 +800,7 @@ class RadioSettingsTab(QWidget):
             "toast when you tune into or out of an allocated band.")
         self.bp_edge_chk.toggled.connect(
             self.radio.set_band_plan_edge_warn)
-        gbp.addWidget(self.bp_edge_chk, 3, 0, 1, 3)
+        gbp.addWidget(self.bp_edge_chk, 4, 0, 1, 3)
 
         v.addWidget(grp_bp)
 
@@ -2317,13 +2330,16 @@ class VisualsSettingsTab(QWidget):
             "keeps the top edge raised until ~10 s after it last\n"
             "appeared, so transient peaks don't overshoot the\n"
             "display.\n\n"
-            "Manual scale changes (the sliders above, or the panadapter\n"
-            "right-edge Y-axis drag) set BOUNDS for auto-scale — auto\n"
-            "is allowed to move within them but never escapes them.\n"
-            "Auto-scale stays ON until you uncheck this box.\n\n"
-            "Tip: drag the Y-axis to set your preferred ceiling /\n"
-            "floor, then leave auto on — it'll auto-fit within your\n"
-            "chosen window without ever wandering off-scale.")
+            "Per-edge locks (drag the panadapter right-edge to set):\n"
+            "  • Drag the FLOOR → auto stops moving it; your noise\n"
+            "    space stays where you put it.\n"
+            "  • Drag the CEILING → auto won't fall below it; the\n"
+            "    ceiling can still RISE if a strong signal arrives\n"
+            "    (so signals are never squeezed off-screen).\n\n"
+            "Locks are saved per-band — switching bands restores\n"
+            "whichever edges you'd locked there.\n\n"
+            "To clear locks: right-click the dB scale on the\n"
+            "panadapter → 'Reset display range'.")
         self.auto_scale_chk.toggled.connect(
             self.radio.set_spectrum_auto_scale)
         # Keep checkbox in sync if Radio turns it off (manual drag)
@@ -3951,6 +3967,104 @@ class NoiseSettingsTab(QWidget):
         self.sq_thr_label.setText(f"{target}")
 
 
+class PropagationSettingsTab(QWidget):
+    """Settings home for the Propagation panel + NCDXF beacons.
+
+    The Propagation dock itself shows live solar / band / Follow
+    controls; this tab is for the persistent toggles that don't
+    belong on the slim status panel — namely the NCDXF spectrum-
+    marker toggle and a quick reference to clock accuracy (which
+    matters for beacon Follow timing).
+    """
+
+    def __init__(self, radio):
+        super().__init__()
+        self.radio = radio
+
+        v = QVBoxLayout(self)
+
+        # ── Spectrum overlay ─────────────────────────────────────
+        grp_marker = QGroupBox("Spectrum overlay")
+        gm = QVBoxLayout(grp_marker)
+
+        self.ncdxf_chk = QCheckBox(
+            "Show NCDXF beacon markers on the panadapter")
+        self.ncdxf_chk.setChecked(radio.band_plan_show_ncdxf)
+        self.ncdxf_chk.setToolTip(
+            "Cyan triangles at the 5 NCDXF International Beacon\n"
+            "Project frequencies (14.100 / 18.110 / 21.150 /\n"
+            "24.930 / 28.200 MHz).  Hover one to see which of the\n"
+            "18 worldwide stations is transmitting on that band\n"
+            "right now.  Click to QSY.\n\n"
+            "Independent from the digimode landmarks toggle — you\n"
+            "can have NCDXF markers on while FT8/WSPR triangles\n"
+            "are off, or vice versa.")
+        self.ncdxf_chk.toggled.connect(
+            self.radio.set_band_plan_show_ncdxf)
+        gm.addWidget(self.ncdxf_chk)
+
+        marker_help = QLabel(
+            "<i>Tip: the panadapter has to be tuned to a band that\n"
+            "includes one of the NCDXF frequencies for the markers\n"
+            "to be visible.  20m / 17m / 15m / 12m / 10m only.</i>")
+        marker_help.setStyleSheet("color: #8a9eb6; padding: 4px 4px 0 4px;")
+        marker_help.setWordWrap(True)
+        gm.addWidget(marker_help)
+
+        v.addWidget(grp_marker)
+
+        # ── Clock accuracy ───────────────────────────────────────
+        grp_clock = QGroupBox("Clock accuracy (NCDXF Follow)")
+        gc = QVBoxLayout(grp_clock)
+
+        clock_text = QLabel(
+            "NCDXF beacons rotate on 10-second slots.  Lyra computes\n"
+            "which station is on the air purely from your PC clock\n"
+            "(no callsign decoding) — so a clock that drifts by more\n"
+            "than ~3 seconds will mis-identify beacons.\n\n"
+            "Right-click either toolbar clock (Local time or UTC) to:\n"
+            "  • Check drift against a public NTP server\n"
+            "  • Sync time now (Windows w32time)\n"
+            "  • Read the explanation\n\n"
+            "If your check comes back significantly off, the UTC\n"
+            "clock will show a ⚠ prefix until you re-check.")
+        clock_text.setWordWrap(True)
+        clock_text.setStyleSheet("padding: 4px;")
+        gc.addWidget(clock_text)
+
+        v.addWidget(grp_clock)
+
+        # ── Where to find the live controls ──────────────────────
+        grp_panel = QGroupBox("Live controls")
+        gp = QVBoxLayout(grp_panel)
+        panel_text = QLabel(
+            "The Propagation dock (View menu → Propagation) shows\n"
+            "live solar numbers (SFI / A / K), a per-band conditions\n"
+            "heatmap (Day/Night-aware via your QTH grid square), and\n"
+            "the NCDXF Follow dropdown which auto-tunes one chosen\n"
+            "station around its 5-band rotation.\n\n"
+            "Set your grid square in <b>Radio → Operator</b> so the\n"
+            "Day/Night band-conditions pick uses your local sunrise\n"
+            "and sunset.")
+        panel_text.setWordWrap(True)
+        panel_text.setStyleSheet("padding: 4px;")
+        gp.addWidget(panel_text)
+
+        v.addWidget(grp_panel)
+
+        v.addStretch(1)
+
+        # Track radio-side changes so external toggles (band-plan
+        # tab, dock right-click, etc.) keep this checkbox in sync.
+        radio.band_plan_show_ncdxf_changed.connect(self._on_ncdxf_changed)
+
+    def _on_ncdxf_changed(self, on: bool):
+        if self.ncdxf_chk.isChecked() != on:
+            self.ncdxf_chk.blockSignals(True)
+            self.ncdxf_chk.setChecked(bool(on))
+            self.ncdxf_chk.blockSignals(False)
+
+
 class WxAlertsSettingsTab(QWidget):
     """Phase 4 — Weather Alerts settings.
 
@@ -5492,6 +5606,13 @@ class SettingsDialog(QDialog):
         # Stations + SW Database sub-tabs.
         self.tab_bands = BandsSettingsTab(radio)
         self.tabs.addTab(self.tab_bands, "Bands")
+
+        # Propagation — NCDXF marker toggle + clock-accuracy reference.
+        # The live solar/band/Follow controls live on the dock
+        # (View → Propagation); this tab is the home for the
+        # persistent toggles that don't belong on the slim panel.
+        self.tab_prop = PropagationSettingsTab(radio)
+        self.tabs.addTab(self.tab_prop, "Propagation")
 
         # Phase 4 — Weather Alerts.  Lives last in the tab order
         # because it's an opt-in convenience feature (gated by an

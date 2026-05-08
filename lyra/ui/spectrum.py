@@ -54,6 +54,11 @@ class SpectrumWidget(_PaintedWidget):
     # Y-axis drag to adjust spectrum dB scale. Emits proposed
     # (min_db, max_db); panel forwards to Radio.set_spectrum_db_range.
     db_scale_drag = Signal(float, float)
+    # Right-click on the dB-scale zone — panel pops a small menu with
+    # "Reset display range" so the operator can clear edge-locks
+    # (floor / ceiling pinned by previous drag) without digging into
+    # Settings.  Payload is the global QPoint for menu placement.
+    db_scale_right_clicked = Signal(QPoint)
 
     NOTCH_HIT_PX = 14
     SPOT_HIT_PX = 8
@@ -211,6 +216,7 @@ class SpectrumWidget(_PaintedWidget):
         self._band_plan_region: str = "NONE"
         self._show_band_segments: bool = True
         self._show_band_landmarks: bool = True
+        self._show_band_ncdxf: bool = True   # NCDXF beacon markers — independent toggle
         self._show_band_edge_warn: bool = True
         # Vertical pixels at the top of the widget reserved by the
         # band-plan overlay (segment strip + landmark triangles). Set
@@ -378,6 +384,12 @@ class SpectrumWidget(_PaintedWidget):
         self._show_band_landmarks = bool(on)
         self.update()
 
+    def set_band_plan_show_ncdxf(self, on: bool):
+        """Toggle NCDXF beacon markers independently of the digital
+        watering-hole landmarks (FT8 / FT4 / WSPR / PSK)."""
+        self._show_band_ncdxf = bool(on)
+        self.update()
+
     def set_band_plan_show_edge_warn(self, on: bool):
         self._show_band_edge_warn = bool(on)
         self.update()
@@ -434,7 +446,9 @@ class SpectrumWidget(_PaintedWidget):
         strip just under the sub-band-segment band (y=10..22 when
         both strips are on, y=0..12 when only landmarks are shown).
         Click tolerance ±6 px horizontally."""
-        if self._band_plan_region == "NONE" or not self._show_band_landmarks:
+        if self._band_plan_region == "NONE":
+            return None
+        if not (self._show_band_landmarks or self._show_band_ncdxf):
             return None
         if self._span_hz <= 0 or self.width() <= 0:
             return None
@@ -446,7 +460,9 @@ class SpectrumWidget(_PaintedWidget):
             return None
         from lyra import band_plan as _bp
         marks = _bp.visible_landmarks(
-            self._band_plan_region, self._center_hz, self._span_hz)
+            self._band_plan_region, self._center_hz, self._span_hz,
+            show_digital=self._show_band_landmarks,
+            show_beacons=self._show_band_ncdxf)
         hz_per_px = self._span_hz / self.width()
         center_x = self.width() / 2
         best = None
@@ -743,6 +759,14 @@ class SpectrumWidget(_PaintedWidget):
             self.setCursor(Qt.OpenHandCursor)
         elif event.button() == Qt.RightButton:
             gpos = event.globalPosition().toPoint()
+            # Right-click in the dB-scale zone (right-edge strip) gets
+            # its own menu — "Reset display range" — so the operator
+            # can clear floor/ceiling edge-locks without leaving the
+            # spectrum view.  Falls through to the freq/notch menu
+            # for clicks anywhere else.
+            if self._db_scale_mode_at(x, y) is not None:
+                self.db_scale_right_clicked.emit(gpos)
+                return
             self.right_clicked_freq.emit(freq, shift, gpos)
 
     def mouseMoveEvent(self, event):
@@ -858,8 +882,36 @@ class SpectrumWidget(_PaintedWidget):
         # Clear tooltip when not over a notch so it doesn't linger.
         if self.toolTip():
             self.setToolTip("")
-        if self._landmark_at(x, y) is not None:
+        lm_hit = self._landmark_at(x, y)
+        if lm_hit is not None:
             self.setCursor(Qt.PointingHandCursor)
+            # Tooltip — operator hovers a triangle and gets the freq /
+            # mode hint, plus (for NCDXF beacons) the live callsign of
+            # whichever station is on that band right now.  Computed
+            # purely from the system clock (NCDXF rotation is a fixed
+            # 3-min cycle of 18 stations across 5 bands), so the same
+            # clock-accuracy caveat from the toolbar-clock right-click
+            # menu applies — drift > ~3 sec → wrong station ID.
+            if lm_hit.get("category") == "BEACON":
+                from lyra.propagation import ncdxf_station_for_freq_khz
+                from datetime import datetime, timezone
+                freq_khz = int(lm_hit["freq"]) // 1000
+                hit = ncdxf_station_for_freq_khz(
+                    freq_khz, datetime.now(timezone.utc))
+                if hit is not None:
+                    callsign, desc = hit
+                    tip = (f"<b>NCDXF {lm_hit['freq']/1e6:.3f} MHz</b><br/>"
+                           f"Currently transmitting: <b>{callsign}</b><br/>"
+                           f"<i>{desc}</i><br/>"
+                           f"Click to QSY (mode: {lm_hit['mode']})")
+                else:
+                    tip = (f"<b>NCDXF {lm_hit['freq']/1e6:.3f} MHz</b><br/>"
+                           f"Click to QSY (mode: {lm_hit['mode']})")
+            else:
+                tip = (f"<b>{lm_hit['label']}</b><br/>"
+                       f"{lm_hit['freq']/1e6:.4f} MHz<br/>"
+                       f"Click to QSY (mode: {lm_hit['mode']})")
+            self.setToolTip(tip)
         elif self._db_scale_mode_at(x, y) is not None:
             self.setCursor(Qt.SizeVerCursor)
         elif self._passband_edge_at_x(x) is not None:
@@ -883,8 +935,14 @@ class SpectrumWidget(_PaintedWidget):
             if target:
                 tip_lines.append(f"Target: {target}")
             self.setToolTip("\n".join(tip_lines))
-        elif self.toolTip().startswith("<b>") and "MHz" in self.toolTip():
+        elif (self.toolTip().startswith("<b>")
+              and "MHz" in self.toolTip()
+              and ("ON AIR" in self.toolTip()
+                   or "off air" in self.toolTip())):
             # Clear stale EiBi tooltip when we move off a label.
+            # Match EiBi-shape only — landmark hover tooltips also use
+            # <b>+MHz formatting but contain "Click to QSY" instead of
+            # the on-air status.
             self.setToolTip("")
 
         # ── Snap-target hover reticle (click-to-tune v1) ─────────
@@ -1108,11 +1166,13 @@ class SpectrumWidget(_PaintedWidget):
                         # Cached font — see __init__.
                         p.setFont(self._font_7pt_bold)
                         p.drawText(x0 + 3, BAND_STRIP_H - 2, seg["label"])
-            if self._show_band_landmarks:
+            if self._show_band_landmarks or self._show_band_ncdxf:
                 top_reserve += LANDMARK_STRIP_H
                 marks = _bp.visible_landmarks(
                     self._band_plan_region,
-                    self._center_hz, self._span_hz)
+                    self._center_hz, self._span_hz,
+                    show_digital=self._show_band_landmarks,
+                    show_beacons=self._show_band_ncdxf)
                 hz_per_px = self._span_hz / w
                 center_x = w / 2
                 tri_y = BAND_STRIP_H if self._show_band_segments else 0
@@ -1124,17 +1184,30 @@ class SpectrumWidget(_PaintedWidget):
                     mx = int(center_x + (lm["freq"] - self._center_hz) / hz_per_px)
                     if not (0 <= mx <= w):
                         continue
+                    # Color by category — NCDXF beacons in cyan so the
+                    # operator can tell them apart from the gold
+                    # FT8/FT4/WSPR/PSK triangles at a glance.  Same
+                    # marker geometry; only color + label color differ.
+                    is_beacon = (lm.get("category") == "BEACON")
+                    if is_beacon:
+                        line_col = QColor(120, 220, 255, 220)   # cyan
+                        fill_col = QColor(120, 220, 255, 150)
+                        text_col = QColor(160, 230, 255, 230)
+                    else:
+                        line_col = QColor(255, 215, 0, 200)     # amber
+                        fill_col = QColor(255, 215, 0, 140)
+                        text_col = QColor(255, 215, 0, 220)
                     # Downward-pointing triangle
                     tri = QPolygonF([
                         QPointF(mx - 4, tri_y + 1),
                         QPointF(mx + 4, tri_y + 1),
                         QPointF(mx,     tri_y + 6),
                     ])
-                    p.setPen(QPen(QColor(255, 215, 0, 200), 1))
-                    p.setBrush(QColor(255, 215, 0, 140))
+                    p.setPen(QPen(line_col, 1))
+                    p.setBrush(fill_col)
                     p.drawPolygon(tri)
                     # Small label to the right of the triangle
-                    p.setPen(QPen(QColor(255, 215, 0, 220), 1))
+                    p.setPen(QPen(text_col, 1))
                     p.drawText(mx + 6, tri_y + LANDMARK_STRIP_H - 1,
                                lm["label"])
             # Band-edge warnings — red vertical line + label at any

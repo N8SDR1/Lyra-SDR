@@ -215,6 +215,10 @@ class SpectrumGpuWidget(QOpenGLWidget):
     # forwards to radio.set_spectrum_db_range. Same shape as the
     # QPainter widget's signal.
     db_scale_drag = Signal(float, float)
+    # Right-click in the dB-scale zone — surfaces a small menu with
+    # "Reset display range" so the operator can clear the per-edge
+    # auto-scale locks without leaving the spectrum view.
+    db_scale_right_clicked = Signal(QPoint)
 
     # Passband-edge drag — emits proposed RX BW in Hz (already
     # clamped + quantized). Panel forwards to radio.set_rx_bw.
@@ -410,6 +414,7 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._band_plan_region: str = "NONE"
         self._show_band_segments: bool = True
         self._show_band_landmarks: bool = True
+        self._show_band_ncdxf: bool = True   # NCDXF beacon markers — independent toggle
         self._show_band_edge_warn: bool = True
         # Per-segment color overrides (CW/DIG/SSB/FM) layered on top
         # of band_plan.SEGMENT_COLORS at paint time.
@@ -417,7 +422,12 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # Cache of the landmarks rendered this frame, used by the
         # mouse-press handler to dispatch click-to-tune on triangles.
         # Tuples of (freq_hz, mode, x_px, y_top, y_bot).
-        self._landmark_hit_cache: list[tuple[int, str, int, int, int]] = []
+        # Tuple shape: (freq_hz, mode, mx_px, y_top, y_bot, label, category)
+        # The label + category pair lets the hover-tooltip path render
+        # NCDXF-specific text (live callsign) without walking the
+        # band-plan again.
+        self._landmark_hit_cache: list[
+            tuple[int, str, int, int, int, str, str]] = []
 
         # ── Peak-markers overlay state ────────────────────────────
         # In-passband peak-hold trace — same buffer shape as the live
@@ -686,6 +696,12 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._show_band_landmarks = bool(on)
         self.update()
 
+    def set_band_plan_show_ncdxf(self, on: bool) -> None:
+        """Toggle NCDXF beacon markers independently of the digital
+        watering-hole landmarks (FT8 / FT4 / WSPR / PSK)."""
+        self._show_band_ncdxf = bool(on)
+        self.update()
+
     def set_band_plan_show_edge_warn(self, on: bool) -> None:
         """Toggle the red dashed band-edge warning line."""
         self._show_band_edge_warn = bool(on)
@@ -820,14 +836,28 @@ class SpectrumGpuWidget(QOpenGLWidget):
         so the geometry is always the most recent frame's. ±5 px of
         slop on x so triangles stay grabbable at small sizes."""
         if (self._band_plan_region == "NONE"
-                or not self._show_band_landmarks
+                or not (self._show_band_landmarks or self._show_band_ncdxf)
                 or not self._landmark_hit_cache):
             return None
-        for freq, mode, mx, y_top, y_bot in self._landmark_hit_cache:
+        for freq, mode, mx, y_top, y_bot, _label, _cat in self._landmark_hit_cache:
             # Allow a tiny bit of slack below the triangle so the
             # operator doesn't have to thread the eye of a needle.
             if abs(x - mx) <= 5 and y_top - 1 <= y <= y_bot + 2:
                 return (freq, mode)
+        return None
+
+    def _landmark_full_at(self, x: float, y: float):
+        """Like ``_landmark_at`` but returns the full cache tuple
+        ``(freq, mode, mx, y_top, y_bot, label, category)`` so the
+        hover-tooltip path can branch on category."""
+        if (self._band_plan_region == "NONE"
+                or not (self._show_band_landmarks or self._show_band_ncdxf)
+                or not self._landmark_hit_cache):
+            return None
+        for entry in self._landmark_hit_cache:
+            _, _, mx, y_top, y_bot, _, _ = entry
+            if abs(x - mx) <= 5 and y_top - 1 <= y <= y_bot + 2:
+                return entry
         return None
 
     # ── Notch hit-test (Phase B.14) ────────────────────────────────
@@ -1060,10 +1090,17 @@ class SpectrumGpuWidget(QOpenGLWidget):
                 self.setCursor(Qt.OpenHandCursor)
         elif event.button() == Qt.RightButton:
             shift_held = bool(event.modifiers() & Qt.ShiftModifier)
-            self.right_clicked_freq.emit(
-                float(self._freq_at_pixel(x)),
-                shift_held,
-                event.globalPosition().toPoint())
+            # dB-scale zone gets its own menu — same pattern as the
+            # CPU widget (Reset display range etc.).  Falls through
+            # to the freq/notch menu otherwise.
+            if self._is_in_db_zone(int(x)):
+                self.db_scale_right_clicked.emit(
+                    event.globalPosition().toPoint())
+            else:
+                self.right_clicked_freq.emit(
+                    float(self._freq_at_pixel(x)),
+                    shift_held,
+                    event.globalPosition().toPoint())
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
@@ -1154,6 +1191,38 @@ class SpectrumGpuWidget(QOpenGLWidget):
             self._drag_last_emit_hz = float(new_center)
             self.clicked_freq.emit(float(new_center))
             return
+
+        # ── Landmark hover tooltip (NCDXF live callsign etc.) ────
+        # Show freq + mode + (for NCDXF) the live callsign of whoever's
+        # transmitting on that band right now.  Symmetric with the
+        # CPU widget's tooltip behavior so operators see the same
+        # info regardless of which spectrum backend is active.
+        y = event.position().y()
+        lm_full = self._landmark_full_at(x, y)
+        if lm_full is not None:
+            freq_hz, mode, _mx, _yt, _yb, label, category = lm_full
+            if category == "BEACON":
+                from lyra.propagation import ncdxf_station_for_freq_khz
+                from datetime import datetime, timezone
+                hit = ncdxf_station_for_freq_khz(
+                    freq_hz // 1000, datetime.now(timezone.utc))
+                if hit is not None:
+                    callsign, desc = hit
+                    tip = (f"<b>NCDXF {freq_hz/1e6:.3f} MHz</b><br/>"
+                           f"Currently transmitting: <b>{callsign}</b><br/>"
+                           f"<i>{desc}</i><br/>"
+                           f"Click to QSY (mode: {mode})")
+                else:
+                    tip = (f"<b>NCDXF {freq_hz/1e6:.3f} MHz</b><br/>"
+                           f"Click to QSY (mode: {mode})")
+            else:
+                tip = (f"<b>{label}</b><br/>"
+                       f"{freq_hz/1e6:.4f} MHz<br/>"
+                       f"Click to QSY (mode: {mode})")
+            self.setToolTip(tip)
+        elif self.toolTip() and "Click to QSY" in self.toolTip():
+            # Clear stale landmark tooltip when the cursor moves off.
+            self.setToolTip("")
 
         # ── Snap-target hover reticle (click-to-tune v1) ─────────
         # When the modifier is held over empty spectrum (no drag in
@@ -1781,11 +1850,13 @@ class SpectrumGpuWidget(QOpenGLWidget):
                                      seg["label"])
 
         # ── Landmark triangle strip ───────────────────────────────
-        if self._show_band_landmarks:
+        if self._show_band_landmarks or self._show_band_ncdxf:
             top_reserve += self.LANDMARK_STRIP_H
             marks = _bp.visible_landmarks(
                 self._band_plan_region,
-                self._center_hz, self._span_hz)
+                self._center_hz, self._span_hz,
+                show_digital=self._show_band_landmarks,
+                show_beacons=self._show_band_ncdxf)
             tri_y = (self.BAND_STRIP_H
                      if self._show_band_segments else 0)
             # Cached font — see __init__.
@@ -1795,6 +1866,18 @@ class SpectrumGpuWidget(QOpenGLWidget):
                          (lm["freq"] - self._center_hz) / hz_per_px)
                 if not (0 <= mx <= w):
                     continue
+                # Color by category — NCDXF beacons in cyan so the
+                # operator can tell them apart from the gold
+                # FT8/FT4/WSPR/PSK triangles at a glance.
+                is_beacon = (lm.get("category") == "BEACON")
+                if is_beacon:
+                    line_col = QColor(120, 220, 255, 220)
+                    fill_col = QColor(120, 220, 255, 150)
+                    text_col = QColor(160, 230, 255, 230)
+                else:
+                    line_col = QColor(255, 215, 0, 200)
+                    fill_col = QColor(255, 215, 0, 140)
+                    text_col = QColor(255, 215, 0, 220)
                 # Downward-pointing triangle, identical geometry to
                 # the CPU widget so the landmark hit zone matches.
                 tri = QPolygonF([
@@ -1802,19 +1885,23 @@ class SpectrumGpuWidget(QOpenGLWidget):
                     QPointF(mx + 4, tri_y + 1),
                     QPointF(mx,     tri_y + 6),
                 ])
-                painter.setPen(QPen(QColor(255, 215, 0, 200), 1))
-                painter.setBrush(QColor(255, 215, 0, 140))
+                painter.setPen(QPen(line_col, 1))
+                painter.setBrush(fill_col)
                 painter.drawPolygon(tri)
-                painter.setPen(QPen(QColor(255, 215, 0, 220), 1))
+                painter.setPen(QPen(text_col, 1))
                 painter.drawText(mx + 6,
                                  tri_y + self.LANDMARK_STRIP_H - 1,
                                  lm["label"])
                 # Stash for hit-test — the triangle's vertical extent
-                # is roughly tri_y .. tri_y + 6 px.
+                # is roughly tri_y .. tri_y + 6 px.  We also stash the
+                # category so the hover-tooltip path can branch on
+                # NCDXF vs digital without re-walking the band-plan.
                 self._landmark_hit_cache.append((
                     int(lm["freq"]),
                     str(lm.get("mode", "")),
                     mx, tri_y, tri_y + 6,
+                    str(lm.get("label", "")),
+                    str(lm.get("category", "DIGITAL")),
                 ))
 
         # ── Band-edge warnings ────────────────────────────────────

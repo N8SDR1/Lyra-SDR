@@ -13,7 +13,241 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
-## [0.0.9.5] — unreleased — "Captured-Profile UX"
+## [0.0.9.6] — 2026-05-08 — "Audio Foundation"
+
+The biggest single release Lyra has shipped to date.  Headline
+change is a wholesale pivot from pure-Python DSP to **cffi calls
+into the WDSP DSP engine** for the RX1 audio chain — driven by
+extended audio-quality troubleshooting on the pure-Python port
+path (per-sample numpy work in agc / nr / nr2 / anf / demod /
+channel was producing GIL contention with the EP2 writer thread,
+manifesting as HL2 audio-jack clicks and PC Soundcard
+motorboating).  WDSP's DLLs are bundled at `lyra/dsp/_native/` —
+no external installs, no operator-side dependencies.
+
+Around that core change: a six-week cleanup arc retiring ~6,800
+lines of legacy DSP code, a series of operator-driven UX
+improvements, and a final-day push that landed Propagation /
+NCDXF / clock-sync / per-edge auto-scale locks.
+
+### RX1 audio chain — native engine via cffi
+
+* **`lyra/dsp/wdsp_native.py`** + **`lyra/dsp/wdsp_engine.py`** —
+  cdef declarations + high-level Python wrapper.  Bundled
+  binaries: `wdsp.dll`, `libfftw3-3.dll`, `libfftw3f-3.dll`,
+  `rnnoise.dll`, `specbleach.dll` (~16 MB total) at
+  `lyra/dsp/_native/`.
+* **RX1 audio path now end-to-end through WDSP**: decimator,
+  bandpass, demod (USB/LSB/AM/FM/CWU/CWL/DSB/SAM/DIGU/DIGL/DRM/
+  SPEC), AGC, EMNR (NR), ANR (NR), ANF, LMS, AM/FM squelch,
+  SSQL all-mode squelch, APF (CW peaking).
+* AGC gain readout wired (GetRXAMeter / RXA_AGC_GAIN, throttled
+  to ~6 Hz) so the panel meter actually moves.
+* CW pitch refilters when active mode is CWU / CWL.
+
+### NR-mode UX overhaul (operator-driven)
+
+The legacy NR1/NR2 backend dropdown + dual strength sliders were
+confusing in WDSP mode (sliders mostly inert; backend NR1/NR2
+sounded similar even though we set different gain methods).
+Replaced with a Thetis-inspired but Lyra-tuned model on the
+DSP+Audio panel:
+
+* **NR slider** → 4-position MODE selector (1 / 2 / 3 / 4)
+  mapping to WDSP gain methods 0..3 (Wiener+SPP / Wiener simple
+  / **MMSE-LSA default** / Trained adaptive)
+* **AEPF checkbox** → anti-musical-noise post-filter (clear
+  audible difference; previously hidden in Thetis)
+* **NPE dropdown** (OSMS / MCRA / etc.) — new operator-tunable
+  control on the DSP+Audio panel.  Lyra exposes more WDSP NR
+  knobs for direct on-air tuning than Thetis / SparkSDR /
+  PowerSDR.
+
+### SSQL all-mode squelch
+
+Mode-routed squelch:
+* FM → `SetRXAFMSQRun` + Threshold (logarithmic slider mapping)
+* AM/SAM/DSB → `SetRXAAMSQRun` + Threshold + MaxTail (0.5 sec)
+* SSB/CW/DIG/SPEC → **NEW** `SetRXASSQLRun` (WDSP's Single-mode
+  Squelch Level — operator slider scaled 0.65× to put the
+  comfortable zone just below WU2O's tested-good 0.16 default;
+  TauMute 0.7 sec / TauUnMute 0.1 sec)
+* Squelch master-off bug fixed (AM/FM gates were stuck on when
+  SQ was toggled off — fixed in Phase 6.A4 fix-up)
+
+### AM/FM/DSB right-channel-silent — fixed
+
+WDSP's EMNR explicitly zeroes the Q channel on output.  For SSB,
+the asymmetric BP1 passband acts as a Hilbert restorer and stereo
+content survives.  For AM/FM/DSB, the symmetric passband leaves
+Q at zero — so the patch panel's default `copy=0` produced silence
+on the right channel.  Fixed by calling `SetRXAPanelBinaural(0)`
+at channel init (Thetis does this; Lyra had been inheriting the
+WDSP create-time default).  Operator-verified across all modes
+with EMNR active: L_rms == R_rms within 0.001 on every mode.
+
+### TPDF dither + audio polish
+
+* **TPDF dither** added to the float→int16 quantization in
+  `_quantize_to_int16_be` — operator-confirmed harshness gone.
+* **S-meter peak-hold smoothing** with fast-attack /
+  slow-release (~500 ms decay) — eliminates twitch on weak
+  signals.
+* **PC Soundcard mode** now CPU-comparable to HL2-jack mode via
+  cffi-wrapped `WdspRMatch` (in-tree `lyra/dsp/rmatch.py`
+  formerly pure-Python is the fallback).
+* **Noise blanker** wired (`xnobEXT` / `xanbEXT` actually splice
+  into the IQ path now; previously `SetEXTNOBRun(1)` alone was
+  a no-op since the EXT-blanker objects weren't created).
+* **Manual notches** wired through WDSP NotchDB.
+* **APF** (CW peaking) via WDSP biquad — operator-confirmed
+  +12 dB measured at +12.2 dB.
+* **BIN (binaural)** Python post-processor on top of WDSP's
+  stereo output; works in both HL2-jack and PC Soundcard paths.
+* **Audio Leveler** retired — WDSP AGC subsumes it.
+
+### AGC plumbing fixes (operator-reported, all in Phase 6.A)
+
+1. **AF Gain inert in live audio** — wired
+   `set_af_gain_db` → `_wdsp_rx.set_panel_gain(af_gain_linear)`.
+2. **AGC Settings sliders didn't follow profile changes** —
+   `set_agc_profile` now reads the preset table to update
+   advisory `_agc_release` / `_agc_hang_blocks`.
+3. **AGC threshold push missing** — `_open_wdsp_rx` now wires
+   `set_agc_slope(0)` + `set_agc_threshold` at init.
+4. **FM SQ slider had no effect** — added logarithmic mapping
+   `10^(-2·v)`.
+5. **ANF μ slider was advisory-only** — added `SetRXAANFVals`
+   binding + push.
+6. **AM SQ tail too long** — pushed 0.5 sec at init.
+
+### Cleanup arc (Phases 3–9)
+
+Retired ~6,800 lines of legacy pure-Python DSP code now that
+WDSP is the single audio engine:
+
+| Module deleted | Lines | Replaced by |
+|---|---|---|
+| `lyra/dsp/leveler.py` | 355 | feature retired (WDSP AGC subsumes) |
+| `lyra/dsp/agc_wdsp.py` | 746 | WDSP cffi `SetRXAAGCMode` directly |
+| `lyra/dsp/apf.py` | 251 | WDSP SPEAK biquad |
+| `lyra/dsp/demod.py` | 528 | WDSP RXA chain |
+| `lyra/dsp/nb.py` | 477 | `_NBState` dataclass + WDSP NOB |
+| `lyra/dsp/lms.py` | 459 | `_LMSState` dataclass + WDSP ANR |
+| `lyra/dsp/anf.py` | 395 | `_ANFState` dataclass + WDSP ANF |
+| `lyra/dsp/squelch.py` | 419 | `_SquelchState` dataclass + WDSP SSQL/FMSQ/AMSQ |
+| `lyra/dsp/nr2.py` | 1496 | `_NR2State` dataclass + WDSP EMNR |
+| `LYRA_USE_LEGACY_DSP=1` env-var fallback | ~57 | gone — WDSP is the only path |
+
+The `DspChannel` ABC is kept for forward compatibility (a future
+DSP backend could subclass it) but its `process()` abstractmethod
+is gone — channels are state containers now, not DSP drivers.
+
+### Operator-driven UX additions (final-day push)
+
+* **Panadapter wheel-tune** — mouse wheel over empty spectrum now
+  tunes the VFO (wheel up = freq up).  Ctrl+wheel keeps the legacy
+  zoom gesture for power users.  **Panafall Step** combo on the
+  Display panel picks the per-tick step (100 Hz / 500 Hz / 1 kHz /
+  5 kHz / 10 kHz / 25 kHz / 100 kHz).
+* **Propagation panel** (View → Propagation) — slim status strip
+  with live solar numbers (SFI / A / K, color-coded), 10-band
+  HamQSL conditions heatmap (Day/Night-aware via QTH grid square),
+  and an NCDXF Beacon Auto-Follow dropdown.  Pick one of 18
+  worldwide stations and Lyra auto-tunes through its 5-band
+  rotation (20m → 17m → 15m → 12m → 10m every 10 sec) — an
+  SDR-only superpower a knob radio can't match.
+* **NCDXF spectrum markers** — cyan triangles at the 5 NCDXF
+  frequencies (14.100 / 18.110 / 21.150 / 24.930 / 28.200 MHz).
+  Hover for the live callsign of whichever of the 18 stations is
+  on that band right now.  Independent show/hide toggle separate
+  from the digimode landmarks (FT8/FT4/WSPR/PSK).  New
+  **Settings → Propagation** tab + sibling checkbox under Bands.
+* **Clock drift / sync** — right-click either toolbar clock (Local
+  or UTC) to:
+    * Check drift against an NTP server (Cloudflare / NTP Pool /
+      Google / Microsoft — first that answers wins, raw UDP/123)
+    * Sync time on Windows via `w32tm /resync`
+    * Read why this matters (NCDXF beacon Follow accuracy
+      depends on it — 10-sec slots → drift > 3 sec mis-IDs the
+      station)
+  ⚠ prefix appears on the UTC clock if the last drift check came
+  back warn/bad.
+* **dB-scale per-edge auto-scale locks** — the long-standing
+  "I dragged the floor and it climbed back" complaint, fixed:
+    * **Drag the FLOOR** → auto stops moving it.  Hard lock.
+    * **Drag the CEILING** → auto won't fall below it but still
+      RISES if a strong signal arrives.  Soft lock.
+    * **Drag pan (middle)** → both edges shift + lock together.
+  Locks are saved per-band so switching bands restores them.
+  Right-click the dB scale → **Reset display range** to clear
+  (menu shows which edges are locked).
+
+### Bug fixes (UI + cosmetic)
+
+* **Toolbar clock right-click crash** — dynamic class-with-Signal
+  pattern crashed PySide6's meta-object compiler on second
+  invocation.  Fixed by hoisting workers to module scope +
+  layered try/except.
+* **Tooltip cascade** — bare-stylesheet rules on QLabel widgets
+  (`color: ...; font-size: 22px;` with no selector) cascaded to
+  the QToolTip popup spawned by the same widget, making tooltips
+  render at the label's huge bold styling.  Fixed on the toolbar
+  clocks + AGC labels by wrapping all rules in `QLabel { ... }`
+  selectors.
+
+### Help docs / Settings tooltip refresh
+
+* `docs/help/spectrum.md` — rewrote the auto-scale section to
+  match the actual per-edge-lock behavior (the old text promised
+  "drag = bounds for auto" which a prior pinch-bug fix had
+  silently broken).
+* `docs/help/propagation.md` — new file covering the panel,
+  NCDXF rotation math, clock-accuracy caveat, NTP drift check.
+* `docs/help/index.md` — added Propagation entry to the topic
+  index.
+* Settings tab tooltips updated (auto-scale, NR mode, AEPF, NPE,
+  NCDXF marker, propagation tab) — all match current code.
+
+### Tags + portable bundles
+
+| Tag | What it covers |
+|---|---|
+| `v0.0.9.6-rx1-working-r3` | Pre-cleanup baseline |
+| `v0.0.9.6-rx1-working-r4` | + AM right-channel-silent fix |
+| `v0.0.9.6-rx1-working-r5` | + Audio Leveler delete |
+| `v0.0.9.6-rx1-working-r6` | + channel.py slim |
+| `v0.0.9.6-rx1-working-r7` | + AF Gain fix |
+| `v0.0.9.6-rx1-working-r8` | + AGC plumbing |
+| `v0.0.9.6-rx1-working-r9` | Cleanup arc COMPLETE |
+
+Each has a matching `_backups/lyra-2026-05-NN-rx1-working-rN.bundle`
+for portable archaeology.
+
+### Known issues / deferred
+
+* **Captured-profile apply path is INERT in WDSP mode.**  Capture
+  works, profiles save / load / persist; toggling "use captured
+  profile" fires a status-bar warning.  Three rounds of fixes
+  (post-WDSP nr2 pass + temporal smoothing + auto-VAD) couldn't
+  eliminate audible artifacts because of WDSP-AGC-vs-static-
+  reference mismatch.  Architectural rebuild planned for next
+  release: tap IQ pre-WDSP, apply spectral subtraction in IQ
+  domain, hand cleaned IQ to WDSP.  Mode-independent + cleaner
+  math.  Captured profiles in legacy mode (`LYRA_USE_LEGACY_DSP=1`)
+  are unaffected — but legacy mode is gone in v0.0.9.6, so this
+  feature is effectively shelved until the IQ-domain rebuild.
+
+### Coming next (v0.1)
+
+* **RX2** — second receiver, stereo split via EP2 LR bytes through
+  the AK4951 codec.  Foundation already laid: `lyra/dsp/mix.py`
+  ports WDSP `aamix.c`, the audio mixer plumbing is in tree but
+  not yet driven by a second WDSP channel.
+
+---
+
+## [0.0.9.5] — 2026-05-05 — "Captured-Profile UX"
 
 A focused UX polish release for the captured-noise-profile feature.
 No DSP-path changes; no protocol-path changes.  Headline change

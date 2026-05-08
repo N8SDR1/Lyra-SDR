@@ -118,7 +118,7 @@ class PropagationPanel(GlassPanel):
         for b in self.BAND_LABELS:
             lbl = QLabel(b)
             lbl.setAlignment(Qt.AlignCenter)
-            lbl.setFixedWidth(28)
+            lbl.setFixedWidth(32)
             lbl.setStyleSheet(self._band_style(rating_color_hex(None)))
             lbl.setToolTip(f"{b}m — no data yet")
             self._band_labels[b] = lbl
@@ -135,8 +135,8 @@ class PropagationPanel(GlassPanel):
             "QToolButton {"
             "  color: #cdd9e5; background: transparent;"
             "  border: 1px solid #2a3a4a; border-radius: 3px;"
-            "  padding: 2px 8px; font-family: 'Segoe UI', sans-serif;"
-            "  font-size: 11px;"
+            "  padding: 3px 10px; font-family: 'Segoe UI', sans-serif;"
+            "  font-size: 13px; font-weight: 600;"
             "}"
             "QToolButton:hover { border-color: #4a90c2; }"
             "QToolButton::menu-indicator { width: 0; }"
@@ -181,20 +181,20 @@ class PropagationPanel(GlassPanel):
         kl = QLabel(key)
         kl.setStyleSheet(
             "color: #7a8a9c; font-family: 'Segoe UI', sans-serif; "
-            "font-size: 11px; font-weight: 600;")
+            "font-size: 13px; font-weight: 600;")
         vl = QLabel(val)
         vl.setStyleSheet(
             "color: #cdd9e5; font-family: Consolas, monospace; "
-            "font-weight: 700; font-size: 12px;")
-        vl.setMinimumWidth(28)
+            "font-weight: 700; font-size: 14px;")
+        vl.setMinimumWidth(32)
         bl.addWidget(kl)
         bl.addWidget(vl)
         return {"box": box, "key": kl, "val": vl}
 
     def _make_divider(self) -> QLabel:
         d = QLabel("│")
-        d.setStyleSheet("color: #2a3a4a; font-size: 14px;")
-        d.setFixedWidth(6)
+        d.setStyleSheet("color: #2a3a4a; font-size: 16px;")
+        d.setFixedWidth(7)
         return d
 
     @staticmethod
@@ -202,8 +202,8 @@ class PropagationPanel(GlassPanel):
         return (
             f"color: {color_hex};"
             "font-family: Consolas, monospace;"
-            "font-size: 11px; font-weight: 700;"
-            "padding: 2px 4px; border-radius: 3px;"
+            "font-size: 13px; font-weight: 700;"
+            "padding: 3px 4px; border-radius: 3px;"
             "background: rgba(20, 30, 45, 120);"
         )
 

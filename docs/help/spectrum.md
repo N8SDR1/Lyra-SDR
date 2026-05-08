@@ -305,22 +305,31 @@ top, then the next auto-fit would catch up — producing the visible
 rolling window keeps the ceiling raised until the spike is ~10 sec
 old, so transients have comfortable headroom.
 
-### Manual range = bounds, not disable
+### Per-edge locks (drag pins the edge you moved)
 
-Manual dB-scale adjustments (Settings sliders, the panadapter's
-right-edge Y-axis drag) **DO NOT turn auto scaling off**. Instead,
-they set the **bounds** that auto-scale is allowed to operate
-within:
+Manual dB-scale adjustments **DO NOT turn auto scaling off** —
+they pin the edge you moved.  The other edge keeps auto-fitting.
 
-- Drag the Y-axis ceiling down to −40 dBFS → auto-scale will never
-  pull the top above −40, even if a strong transient appears
-- Drag the floor up to −135 dBFS → auto-scale will never push the
-  bottom below −135, even on a very quiet band
+- **Drag the FLOOR** (bottom third of the right-edge Y-axis
+  strip) → auto stops moving the floor.  Your noise space stays
+  exactly where you put it.  The ceiling still tracks signals
+  normally.
+- **Drag the CEILING** (top third) → auto won't fall below your
+  ceiling.  But it can still **rise** above it if a strong signal
+  arrives, so the trace never gets squeezed off-screen.
+- **Drag the middle (pan)** → both edges shift together; both
+  get locked.
 
-Auto-scale still continuously fits within whatever window you've
-set, so you get the best of both: your preferred ceiling/floor as
-hard limits, plus the auto loop tracking band conditions inside
-those limits.
+The asymmetry on the ceiling lock is deliberate.  The floor has no
+auto-driven reason to move (the noise floor is the visual
+reference, not a moving target), so locking it hard is right.  The
+ceiling, on the other hand, must be allowed to grow when a strong
+signal arrives — locking it hard would clip strong signals at the
+top, the original "panadapter looks broken" failure mode.
+
+To clear locks: **right-click the dB scale** on the panadapter →
+**Reset display range**.  The menu shows which edges are
+currently locked so you can confirm before clearing.
 
 The **only** thing that toggles auto-scale on/off is the checkbox
 itself.

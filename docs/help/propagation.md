@@ -120,6 +120,32 @@ These are rough guides; the actual band response also depends on
 seasonal effects, time of day, and your specific antenna's
 performance toward the target QTH.
 
+## Clock accuracy (important for NCDXF Follow)
+
+NCDXF beacon slots are 10 seconds long, and Lyra computes which
+station is on which band purely from your PC clock — there's no
+audio decoding involved.  If your clock drifts more than ~3 seconds
+off real UTC, the spectrum-marker tooltips and Follow-mode tuning
+will identify the **wrong** station.
+
+To check / fix:
+
+- **Right-click either toolbar clock** (local time or UTC) → pick
+  **Check clock drift now…**.  Lyra queries a public NTP server
+  (Cloudflare, NTP Pool, Google, Microsoft — first that answers
+  wins) and reports the offset.
+- If drift is significant, the UTC clock gets a ⚠ prefix as a
+  glance-readable warning until you re-check.
+- On Windows, the same right-click menu has **Sync time now
+  (Windows w32time)** which shells out to ``w32tm /resync`` —
+  works on a stock Windows install if Windows Time service is
+  running.  Otherwise the dialog gives you the manual command
+  sequence to run from an elevated Command Prompt.
+
+This check is purely outgoing UDP/123 — no account, no key, no
+data sent except the timestamp.  Your firewall has to allow
+outbound NTP (most do by default).
+
 ## What this panel doesn't do
 
 - **Predict tomorrow's propagation** — the data is a snapshot of

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import Qt, QSettings, QByteArray
+from PySide6.QtCore import Qt, QSettings, QByteArray, QObject, Signal
 from PySide6.QtGui import QFont, QPalette, QAction
 from PySide6.QtWidgets import (
     QApplication, QDockWidget, QHBoxLayout, QMainWindow, QMenuBar,
@@ -28,6 +28,65 @@ from lyra.ui.panels import (
 )
 from lyra.ui.settings_dialog import SettingsDialog
 from lyra.ui.help_dialog import HelpDialog
+
+
+# ── Module-level worker classes for the toolbar-clock right-click menu.
+# IMPORTANT: these MUST be defined at module scope, not inside a method.
+# PySide6 needs Signal descriptors registered at class-definition time
+# via Qt's meta-object compiler — defining a QObject subclass with
+# Signal() inside a method body works for the first call but can crash
+# on the second invocation (the meta-object gets re-registered against
+# stale C++ state).  An earlier crash report on right-click → Check
+# clock drift traced to that pattern.
+
+class _NtpDriftWorker(QObject):
+    """One-shot worker for the NTP drift check.
+
+    Created on the GUI thread, moved to a QThread, runs
+    ``time_sync.check_drift()`` (network I/O), emits ``done`` with
+    the ``NtpResult`` or ``None``.  All exceptions are swallowed and
+    surfaced as ``None`` so the GUI gets a clean "couldn't reach
+    NTP" path instead of a thread-side crash.
+    """
+    done = Signal(object)
+
+    def run(self):
+        try:
+            from lyra.time_sync import check_drift
+            result = check_drift()
+        except Exception as exc:  # noqa: BLE001 — last-ditch worker shield
+            print(f"[NtpDriftWorker] {exc!r}")
+            result = None
+        try:
+            self.done.emit(result)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[NtpDriftWorker] emit failed: {exc!r}")
+
+
+class _W32TmResyncWorker(QObject):
+    """One-shot worker for the Windows w32tm /resync command.
+
+    Same pattern as ``_NtpDriftWorker`` — exceptions become a
+    failure-shaped ``ResyncResult`` so the GUI never sees an
+    unhandled error.
+    """
+    done = Signal(object)
+
+    def run(self):
+        try:
+            from lyra.time_sync import attempt_windows_resync
+            result = attempt_windows_resync()
+        except Exception as exc:  # noqa: BLE001
+            from lyra.time_sync import ResyncResult
+            result = ResyncResult(
+                ok=False,
+                output=f"Worker error: {exc!r}",
+                returncode=-1,
+            )
+        try:
+            self.done.emit(result)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[W32TmResyncWorker] emit failed: {exc!r}")
 
 
 class MainWindow(QMainWindow):
@@ -856,18 +915,43 @@ class MainWindow(QMainWindow):
         # ── 8. Clocks (local + UTC) ────────────────────────────────
         # Sized ~2.4× the surrounding toolbar text so the operator can
         # read the time across the room without leaning in.
+        # NOTE: the QLabel selector is required.  Without it (bare
+        # `color: ...; font-size: ...;` rules) the QSS cascades to
+        # the QToolTip popup spawned by the same widget — making
+        # the tooltip render at 22 px bold like the clock face,
+        # which is enormous and looks broken.  Restricting to the
+        # QLabel selector lets the global QToolTip rule (theme.py)
+        # govern the tooltip text size + weight independently.
         self.clock_local = QLabel("--:--:--")
         self.clock_local.setStyleSheet(
-            "color: #ffd54f; font-family: Consolas, monospace; "
-            "font-weight: 700; font-size: 22px; padding: 0 8px;")
-        self.clock_local.setToolTip("PC local time (HH:MM:SS)")
+            "QLabel { color: #ffd54f; font-family: Consolas, monospace; "
+            "font-weight: 700; font-size: 22px; padding: 0 8px; }")
+        self.clock_local.setToolTip(
+            "PC local time (HH:MM:SS)\n"
+            "Right-click to check NTP drift / sync time.")
         tb.addWidget(self.clock_local)
         self.clock_utc = QLabel("--:--:--Z")
         self.clock_utc.setStyleSheet(
-            "color: #80d8ff; font-family: Consolas, monospace; "
-            "font-weight: 700; font-size: 22px; padding: 0 8px;")
-        self.clock_utc.setToolTip("UTC time (HH:MM:SSZ) — always Zulu")
+            "QLabel { color: #80d8ff; font-family: Consolas, monospace; "
+            "font-weight: 700; font-size: 22px; padding: 0 8px; }")
+        self.clock_utc.setToolTip(
+            "UTC time (HH:MM:SSZ) — always Zulu\n"
+            "Right-click to check NTP drift / sync time.")
         tb.addWidget(self.clock_utc)
+        # Right-click on either clock → check NTP drift, optionally
+        # nudge w32time.  Important for NCDXF beacon Follow accuracy
+        # (10-sec slots — clock drift > 3 sec → wrong station ID).
+        self.clock_local.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.clock_local.customContextMenuRequested.connect(
+            lambda pos: self._show_clock_menu(self.clock_local, pos))
+        self.clock_utc.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.clock_utc.customContextMenuRequested.connect(
+            lambda pos: self._show_clock_menu(self.clock_utc, pos))
+        # Drift indicator state — populated when the operator runs a
+        # check.  Used by _tick_clocks to show a colored prefix on the
+        # UTC clock if drift is significant.
+        self._clock_drift_severity: str = ""   # "", "ok", "warn", "bad"
+        self._clock_drift_offset: float = 0.0
         self._clock_timer = QTimer(self)
         self._clock_timer.setInterval(1000)
         self._clock_timer.timeout.connect(self._tick_clocks)
@@ -1107,12 +1191,303 @@ class MainWindow(QMainWindow):
         """1 Hz tick — repaint local + UTC clocks. We re-read the
         system clock each tick (rather than incrementing a counter) so
         the labels stay correct across DST boundaries, sleep/resume,
-        and manual time changes."""
+        and manual time changes.
+
+        If the operator has run an NTP drift check and the result
+        flagged a problem, the UTC clock gets a colored ``⚠`` prefix
+        as a glance-readable warning — important for NCDXF beacon
+        Follow accuracy."""
         from datetime import datetime, timezone
         now_local = datetime.now()
         now_utc = datetime.now(timezone.utc)
         self.clock_local.setText(now_local.strftime("%H:%M:%S"))
-        self.clock_utc.setText(now_utc.strftime("%H:%M:%SZ"))
+
+        utc_text = now_utc.strftime("%H:%M:%SZ")
+        sev = self._clock_drift_severity
+        if sev == "warn":
+            utc_text = "⚠ " + utc_text
+        elif sev == "bad":
+            utc_text = "⚠ " + utc_text
+        self.clock_utc.setText(utc_text)
+
+    # ── Clock right-click menu (NTP drift / sync) ────────────────────
+    def _show_clock_menu(self, widget, pos):
+        """Right-click context menu for the toolbar clocks.
+
+        Three actions:
+          * Check clock drift now — query NTP, show drift in dialog
+          * Sync time now (Windows) — shell out to w32tm /resync
+          * Why this matters — explanation focused on NCDXF beacons
+
+        Whole method wrapped in try/except so a menu-construction or
+        signal-connect error (rare but possible across PySide6 builds)
+        reports to the status bar rather than tearing down the GUI.
+        """
+        try:
+            from PySide6.QtWidgets import QMenu
+            menu = QMenu(self)
+
+            check_act = menu.addAction("Check clock drift now…")
+            # lambda wrapper isolates the trigger so any handler-side
+            # exception during connect doesn't trip the menu show.
+            check_act.triggered.connect(
+                lambda _checked=False: self._safe_call(
+                    self._check_clock_drift, "Check clock drift"))
+
+            sync_act = menu.addAction("Sync time now (Windows w32time)…")
+            if sys.platform != "win32":
+                sync_act.setEnabled(False)
+                sync_act.setToolTip(
+                    "Windows-only.  Use your OS time settings.")
+            sync_act.triggered.connect(
+                lambda _checked=False: self._safe_call(
+                    self._sync_clock_w32tm, "Sync time"))
+
+            menu.addSeparator()
+
+            why_act = menu.addAction("Why does this matter?")
+            why_act.triggered.connect(
+                lambda _checked=False: self._safe_call(
+                    self._explain_clock_accuracy, "Why this matters"))
+
+            menu.exec(widget.mapToGlobal(pos))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[clock-menu] {exc!r}")
+            try:
+                self.statusBar().showMessage(
+                    f"Clock menu error: {exc}", 6000)
+            except Exception:
+                pass
+
+    def _safe_call(self, fn, label: str) -> None:
+        """Call ``fn`` and report any exception via the status bar.
+        Used by the clock right-click menu so a bug in one of the
+        handlers never propagates up and tears down the main window.
+        """
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[clock-menu:{label}] {exc!r}")
+            import traceback
+            traceback.print_exc()
+            try:
+                self.statusBar().showMessage(
+                    f"{label} failed: {exc}", 6000)
+            except Exception:
+                pass
+
+    def _check_clock_drift(self):
+        """Run an NTP drift check on a worker thread, show the result
+        in a dialog.  We never block the Qt main loop on network I/O.
+        """
+        # Guard against double-invoke (operator clicks twice) — if a
+        # check is already running, just refresh the status hint and
+        # let the in-flight one finish.
+        existing = getattr(self, "_drift_thread_ref", None)
+        if existing is not None and existing.isRunning():
+            self.statusBar().showMessage(
+                "Clock drift check already running…", 4000)
+            return
+
+        from PySide6.QtCore import QThread
+
+        # Status-bar feedback so the operator knows we're working.
+        # NTP queries usually take < 1 sec but we time-budget up to
+        # 4 servers × 2.5 sec timeout = 10 sec worst case.
+        self.statusBar().showMessage("Checking clock drift against NTP…", 8000)
+
+        thread = QThread(self)
+        worker = _NtpDriftWorker()
+        worker.moveToThread(thread)
+
+        # Tear-down chain — thread.quit() runs on the worker thread,
+        # finished fires on the worker thread, both deleteLater calls
+        # are queued safely.  We rely on Qt's automatic queued
+        # connection from worker→main for the result delivery.
+        worker.done.connect(self._on_drift_result)
+        worker.done.connect(thread.quit)
+        thread.started.connect(worker.run)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        # Pin worker + thread refs so Python GC doesn't collect them
+        # while still in flight.
+        self._drift_worker_ref = worker
+        self._drift_thread_ref = thread
+        thread.start()
+
+    def _on_drift_result(self, result):
+        """Worker came back — render the drift result to the operator.
+
+        Wrapped in try/except so any rendering glitch (theme issue,
+        dialog construction error, etc.) reports to the status bar
+        instead of bubbling up and tearing the GUI down.
+        """
+        try:
+            self._render_drift_result(result)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[clock-drift] render error: {exc!r}")
+            try:
+                self.statusBar().showMessage(
+                    f"Clock drift check failed in UI: {exc}", 8000)
+            except Exception:
+                pass
+
+    def _render_drift_result(self, result):
+        from PySide6.QtWidgets import QMessageBox
+        from lyra.time_sync import format_drift
+
+        if result is None:
+            self.statusBar().showMessage(
+                "Clock drift check failed — no NTP server reachable.",
+                6000)
+            QMessageBox.warning(
+                self, "Clock drift — couldn't reach NTP",
+                "Could not reach any NTP server (Cloudflare / NTP Pool /\n"
+                "Google / Microsoft).\n\n"
+                "Possible causes:\n"
+                "  • No internet connection\n"
+                "  • Firewall blocking outbound UDP/123\n"
+                "  • Corporate proxy doesn't pass NTP traffic\n\n"
+                "If the rest of Lyra works (HamQSL panel updates, etc.),\n"
+                "your firewall is blocking UDP/123 specifically.")
+            return
+
+        # Latch severity for the persistent UTC-clock indicator.
+        self._clock_drift_severity = result.severity
+        self._clock_drift_offset = result.offset_sec
+        self._tick_clocks()  # repaint immediately
+
+        drift_line = format_drift(result)
+        self.statusBar().showMessage(
+            f"NTP drift: {drift_line}  (server: {result.server})", 8000)
+
+        if result.severity == "ok":
+            icon = QMessageBox.Information
+            verdict = (
+                "Your clock is well within tolerance.\n\n"
+                "NCDXF beacon Follow mode and live spectrum-marker\n"
+                "callsigns will show the correct station.")
+            title = "Clock drift — OK"
+        elif result.severity == "warn":
+            icon = QMessageBox.Warning
+            verdict = (
+                "Your clock is drifting.  NCDXF beacon spectrum markers\n"
+                "may show the wrong callsign at slot boundaries\n"
+                "(slots are 10 sec long).\n\n"
+                "Recommended: right-click the toolbar clock again and\n"
+                "pick 'Sync time now (Windows w32time)'.")
+            title = "Clock drift — warning"
+        else:  # "bad"
+            icon = QMessageBox.Critical
+            verdict = (
+                "Your clock is significantly off.  NCDXF beacon\n"
+                "tracking will identify the wrong stations.\n\n"
+                "Sync your clock before relying on Follow mode or the\n"
+                "live spectrum-marker callsigns.\n\n"
+                "Right-click the toolbar clock again and pick\n"
+                "'Sync time now (Windows w32time)'.")
+            title = "Clock drift — too far off"
+
+        msg = QMessageBox(self)
+        msg.setIcon(icon)
+        msg.setWindowTitle(title)
+        msg.setText(drift_line)
+        msg.setInformativeText(verdict)
+        msg.setDetailedText(
+            f"NTP server:        {result.server}\n"
+            f"Round-trip delay:  {result.round_trip_sec * 1000:.0f} ms\n"
+            f"Local clock:       behind NTP by {result.offset_sec:+.3f} sec\n"
+            f"\n"
+            f"Positive offset → your clock reads earlier than NTP\n"
+            f"Negative offset → your clock reads later than NTP\n"
+        )
+        msg.exec()
+
+    def _sync_clock_w32tm(self):
+        """Shell out to w32tm /resync (Windows only).  Run on a
+        worker thread so the Qt loop stays responsive — w32tm can
+        take a few seconds when the time peer is unreachable."""
+        # Guard against double-invoke.
+        existing = getattr(self, "_resync_thread_ref", None)
+        if existing is not None and existing.isRunning():
+            self.statusBar().showMessage(
+                "Time resync already running…", 4000)
+            return
+
+        from PySide6.QtCore import QThread
+
+        self.statusBar().showMessage(
+            "Asking Windows Time service to resync…", 10000)
+
+        thread = QThread(self)
+        worker = _W32TmResyncWorker()
+        worker.moveToThread(thread)
+
+        worker.done.connect(self._on_resync_result)
+        worker.done.connect(thread.quit)
+        thread.started.connect(worker.run)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._resync_worker_ref = worker
+        self._resync_thread_ref = thread
+        thread.start()
+
+    def _on_resync_result(self, result):
+        try:
+            self._render_resync_result(result)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[time-resync] render error: {exc!r}")
+            try:
+                self.statusBar().showMessage(
+                    f"Time resync UI error: {exc}", 8000)
+            except Exception:
+                pass
+
+    def _render_resync_result(self, result):
+        from PySide6.QtWidgets import QMessageBox
+
+        if result.ok:
+            self.statusBar().showMessage(
+                "Windows time service resync requested OK.", 6000)
+            # Re-check drift after resync so the indicator updates.
+            QMessageBox.information(
+                self, "Time sync — OK",
+                "Windows Time service accepted the resync request.\n\n"
+                "Use 'Check clock drift now…' to confirm the new offset.\n\n"
+                "Output:\n" + result.output)
+            # Clear the warning indicator until next check.
+            self._clock_drift_severity = ""
+            self._tick_clocks()
+        else:
+            self.statusBar().showMessage(
+                "Windows time resync failed — see dialog.", 6000)
+            QMessageBox.warning(
+                self, "Time sync — failed",
+                "Windows wouldn't resync.  This is usually because the\n"
+                "Windows Time service is stopped or its configured time\n"
+                "peer is unreachable.\n\n"
+                "Manual fix (Run as Administrator → Command Prompt):\n"
+                "    net start w32time\n"
+                "    w32tm /config /manualpeerlist:\"time.windows.com,0x9\" /update\n"
+                "    w32tm /resync\n\n"
+                "Or: Settings → Time & language → Date & time →\n"
+                "    'Sync now' button.\n\n"
+                "Output from w32tm:\n" + result.output)
+
+    def _explain_clock_accuracy(self):
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(
+            self, "Clock accuracy & NCDXF beacons",
+            "The NCDXF International Beacon Project rotates 18 stations\n"
+            "across 5 bands on a 3-minute cycle.  Each station's slot\n"
+            "lasts 10 seconds.\n\n"
+            "If your PC clock is more than ~3 seconds off real UTC,\n"
+            "the spectrum-marker tooltip and Follow-mode tuning will\n"
+            "identify the WRONG station — Lyra computes the rotation\n"
+            "purely from your system clock (no callsign decoding).\n\n"
+            "Right-click any clock at any time to check drift against\n"
+            "an NTP server, and (on Windows) trigger a w32time resync.")
 
 
     def _update_hl2_telemetry(self, payload: dict):
@@ -2662,6 +3037,9 @@ class MainWindow(QMainWindow):
         if s.contains("band_plan/show_landmarks"):
             r.set_band_plan_show_landmarks(
                 s.value("band_plan/show_landmarks", False, type=bool))
+        if s.contains("band_plan/show_ncdxf"):
+            r.set_band_plan_show_ncdxf(
+                s.value("band_plan/show_ncdxf", True, type=bool))
         if s.contains("band_plan/edge_warn"):
             r.set_band_plan_edge_warn(
                 s.value("band_plan/edge_warn", False, type=bool))
@@ -2818,6 +3196,7 @@ class MainWindow(QMainWindow):
         s.setValue("band_plan/region",         r.band_plan_region)
         s.setValue("band_plan/show_segments",  r.band_plan_show_segments)
         s.setValue("band_plan/show_landmarks", r.band_plan_show_landmarks)
+        s.setValue("band_plan/show_ncdxf",     r.band_plan_show_ncdxf)
         s.setValue("band_plan/edge_warn",      r.band_plan_edge_warn)
         # Peak markers
         s.setValue("visuals/peak_markers",     r.peak_markers_enabled)
