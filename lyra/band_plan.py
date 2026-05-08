@@ -161,6 +161,17 @@ _COMMON_LANDMARKS: list[Landmark] = [
     {"freq": 14_070_000, "label": "PSK",  "mode": "DIGU"},
     {"freq": 21_070_000, "label": "PSK",  "mode": "DIGU"},
     {"freq": 28_120_000, "label": "PSK",  "mode": "DIGU"},
+    # NCDXF International Beacon Project — 5 fixed CW frequencies
+    # where 18 worldwide stations rotate every 10 seconds.  The
+    # marker is a static frequency label; the live "currently
+    # transmitting: <callsign>" info appears in the hover tooltip
+    # (driven by lyra.propagation.ncdxf_station_for_freq_khz at
+    # paint time).
+    {"freq": 14_100_000, "label": "NCDXF", "mode": "CWU"},
+    {"freq": 18_110_000, "label": "NCDXF", "mode": "CWU"},
+    {"freq": 21_150_000, "label": "NCDXF", "mode": "CWU"},
+    {"freq": 24_930_000, "label": "NCDXF", "mode": "CWU"},
+    {"freq": 28_200_000, "label": "NCDXF", "mode": "CWU"},
 ]
 
 

@@ -186,6 +186,13 @@ class MainWindow(QMainWindow):
             self.radio.autoload_panadapter_scroll_step()
         except Exception as exc:
             print(f"[app] panadapter scroll-step autoload error: {exc}")
+        # NCDXF beacon auto-follow — Propagation panel dropdown,
+        # persisted under propagation/ncdxf_follow_station.  Empty
+        # string means follow is off.
+        try:
+            self.radio.autoload_ncdxf_follow()
+        except Exception as exc:
+            print(f"[app] NCDXF follow autoload error: {exc}")
 
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.
@@ -194,6 +201,12 @@ class MainWindow(QMainWindow):
         self.pnl_mode       = ModeFilterPanel(self.radio)
         self.pnl_view       = ViewPanel(self.radio)
         self.pnl_band       = BandPanel(self.radio)
+        # Propagation panel — slim solar/band-conditions/NCDXF-follow
+        # strip.  Operator-toggleable like every other Lyra dock.
+        # Lazy-import to avoid circular reference if ui/app.py is
+        # the first import.
+        from lyra.ui.propagation_panel import PropagationPanel
+        self.pnl_propagation = PropagationPanel(self.radio)
         # GainPanel is DELETED: it had an old 0-300 range slider with a
         # linear v/100 mapping, while DspPanel uses a 0-100 slider with
         # a perceptual power curve. Both panels connected to
@@ -388,6 +401,8 @@ class MainWindow(QMainWindow):
             "meters", "Meters", self.pnl_smeter)
         self.docks["dsp"] = self._make_dock(
             "dsp_audio", "DSP + Audio", self.pnl_dsp)
+        self.docks["propagation"] = self._make_dock(
+            "propagation", "Propagation", self.pnl_propagation)
         # GainPanel removed entirely — see comment at construction site.
         # Its LNA + Vol sliders duplicated DspPanel's and fought for
         # radio.volume via incompatible mappings.
@@ -423,6 +438,12 @@ class MainWindow(QMainWindow):
                              self.docks["meters"], Qt.Vertical)
 
         self.addDockWidget(Qt.BottomDockWidgetArea, self.docks["dsp"])
+        # Propagation — slim status panel near the top, defaults to
+        # below Meters where it's glance-readable without competing
+        # for primary control real estate.  Operator can drag it
+        # anywhere; layout persists across restarts.
+        self.splitDockWidget(self.docks["meters"],
+                             self.docks["propagation"], Qt.Vertical)
 
     def _make_dock(self, object_name: str, title: str, panel: QWidget) -> QDockWidget:
         dock = QDockWidget(title, self)

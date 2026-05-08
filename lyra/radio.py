@@ -215,6 +215,7 @@ class Radio(QObject):
     # Panadapter zoom + update rates
     zoom_changed                  = Signal(float)      # 1.0 = full span
     panadapter_scroll_step_changed = Signal(int)       # mouse-wheel-tune step, Hz
+    _ncdxf_follow_changed         = Signal(str)        # NCDXF follow station callsign, "" = off
     spectrum_fps_changed          = Signal(int)        # frames/sec
     waterfall_divider_changed     = Signal(int)        # push 1 row per N FFT ticks
     waterfall_multiplier_changed  = Signal(int)        # push M rows per tick (visual speedup)
@@ -892,6 +893,18 @@ class Radio(QObject):
         self._hl2_telem_timer.timeout.connect(self._emit_hl2_telemetry)
         # Started/stopped alongside the stream so we don't churn signals
         # with stale ADC counts when nothing is connected.
+
+        # NCDXF beacon auto-follow — fires every second so the pump
+        # catches each 10-second slot transition reliably regardless
+        # of when follow was activated.  The pump itself is cheap (4
+        # arithmetic ops) and a no-op when follow is off, so the
+        # 1 Hz cadence is fine.  Start whenever the operator picks a
+        # follow station; stop when they pick "Off" (handled inside
+        # set_ncdxf_follow_station via _ncdxf_follow_pump).
+        self._ncdxf_follow_station: Optional[str] = None
+        self._ncdxf_follow_timer = _QTimer(self)
+        self._ncdxf_follow_timer.setInterval(1000)
+        self._ncdxf_follow_timer.timeout.connect(self._ncdxf_follow_pump)
 
         # Notch bank — list of Notch dataclasses (see top of file).
         # Operators add/remove via right-click on spectrum/waterfall;
@@ -5745,6 +5758,105 @@ class Radio(QObject):
         except Exception:
             return
         self._panadapter_scroll_step_hz = max(1, step)
+
+    # ── NCDXF beacon auto-follow ──────────────────────────────────────
+    # When enabled, Lyra auto-tunes its VFO to whichever band the
+    # tracked NCDXF station is currently transmitting on.  The 18-
+    # station NCDXF rotation cycles every 10 sec across 5 bands
+    # (20m / 17m / 15m / 12m / 10m), and a regular transceiver
+    # operator would have to manually band-change every 10 sec to
+    # follow one station around — Lyra just does it.  Operator-set
+    # via the Propagation panel's Follow dropdown.
+
+    @property
+    def ncdxf_follow_station(self) -> Optional[str]:
+        """Currently followed NCDXF station callsign, or None if off."""
+        return getattr(self, "_ncdxf_follow_station", None)
+
+    def set_ncdxf_follow_station(self, callsign: Optional[str]) -> None:
+        """Start / stop auto-following an NCDXF station.
+
+        Pass a callsign (e.g. "W6WX") to start; pass None to stop.
+        Validates the callsign against the known station list — an
+        unknown callsign silently turns follow off rather than
+        chasing a phantom.
+
+        Persists across sessions via QSettings.
+        """
+        from lyra.propagation import NCDXF_STATIONS
+        valid = {s[0] for s in NCDXF_STATIONS}
+        if callsign and callsign in valid:
+            self._ncdxf_follow_station = callsign
+        else:
+            self._ncdxf_follow_station = None
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("propagation/ncdxf_follow_station",
+                       self._ncdxf_follow_station or "")
+        except Exception as exc:
+            print(f"[Radio] persist NCDXF follow: {exc}")
+        self._ncdxf_follow_changed.emit(self._ncdxf_follow_station or "")
+        # Start / stop the 1 Hz pump timer based on follow state.
+        if self._ncdxf_follow_station:
+            if not self._ncdxf_follow_timer.isActive():
+                self._ncdxf_follow_timer.start()
+            self._ncdxf_follow_pump()      # immediate kick on activation
+        else:
+            if self._ncdxf_follow_timer.isActive():
+                self._ncdxf_follow_timer.stop()
+
+    def _ncdxf_follow_pump(self) -> None:
+        """Re-tune the VFO to the followed station's current band.
+
+        Called by ``set_ncdxf_follow_station`` (immediate kick) and by
+        the 10-sec timer that fires once per slot transition.  No-op
+        when follow is off.
+        """
+        call = getattr(self, "_ncdxf_follow_station", None)
+        if not call:
+            return
+        from lyra.propagation import (
+            NCDXF_STATIONS, NCDXF_BANDS,
+            ncdxf_current_slot, ncdxf_station_for_band,
+        )
+        try:
+            target_idx = next(
+                i for i, s in enumerate(NCDXF_STATIONS) if s[0] == call)
+        except StopIteration:
+            return
+        slot = ncdxf_current_slot()
+        for band_idx, (_, freq_khz) in enumerate(NCDXF_BANDS):
+            if ncdxf_station_for_band(band_idx, slot) == target_idx:
+                # Followed station is on this band right now —
+                # tune to it.  Set mode to CWU first so the operator
+                # actually hears the CW callsign + tones.
+                try:
+                    if self._mode != "CWU":
+                        self.set_mode("CWU")
+                    self.set_freq_hz(freq_khz * 1000)
+                except Exception as exc:
+                    print(f"[Radio] NCDXF auto-follow tune: {exc}")
+                return
+        # Followed station isn't on any of the 5 bands right now
+        # (silent slot) — leave the VFO where it is until the next
+        # slot transition.
+
+    def autoload_ncdxf_follow(self) -> None:
+        """Restore the persisted NCDXF follow station on startup.
+
+        Empty string means follow is off (operator's last state was
+        not following anyone).
+        """
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            call = str(s.value(
+                "propagation/ncdxf_follow_station", "", type=str) or "")
+        except Exception:
+            return
+        if call:
+            self.set_ncdxf_follow_station(call)
 
     # ── Spectrum FPS ─────────────────────────────────────────────────
     @property

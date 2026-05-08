@@ -66,6 +66,9 @@ up changes.
   operator's pitch
 - **BIN (Binaural)** — pseudo-stereo headphone listening for
   CW + SSB
+- **Propagation** — slim panel showing live solar numbers
+  (SFI / A / K), color-coded band-conditions heatmap, and
+  NCDXF International Beacon Project auto-follow
 - **Spectrum & Waterfall** — pan, zoom, drag, palettes
 - **S-Meter** — analog vs LED styles
 - **External Hardware** — N2ADR filter board, USB-BCD for
