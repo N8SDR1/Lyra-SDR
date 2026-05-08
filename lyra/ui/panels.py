@@ -681,7 +681,12 @@ class ViewPanel(GlassPanel):
         # rest of the panel (Spec FPS, Wf, etc.) keeps its existing
         # horizontal placement — only this group is two rows tall.
         zoom_grid = QGridLayout()
-        zoom_grid.setSpacing(4)
+        # Horizontal spacing 4 px (snug between label and combo);
+        # vertical spacing 7 px so the Zoom row and Panafall Step
+        # row breathe — operator feedback was that 4 px both
+        # directions made the rows feel cramped against each other.
+        zoom_grid.setHorizontalSpacing(4)
+        zoom_grid.setVerticalSpacing(7)
         zoom_grid.setContentsMargins(0, 0, 0, 0)
 
         # Top row: Zoom controls.
@@ -772,7 +777,10 @@ class ViewPanel(GlassPanel):
                      else f"{hz // 1000} kHz")
             self.scroll_step_combo.addItem(label, int(hz))
         self._sync_scroll_step_combo(radio.panadapter_scroll_step_hz)
-        self.scroll_step_combo.setFixedWidth(72)
+        # 90 px fits "100 kHz" + the dropdown arrow comfortably.
+        # Was 72 px which clipped the longest preset to "100 H..."
+        # (visible in operator screenshot 2026-05-08).
+        self.scroll_step_combo.setFixedWidth(90)
         self.scroll_step_combo.setToolTip(
             "Mouse-wheel-over-panadapter tune step.\n\n"
             "Wheel up = freq up.  Wheel down = freq down.\n"
