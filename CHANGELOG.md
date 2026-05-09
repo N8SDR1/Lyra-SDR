@@ -13,6 +13,35 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.7.1] — 2026-05-09 — "Display Polish" (NCDXF tuning fix)
+
+Bug-fix patch on top of v0.0.9.7.  No new features — same WDSP
+audio path, same Display panel additions.
+
+### Fixed
+
+* **NCDXF beacon tuning now applies the CW pitch offset.**  When
+  clicking an NCDXF triangle marker on the panadapter or engaging
+  auto-follow, the VFO previously tuned to the listed carrier
+  frequency exactly (e.g. 14.100.000 MHz).  Because Lyra's CWU
+  filter sits offset from the VFO marker by `+cw_pitch_hz`, the
+  beacon's carrier landed at the marker and fell outside the
+  filter window — the operator heard zero-beat instead of a
+  proper CW tone at their configured pitch.  Both paths now apply
+  the same offset that `_on_click` already does for click-to-tune
+  on a visible CW signal: VFO tunes to `(carrier − pitch)` for
+  CWU, `(carrier + pitch)` for CWL.  Result: NCDXF beacons audibly
+  identify themselves at the operator's preferred CW pitch tone,
+  matching what manual click-to-tune on the same signal already
+  produced.
+* The fix is in two places: `_on_landmark_clicked` in
+  `lyra/ui/panels.py` (covers the marker-click path AND any
+  future CWU/CWL landmark category) and `_ncdxf_follow_pump` in
+  `lyra/radio.py` (covers the 1-sec auto-follow timer that
+  re-tunes when the followed station moves to a different band).
+
+---
+
 ## [0.0.9.7] — 2026-05-09 — "Display Polish"
 
 Operator-driven UX polish release on the spectrum / waterfall /

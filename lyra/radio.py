@@ -6326,10 +6326,21 @@ class Radio(QObject):
                 # Followed station is on this band right now —
                 # tune to it.  Set mode to CWU first so the operator
                 # actually hears the CW callsign + tones.
+                #
+                # CW pitch offset (v0.0.9.7.1 fix): the listed
+                # NCDXF freqs are the beacons' actual transmitted
+                # CARRIERS (e.g. 14.100.000 MHz exactly).  Lyra's
+                # CW filter sits offset from the VFO marker by
+                # +cw_pitch_hz in CWU, so to hear the beacon at the
+                # operator's pitch tone we tune the VFO to
+                # (carrier − pitch).  Without this the carrier
+                # lands AT the marker and the filter misses it.
+                # Same logic as `_on_click`'s click-to-tune offset.
                 try:
                     if self._mode != "CWU":
                         self.set_mode("CWU")
-                    self.set_freq_hz(freq_khz * 1000)
+                    target_hz = freq_khz * 1000 - int(self._cw_pitch_hz)
+                    self.set_freq_hz(target_hz)
                 except Exception as exc:
                     print(f"[Radio] NCDXF auto-follow tune: {exc}")
                 return

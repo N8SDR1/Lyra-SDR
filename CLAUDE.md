@@ -62,6 +62,14 @@ content below has been mass-renumbered to the new scheme.
   nb, lms, anf, squelch, nr2, PythonRxChannel.process, etc.).
   See §13 (audio architecture), §14 (WDSP-DLL integration), §14.9
   (cleanup arc).
+- **v0.0.9.7.1** "Display Polish" (NCDXF tuning fix, 2026-05-09)
+  — patch over v0.0.9.7.  Bug fix only: NCDXF beacon tuning
+  (marker click + auto-follow) now applies the CW pitch offset,
+  so the operator hears the beacon at their configured pitch
+  tone instead of zero-beat.  Two surgical edits to
+  `_on_landmark_clicked` (panels.py) and `_ncdxf_follow_pump`
+  (radio.py) following the same offset pattern `_on_click`
+  already used for plain click-to-tune.
 - **v0.0.9.7** "Display Polish" (2026-05-09) — operator-driven UX
   polish on spectrum/waterfall/Display panel surfaces, plus
   Settings dialog stability hardening.  New operator-facing

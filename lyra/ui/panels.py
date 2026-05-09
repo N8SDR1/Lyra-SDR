@@ -4979,9 +4979,25 @@ class SpectrumPanel(GlassPanel):
 
     def _on_landmark_clicked(self, freq_hz: int, mode: str):
         """User clicked a band-plan landmark triangle — tune there
-        and switch to the landmark's suggested mode (FT8 → DIGU, etc.)"""
+        and switch to the landmark's suggested mode (FT8 → DIGU,
+        NCDXF beacons → CWU, etc.).
+
+        For CW landmarks (NCDXF + any future CWU/CWL beacons), the
+        triangle's frequency is the signal's CARRIER, but Lyra's
+        CW filter sits OFFSET from the VFO marker by ±cw_pitch_hz
+        (CWU passband above the marker, CWL below).  To hear the
+        beacon at the operator's CW pitch tone we tune the VFO to
+        (carrier − pitch) for CWU, (carrier + pitch) for CWL —
+        same offset trick `_on_click` already does for click-to-
+        tune on a visible CW signal in the spectrum.  Without this
+        the beacon's carrier lands AT the marker and the filter
+        misses it (operator hears no audible CW tone)."""
         self.radio.set_mode(mode)
-        self.radio.set_freq_hz(int(freq_hz))
+        target = int(freq_hz)
+        if mode in ("CWU", "CWL"):
+            pitch = int(self.radio.cw_pitch_hz)
+            target += -pitch if mode == "CWU" else +pitch
+        self.radio.set_freq_hz(target)
         self.radio.status_message.emit(
             f"Tuned to {freq_hz/1e6:.3f} MHz {mode}", 2000)
 
