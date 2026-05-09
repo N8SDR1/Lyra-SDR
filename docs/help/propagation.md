@@ -79,7 +79,12 @@ know which DXCC entity you're hearing and how strong the propagation
 is to that station's QTH.
 
 Click the marker to QSY to that NCDXF frequency (mode auto-switches
-to CWU).
+to CWU).  Lyra tunes the VFO so the beacon's carrier lands at your
+configured **CW pitch** offset from the marker — i.e., you hear the
+beacon's keyed callsign as a clean CW tone at whatever pitch you've
+set in Settings → DSP (default 650 Hz), the same way clicking on
+any visible CW signal in the spectrum already worked.  Auto-follow
+applies the same offset on every band switch.
 
 ## How the data is gathered
 
