@@ -51,6 +51,21 @@ datas = [
     # DXCC country prefix database used by TCI spot enrichment.
     # Lazily loaded; if missing, country flags just don't render —
     # but we ship it because operators expect spot flags to work.
+    #
+    # WDSP DSP engine native DLLs — wdsp.dll + libfftw3 (single +
+    # double precision) + rnnoise + specbleach.  ~16 MB total.
+    # CRITICAL for v0.0.9.6+ since the entire RX1 audio chain runs
+    # through these via cffi.  Without them, the loader's fallback
+    # path expects either an LYRA_WDSP_DIR env var or a Thetis-HL2
+    # install — neither of which a typical end-user has — and Lyra
+    # refuses to open the audio engine.  Source layout:
+    # ``lyra/dsp/_native/{wdsp,libfftw3-3,libfftw3f-3,rnnoise,
+    # specbleach}.dll``.  Runtime layout (after PyInstaller bundles):
+    # ``_internal/lyra/dsp/_native/...`` so wdsp_native.py's
+    # ``Path(__file__).resolve().parent / "_native"`` resolution
+    # finds them.
+    (str(PROJECT_ROOT / "lyra" / "dsp" / "_native"),
+     "lyra/dsp/_native"),
 ]
 # Optional: bundle data/cty.dat for DXCC if it exists.
 _cty = PROJECT_ROOT / "data" / "cty.dat"
