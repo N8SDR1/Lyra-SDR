@@ -36,9 +36,8 @@ opening Settings.
 | **Off**  | No automatic gain — Volume scales raw demod output | Digital modes (FT8/FT4/RTTY)         |
 | **Fast** | Quick attack/decay, no hang                         | CW, weak-signal work                  |
 | **Med**  | Moderate decay, no hang (default)                   | SSB / ragchew                         |
-| **Slow** | Longer decay with short hang                        | DX nets, steady AM broadcast          |
-| **Long** | Long decay with long hang                           | Beacons, steady-carrier listening     |
-| **Auto** | Same time-constants as Med                          | (Auto-threshold tracking is parked)   |
+| **Slow** | Longer decay with short hang                        | DX nets, steady AM broadcast, beacons |
+| **Auto** | Med time-constants + auto-threshold tracking        | Strong fading signals, condition shifts |
 | **Cust** | Persisted UI sliders (advisory only)                | (Future direct-WDSP control)          |
 
 The time constants come from WDSP's canonical mode presets, so
@@ -49,8 +48,8 @@ Label color on the panel tells you which profile is active at
 a glance:
 
 - **Gray** = Off
-- **Amber** = Fast / Med / Slow / Long (static)
-- **Cyan** = Auto (currently same behavior as Med)
+- **Amber** = Fast / Med / Slow (static)
+- **Cyan** = Auto (Med time-constants + threshold-tracks-noise-floor)
 - **Magenta** = Cust (UI sliders persisted, advisory only)
 
 ## Threshold
@@ -87,7 +86,7 @@ AGC  <PROFILE>  thr <-NN dBFS>  gain <±N.N dB>
 
 - **Left-click digits / labels** — no action (read-only display).
 - **Right-click** anywhere on the cluster — pops a profile menu:
-  Off / Fast / Med / Slow / Long / Auto / Custom. Checked radio =
+  Off / Fast / Med / Slow / Auto / Custom. Checked radio =
   current profile.
 
 Deeper configuration — Release / Hang / Threshold sliders —
@@ -113,9 +112,10 @@ to WDSP parameters so Custom regains full operator control.
 
 - **Pumping on FT8?** — Use **Off**. FT8 / FT4 / RTTY want fixed
   gain; AF Gain on the panel is your "station loudness" knob.
-- **Pumping on AM with strong fades?** — **Slow** or **Long**.
+- **Pumping on AM with strong fades?** — **Slow**.
 - **CW echo / distortion?** — **Fast**. Let each dit/dah settle.
 - **AM broadcast fading?** — **Slow** + a healthy AF Gain dial.
-- **Stronger station punches through?** — **Auto** behaves like
-  **Med** today; pick **Med** until Auto-threshold tracking
-  returns.
+- **Stronger station punches through?** — **Auto** uses Med
+  time-constants and continuously re-calibrates the threshold to
+  ~18 dB above the rolling noise floor, so as the band shifts
+  the threshold moves with it.

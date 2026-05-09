@@ -112,9 +112,9 @@ If you hear AGC pumping (the gain visibly riding speech
 syllables or breaths), try a slower AGC profile:
 
 1. Right-click the **AGC** cluster on the DSP & AUDIO panel.
-2. Pick **Slow** for SSB, or **Long** for AM broadcast / steady
-   carrier listening.  Faster profiles (Fast / Med) react too
-   quickly on speech.
+2. Pick **Slow** for SSB or AM broadcast / steady carrier
+   listening.  Faster profiles (Fast / Med) react too quickly
+   on speech.
 3. For digital modes (FT8 / FT4 / RTTY) where AGC pumping is
    especially distracting, just turn AGC **Off** — set AF Gain
    high enough to bring weak signals up to your decoder's
@@ -128,25 +128,25 @@ just like a heterodyne. Aggressive μ values will eat fast keying.
 **Fix:**
 
 1. Right-click the **ANF** button on the DSP+Audio panel.
-2. Pick **Gentle** — slow adapt rate, fast keying outpaces it.
+2. Pick **Light** — slow adapt rate, fast keying outpaces it.
 3. Or simply **Off** — for CW you usually want
    [APF](./apf.md) to *boost* the pitch, not ANF to null it.
 
 Rule of thumb: if you can hear ANF chewing on your CW, it's on
-the wrong setting for that mode. Gentle or Off when listening
+the wrong setting for that mode. Light or Off when listening
 to CW you actually care about.
 
 ## ANF doing nothing on an obvious heterodyne
 
 Two common causes:
 
-1. **Adapt rate too slow** — try **Aggressive** (μ = 4×10⁻⁴),
-   or pick **Custom** in Settings → Noise → μ slider and dial up.
+1. **Adapt rate too slow** — try **Heavy** (μ ≈ 4×10⁻⁴), or
+   pick **Custom** in Settings → Noise → μ slider and dial up.
 2. **Heterodyne is too wide** — ANF works on narrow tones. A
    "carrier" with significant audio modulation looks broadband
    to the LMS predictor. Use a manual notch filter instead.
 
-If the tone is brief/transient (under ~100 ms), even Aggressive
+If the tone is brief/transient (under ~100 ms), even Heavy
 profile may not have time to lock on. Brief tones aren't usually
 worth notching — they're gone before you'd notice.
 
@@ -157,15 +157,15 @@ peaks in vowel sounds).
 
 **Fix:**
 
-1. Try **Standard** profile (μ = 1.5×10⁻⁴) — fast enough for
+1. Try **Medium** profile (μ ≈ 1.5×10⁻⁴) — fast enough for
    real heterodynes, slow enough that vowels survive.
-2. If Standard still feels off, try **Gentle** (μ = 5×10⁻⁵).
+2. If Medium still feels off, try **Light** (μ ≈ 5×10⁻⁵).
 3. Or **Off** — manually notch known carriers via the spectrum
    right-click menu.
 
 The tradeoff is fundamental: faster adapt rate kills more tones
-but takes more bites out of speech. The Standard preset is
-calibrated for typical SSB voice; only step up to Aggressive on
+but takes more bites out of speech. The Medium preset is
+calibrated for typical SSB voice; only step up to Heavy on
 bands where heterodynes are appearing/disappearing rapidly.
 
 ## NB is clipping my CW signal
@@ -218,6 +218,16 @@ NB is over-active. Either:
    Notch them with a manual notch filter instead.
 
 ## Captured noise profile is muting real signals
+
+> **v0.0.9.6 note:** the captured-profile **apply** path is
+> currently INERT in the WDSP DSP engine — capture, save, load,
+> and management all work normally, but enabling "use captured
+> profile" doesn't yet feed the profile back into live NR.
+> Lyra fires a status-bar warning when you toggle it on.  The
+> recipe below applies in legacy DSP mode only
+> (`LYRA_USE_LEGACY_DSP=1`); a proper IQ-domain rebuild for
+> WDSP-mode apply is on the v0.1 backlog (see
+> `CLAUDE.md` §14.6).
 
 If a captured profile makes your signal-of-interest quieter than
 NR-off, the captured noise model probably contains some signal

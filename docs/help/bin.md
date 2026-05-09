@@ -70,19 +70,27 @@ when summed back to mono in the listener's brain).
 ## Where BIN sits in the audio chain
 
 ```
-IQ → demod → notches → NR → APF → AGC → AF → Volume → tanh → BIN → sink
+IQ → [WDSP engine: decim → notches → NR → ANF → AGC → APF → bandpass → demod]
+                                                                 │
+                                                                 ▼
+                                                       mute → Volume
+                                                                 │
+                                                                 ▼
+                                                              BIN → sink
                                                               ▲
                                                               mono → stereo
 ```
 
-BIN runs **last** — after AGC has leveled the signal, after the
-tanh limiter has prevented clipping. The Hilbert phase transform
-operates on the operator's already-listening-ready audio, so BIN
-never interferes with AGC tracking or peak-meter math.
+BIN runs **last** — after WDSP has done all the heavy lifting
+(noise reduction, AGC leveling, sideband filtering, demod) and
+after Lyra's Python layer has applied operator-level volume and
+mute.  The Hilbert phase transform operates on the
+already-listening-ready audio, so BIN never interferes with AGC
+tracking or peak-meter math.
 
 The audio sinks (PC Soundcard, HL2 audio jack) accept either
-mono or already-stereo input. When BIN is off, Lyra sends mono
-and the sink duplicates to L/R as before. When BIN is on, the
+mono or already-stereo input.  When BIN is off, Lyra sends mono
+and the sink duplicates to L/R as before.  When BIN is on, the
 sink takes the (N, 2) stereo array directly and applies your
 **Balance** slider on top.
 

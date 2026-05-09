@@ -17,8 +17,39 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QButtonGroup, QColorDialog, QComboBox, QFrame, QListWidget,
-    QRadioButton, QSlider,
+    QRadioButton, QSizePolicy, QSlider,
 )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Wrapped-label vertical-squeeze guard
+# ─────────────────────────────────────────────────────────────────────
+#
+# Qt bug seen on Settings → Noise / Visuals (2026-05-09 Brent +
+# operator):  a QLabel with setWordWrap(True) sitting in a
+# QVBoxLayout that is also packed with sliders, sub-groups, and
+# action buttons gets vertically SHRUNK below its heightForWidth
+# answer when the column runs out of preferred space.  Result:
+# wrapped lines render on top of each other instead of forcing the
+# parent to be taller (or scrolling).
+#
+# Calling this helper after setWordWrap(True) flips the vertical
+# size policy to MinimumExpanding + sets hasHeightForWidth so the
+# layout MUST honor the wrapped-text height.  Cheap; no visible
+# downside on labels that already had room.
+
+def _force_wrap_height(label: QLabel) -> None:
+    """Force a wrapped QLabel to claim its full heightForWidth.
+
+    Apply right after `label.setWordWrap(True)` — the label will no
+    longer be shrunk below its wrapped height by a tight parent
+    QVBoxLayout (which produces the visible "lines stacked on top of
+    each other" rendering bug).
+    """
+    sp = label.sizePolicy()
+    sp.setVerticalPolicy(QSizePolicy.MinimumExpanding)
+    sp.setHeightForWidth(True)
+    label.setSizePolicy(sp)
 
 # Shared with the front-panel ViewPanel slider — both UIs map slider
 # detents to the same FPS values + (divider, multiplier) tuples.
@@ -27,6 +58,148 @@ from lyra.ui.panels import (
     fps_to_slider_position, fps_from_slider_position,
     wf_to_slider_position, wf_from_slider_position,
 )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Settings-dialog dead-widget guard
+# ─────────────────────────────────────────────────────────────────────
+#
+# Background: many Settings tabs mirror Radio properties into UI
+# widgets via slot lambdas like:
+#
+#     radio.foo_changed.connect(
+#         lambda v: self.foo_widget.setValue(v)
+#         if self.foo_widget.value() != v else None)
+#
+# The "if widget != value" check is feedback-loop avoidance — without
+# it, setValue would re-emit and cause oscillation between the
+# Settings UI and the Radio.  Functionally correct; lifetime-buggy.
+#
+# When the operator closes the Settings dialog, Qt destroys the
+# dialog and ALL its child widgets at the C++ level (Qt parent-owns-
+# child rule).  But the Python wrappers survive — the lambda's
+# closure keeps `self` alive, which keeps `self.foo_widget` alive at
+# the Python level.  And the `radio.foo_changed.connect(...)` wiring
+# is on the long-lived Radio object — it's NEVER disconnected.
+#
+# Result: any signal fire after dialog close runs the lambda; the
+# lambda calls `self.foo_widget.value()`; libshiboken raises
+# "Internal C++ object already deleted"; PySide6 prints the
+# traceback to stderr and continues.  Brent reported this in
+# v0.0.9.6 with five identical wf_auto_scale_chk tracebacks per
+# signal fire — proof that 5 stale lambdas had accumulated from
+# repeated Settings open/close cycles.
+#
+# Two helpers below silence the noise + prevent further leak:
+#
+#   _is_widget_valid(widget)
+#       True if the widget's underlying C++ object hasn't been
+#       deleted.  Wraps shiboken6.isValid with an ImportError fallback
+#       for the (unlikely) case where shiboken6 isn't on the path.
+#
+#   _safe_mirror(widget, getter, setter, value)
+#       The sweep-and-replace target.  Reads getter() / setter()
+#       BY NAME via getattr so callers don't have to bind methods
+#       to a destroyed widget, validates the widget is alive before
+#       touching it, and swallows the RuntimeError that fires if a
+#       widget dies between validity check and call.
+#
+# Sweep history: ten lambda call sites + several mirror-method
+# bodies were converted to use _safe_mirror across settings_dialog.py
+# in the v0.0.9.6.1 hardening pass (2026-05-08, after Brent's
+# operator-visible tracebacks).  When adding new mirror lambdas to
+# this file, USE _safe_mirror — don't reintroduce the inline form.
+
+def _is_widget_valid(widget) -> bool:
+    """True if widget's underlying C++ object hasn't been deleted.
+
+    Returns False once the QWidget has been destroyed by Qt's
+    parent-owns-child cleanup (typically on Settings dialog close).
+    Falls back to True if shiboken6 isn't importable — the call
+    site's try/except RuntimeError still catches the dead-widget
+    case in that scenario.
+    """
+    try:
+        from shiboken6 import isValid
+    except ImportError:
+        return True
+    try:
+        return bool(isValid(widget))
+    except Exception:
+        return False
+
+
+def _safe_mirror(widget, getter: str, setter: str, value) -> None:
+    """Mirror ``value`` into ``widget`` if it differs.
+
+    Args:
+        widget: a QWidget (QSpinBox / QCheckBox / QSlider / etc.).
+        getter: name of the read method on the widget — e.g.
+            ``"value"``, ``"isChecked"``, ``"text"``,
+            ``"currentIndex"``.
+        setter: name of the write method on the widget — e.g.
+            ``"setValue"``, ``"setChecked"``, ``"setText"``,
+            ``"setCurrentIndex"``.
+        value: the desired value.
+
+    Behavior:
+        * No-op if the widget's C++ object has been destroyed.
+        * Reads ``widget.<getter>()`` and only calls
+          ``widget.<setter>(value)`` if it differs (preserves the
+          feedback-loop avoidance the inline pattern provided).
+        * Swallows ``RuntimeError`` from libshiboken (race between
+          isValid check and the actual method call).
+
+    Replaces the inline pattern:
+        ``self.X.<setter>(v) if self.X.<getter>() != v else None``
+    """
+    if not _is_widget_valid(widget):
+        return
+    try:
+        getter_fn = getattr(widget, getter, None)
+        setter_fn = getattr(widget, setter, None)
+        if getter_fn is None or setter_fn is None:
+            return
+        if getter_fn() != value:
+            setter_fn(value)
+    except RuntimeError:
+        # Race: widget became invalid between check and call.
+        # Silent — operator's console stays clean.
+        pass
+
+
+def _swallow_dead_widget(fn):
+    """Decorator for Settings-tab slot methods that touch widgets.
+
+    Wraps the method body so a libshiboken "Internal C++ object
+    already deleted" error (raised when the slot is invoked AFTER
+    the Settings dialog has been closed and Qt has destroyed the
+    widget) is swallowed silently rather than spamming the
+    operator's console with multi-line tracebacks.
+
+    Use on any ``_on_*`` slot method that's connected to a Radio
+    signal or other long-lived emitter — those are the methods at
+    risk of firing after the tab is gone.  Methods that only run
+    while the dialog is alive (e.g. invoked from inside the same
+    tab) don't need this.
+
+    Re-raises any RuntimeError that doesn't look like the dead-
+    widget marker, so genuine logic bugs still surface.
+    """
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except RuntimeError as exc:
+            msg = str(exc)
+            if ("already deleted" in msg
+                    or "Internal C++ object" in msg
+                    or "wrapped C/C++ object" in msg):
+                return None
+            raise
+    wrapper.__name__ = getattr(fn, "__name__", "wrapper")
+    wrapper.__doc__ = getattr(fn, "__doc__", "")
+    wrapper.__wrapped__ = fn
+    return wrapper
 
 
 class _ColorPickLabel(QLabel):
@@ -842,6 +1015,7 @@ class RadioSettingsTab(QWidget):
     def _commit_ip(self):
         self.radio.set_ip(self.ip_edit.text().strip())
 
+    @_swallow_dead_widget
     def _on_ip_changed(self, ip: str):
         if self.ip_edit.text() != ip:
             self.ip_edit.setText(ip)
@@ -880,6 +1054,7 @@ class RadioSettingsTab(QWidget):
         self.radio.set_operator_lat_lon(lat, lon)
         self._refresh_computed_loc()
 
+    @_swallow_dead_widget
     def _on_callsign_signal(self, cs: str) -> None:
         """External callsign change (e.g. from REPL or another tab)
         — mirror into the line edit without re-firing."""
@@ -888,6 +1063,7 @@ class RadioSettingsTab(QWidget):
             self.callsign_edit.setText(cs)
             self.callsign_edit.blockSignals(False)
 
+    @_swallow_dead_widget
     def _on_grid_signal(self, grid: str) -> None:
         """External grid change — mirror into the edit + refresh
         the computed-lat/lon readout."""
@@ -934,6 +1110,7 @@ class RadioSettingsTab(QWidget):
         elif not on and self.radio.is_streaming:
             self.radio.stop()
 
+    @_swallow_dead_widget
     def _on_stream_state_changed(self, running: bool):
         self.connect_btn.blockSignals(True)
         self.connect_btn.setChecked(running)
@@ -1076,12 +1253,12 @@ class HardwareSettingsTab(QWidget):
         # Bind to radio signals
         radio.oc_bits_changed.connect(self._on_bits_changed)
         radio.filter_board_changed.connect(
-            lambda on: self.n2adr_toggle.setChecked(on)
-                       if self.n2adr_toggle.isChecked() != on else None)
+            lambda on: _safe_mirror(
+                self.n2adr_toggle, "isChecked", "setChecked", bool(on)))
         radio.bcd_value_changed.connect(self._on_bcd_changed)
         radio.usb_bcd_changed.connect(
-            lambda on: self.bcd_toggle.setChecked(on)
-                       if self.bcd_toggle.isChecked() != on else None)
+            lambda on: _safe_mirror(
+                self.bcd_toggle, "isChecked", "setChecked", bool(on)))
 
     @staticmethod
     def _bits_text(bits: int) -> str:
@@ -1093,9 +1270,11 @@ class HardwareSettingsTab(QWidget):
             return f"0x{value:02X}  ({value})"
         return f"0x{value:02X}  ({value})  →  {band}"
 
+    @_swallow_dead_widget
     def _on_bits_changed(self, bits: int, _human: str):
         self.bits_label.setText(self._bits_text(bits))
 
+    @_swallow_dead_widget
     def _on_bcd_changed(self, value: int, band: str):
         self.bcd_label.setText(self._bcd_text(value, band))
 
@@ -1318,8 +1497,8 @@ class DspSettingsTab(QWidget):
         # Reflect external changes (e.g., loaded from a snapshot or
         # set programmatically) back into the spinbox.
         radio.cw_pitch_changed.connect(
-            lambda hz: self.cw_pitch_spin.setValue(int(hz))
-            if self.cw_pitch_spin.value() != int(hz) else None)
+            lambda hz: _safe_mirror(
+                self.cw_pitch_spin, "value", "setValue", int(hz)))
 
         # ── APF (Audio Peaking Filter) ───────────────────────────
         # Narrow peaking biquad centered on cw_pitch_hz. Only audible
@@ -1370,8 +1549,8 @@ class DspSettingsTab(QWidget):
             "comfortable CW. Default 80 Hz.")
         self.apf_bw_spin.valueChanged.connect(self.radio.set_apf_bw_hz)
         radio.apf_bw_changed.connect(
-            lambda v_: self.apf_bw_spin.setValue(int(v_))
-            if self.apf_bw_spin.value() != int(v_) else None)
+            lambda v_: _safe_mirror(
+                self.apf_bw_spin, "value", "setValue", int(v_)))
         gc.addWidget(self.apf_bw_spin, 2, 1)
 
         gc.addWidget(QLabel("APF Gain (dB):"), 3, 0)
@@ -1391,8 +1570,8 @@ class DspSettingsTab(QWidget):
         self.apf_gain_spin.valueChanged.connect(
             lambda v_: self.radio.set_apf_gain_db(float(v_)))
         radio.apf_gain_changed.connect(
-            lambda v_: self.apf_gain_spin.setValue(int(v_))
-            if self.apf_gain_spin.value() != int(v_) else None)
+            lambda v_: _safe_mirror(
+                self.apf_gain_spin, "value", "setValue", int(v_)))
         gc.addWidget(self.apf_gain_spin, 3, 1)
 
         # ── BIN (Binaural pseudo-stereo) ─────────────────────────
@@ -1414,8 +1593,8 @@ class DspSettingsTab(QWidget):
             "Runs on all modes; no mode gate. Default OFF.")
         self.bin_enable_chk.toggled.connect(self.radio.set_bin_enabled)
         radio.bin_enabled_changed.connect(
-            lambda on: self.bin_enable_chk.setChecked(bool(on))
-            if self.bin_enable_chk.isChecked() != bool(on) else None)
+            lambda on: _safe_mirror(
+                self.bin_enable_chk, "isChecked", "setChecked", bool(on)))
         gc.addWidget(self.bin_enable_chk, 4, 1, 1, 2)
 
         gc.addWidget(QLabel("BIN Depth (%):"), 5, 0)
@@ -1434,8 +1613,9 @@ class DspSettingsTab(QWidget):
         self.bin_depth_spin.valueChanged.connect(
             lambda v_: self.radio.set_bin_depth(float(v_) / 100.0))
         radio.bin_depth_changed.connect(
-            lambda v_: self.bin_depth_spin.setValue(int(round(v_ * 100)))
-            if self.bin_depth_spin.value() != int(round(v_ * 100)) else None)
+            lambda v_: _safe_mirror(
+                self.bin_depth_spin, "value", "setValue",
+                int(round(v_ * 100))))
         gc.addWidget(self.bin_depth_spin, 5, 1)
 
         v.addWidget(grp_cw)
@@ -1469,8 +1649,8 @@ class DspSettingsTab(QWidget):
         self.lna_pullup_chk.toggled.connect(
             self.radio.set_lna_auto_pullup)
         radio.lna_auto_pullup_changed.connect(
-            lambda on: self.lna_pullup_chk.setChecked(on)
-            if self.lna_pullup_chk.isChecked() != on else None)
+            lambda on: _safe_mirror(
+                self.lna_pullup_chk, "isChecked", "setChecked", bool(on)))
         gl.addWidget(self.lna_pullup_chk)
         v.addWidget(grp_lna)
 
@@ -1607,6 +1787,7 @@ class DspSettingsTab(QWidget):
         self.threshold_label.setText(
             f"{t:.2f}  ({20 * math.log10(max(t, 1e-6)):+.0f} dBFS)")
 
+    @_swallow_dead_widget
     def _on_threshold_changed(self, value: float):
         v = int(round(value * 100))
         if self.threshold_slider.value() != v:
@@ -1623,6 +1804,7 @@ class DspSettingsTab(QWidget):
         self.release_slider.setEnabled(is_custom)
         self.hang_slider.setEnabled(is_custom)
 
+    @_swallow_dead_widget
     def _on_profile_changed(self, name: str):
         rb = self._agc_radios.get(name)
         if rb and not rb.isChecked():
@@ -1641,6 +1823,7 @@ class DspSettingsTab(QWidget):
         self._update_labels()
         self._update_custom_enabled(name)
 
+    @_swallow_dead_widget
     def _on_radio_apf_enabled_changed(self, on: bool) -> None:
         """Safe slot for ``radio.apf_enabled_changed``.
 
@@ -1664,6 +1847,7 @@ class DspSettingsTab(QWidget):
             # delivery — nothing to update, harmless to ignore.
             pass
 
+    @_swallow_dead_widget
     def _on_action_db(self, action_db: float):
         """Live AGC gain reduction in dB, fired from
         ``Radio.agc_action_db`` once per demod block (~40 Hz).
@@ -2048,6 +2232,7 @@ class AudioSettingsTab(QWidget):
             self._dev_combo.currentIndexChanged.connect(self._on_device_picked)
             self._signal_connected = True
 
+    @_swallow_dead_widget
     def _sync_to_radio(self, current_idx):
         """Set the combo selection to match Radio's current device.
         Called on initial populate and whenever Radio emits
@@ -2344,8 +2529,8 @@ class VisualsSettingsTab(QWidget):
             self.radio.set_spectrum_auto_scale)
         # Keep checkbox in sync if Radio turns it off (manual drag)
         radio.spectrum_auto_scale_changed.connect(
-            lambda on: self.auto_scale_chk.setChecked(on)
-            if self.auto_scale_chk.isChecked() != on else None)
+            lambda on: _safe_mirror(
+                self.auto_scale_chk, "isChecked", "setChecked", bool(on)))
         gd.addWidget(self.auto_scale_chk, 10, 0, 1, 3, Qt.AlignLeft)
 
         # Independent waterfall auto-scale toggle. Default ON (waterfall
@@ -2369,9 +2554,35 @@ class VisualsSettingsTab(QWidget):
         self.wf_auto_scale_chk.toggled.connect(
             self.radio.set_waterfall_auto_scale)
         radio.waterfall_auto_scale_changed.connect(
-            lambda on: self.wf_auto_scale_chk.setChecked(on)
-            if self.wf_auto_scale_chk.isChecked() != on else None)
+            lambda on: _safe_mirror(
+                self.wf_auto_scale_chk, "isChecked", "setChecked", bool(on)))
         gd.addWidget(self.wf_auto_scale_chk, 11, 0, 1, 3, Qt.AlignLeft)
+
+        # Spectrum fill toggle (operator request 2026-05-09) —
+        # controls whether the spectrum trace gets a gradient-fill
+        # area below the curve (the legacy always-on behavior).
+        # Color picker for it lives in the Colors group below.
+        self.spec_fill_chk = QCheckBox(
+            "Fill area under spectrum trace (gradient)")
+        self.spec_fill_chk.setChecked(radio.spectrum_fill_enabled)
+        self.spec_fill_chk.setToolTip(
+            "When ON: the spectrum trace gets a translucent gradient\n"
+            "fill below the curve (alpha 100→10 top-to-bottom),\n"
+            "matching the legacy Lyra look.\n\n"
+            "When OFF: only the trace line is drawn — useful for a\n"
+            "cleaner 'bare line' look or to see content behind the\n"
+            "spectrum (e.g. landmark triangles, peak markers in\n"
+            "Live mode).\n\n"
+            "Color is configurable via the 'Spectrum fill' field in\n"
+            "the Colors group below — empty = derive from the trace\n"
+            "color.")
+        self.spec_fill_chk.toggled.connect(
+            self.radio.set_spectrum_fill_enabled)
+        # Row 14 — sits below the smoothing slider (row 13) so the
+        # appearance-toggle group reads top-to-bottom: NF line / peak
+        # markers / smoothing / fill.  Row 4 was already used by the
+        # "Reset to defaults" button.
+        gd.addWidget(self.spec_fill_chk, 14, 0, 1, 3, Qt.AlignLeft)
 
         # Noise-floor marker toggle sits with the other spectrum
         # appearance controls. Default on — it's a quiet, informative
@@ -2433,6 +2644,9 @@ class VisualsSettingsTab(QWidget):
             ("_trace_", "Spectrum trace",
              radio.spectrum_trace_color, "#5ec8ff",
              lambda hx: self.radio.set_spectrum_trace_color(hx)),
+            ("_fill_",  "Spectrum fill",
+             radio.spectrum_fill_color,  "#5ec8ff",
+             lambda hx: self.radio.set_spectrum_fill_color(hx)),
             ("_nf_",    "Noise-floor",
              radio.noise_floor_color,   "#78c88c",
              lambda hx: self.radio.set_noise_floor_color(hx)),
@@ -2506,7 +2720,11 @@ class VisualsSettingsTab(QWidget):
         # Action row: Custom…, Reset-aimed, Reset-all
         btn_row = QHBoxLayout()
         custom_btn = QPushButton("Custom color…")
-        custom_btn.setFixedWidth(120)
+        # 140 px (was 120): the 120 px width was clipping the leading
+        # "C" on Windows because Qt centers QPushButton text and trims
+        # both edges when the rendered width exceeds the box.  Operator-
+        # reported 2026-05-09.
+        custom_btn.setFixedWidth(140)
         custom_btn.setToolTip(
             "Open a full color picker for the aimed field. "
             "Falls back here if the preset palette doesn't have "
@@ -2669,6 +2887,7 @@ class VisualsSettingsTab(QWidget):
             "to match a reference signal generator. Default = 0 dB "
             "(true dBFS — a full-scale tone reads as 0).")
         cal_help.setWordWrap(True)
+        _force_wrap_height(cal_help)
         # Inherit the dialog's default font size (matching "Show peak"
         # / "Show noise floor" chk text); the muted color is the only
         # visual differentiator vs the chk labels.
@@ -2722,6 +2941,7 @@ class VisualsSettingsTab(QWidget):
             "Tip: right-click the meter face for a one-click "
             "'calibrate to S9 / S5 / -73 dBm' menu.")
         smeter_help.setWordWrap(True)
+        _force_wrap_height(smeter_help)
         smeter_help.setStyleSheet("color: #b6c0cc;")
         gc.addWidget(smeter_help, 2, 0, 1, 3)
 
@@ -2946,6 +3166,7 @@ class VisualsSettingsTab(QWidget):
         self._cal_lbl.setText(f"{val:+.1f} dB")
         self.radio.set_spectrum_cal_db(float(val))
 
+    @_swallow_dead_widget
     def _on_radio_cal_changed(self, db: float):
         """Radio.spectrum_cal_db_changed — keep slider + label in sync
         without re-firing our own valueChanged into Radio."""
@@ -2961,6 +3182,7 @@ class VisualsSettingsTab(QWidget):
         self._smeter_cal_lbl.setText(f"{val:+.1f} dB")
         self.radio.set_smeter_cal_db(float(val))
 
+    @_swallow_dead_widget
     def _on_radio_smeter_cal_changed(self, db: float):
         """Radio.smeter_cal_db_changed — keep slider + label in sync."""
         target = int(round(db))
@@ -2970,6 +3192,7 @@ class VisualsSettingsTab(QWidget):
             self._smeter_cal_slider.blockSignals(False)
         self._smeter_cal_lbl.setText(f"{db:+.1f} dB")
 
+    @_swallow_dead_widget
     def _sync_spec_sliders(self, lo: float, hi: float):
         """Spectrum dB range changed at the Radio side (auto-scale,
         Y-axis drag on the panadapter, etc.) — keep our sliders +
@@ -2984,6 +3207,7 @@ class VisualsSettingsTab(QWidget):
         self._spec_min_lbl.setText(f"{int(lo):+d} dBFS")
         self._spec_max_lbl.setText(f"{int(hi):+d} dBFS")
 
+    @_swallow_dead_widget
     def _sync_wf_sliders(self, lo: float, hi: float):
         """Same as _sync_spec_sliders but for the waterfall pair."""
         for slider, val in ((self._wf_min, int(lo)),
@@ -3155,6 +3379,7 @@ class VisualsSettingsTab(QWidget):
         self._on_db_changed()
 
     # ── Update rates + zoom handlers ─────────────────────────────
+    @_swallow_dead_widget
     def _on_zoom_changed(self, zoom: float):
         """Radio zoom changed (e.g., from wheel) — keep the combo in
         sync. Block signals so we don't bounce back to Radio."""
@@ -3193,6 +3418,7 @@ class VisualsSettingsTab(QWidget):
         self.radio.set_spectrum_fps(fps)
         self.wf_label.setText(self._wf_label_text())
 
+    @_swallow_dead_widget
     def _sync_fps_slider(self, fps: int):
         """Radio FPS changed elsewhere (front-panel slider, QSettings
         load, etc.) — mirror here without firing our own valueChanged.
@@ -3243,6 +3469,7 @@ class VisualsSettingsTab(QWidget):
         self.radio.set_waterfall_multiplier(mult)
         self.wf_label.setText(self._wf_label_text())
 
+    @_swallow_dead_widget
     def _sync_wf_slider(self, *_):
         """Radio state changed elsewhere (front-panel slider moved,
         QSettings load, etc.) — mirror here without firing our own
@@ -3318,25 +3545,35 @@ class NoiseSettingsTab(QWidget):
         gv = QVBoxLayout(grp_cap)
         gv.setSpacing(8)
 
-        intro = QLabel(
+        # Multi-paragraph intro split across 3 separate QLabels.
+        # `\n\n` paragraph breaks inside ONE wrapped QLabel can confuse
+        # Qt's heightForWidth math when the column is space-tight
+        # (visible artifact: wrapped lines render on top of each other
+        # if the layout squeezes the label below its real height).
+        # Three short labels each have a tractable single-paragraph
+        # height that the QVBoxLayout always honors.
+        intro_paras = [
             "Audacity-style noise capture.  Tune to a noise-only "
             "frequency or wait for a transmission gap, then click "
             "the 📷 Cap button on the DSP+Audio panel.  Lyra records "
             "the band-noise spectrum and saves it to a profile "
             "library you can name, organize, and reload across "
-            "sessions.\n\n"
-            "Profiles save to disk and persist across Lyra "
-            "restarts.\n\n"
+            "sessions.",
+            "Profiles save to disk and persist across Lyra restarts.",
             "Note (v0.0.9.6): the apply step — feeding the "
             "captured profile into live NR — is currently disabled "
             "in WDSP mode while the IQ-domain rebuild lands.  "
             "Capture, save, load, and management all work normally; "
             "your library is being built for when the apply path "
             "comes back.  See User Guide → Noise Reduction for "
-            "details.")
-        intro.setWordWrap(True)
-        intro.setStyleSheet("color: #8a9aac;")
-        gv.addWidget(intro)
+            "details.",
+        ]
+        for para in intro_paras:
+            lbl = QLabel(para)
+            lbl.setWordWrap(True)
+            _force_wrap_height(lbl)
+            lbl.setStyleSheet("color: #8a9aac;")
+            gv.addWidget(lbl)
 
         # Capture duration slider — 1.0..5.0 sec, locked range.
         s = QSettings("N8SDR", "Lyra")
@@ -3491,6 +3728,7 @@ class NoiseSettingsTab(QWidget):
             "selection is persisted for when the threshold mapping "
             "is wired up).")
         nb_intro.setWordWrap(True)
+        _force_wrap_height(nb_intro)
         nb_intro.setStyleSheet("color: #8a9aac;")
         nbv.addWidget(nb_intro)
 
@@ -3565,6 +3803,7 @@ class NoiseSettingsTab(QWidget):
             "Right-click the NB button on the DSP+Audio panel for "
             "quick on/off switching during operating.")
         nb_hint.setWordWrap(True)
+        _force_wrap_height(nb_hint)
         # Drop the explicit font-size override — match the intro
         # paragraph above so the operator-facing text is at the
         # same readability tier as the rest of the tab.  Slightly
@@ -3601,6 +3840,7 @@ class NoiseSettingsTab(QWidget):
             "WDSP-default audio behavior — your selection is "
             "persisted for when the μ mapping is wired up).")
         anf_intro.setWordWrap(True)
+        _force_wrap_height(anf_intro)
         anf_intro.setStyleSheet("color: #8a9aac;")
         anfv.addWidget(anf_intro)
 
@@ -3663,6 +3903,7 @@ class NoiseSettingsTab(QWidget):
             "Right-click the ANF button on the DSP+Audio panel "
             "for quick on/off switching during operating.")
         anf_hint.setWordWrap(True)
+        _force_wrap_height(anf_hint)
         anf_hint.setStyleSheet("color: #7a8a9c;")
         anfv.addWidget(anf_hint)
 
@@ -3698,6 +3939,7 @@ class NoiseSettingsTab(QWidget):
             "routing happens automatically; you just set the "
             "threshold for the noise floor on your current band.")
         sq_intro.setWordWrap(True)
+        _force_wrap_height(sq_intro)
         sq_intro.setStyleSheet("color: #8a9aac; font-size: 12px;")
         sqv.addWidget(sq_intro)
 
@@ -3742,6 +3984,7 @@ class NoiseSettingsTab(QWidget):
             "speech onset).  Direct sliders for those are on the "
             "post-RX2 backlog.")
         sq_hint.setWordWrap(True)
+        _force_wrap_height(sq_hint)
         sq_hint.setStyleSheet("color: #7a8a9c; font-size: 11px;")
         sqv.addWidget(sq_hint)
         v.addWidget(grp_sq)
@@ -3864,6 +4107,7 @@ class NoiseSettingsTab(QWidget):
         # then mirrors via the nb_profile_changed signal.
         self.radio.set_nb_threshold(threshold)
 
+    @_swallow_dead_widget
     def _on_nb_profile_signal(self, name: str) -> None:
         """Mirror an external profile change (e.g., from the
         DSP-row NB button right-click menu) into the radio group."""
@@ -3874,6 +4118,7 @@ class NoiseSettingsTab(QWidget):
             rb.blockSignals(False)
         self._update_nb_threshold_enabled(name)
 
+    @_swallow_dead_widget
     def _on_nb_threshold_signal(self, threshold: float) -> None:
         """Mirror an external threshold change into the slider."""
         target = int(round(threshold * 10))
@@ -3901,6 +4146,7 @@ class NoiseSettingsTab(QWidget):
         self.anf_mu_label.setText(f"μ = {mu:.2e}")
         self.radio.set_anf_mu(mu)
 
+    @_swallow_dead_widget
     def _on_anf_profile_signal(self, name: str) -> None:
         rb = self._anf_radios.get(name)
         if rb and not rb.isChecked():
@@ -3909,6 +4155,7 @@ class NoiseSettingsTab(QWidget):
             rb.blockSignals(False)
         self._update_anf_mu_enabled(name)
 
+    @_swallow_dead_widget
     def _on_anf_mu_signal(self, mu: float) -> None:
         target = self._anf_mu_to_slider(mu)
         if self.anf_mu_slider.value() != target:
@@ -3957,6 +4204,7 @@ class NoiseSettingsTab(QWidget):
     # The DSP+Audio panel's NR Mode 1-4 + LMS strength slider
     # are the live operator surface for those parameters now.
 
+    @_swallow_dead_widget
     def _on_sq_threshold_signal(self, value: float) -> None:
         """Mirror an external squelch threshold change into slider."""
         target = int(round(value * 100))
@@ -4058,6 +4306,7 @@ class PropagationSettingsTab(QWidget):
         # tab, dock right-click, etc.) keep this checkbox in sync.
         radio.band_plan_show_ncdxf_changed.connect(self._on_ncdxf_changed)
 
+    @_swallow_dead_widget
     def _on_ncdxf_changed(self, on: bool):
         if self.ncdxf_chk.isChecked() != on:
             self.ncdxf_chk.blockSignals(True)
@@ -5568,7 +5817,17 @@ class SettingsDialog(QDialog):
         # particular was cramped even on a 27" display. The dialog
         # remains resizable so operators on smaller monitors can pull
         # it tighter; minimum keeps it from collapsing into nothing.
-        self.resize(1100, 760)
+        # Initial size bumped 1100x760 -> 1280x880 (operator-reported
+        # 2026-05-09): on tabs with denser content (Visuals, Bands,
+        # Audio) the default 1100x760 was clipping label text or
+        # cutting off rows at the bottom, forcing the operator to
+        # drag-resize on every open.  Going taller used to push the
+        # bottom off-screen, requiring close-and-reopen to recover.
+        # 1280x880 fits all tabs without scroll/clip on a typical
+        # 1080p+ display while still leaving 200 px of margin below
+        # on a 1080p screen.  Operators on smaller displays can
+        # still pull it tighter — minimumSize unchanged.
+        self.resize(1280, 880)
         self.setMinimumSize(640, 480)
 
         v = QVBoxLayout(self)

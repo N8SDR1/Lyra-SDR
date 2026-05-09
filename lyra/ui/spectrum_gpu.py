@@ -102,6 +102,9 @@ BYTES_PER_POINT = 8  # vec2 = 2 × float32
 GL_COLOR_BUFFER_BIT      = 0x4000
 GL_LINE_STRIP            = 0x0003
 GL_TRIANGLE_STRIP        = 0x0005
+GL_BLEND                 = 0x0BE2
+GL_SRC_ALPHA             = 0x0302
+GL_ONE_MINUS_SRC_ALPHA   = 0x0303
 GL_FLOAT                 = 0x1406
 GL_RED                   = 0x1903
 GL_R8                    = 0x8229
@@ -293,6 +296,31 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._loc_position: int = -1
         self._loc_trace_color: int = -1
 
+        # ── Spectrum trace fill (operator request 2026-05-09) ──────
+        # Second shader program + VBO + VAO to draw a gradient-
+        # filled triangle strip BELOW the trace line (matches the
+        # QPainter CPU widget's QLinearGradient fill — alpha 100/255
+        # at the top of the viewport fading to 10/255 at the bottom).
+        # Toggleable via set_spectrum_fill_enabled; color separately
+        # picked via set_spectrum_fill_color (empty = use trace
+        # color).
+        self._prog_fill: Optional[QOpenGLShaderProgram] = None
+        self._vbo_fill: Optional[QOpenGLBuffer] = None
+        self._vao_fill: Optional[QOpenGLVertexArrayObject] = None
+        self._loc_fill_position:        int = -1
+        self._loc_fill_color:           int = -1
+        self._loc_fill_viewport_height: int = -1
+        # Triangle-strip vertex buffer — 2× MAX_BINS vertices (top +
+        # bottom for each x).  Top y mirrors _trace_xy[:, 1]; bottom
+        # y is fixed at NDC -1.0 (viewport bottom).
+        self._fill_xy = np.zeros((2 * MAX_BINS, 2), dtype=np.float32)
+        self._fill_n = 0   # number of valid vertex pairs (= 2× bins)
+        # Operator state (default ON, color empty = derive from trace).
+        self._user_fill_enabled: bool = True
+        self._user_fill_color: tuple[float, float, float, float] = (
+            _DEFAULT_TRACE)
+        self._user_fill_color_explicit: bool = False
+
         # CPU-side trace data. Pre-allocated to MAX_BINS so paintGL
         # never allocates. Shape (N, 2) float32; column 0 = NDC.x,
         # column 1 = NDC.y. _trace_n is the number of valid points
@@ -440,6 +468,10 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._user_peak_color: str = ""
         self._peak_hold_db: Optional[np.ndarray] = None
         self._peak_last_ts: Optional[float] = None
+        # Peak-hold timer state — see CPU widget (spectrum.py) for the
+        # full rationale.  0=Off, >0=hold seconds, -1=Infinite.
+        self._peak_hold_secs: float = 0.0
+        self._peak_last_updated: Optional[np.ndarray] = None
 
         # Display-only EWMA smoothing — see spectrum.py for the same
         # pattern. Off by default; toggled from Settings → Display.
@@ -572,24 +604,70 @@ class SpectrumGpuWidget(QOpenGLWidget):
             # (peak-hold + GL trace upload) — both already use spec_db[:n].
             spec_db = self._smoothed_db
             n = self._smoothed_db.shape[0]
-        # Peak-hold buffer maintenance — same algo as the CPU
-        # widget: linear dB/sec decay, then clamp-up to the live
-        # spectrum so peaks can never sit below current signal.
-        # Use the truncated `n`-prefix so the buffer always matches
-        # what the GL trace will draw.
-        if self._peak_markers_enabled:
+        # Peak-hold buffer maintenance — mirrors the CPU widget's
+        # hold-then-decay algorithm in spectrum.py.  See that file's
+        # set_spectrum() comment block for the full rationale + mode
+        # semantics (Off / Live / timed / Hold).
+        if (self._peak_markers_enabled
+                and self._peak_hold_secs != 0.0):
             spec_view = spec_db[:n].astype(np.float32, copy=False)
             now = time.monotonic()
-            if (self._peak_hold_db is None
+            hold_secs = self._peak_hold_secs
+            if hold_secs == -2.0:
+                # Live — buffer = live spectrum, no accumulation.
+                # Cheap (single assignment) and gives the operator's
+                # chosen style a ride-along overlay matching the
+                # current trace.
+                self._peak_hold_db = spec_view.copy()
+                self._peak_last_ts = now
+                self._peak_last_updated = None
+            elif (self._peak_hold_db is None
                     or self._peak_hold_db.shape != spec_view.shape):
                 self._peak_hold_db = spec_view.copy()
                 self._peak_last_ts = now
+                self._peak_last_updated = np.full(
+                    spec_view.shape, now, dtype=np.float64)
             else:
                 dt = max(0.005, now - (self._peak_last_ts or now))
                 self._peak_last_ts = now
-                self._peak_hold_db -= self._peak_markers_decay_dbps * dt
-                np.maximum(self._peak_hold_db, spec_view,
-                           out=self._peak_hold_db)
+                if hold_secs < 0:
+                    # Infinite hold — never decay, only clamp-up.
+                    if self._peak_last_updated is None:
+                        self._peak_last_updated = np.full(
+                            spec_view.shape, now, dtype=np.float64)
+                    new_peak_mask = spec_view > self._peak_hold_db
+                    np.maximum(self._peak_hold_db, spec_view,
+                               out=self._peak_hold_db)
+                    self._peak_last_updated[new_peak_mask] = now
+                else:
+                    # Hold-then-decay — see CPU widget for the full
+                    # rationale.  Reset timer only for bins past the
+                    # hold window AND with a fresh higher peak;
+                    # bins still inside their window get clamp-up
+                    # without timer extension.  Operator-reported
+                    # 2026-05-09: prior reset-on-any-new-peak logic
+                    # made Fast/Med/Slow indistinguishable on real
+                    # ham signals (continuously varying = perpetual
+                    # timer reset = no decay phase observed).
+                    if self._peak_last_updated is None:
+                        self._peak_last_updated = np.full(
+                            spec_view.shape, now, dtype=np.float64)
+                    ages = now - self._peak_last_updated
+                    decay_mask = ages > hold_secs
+                    if decay_mask.any():
+                        self._peak_hold_db[decay_mask] -= (
+                            self._peak_markers_decay_dbps * dt)
+                    new_peak_mask = spec_view > self._peak_hold_db
+                    np.maximum(self._peak_hold_db, spec_view,
+                               out=self._peak_hold_db)
+                    reset_mask = new_peak_mask & decay_mask
+                    self._peak_last_updated[reset_mask] = now
+        elif self._peak_hold_db is not None:
+            # Off mode (or master toggled off) — drop the buffer so a
+            # previously-held peak doesn't linger after switching to
+            # Off.  Paint code's `is not None` check skips overlay.
+            self._peak_hold_db = None
+            self._peak_last_updated = None
         # Map bins → NDC.x: linear from -1 (left) to +1 (right).
         xs = np.linspace(-1.0, 1.0, n, dtype=np.float32)
         # Map dB → NDC.y: linear from -1 (bottom = min_db) to +1
@@ -601,6 +679,15 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._trace_xy[:n, 0] = xs
         self._trace_xy[:n, 1] = ys
         self._trace_n = n
+        # Build fill triangle-strip vertices alongside the trace —
+        # 2 vertices per bin: (x, trace_y) at the top, (x, -1.0) at
+        # the bottom of NDC.  Adjacent (top, bottom) pairs form the
+        # quads that the GL_TRIANGLE_STRIP rasterizes.
+        self._fill_xy[:2 * n:2, 0] = xs
+        self._fill_xy[:2 * n:2, 1] = ys
+        self._fill_xy[1:2 * n:2, 0] = xs
+        self._fill_xy[1:2 * n:2, 1] = -1.0
+        self._fill_n = 2 * n
         # Real data takes over — disable synthetic generator.
         if self._synthetic_active:
             self._synthetic_active = False
@@ -616,6 +703,37 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._trace_color = (
             color.redF(), color.greenF(), color.blueF(), color.alphaF(),
         )
+        self.update()
+
+    def set_spectrum_fill_enabled(self, on: bool) -> None:
+        """Toggle the gradient fill below the spectrum trace.
+        Operator request 2026-05-09 — disabled gives a 'line-only'
+        look; enabled draws the same alpha-faded fill as the
+        QPainter (CPU) widget."""
+        self._user_fill_enabled = bool(on)
+        self.update()
+
+    def set_spectrum_fill_color(self, hex_str: str) -> None:
+        """Operator-picked fill color (hex like '#5ec8ff').  Empty
+        string reverts to 'derive from trace color' (the legacy
+        behavior).  Same API shape as the CPU widget so panels.py
+        can connect the Radio signal to either backend uniformly."""
+        s = str(hex_str or "").strip()
+        if not s:
+            self._user_fill_color_explicit = False
+            self._user_fill_color = self._trace_color
+        else:
+            col = QColor(s)
+            if col.isValid():
+                self._user_fill_color_explicit = True
+                self._user_fill_color = (
+                    col.redF(), col.greenF(),
+                    col.blueF(), col.alphaF(),
+                )
+            else:
+                # Invalid hex — treat as clear (derive from trace).
+                self._user_fill_color_explicit = False
+                self._user_fill_color = self._trace_color
         self.update()
 
     def set_tuning(self, center_hz: float, span_hz: float) -> None:
@@ -742,6 +860,29 @@ class SpectrumGpuWidget(QOpenGLWidget):
 
     def set_peak_markers_decay_dbps(self, dbps: float) -> None:
         self._peak_markers_decay_dbps = float(dbps)
+
+    def set_peak_hold_secs(self, secs: float) -> None:
+        """Peak-hold mode setter.  See CPU widget (spectrum.py) for
+        the algorithm + sentinel values:
+            0.0   — Off
+            -1.0  — Hold (Infinite)
+            -2.0  — Live (track current spectrum)
+            >0.0  — Timed seconds
+        """
+        v = float(secs)
+        if v < -1.5:
+            v = -2.0
+        elif v < 0:
+            v = -1.0
+        self._peak_hold_secs = v
+
+    def clear_peak_holds(self) -> None:
+        """Reset the peak-hold buffer + last-updated timestamps so
+        the next tick re-seeds from the live spectrum.  Operator
+        path: Display panel Clear button."""
+        self._peak_hold_db = None
+        self._peak_last_updated = None
+        self.update()
 
     def set_peak_markers_style(self, name: str) -> None:
         name = (name or "dots").strip().lower()
@@ -1394,6 +1535,76 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._vao_trace.release()
         self._vbo_trace.release()
 
+        # ── Fill shader program (gradient under the trace) ────────
+        # Same vertex shader (trace.vert) — pass-through positions in
+        # NDC.  Different fragment shader (fill.frag) — alpha-by-Y
+        # gradient.  Compiled here in parallel with the trace program
+        # so a single initializeGL pass sets up both pipelines.
+        if self._prog_fill is not None:
+            self._prog_fill.removeAllShaders()
+            self._prog_fill.deleteLater()
+            self._prog_fill = None
+        prog_f = QOpenGLShaderProgram(self)
+        ok = (prog_f.addShaderFromSourceFile(
+                  QOpenGLShader.ShaderTypeBit.Vertex,
+                  str(_SHADER_DIR / "trace.vert"))
+              and prog_f.addShaderFromSourceFile(
+                  QOpenGLShader.ShaderTypeBit.Fragment,
+                  str(_SHADER_DIR / "fill.frag")))
+        if not ok:
+            raise RuntimeError(
+                "Fill shader compile failed:\n" + prog_f.log())
+        if not prog_f.link():
+            raise RuntimeError(
+                "Fill shader link failed:\n" + prog_f.log())
+        self._prog_fill = prog_f
+        self._loc_fill_position        = prog_f.attributeLocation("position")
+        self._loc_fill_color           = prog_f.uniformLocation("fillColor")
+        self._loc_fill_viewport_height = prog_f.uniformLocation("viewportHeight")
+
+        # Fill VBO — 2× MAX_BINS vertices for the triangle strip.
+        if self._vbo_fill is not None:
+            self._vbo_fill.destroy()
+        self._vbo_fill = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
+        self._vbo_fill.setUsagePattern(QOpenGLBuffer.UsagePattern.DynamicDraw)
+        self._vbo_fill.create()
+        self._vbo_fill.bind()
+        self._vbo_fill.allocate(2 * MAX_BINS * BYTES_PER_POINT)
+
+        # Fill VAO — same vec2-position attribute layout as trace.
+        if self._vao_fill is not None:
+            self._vao_fill.destroy()
+        self._vao_fill = QOpenGLVertexArrayObject(self)
+        self._vao_fill.create()
+        self._vao_fill.bind()
+        prog_f.bind()
+        prog_f.enableAttributeArray(self._loc_fill_position)
+        prog_f.setAttributeBuffer(
+            self._loc_fill_position,
+            0x1406,            # GL_FLOAT
+            0,                 # offset
+            2,                 # tupleSize (vec2)
+            BYTES_PER_POINT,   # stride
+        )
+        prog_f.release()
+        self._vao_fill.release()
+        self._vbo_fill.release()
+
+        # ── Enable alpha blending so the fill renders translucent.
+        # Without this, the fragment shader's alpha output is
+        # ignored and we'd draw an opaque polygon instead of a
+        # gradient-faded one.  Cheap one-time setup; the blend
+        # function stays set for the lifetime of the GL context.
+        try:
+            self._gl.glEnable(GL_BLEND)
+            self._gl.glBlendFunc(
+                GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        except Exception as exc:
+            # Defensive — if the GL profile somehow lacks blending
+            # the trace + fill still draw (just opaque), better
+            # than a hard crash.
+            print(f"[GPU spectrum] blending setup failed: {exc}")
+
     def resizeGL(self, w: int, h: int) -> None:
         """Hook for resize-time setup. Phase A trace path uses NDC
         throughout, so no per-resize state needs updating here.
@@ -1461,6 +1672,41 @@ class SpectrumGpuWidget(QOpenGLWidget):
         if n < 2:
             return  # nothing to draw yet
 
+        # ── Optional fill pass — gradient under the trace ─────────
+        # Operator-toggleable (set_spectrum_fill_enabled).  Drawn
+        # FIRST so the trace line renders on top of the gradient.
+        # Color: explicit fill color if the operator picked one, else
+        # derive from the trace color (alpha-by-Y in fill.frag does
+        # the gradient — fragment alpha output ignores the input
+        # alpha here).
+        if (self._user_fill_enabled and self._prog_fill is not None
+                and self._fill_n >= 4):
+            fn = self._fill_n
+            self._vbo_fill.bind()
+            self._vbo_fill.write(0, self._fill_xy[:fn].tobytes(),
+                                 fn * BYTES_PER_POINT)
+            self._prog_fill.bind()
+            if self._user_fill_color_explicit:
+                fr, fg, fb, fa = self._user_fill_color
+            else:
+                fr, fg, fb, fa = self._trace_color
+            if self._loc_fill_color >= 0:
+                self._prog_fill.setUniformValue(
+                    self._loc_fill_color, fr, fg, fb, 1.0)
+            if self._loc_fill_viewport_height >= 0:
+                # Pass the framebuffer pixel height (dpr-aware) so
+                # the fragment shader's gl_FragCoord.y normalization
+                # matches the real viewport.
+                px_h = float(max(1, self.height()
+                                  * self.devicePixelRatioF()))
+                self._prog_fill.setUniformValue(
+                    self._loc_fill_viewport_height, px_h)
+            self._vao_fill.bind()
+            self._gl.glDrawArrays(GL_TRIANGLE_STRIP, 0, fn)
+            self._vao_fill.release()
+            self._prog_fill.release()
+            self._vbo_fill.release()
+
         # ── Upload current vertex data ────────────────────────────
         # QOpenGLBuffer.write takes (offset, data, count_in_bytes).
         # Slice the prefix actually in use; .tobytes() copies into a
@@ -1499,6 +1745,14 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._trace_xy[:n, 0] = xs
         self._trace_xy[:n, 1] = ys
         self._trace_n = n
+        # Mirror the trace into the fill buffer for the synthetic
+        # path too — keeps the fill working when the GPU widget is
+        # driving its test pattern.
+        self._fill_xy[:2 * n:2, 0] = xs
+        self._fill_xy[:2 * n:2, 1] = ys
+        self._fill_xy[1:2 * n:2, 0] = xs
+        self._fill_xy[1:2 * n:2, 1] = -1.0
+        self._fill_n = 2 * n
 
     # ── QPainter overlay pass (Phase B.4+ feature parity) ──────────
     #

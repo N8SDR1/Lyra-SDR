@@ -51,29 +51,85 @@ AGC cluster → Auto-calibrate), so having them both on gives a
 self-consistent view: the AGC target sits ~18 dB above the NF line
 by default.
 
+## Trace fill (under-curve shading)
+
+The spectrum trace is backed by a translucent gradient fill — the
+colored area below the curve that gives the trace visual weight
+against a busy waterfall.  Alpha fades from ~40 % at the top of the
+spectrum to ~4 % at the bottom; the fade emphasizes peaks while
+keeping the noise floor visually quiet.
+
+**Toggle**: Settings → Visuals → Signal range → **"Fill area under
+spectrum trace"**.  Default on.  When off, only the trace line is
+drawn — useful for a cleaner "bare line" look or when you want to see
+content behind the trace (landmark triangles, peak markers in Live
+mode, TCI spot ticks).
+
+**Color**: Settings → Visuals → Colors → **Spectrum fill** field.
+Empty (default) = fill derives from the current trace color.  Pick
+a different color to make the fill stand out from the trace line
+itself — for example, a cyan trace with a deeper-blue fill.
+
+The toggle and color persist across Lyra launches and work
+identically on the QPainter (CPU) and GPU panadapter backends.
+
 ## Peak markers
 
 Optional peak-hold overlay drawn **only inside the RX filter passband**.
-Shows the highest dB level each bin has reached in the decay window —
-useful for spotting weak signals that come and go too fast for the
-eye to catch, or confirming a recent burst peaked above a threshold.
+Useful for spotting weak signals that come and go too fast for the
+eye to catch, watching band openings, or confirming a recent burst
+peaked above a threshold.
 
 Unlike whole-spectrum "blobs" in some reference SDR clients, Lyra's
 peak markers are scoped to the passband so the feature doesn't clutter
 the whole spectrum with irrelevant peaks.
 
-- **Toggle**: Settings → Visuals → Signal range → "Show peak markers"
+### Quick controls — Display panel
+
+The **Display** panel (top-right by default) carries three live peak
+controls so the operator can switch behavior without diving into
+Settings:
+
+- **Peak Hold** combo — eight modes:
+    - **Off** — peak markers hidden
+    - **Live** — markers track the current spectrum bin-for-bin in
+      your chosen style. No freeze, no fade. Ride-along overlay.
+      *Default on fresh install.*
+    - **1 sec / 2 / 5 / 10 / 30 sec** — capture max, freeze for that
+      window, then fade at the chosen Decay rate
+    - **Hold** — capture max, never fade. Click **Clear** to reset
+- **Decay** combo — three fade speeds (only relevant in timed Hold
+  modes):
+    - **Fast** — ~2 sec to fade a 60 dB peak (30 dB/s)
+    - **Med** — ~5 sec (12 dB/s, default)
+    - **Slow** — ~10 sec (6 dB/s)
+- **Clear** button — instantly drops the held peak buffer.  Useful
+  in **Hold** mode (where peaks would otherwise stay frozen
+  forever).
+
+### Settings → Visuals — appearance + master toggle
+
+- **"Show peak markers"** master toggle — overrides the Display
+  panel Hold combo (master OFF = no peaks regardless of mode).
 - **Style**: three render options — **Line** (solid peak trace),
   **Dots** (discrete per-bin markers), **Triangles** (upward
-  triangles at peaks). Live-switch from the Visuals tab.
+  triangles at peaks).  Affects Live, timed Hold, and Hold modes.
 - **Show dB readout**: optional numeric dB value drawn next to the
   three highest in-passband peaks.
-- **Decay rate slider**: 1 – 120 dB/second. Lower = peaks linger
-  longer (good for watching band openings, spotting DX). Higher =
-  peaks track the signal closely (live-action feel).
+- **Decay rate slider**: 1 – 120 dB/second.  Picking Fast/Med/Slow
+  on the Display panel snaps this slider; the slider stays
+  available for non-preset values.
 - **Color**: Settings → Visuals → Colors → **Peak markers** field.
   Separate from the main trace color so the two don't blend.
-- Default: off, Dots style, 10 dB/s when enabled.
+
+### Mode interactions
+
+| Hold mode | Style applies? | Decay applies? |
+|---|---|---|
+| Off | n/a (peaks hidden) | n/a |
+| Live | ✅ yes | ❌ no (no decay path) |
+| 1-30 sec | ✅ yes | ✅ yes (post-hold fade) |
+| Hold | ✅ yes | ❌ no (never decays) |
 
 ## ADC peak indicator (toolbar)
 
@@ -336,11 +392,12 @@ itself.
 
 ### Per-band bounds memory
 
-Spectrum range bounds are saved **per band**. When you change band
-(via the Band panel buttons or by tuning across a band edge), Lyra
-restores the bounds you last set for that band, OR a sensible
-factory default for that band's typical noise environment if
-you've never set bounds for it:
+Spectrum range bounds AND waterfall manual range are saved **per
+band**.  When you change band (via the Band panel buttons or by
+tuning across a band edge), Lyra restores both: the spectrum
+floor/ceiling/locks AND the waterfall min/max for that band, OR a
+sensible factory default for that band's typical noise environment
+if you've never customized it:
 
 | Band group | Factory default range |
 |---|---|
@@ -354,9 +411,22 @@ to fit a weak meteor-scatter ping → that becomes your 6m bounds.
 Switch to 40m → 40m's bounds are restored. Switch back to 6m →
 your meteor-scatter bounds come back.
 
+The same applies to the **waterfall** sliders in
+Settings → Visuals → Signal range when **Waterfall auto-range
+follows spectrum** is OFF.  The manual min/max you set on each
+band stay tied to that band.
+
 This is automatic — no setup, no per-band UI to configure.
 Operators who don't care about per-band tuning never notice;
 operators who do get exactly what they want.
+
+### Waterfall collapse toggle
+
+A small ▾ triangle in the Waterfall panel header (just left of
+the help `?` badge) collapses the waterfall content area to free
+vertical space for the spectrum view above.  Click again to
+expand back to the previous size.  State is remembered between
+sessions.
 
 ### When to use
 
@@ -477,6 +547,12 @@ Three independent controls in **Settings → Visuals → Update rates
 and zoom**. Changes are live — no restart needed. Front-panel **DISPLAY**
 strip (Zoom / Spec / WF sliders) mirrors these settings both ways —
 adjust in either place, the other updates.
+
+The Spec and WF sliders on the front-panel DISPLAY strip update
+the spectrum / waterfall **live while you drag** (debounced to
+~10 commits per second), so you can see exactly how each rate
+feels without releasing the slider.  The release just locks in
+whatever you'd already settled on.
 
 ### Panadapter zoom
 

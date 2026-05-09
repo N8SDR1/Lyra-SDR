@@ -13,6 +13,133 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.7] — 2026-05-09 — "Display Polish"
+
+Operator-driven UX polish release on the spectrum / waterfall /
+Display panel surface, plus Settings dialog stability hardening
+and a documentation accuracy pass.  No DSP-engine or protocol
+changes — same WDSP-cffi audio path that v0.0.9.6 introduced.
+
+### New on the Display panel
+
+* **Peak Hold combo** — eight modes: Off / Live / 1 / 2 / 5 / 10 /
+  30 sec / Hold.  Live tracks the spectrum bin-for-bin (no
+  freeze, no fade); timed modes capture max → freeze for the
+  chosen window → fade at the chosen Decay rate; Hold captures
+  max and never fades.  Default Live on fresh install.
+* **Decay combo** — three fade speeds for the timed Hold modes:
+  **Fast** (~2 s for a 60 dB peak, 30 dB/s) / **Med** (~5 s,
+  12 dB/s, default) / **Slow** (~10 s, 6 dB/s).
+* **Clear button** — instantly drops the held peak buffer.
+  Useful in Hold mode (where peaks would otherwise stay frozen
+  forever).
+* **Exact / 100 Hz** quantization toggle — when enabled, all
+  panadapter tuning gestures (wheel-tune, click-tune, drag-pan,
+  Shift+click peak-snap) round the resulting freq to the nearest
+  100 Hz grid.  Useful for SSB voice tune-around without
+  needing to babysit the LED digit.  LED-readout wheel-tuning
+  paths stay exact regardless.
+* **Spec/WF zoom slider live-preview** — the front-panel Spec
+  and WF rate sliders now update spectrum / waterfall *while you
+  drag*, debounced to ~10 commits/sec.  Release just locks in
+  whatever you'd already settled on — no more "drag, release,
+  see if you got it right, drag again" loop.
+
+### Spectrum trace fill — operator control
+
+* **Master toggle** in Settings → Visuals → Signal range →
+  "Fill area under spectrum trace (gradient)".  Default on.
+  When off, only the trace line is drawn — useful for a cleaner
+  "bare line" look or to see content behind the trace (landmark
+  triangles, peak markers in Live mode, TCI spot ticks).
+* **Custom fill color** in Settings → Visuals → Colors →
+  **Spectrum fill** field.  Empty (default) = derive from the
+  current trace color.  Pick a different color to make the fill
+  stand out from the trace line itself.
+* Both controls work identically on QPainter and GPU panadapter
+  backends and persist across launches.
+
+### Waterfall collapse toggle
+
+* Small **▾** triangle button in the Waterfall panel header (next
+  to the help `?` badge) collapses the waterfall content area to
+  free vertical space for the spectrum view above.  Click again
+  to expand back to the previous size.  State is remembered
+  between sessions.
+
+### Per-band waterfall persistence
+
+* The waterfall min / max dB range now travels with the per-band
+  bounds memory.  Switch from 40 m to 20 m and back — the
+  waterfall dynamic range you'd dialed in for each band recalls
+  automatically alongside the spectrum bounds you'd already had
+  per-band.  No new UI; happens automatically.
+* Fixes a related restart-recall regression where bands with
+  drag-set ranges (but no recent freq write) were being dropped
+  from band memory on restore.
+
+### Settings dialog hardening
+
+* **Dead-widget guards** — `_safe_mirror` helper + the
+  `@_swallow_dead_widget` decorator (applied to ~24 slot
+  methods) catch the "Internal C++ object already deleted"
+  PySide6 crashes that could fire when a dialog was closed
+  mid-mirror-update.  Bounded layer underneath: section §15.3
+  in CLAUDE.md captures the deeper disconnect-on-close refactor
+  that's parked for v0.1.
+* **Wrapped-label squeeze fix** — multi-paragraph QLabel intros
+  on the Noise tab (and others) were rendering with overlapping
+  lines when the tab was first opened.  Fixed with a
+  `_force_wrap_height()` helper that pins the label's vertical
+  size policy, plus a structural change splitting the long
+  Captured Noise Profile intro into three short labels.
+* **Dialog size** bumped 1100×760 → 1280×880 to fit all tabs
+  without scroll/clip on a typical Windows desktop.
+* **Custom color button width** 120 → 140 px to fix Windows
+  clipping the leading "C" on the "Custom color…" label.
+
+### Documentation pass
+
+* `docs/help/spectrum.md` — new sections for trace fill, peak
+  markers (Display panel quick controls + Settings → Visuals
+  appearance), waterfall collapse toggle.
+* `docs/help/tuning.md` — new section for Exact / 100 Hz
+  quantization.
+* `docs/help/bin.md` — audio-chain diagram redrawn to match the
+  WDSP-mode reality (engine handles decim → notches → NR → ANF →
+  AGC → APF → bandpass → demod internally; no more legacy
+  Python `tanh` stage).
+* `docs/help/agc.md` — Auto profile description corrected
+  (auto-threshold tracking is wired, not parked); Long profile
+  removed from operator-facing docs (infrastructure exists in
+  `radio.py` but isn't in the right-click menu list — see
+  CLAUDE.md §15.5 to re-add).
+* `docs/help/troubleshooting.md` — ANF profile names corrected
+  (Gentle/Standard/Aggressive → Light/Medium/Heavy); v0.0.9.6
+  captured-profile-INERT-in-WDSP-mode caveat added to the
+  recipe; AGC AM-fade tip simplified.
+* `docs/help/shortcuts.md` — NR right-click menu rewritten from
+  pre-v0.0.9.6 "Light/Medium/Aggressive/Neural" wording to the
+  current Mode 1..4 + AEPF + NPE picker; EQ removed from the
+  DSP-menu jump (no operator-facing EQ exists; parametric EQ
+  port is v0.2 work).
+* `docs/help/introduction.md` + `support.md` — author
+  attribution reconciled to match `CONTRIBUTORS.md` (N8SDR is
+  project lead and sole developer through v0.0.9.x; N9BC joined
+  as co-contributor during v0.0.9.1 testing; joint development
+  begins at v0.1).
+
+### Internal architecture / refactor notes
+
+* CLAUDE.md §15 — new Documentation backlog section captures the
+  internal-doc cleanup items the audit surfaced but didn't fix
+  in this release (CLAUDE.md current-version line, §14.2 wired /
+  inert lists update, RX2-plan leveler references after Audio
+  Leveler deletion, Settings dialog disconnect-on-close deeper
+  fix, `_AGC_PROFILES` Long re-add).
+
+---
+
 ## [0.0.9.6] — 2026-05-08 — "Audio Foundation"
 
 The biggest single release Lyra has shipped to date.  Headline

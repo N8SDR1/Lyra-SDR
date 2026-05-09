@@ -51,23 +51,34 @@ content below has been mass-renumbered to the new scheme.
   positives + false negatives in field testing), tunable staleness
   threshold, live drift readout in profile manager, TCI server +
   profile manager dialog stability fixes.
-- **v0.0.9.6** "Audio Foundation" — IN PROGRESS on
-  `feature/v0.0.9.6-audio-foundation`. Direction pivoted 2026-05-06
-  after extended audio-quality troubleshooting on the pure-Python
-  port path: per-sample numpy work in agc_wdsp / nr / nr2 / anf /
-  demod / channel was producing GIL contention with the EP2 writer
-  thread, manifesting as HL2 audio-jack clicks and PC Soundcard
-  motorboating that no amount of tweaking the Python chain
-  resolved. Commitment 2026-05-06 to call into the WDSP DSP engine
-  directly via cffi (the engine's own DLL is bundled at
-  `lyra/dsp/_native/`). Status: RX1 audio chain runs through the
-  native engine; mode/filter/AGC/CW-pitch/rate setters wired; NR
-  EMNR + ANR + ANF + LMS + AM/FM squelch wired; AGC gain readout
-  back. Still TBD: PC Soundcard rmatch/varsamp cffi port (~2x CPU
-  vs HL2-jack today because that path stays in pure Python),
-  manual notches, NB EXT-blanker init, RX2 / TX / PureSignal phases.
-  See §13 below for the full audio architecture and §14 for the
-  WDSP-DLL integration architecture.
+- **v0.0.9.6** "Audio Foundation" (shipped 2026-05-08) — wholesale
+  pivot from pure-Python DSP to cffi calls into the WDSP DSP engine
+  for the RX1 audio chain.  Per-sample numpy work in legacy modules
+  (agc_wdsp / nr / nr2 / anf / demod / channel) was producing GIL
+  contention with the EP2 writer thread, manifesting as HL2
+  audio-jack clicks and PC Soundcard motorboating.  WDSP DLLs
+  bundled at `lyra/dsp/_native/`.  Cleanup arc retired ~6,800
+  lines of legacy DSP code (Audio Leveler, agc_wdsp, apf, demod,
+  nb, lms, anf, squelch, nr2, PythonRxChannel.process, etc.).
+  See §13 (audio architecture), §14 (WDSP-DLL integration), §14.9
+  (cleanup arc).
+- **v0.0.9.7** "Display Polish" (2026-05-09) — operator-driven UX
+  polish on spectrum/waterfall/Display panel surfaces, plus
+  Settings dialog stability hardening.  New operator-facing
+  features: Peak Hold combo (Off/Live/timed/Hold) + Decay
+  (Fast/Med/Slow) + Clear button on the Display panel; Exact /
+  100 Hz tuning quantization toggle; Spec/WF zoom slider
+  live-preview during drag; spectrum trace fill master toggle +
+  custom fill color picker; waterfall collapse toggle; per-band
+  waterfall min/max persistence (sister to per-band spectrum
+  bounds).  Bug fixes: dB-lock recall on restart, Settings dialog
+  dead-widget guards (`_safe_mirror`, `_swallow_dead_widget`),
+  wrapped-label squeeze fix on Noise + Visuals tabs, dialog size
+  bump 1100×760 → 1280×880, custom-color button width 120 → 140
+  px.  Documentation pass aligned help docs with the NR-mode UX
+  overhaul + AGC profile + ANF profile-name corrections from the
+  v0.0.9.6 cleanup arc.  See §15 for the residual doc backlog
+  parked for future cleanup.
 
 ---
 
@@ -1411,6 +1422,153 @@ meantime:
 * In legacy mode (`LYRA_USE_LEGACY_DSP=1`), captured profile
   applies normally — no regression.
 
+#### Toggle-pattern UX for §14.6 (operator design lens, 2026-05-09)
+
+When the IQ-domain rebuild lands, the **operator-facing UX should
+mirror the NPE picker** — a Settings checkbox or two-way switch on
+the DSP+Audio panel:
+
+```
+Settings → DSP → Noise reference
+  ( ) Off — use WDSP's built-in noise tracker (default)
+  ( ) Use captured profile — your QTH-specific spectrum
+       Profile: [WX-2026-05-08-7250kHz-quiet ▾]
+```
+
+Same as NPE: operator picks "stock algorithm" or "their thing"
+depending on which sounds better at the current band conditions.
+The captured profile is genuinely operator-specific data (your QTH's
+noise floor at that band, that time of day, that antenna), so
+flipping the toggle produces a real audible difference — unlike a
+hypothetical "trained vs untrained zetaHat" toggle which would be
+theater (those datasets are bit-exact identical; see investigation
+below).
+
+**Why this is the right framing:**
+
+Operators already understand the NPE pattern (Mode 1-4 mode-of-the-
+gain-function picker + AEPF on/off + NPE method picker — three
+operator-tunable knobs over WDSP's stock algorithm).  Adding
+"reference profile picker" as a fourth knob fits the same mental
+model: pick the noise model that matches your situation.
+
+**Implementation hook:**
+
+A `Radio._noise_reference_mode` enum-ish setting:
+* `"stock"` — WDSP's noise tracker (current behavior)
+* `"captured"` — apply pre-WDSP IQ-domain spectral subtraction
+  using the operator-selected captured profile
+
+The `set_nr_use_captured_profile` method already exists and fires
+the status-bar warning today.  Rewire it to: "stock" → no IQ-
+domain pre-pass; "captured" → enable the IQ-domain pre-pass with
+the active profile.  No status-bar warning needed once the
+implementation is real.
+
+**Settings persistence:**
+
+Same QSettings keys we already have for the captured profile
+selection (`nr/use_captured_profile`, `nr/active_profile_name`).
+No schema bump.
+
+#### Companion investigations (parked alongside §14.6)
+
+These came up while operator was researching the captured-noise
+feature.  Cross-linked here so they don't get rediscovered.
+
+**A. Thetis `zetaHat.bin` is identical to WDSP's C-baked default
+(verified 2026-05-09).**
+
+The Gemini-style summary the operator was reading suggested
+Thetis ships a "trained" gain table file derived from "72 hours
+of band noise" — implying a meaningful difference vs the WDSP
+default.  Bit-exact diff on Thetis 2.10.3.13:
+
+* `zetaHat.bin` (43,240 bytes) at
+  `D:/sdrprojects/OpenHPSDR-Thetis-2.10.3.13/Project Files/lib/Thetis-resources/zetaHat.bin`
+* `CzetaHat[]` baked into WDSP source at
+  `D:/sdrprojects/OpenHPSDR-Thetis-2.10.3.13/Project Files/Source/wdsp/zetaHat.c`
+
+All 3,600 doubles match to 1e-12 (worst real-cell delta = 0.0).
+All 3,600 zetaValid integers match exactly.
+
+What the file actually is: a 60×60 lookup table of MMSE-LSA gain
+values indexed by (γ, ξ) — the a-posteriori / a-priori SNR pair.
+NOT a noise spectrum.  NOT QTH-specific.  Generic algorithm
+tuning.  When WDSP's `readZetaHat()` (in `wdsp/emnr.c:207`) can't
+find a `zetaHat.bin` in CWD, it falls back to the C-baked array;
+when it finds one, it loads from the file.  Either way, ham
+operators downstream get the same data because Thetis ships the
+same data both ways.
+
+**Implication:** there's no shippable variant of `zetaHat.bin` to
+toggle between in stock WDSP.  Modes 3 / 4 in our NR-mode picker
+already use this gain table via `gain_method=2` / `gain_method=3`.
+Don't waste cycles building a "use Thetis trained table" toggle —
+nothing would change.
+
+(The file COULD be regenerated offline by replicating NR0V's
+training pipeline, but that's a research project, not a feature.)
+
+**B. Line-synchronous blanking (LSB) — KA7OEI-style.**
+
+Operator-attached doc 2026-05-09 covered software LSB: PLL-locked
+time-domain blanker that targets mains-synchronous impulsive noise
+(SCR dimmers, switching supplies) at 100/120 Hz.  Linrad's the
+canonical reference implementation.
+
+Status: parked, NOT a separate feature.
+
+Reasons:
+1. Targets a noise type (mains-locked impulses) that the operator
+   doesn't currently report as a top issue.  N8SDR's worst case
+   is the nearby AM broadcaster's 5th harmonic on 7.250 MHz — an
+   RF interferer, not mains-locked, which LSB does nothing for.
+2. WDSP NB at "Heavy" handles impulsive noise reasonably for
+   typical operator situations.  No tester has yet reported "WDSP
+   NB doesn't kill my dimmer buzz."
+3. The IQ-domain captured-profile rebuild (§14.6) is a strict
+   superset: capture + replay any periodic spectral pattern,
+   mains-locked or otherwise.  An LSB-style PLL variant could
+   layer on top of §14.6 ("sync profile to mains") if a real
+   need surfaces, but standalone is duplicative.
+
+**If a tester reports unmissable mains-locked impulses that WDSP
+NB Heavy + IQ-domain captured-profile both fail to suppress**, then
+revisit.  Implementation outline at that point:
+
+* PLL-track the dominant 100/120 Hz pulse train in pre-WDSP IQ
+* Compute predicted next-pulse timestamp at sample-clock resolution
+* Time-domain gate that zeroes ~50-100 µs around each predicted
+  pulse
+* Avoids the "static profile vs dynamic AGC" mismatch that killed
+  cyclostationary spectral subtraction (§9.5) — different
+  domain, different failure modes
+* CPU: cheap (a few hundred µs per second of audio)
+* UX: "Off / Light / Heavy" picker on DSP+Audio, similar to NB
+
+**C. Modify-WDSP-C-source path for "captured noise as LMS
+reference" — REJECTED (per the 2026-05-09 Gemini-doc analysis).**
+
+The Gemini summary the operator forwarded suggested editing
+`Thetis/DSP.cs`, `Thetis/WDSP.cs`, AND the WDSP C source itself
+to add a "noise-only reference buffer" input to the LMS adaptive
+filter.  This path is explicitly out of scope for Lyra:
+
+* Maintaining a Lyra-flavored WDSP fork = ongoing burden every
+  time NR0V ships a new WDSP version
+* Loses the bundle-the-stock-DLL property of v0.0.9.6 (which we
+  picked specifically to avoid compile-chain complexity in
+  installs)
+* §14.6 IQ-domain pre-WDSP approach achieves the same end-result
+  without forking: tap IQ before `_wdsp_rx.process(iq)`, apply
+  spectral subtraction in IQ-magnitude domain using the captured
+  profile, hand cleaned IQ to WDSP — WDSP sees nothing different
+  about its input.  Same NR effect, zero WDSP-source touches.
+
+The Gemini doc is well-written but its recommended path is the
+expensive one for our architecture.  Do not pursue.
+
 ### 14.7 NR-mode UX overhaul (2026-05-07 evening — IN OPERATOR TESTING)
 
 **Background:** operator-driven UX redesign after extensive A/B
@@ -1654,7 +1812,7 @@ If anyone needs to recover a deleted file by name (e.g. the spectral-subtraction
 
 * **§14.6 Captured-profile IQ-domain rebuild** — capture works, save / load / manage all work, apply step is INERT in WDSP mode.  Future work: rebuild apply path in IQ domain pre-WDSP rather than audio-domain post-WDSP.
 * **§14.10 _open_wdsp_rx audit (partially closed)** — Phase 6.A3 + 6.A4 wired the AGC + FM SQ + ANF + AM SQ gaps the audit found.  Lower-priority gaps (FM Deviation, FM Limiter, FM AF Filter, CTCSS, AM DSBMode, AM Fade, NR3-RNNoise, NR4-SpectralBleach, EMNR Position, ANR Position, Pan, etc.) deferred until operator surfaces specific need.
-* **HL2 audio smoothing regression check** — Phase 9.5 Item 2.  A "less harsh" smoothing change landed during the v0.0.9.6 audio rebuild on 2026-05-07 may have been dropped during a subsequent revert chain.  Worth a `git log -p lyra/dsp/audio_sink.py` review.
+* ~~**HL2 audio smoothing regression check** — Phase 9.5 Item 2.  A "less harsh" smoothing change landed during the v0.0.9.6 audio rebuild on 2026-05-07 may have been dropped during a subsequent revert chain.  Worth a `git log -p lyra/dsp/audio_sink.py` review.~~  **CLOSED 2026-05-09: NO regression.**  The smoothing change in question was Option Z (commit `022d1fd`, half-cosine slewed-silence-fill on EP2 underrun, 2026-05-06 12:47).  It was deliberately reverted (`f29f53d`, 12:56) when the real root cause was found 19 minutes later: HL2 command 0x17 (`config_txbuffer`) was never being sent, so the FPGA's TX-side audio buffer ran at the gateware default 10 ms and underran with Python-side jitter.  The actual fix landed in `c7916bc` (13:15) and lives at `lyra/protocol/stream.py:356` as the `0x2e` register entry (`(0, 0, 12 & 0x1F, 40 & 0x7F)` = 12 ms PTT hang, **40 ms TX latency**), pushed at startup via the standard C&C cycle.  Plus TPDF dither (stream.py:207-260) and S-meter peak-hold smoothing (radio.py:1358 `_SMETER_PEAK_DECAY = 0.85`) are also still in place.  The revert was correct — Option Z would have masked symptoms while c7916bc fixes the cause.  No code action; CLAUDE.md note kept here as the audit trail in case anyone re-reads §14.9 and wonders why the strikethrough.
 * **AGC profile A/B at the operator level** — meter movement is verified (Phase 6.A3 fix), but per-time-constant audible differences (Fast vs Slow vs Long on real speech / CW) need operator confirmation when band conditions improve.
 
 ### 14.10 AM/FM/DSB right-channel-silent bug — FIXED (2026-05-07 night)
@@ -1750,6 +1908,110 @@ more.  Future audit: diff the `SetRXA*` calls in our
 
 Track in `docs/architecture/measurements_and_cleanup.md` as a
 phase before TX work starts.
+
+---
+
+## 15. Documentation backlog from v0.0.9.6.1 audit (2026-05-09)
+
+Two-agent audit during the v0.0.9.6.1 release prep flagged these
+items.  High-priority operator-facing fixes landed in the patch
+itself (NR right-click menu name fix, AGC profile cleanup of stale
+"Long" entry, ANF profile name correction in troubleshooting.md,
+captured-profile WDSP-mode INERT caveat, AGC Auto profile docs
+correction).  The items below are non-blocking and parked for a
+future session.
+
+### 15.1 — Internal architecture doc cleanup
+
+* **`CLAUDE.md` line 107** — `**Current version**: 0.0.7 ("Polish
+  Pass")` is stale.  The actual `__version__` in
+  `lyra/__init__.py` has tracked through 0.0.7 → 0.0.8 → 0.0.9 →
+  0.0.9.6 and (when this doc TODO is acted on) onward.  Either
+  remove the inline version line entirely (the version-numbering
+  history at the top of the doc already covers it) or update each
+  release.  Removing is probably cleaner.
+* **`CLAUDE.md` §14.2 "Wired" / "Inert" lists** — the wired list
+  uses pre-§14.7 NR1/NR2 backend wording ("EMNR for nr1+nr2
+  backend, ANR for lms backend").  Should be rewritten to reflect
+  the Mode 1-4 + AEPF + NPE picker on the DSP+Audio panel.  The
+  inert list still names features that are now wired: manual
+  notches (done per §14.4 #3), NB UI (done per §14.4 #2), BIN
+  (done per §14.4 #4), APF (done per §14.4 #4 — Leveler is the
+  one that was deleted, not parked).  Captured-profile UX wording
+  is mostly accurate but predates §14.6's IQ-domain rebuild plan.
+* **`CLAUDE.md` "Last updated" trailer** — frozen at 2026-05-07
+  late night.  Should be refreshed on the next major touch
+  (probably during v0.1 RX2 work) to call out the 2026-05-08
+  cleanup-arc completion (§14.9 r9 tag) and the 2026-05-09
+  v0.0.9.6.1 patch surface (Settings dialog hardening, panadapter
+  wheel-tune polish, peak-hold combo + decay + clear, waterfall
+  collapse, per-band waterfall, spectrum trace fill, dead-widget
+  guards).
+
+### 15.2 — RX2 plan leveler references (`docs/architecture/v0.1_rx2_consensus_plan.md`)
+
+Multiple lines (422, 426, 753-757, 789, 804, 1091) still reference
+`leveler` as part of the RX/TX audio chain or as a tap point for
+the Lit-Arc `MODE_COMP` indicator.  Audio Leveler was DELETED in
+the v0.0.9.6 cleanup arc (`lyra/dsp/leveler.py`, 355 lines, see
+§14.9).  Action when v0.1 work begins:
+
+1. Update RX/TX chain diagrams to drop the `→ leveler` step (or
+   replace with explicit `Vol → APF → sink` to match current
+   reality).
+2. Re-think `MODE_COMP` signal source — `radio._leveler._env_db`
+   no longer exists.  Options: (a) read AGC gain magnitude from
+   `radio.agc_action_db` as a proxy for compression; (b) tap APF
+   peak gain when active; (c) port WDSP `compress.c` for v0.2 TX
+   first then re-use for RX MODE_COMP.
+3. TX chain table row (line 1091) `| leveler | lyra/dsp/leveler.py
+   (existing RX leveler reused) | ...` — needs either re-port
+   from WDSP `compress.c` or alternate strategy.
+
+### 15.3 — Settings dialog connection-tracking refactor closure
+
+`v0.1_rx2_consensus_plan.md` §7.x parks the dead-widget refactor.
+The v0.0.9.6.1 sweep landed the partial fix (`_safe_mirror`,
+`_swallow_dead_widget`, three-paragraph intro split).  Section
+should note that the noise-suppression layer is in but the
+DEEPER fix (actual disconnect-on-close) is still parked, with a
+pointer to the present helpers as the "current state of the
+art."
+
+### 15.4 — Help-doc minor polish (CLOSED in v0.0.9.6.1)
+
+All three items closed during the v0.0.9.6.1 doc audit:
+
+* **Live-preview during zoom slider drag** — added a paragraph to
+  `docs/help/spectrum.md` "Update rates and zoom" section noting
+  that Spec / WF sliders commit ~10 times per second while held,
+  not just on release.
+* **`docs/help/bin.md` audio-chain diagram** — redrawn to show the
+  WDSP-mode reality (engine handles decim → notches → NR → ANF →
+  AGC → APF → bandpass → demod internally; Python layer does
+  mute → Volume → BIN → sink).  No more `tanh` stage (that was
+  legacy pure-Python).
+* **Author attribution** — reconciled to match `CONTRIBUTORS.md`
+  authoritative list:
+    * `introduction.md` — N8SDR is project lead and sole developer
+      through v0.0.9.x; N9BC joined as co-contributor during
+      v0.0.9.1 testing; **joint development begins at v0.1**.
+    * `support.md` — "primarily built by N8SDR, with N9BC joining
+      as co-contributor" (was "built by one person").
+    * `license.md` — already had both names in copyright; left
+      as-is.
+
+### 15.5 — `_AGC_PROFILES` Long re-add (code, not doc)
+
+The `"long"` AGC profile is fully wired in `radio.py` (release
+time 0.040 s, hang_blocks 46, WDSP mode mapping `"long" → "LONG"`)
+but `panels.py:3835 _AGC_PROFILES = ("off", "fast", "med", "slow",
+"auto", "custom")` doesn't include it, so operators can't pick it
+via the right-click menu.  The v0.0.9.6.1 doc fix removed Long
+from operator-facing docs to match what the UI offers.  If a
+future build wants Long back in the menu, it's a one-line
+addition to `_AGC_PROFILES` plus restoring the entries to
+`agc.md`, `index.md`, and `troubleshooting.md`.
 
 ---
 

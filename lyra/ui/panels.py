@@ -7,7 +7,7 @@ relocating panels in the main layout is a one-liner in app.py.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout,
@@ -729,23 +729,37 @@ class ViewPanel(GlassPanel):
             "this slider freely rides between them. Either control\n"
             "drives the same Radio.zoom — Ctrl + mouse-wheel on the\n"
             "spectrum still uses preset steps.")
-        # Same press/release pattern as the FPS slider — committing
-        # zoom on every pixel of drag was DESTROYING the waterfall
-        # display. WaterfallWidget reallocates its scroll buffer to
-        # all-zero whenever the bin count changes, and zoom changes
-        # the bin count (keep = fft_size/zoom). Per-pixel commits =
-        # hundreds of full waterfall buffer wipes during a drag.
-        # Now: commit only on release (or via debounce for click /
-        # arrow-key changes).
+        # Original press/release pattern from CLAUDE.md §9.7 era:
+        # committing zoom on every pixel of drag was DESTROYING the
+        # waterfall display.  WaterfallWidget reallocates its scroll
+        # buffer to all-zero whenever the bin count changes, and zoom
+        # changes the bin count (keep = fft_size/zoom).  Per-pixel
+        # commits = hundreds of full buffer wipes during a drag.
+        #
+        # Live-preview (operator request 2026-05-09):
+        # Add a SECOND timer that fires REPEATEDLY at ~100 ms during
+        # drag.  Each tick commits the current zoom value, giving
+        # the operator visible response while dragging.  The waterfall
+        # gets ~10 buffer wipes per second instead of hundreds — a
+        # tractable load that the worker absorbs cleanly.
+        # On release, the live timer stops + a final commit fires
+        # immediately (matches FPS slider).
         self._zoom_dragging = False
-        # _QTimer is used by both the zoom and FPS sliders below.
-        # Imported here (the earlier of the two construction sites)
-        # so both can reference it.
         from PySide6.QtCore import QTimer as _QTimer
+        # Click-jump / keyboard / programmatic debounce — single-shot,
+        # commits 75 ms after the last value change.  Unchanged.
         self._zoom_debounce = _QTimer(self)
         self._zoom_debounce.setSingleShot(True)
         self._zoom_debounce.setInterval(75)
         self._zoom_debounce.timeout.connect(self._commit_zoom_value)
+        # Drag-time live-preview timer — repeating, 100 ms.  Started
+        # on press, stopped on release.  Each tick commits the
+        # current value so the spectrum + waterfall update during
+        # the drag rather than waiting for release.
+        self._zoom_drag_timer = _QTimer(self)
+        self._zoom_drag_timer.setSingleShot(False)
+        self._zoom_drag_timer.setInterval(100)
+        self._zoom_drag_timer.timeout.connect(self._commit_zoom_during_drag)
         self.zoom_slider.sliderPressed.connect(self._on_zoom_slider_press)
         self.zoom_slider.sliderReleased.connect(self._on_zoom_slider_release)
         self.zoom_slider.valueChanged.connect(self._on_zoom_slider)
@@ -792,20 +806,182 @@ class ViewPanel(GlassPanel):
         self.scroll_step_combo.currentIndexChanged.connect(
             self._on_scroll_step_pick)
         zoom_grid.addWidget(self.scroll_step_combo, 1, 1)
-        # Bottom row leaves cols 2..3 empty so the Step combo sits
-        # directly under the Zoom combo without stretching.
-        # Two-way sync so external changes (CAT command, autoload)
-        # land in the combo too.
+
+        # Exact / Round 100 Hz toggle — operator request from tester
+        # Brent (2026-05-09).  When ON, panadapter freq-set actions
+        # (wheel-tune, click-tune, drag-pan, peak-snap) round the
+        # result to the nearest 100 Hz half-up.  Independent of the
+        # Panafall Step setting — the step controls per-tick
+        # increment, this controls whether the FINAL freq lands on a
+        # 100 Hz grid.  Useful when band conditions or spotting
+        # conventions want "round" freqs (7.155.300 not 7.155.232).
+        # Default OFF (Exact) — preserves pre-toggle behavior.
+        self.round_toggle = QPushButton("Exact")
+        self.round_toggle.setCheckable(True)
+        self.round_toggle.setChecked(radio.panadapter_round_to_100hz)
+        # Width fixed so the toggle text swap doesn't jitter the
+        # layout when the operator clicks.  90 px matches the
+        # scroll_step_combo for visual symmetry.
+        self.round_toggle.setFixedWidth(90)
+        self.round_toggle.setToolTip(
+            "Panadapter freq-set quantization.\n\n"
+            "EXACT (off): wheel-tune, click-tune, drag-pan, and\n"
+            "Shift+click peak-snap set the VFO to the exact freq\n"
+            "derived from the gesture (e.g. 7.155.232 MHz).\n\n"
+            "100 Hz (on): the result freq rounds to the nearest\n"
+            "100 Hz grid using half-up rounding:\n"
+            "   7.155.232 → 7.155.200  (32 < 50, down)\n"
+            "   7.155.251 → 7.155.300  (51 ≥ 50, up)\n"
+            "   7.155.250 → 7.155.300  (exact .50, up)\n\n"
+            "Independent of the Panafall Step combo — this controls\n"
+            "the FINAL freq quantization, the step combo controls\n"
+            "the per-tick increment.  First wheel tick after\n"
+            "enabling 100 Hz snaps to grid; subsequent ticks step\n"
+            "cleanly by the chosen step.\n\n"
+            "Direct freq entry, memory recall, band buttons, and CAT\n"
+            "writes are NOT affected — exact-precision tuning paths\n"
+            "stay exact regardless of this toggle.")
+        # Update the visible text whenever the toggle flips so the
+        # button itself shows what mode it's in (saves a tooltip
+        # hover for the most common question "is it on?").
+        self._update_round_toggle_text(radio.panadapter_round_to_100hz)
+        self.round_toggle.toggled.connect(self._on_round_toggle)
+        zoom_grid.addWidget(self.round_toggle, 1, 2)
+
+        # Two-way sync so external changes (autoload, future CAT
+        # command, etc.) land in the row 1 controls too.
         radio.panadapter_scroll_step_changed.connect(
             self._sync_scroll_step_combo)
+        radio.panadapter_round_to_100hz_changed.connect(
+            self._on_round_toggle_signal)
 
-        h.addLayout(zoom_grid)
+        # ── Row 2: Peak Hold timer + Decay preset + Clear button ─────
+        # Tester request 2026-05-09 (Brent).  Operator-tunable hold
+        # timer freezes panadapter peak markers for N seconds before
+        # the existing decay slope takes over.  Plus a 3-preset Decay
+        # combo (Fast / Med / Slow) for quick decay-rate switching
+        # without diving into Settings → Visuals (where the slider
+        # still lives for advanced control).
+        #
+        # Peaks are passband-only (existing scope) — the hold timer
+        # doesn't change WHAT bins are tracked, only how long their
+        # captured peaks persist before fading.
+        zoom_grid.addWidget(QLabel("Peak Hold"), 2, 0)
 
-        # Spectrum rate — compact slider only; live value is in the
-        # tooltip on hover. Operator wanted a thin panel with no
-        # redundant numeric readouts.
-        h.addSpacing(10)
-        h.addWidget(QLabel("Spec"))
+        self.peak_hold_combo = QComboBox()
+        # Preset values mapped to combo entries.  Sentinel values:
+        #   -2 = Live (no accumulation; track current spectrum)
+        #   -1 = Hold (Infinite; never decay, manual clear)
+        #    0 = Off  (peak markers hidden)
+        for secs, label in (
+            (0.0,  "Off"),
+            (-2.0, "Live"),
+            (1.0,  "1 sec"),
+            (2.0,  "2 sec"),
+            (5.0,  "5 sec"),
+            (10.0, "10 sec"),
+            (30.0, "30 sec"),
+            (-1.0, "Hold"),
+        ):
+            self.peak_hold_combo.addItem(label, float(secs))
+        self.peak_hold_combo.setFixedWidth(80)
+        self._sync_peak_hold_combo(radio.peak_hold_secs)
+        self.peak_hold_combo.setToolTip(
+            "Peak markers behavior on the panadapter.\n\n"
+            "Off    — peak markers hidden\n"
+            "Live   — markers track the current spectrum live;\n"
+            "         renders in your chosen style (line / dots /\n"
+            "         triangles from Settings → Visuals).  No\n"
+            "         freeze, no fade — just a ride-along overlay\n"
+            "         highlighting the live trace.\n"
+            "1-30 s — peak freezes for that long then fades at\n"
+            "         the decay rate to the right\n"
+            "Hold   — peak never fades; click Clear to reset\n\n"
+            "Per-bin within the RX passband only — the bins outside\n"
+            "your tuned filter aren't tracked.  When in Hold mode\n"
+            "use the Clear button (right) to reset.\n\n"
+            "Independent of the Decay preset to the right — that\n"
+            "controls how FAST peaks fade once the hold expires.\n"
+            "(Decay is irrelevant in Live and Hold modes.)")
+        self.peak_hold_combo.currentIndexChanged.connect(
+            self._on_peak_hold_pick)
+        zoom_grid.addWidget(self.peak_hold_combo, 2, 1)
+
+        # Decay preset combo + Clear button share col 2 via a small
+        # HBox so both fit without stretching the grid.
+        from PySide6.QtWidgets import QHBoxLayout as _QHBox
+        decay_clear_row = _QHBox()
+        decay_clear_row.setContentsMargins(0, 0, 0, 0)
+        decay_clear_row.setSpacing(6)
+        decay_clear_row.addWidget(QLabel("Decay"))
+
+        self.peak_decay_combo = QComboBox()
+        # Operator-tuned defaults (Brent, 2026-05-09): fade times for
+        # a typical 60 dB peak.  Decay is irrelevant in Off / Live /
+        # Hold modes — only takes effect after a timed-Hold window
+        # expires.
+        for key, label in (
+            ("fast", "Fast"),
+            ("med",  "Med"),
+            ("slow", "Slow"),
+        ):
+            self.peak_decay_combo.addItem(label, key)
+        self.peak_decay_combo.setFixedWidth(70)
+        self._sync_peak_decay_combo(radio.peak_hold_decay_preset)
+        self.peak_decay_combo.setToolTip(
+            "How fast peak markers fade once the Hold window expires.\n\n"
+            "Fast — peak fades in ~2 sec  (30 dB/s)\n"
+            "Med  — peak fades in ~5 sec  (12 dB/s, default)\n"
+            "Slow — peak fades in ~10 sec  (6 dB/s)\n\n"
+            "Decay only takes effect in timed Hold modes (1-30 sec).\n"
+            "In Live / Off / Hold modes there's nothing to decay.\n\n"
+            "For a non-preset value, drag the decay slider in\n"
+            "Settings → Visuals → Signal range (range 1..120 dB/s).")
+        self.peak_decay_combo.currentIndexChanged.connect(
+            self._on_peak_decay_pick)
+        decay_clear_row.addWidget(self.peak_decay_combo)
+        decay_clear_row.addStretch(1)
+
+        self.peak_clear_btn = QPushButton("Clear")
+        # 75 px (was 60) — operator-reported 2026-05-09 the leading
+        # "C" was clipped on Windows because 60 px was tighter than
+        # the rendered "Clear" width with the default font.  Same
+        # fix as the Settings dialog Custom-color button.
+        self.peak_clear_btn.setFixedWidth(75)
+        self.peak_clear_btn.setToolTip(
+            "Clear all held peak markers so the buffer re-seeds from\n"
+            "the live spectrum on the next tick.\n\n"
+            "Mainly useful in Hold mode (peaks would otherwise stay\n"
+            "frozen forever).  In timed-hold modes the existing\n"
+            "decay handles it eventually.")
+        self.peak_clear_btn.clicked.connect(
+            self.radio.clear_peak_holds)
+        decay_clear_row.addWidget(self.peak_clear_btn)
+
+        # Constrain decay_clear_row to col 2 only (no column-span),
+        # leaving cols 3+ free for Spec / WF on rows 1 + 2.  Layout
+        # restructure 2026-05-09: Spec / WF moved from a separate
+        # right-side HBox into the grid at the same rows as
+        # Panafall Step + Peak Hold so the panel height isn't dominated
+        # by empty black space on the right of rows 1-2.
+        zoom_grid.addLayout(decay_clear_row, 2, 2)
+
+        # External-change sync (autoload, future CAT, Settings dialog
+        # snapping the underlying decay slider).
+        radio.peak_hold_secs_changed.connect(
+            lambda v: self._sync_peak_hold_combo(v))
+        radio.peak_hold_decay_preset_changed.connect(
+            lambda k: self._sync_peak_decay_combo(k))
+
+        # ── Spec slider (row 1, cols 4-5) — was a separate
+        # right-side HBox section; moved into the grid 2026-05-09 to
+        # eliminate the empty black columns on rows 1-2.  Spacer
+        # column 3 (16 px) gives Clear ↔ Spec/WF a visible gap so
+        # the controls don't bunch up — operator feedback after the
+        # initial Option B layout that the Clear button and the
+        # Spec/WF labels were touching.
+        zoom_grid.setColumnMinimumWidth(3, 16)
+        zoom_grid.addWidget(QLabel("Spec"), 1, 4)
         self.fps_slider = SteppedSlider(Qt.Horizontal)
         self.fps_slider.setObjectName("fps_slider")
         # Step-list slider — each detent is a useful FPS value the
@@ -815,7 +991,10 @@ class ViewPanel(GlassPanel):
         # is logarithmic-ish. See SPECTRUM_FPS_STEPS at module top.
         self.fps_slider.setRange(0, len(SPECTRUM_FPS_STEPS) - 1)
         self.fps_slider.setValue(fps_to_slider_position(radio.spectrum_fps))
-        self.fps_slider.setFixedWidth(130)
+        # 140 px (was 130) so the Spec slider matches the WF slider
+        # below — they sit in the same grid column and the per-row
+        # left edges should align cleanly (operator-reported 2026-05-09).
+        self.fps_slider.setFixedWidth(140)
         # Visible ticks + 1-per-step page/single moves so the operator
         # both SEES and FEELS the discrete detents. Without these, the
         # slider snaps to integer positions but visually looks smooth.
@@ -842,7 +1021,9 @@ class ViewPanel(GlassPanel):
         self.fps_slider.sliderPressed.connect(self._on_fps_slider_press)
         self.fps_slider.sliderReleased.connect(self._on_fps_slider_release)
         self.fps_slider.valueChanged.connect(self._on_fps_slider_drag)
-        h.addWidget(self.fps_slider)
+        # Spec slider parked in the grid at row 1 col 5 (next to
+        # Panafall Step controls).  Col 3 is an empty 16 px spacer.
+        zoom_grid.addWidget(self.fps_slider, 1, 5)
 
         # Waterfall rate — step-list slider covering multiplier (fast)
         # and divider (slow) in one control. See WATERFALL_SPEED_STEPS
@@ -850,8 +1031,7 @@ class ViewPanel(GlassPanel):
         # Index 8 = neutral (1 row per FFT). Fast end goes up to 30×
         # multiplier (linearly interpolated rows from the previous FFT
         # — no extra CPU cost, just visual scroll speed).
-        h.addSpacing(10)
-        h.addWidget(QLabel("WF"))
+        zoom_grid.addWidget(QLabel("WF"), 2, 4)
         self.wf_slider = SteppedSlider(Qt.Horizontal)
         self.wf_slider.setObjectName("wf_slider")
         self.wf_slider.setRange(0, len(WATERFALL_SPEED_STEPS) - 1)
@@ -871,8 +1051,15 @@ class ViewPanel(GlassPanel):
         self._wf_debounce.setInterval(75)
         self._wf_debounce.timeout.connect(self._commit_wf_value)
         self.wf_slider.valueChanged.connect(self._on_wf_slider_drag)
-        h.addWidget(self.wf_slider)
+        # WF slider parked in the grid at row 2 col 5 (next to
+        # Peak Hold controls).  Col 3 is the 16 px spacer.
+        zoom_grid.addWidget(self.wf_slider, 2, 5)
 
+        # Layout container: zoom_grid contains everything; h is
+        # the outer HBox that lets the grid stretch / addStretch
+        # eats the remainder so the grid doesn't expand to fill
+        # the full panel width.
+        h.addLayout(zoom_grid)
         h.addStretch(1)
         self.content_layout().addLayout(h)
 
@@ -908,6 +1095,77 @@ class ViewPanel(GlassPanel):
             return
         step = int(self.scroll_step_combo.itemData(index))
         self.radio.set_panadapter_scroll_step_hz(step)
+
+    def _update_round_toggle_text(self, on: bool) -> None:
+        """Sync the toggle button's visible text to its checked state.
+        OFF = 'Exact', ON = '100 Hz' — matches the operator's wording
+        from the original feature request."""
+        if not hasattr(self, "round_toggle"):
+            return
+        self.round_toggle.setText("100 Hz" if on else "Exact")
+
+    def _on_round_toggle(self, checked: bool) -> None:
+        """Operator toggled the Exact / Round 100 Hz button."""
+        self._update_round_toggle_text(bool(checked))
+        self.radio.set_panadapter_round_to_100hz(bool(checked))
+
+    def _on_round_toggle_signal(self, on: bool) -> None:
+        """External change to the round-to-100Hz flag (autoload at
+        startup, future CAT command, etc.) — mirror into the toggle
+        without re-firing the toggled signal."""
+        if not hasattr(self, "round_toggle"):
+            return
+        if self.round_toggle.isChecked() != bool(on):
+            self.round_toggle.blockSignals(True)
+            self.round_toggle.setChecked(bool(on))
+            self.round_toggle.blockSignals(False)
+        self._update_round_toggle_text(bool(on))
+
+    # ── Peak hold + decay combo handlers ─────────────────────────────
+
+    def _sync_peak_hold_combo(self, secs: float) -> None:
+        """Mirror Radio's peak_hold_secs into the combo — match the
+        preset whose stored value equals the incoming float (within
+        tolerance for float drift)."""
+        if not hasattr(self, "peak_hold_combo"):
+            return
+        target = float(secs)
+        for i in range(self.peak_hold_combo.count()):
+            data = float(self.peak_hold_combo.itemData(i))
+            if abs(data - target) < 1e-3:
+                if self.peak_hold_combo.currentIndex() != i:
+                    self.peak_hold_combo.blockSignals(True)
+                    self.peak_hold_combo.setCurrentIndex(i)
+                    self.peak_hold_combo.blockSignals(False)
+                return
+
+    def _on_peak_hold_pick(self, index: int) -> None:
+        """Operator picked a new hold-time from the combo."""
+        if index < 0:
+            return
+        secs = float(self.peak_hold_combo.itemData(index))
+        self.radio.set_peak_hold_secs(secs)
+
+    def _sync_peak_decay_combo(self, preset_key: str) -> None:
+        """Mirror Radio's peak_hold_decay_preset into the combo."""
+        if not hasattr(self, "peak_decay_combo"):
+            return
+        key = str(preset_key or "").lower()
+        for i in range(self.peak_decay_combo.count()):
+            data = str(self.peak_decay_combo.itemData(i)).lower()
+            if data == key:
+                if self.peak_decay_combo.currentIndex() != i:
+                    self.peak_decay_combo.blockSignals(True)
+                    self.peak_decay_combo.setCurrentIndex(i)
+                    self.peak_decay_combo.blockSignals(False)
+                return
+
+    def _on_peak_decay_pick(self, index: int) -> None:
+        """Operator picked a new decay preset from the combo."""
+        if index < 0:
+            return
+        key = str(self.peak_decay_combo.itemData(index))
+        self.radio.set_peak_hold_decay_preset(key)
 
     # Backward-compat shims. The waterfall slider encoding now lives
     # at module scope (WATERFALL_SPEED_STEPS + wf_*_slider_position
@@ -958,22 +1216,37 @@ class ViewPanel(GlassPanel):
         self.radio.set_zoom(float(self.zoom_combo.currentData()))
 
     def _on_zoom_slider_press(self):
-        """Mouse-down on zoom slider — drag begins."""
+        """Mouse-down on zoom slider — drag begins.  Start the
+        100 ms live-preview tick timer so the operator gets visible
+        response to the drag (was: silent until release)."""
         self._zoom_dragging = True
         self._zoom_debounce.stop()
+        self._zoom_drag_timer.start()
 
     def _on_zoom_slider_release(self):
-        """Mouse-up — drag complete. Commit immediately."""
+        """Mouse-up — drag complete. Stop the live-preview timer +
+        commit the final value immediately (no debounce wait)."""
         self._zoom_dragging = False
+        self._zoom_drag_timer.stop()
         self._zoom_debounce.stop()
+        self._commit_zoom_value()
+
+    def _commit_zoom_during_drag(self):
+        """Repeating-timer slot — fires every 100 ms while the
+        operator is actively dragging the zoom slider.  Commits the
+        current slider value so the spectrum + waterfall update
+        live during the drag.  No-op once the operator releases
+        (timer is stopped in _on_zoom_slider_release)."""
+        if not self._zoom_dragging:
+            return
         self._commit_zoom_value()
 
     def _on_zoom_slider(self, v: int):
         """valueChanged — drag-aware. While the operator is actively
-        dragging, only the live label updates; radio is left alone so
-        the waterfall buffer doesn't get wiped on every pixel of
-        motion. Click-jumps and keyboard changes go through the 75 ms
-        debounce path."""
+        dragging, only the live label updates here; the
+        _zoom_drag_timer above handles periodic commits at 100 ms.
+        Click-jumps and keyboard changes (no press event) go through
+        the 75 ms single-shot debounce path."""
         zoom = max(1.0, min(16.0, v / 10.0))
         self.zoom_label.setText(f"{zoom:.1f}x")
         if self._zoom_dragging:
@@ -4375,6 +4648,12 @@ class SpectrumPanel(GlassPanel):
         self.widget.set_peak_markers_show_db(
             self.radio.peak_markers_show_db)
         self.widget.set_peak_markers_color(self.radio.peak_markers_color)
+        # Peak-hold timer (Display-panel combo) + Clear button.
+        self.widget.set_peak_hold_secs(self.radio.peak_hold_secs)
+        self.radio.peak_hold_secs_changed.connect(
+            self.widget.set_peak_hold_secs)
+        self.radio.peak_holds_cleared.connect(
+            self.widget.clear_peak_holds)
         self.radio.peak_markers_enabled_changed.connect(
             self.widget.set_peak_markers_enabled)
         self.radio.peak_markers_decay_changed.connect(
@@ -4401,6 +4680,18 @@ class SpectrumPanel(GlassPanel):
         self._gpu_apply_trace_color()
         self.radio.spectrum_trace_color_changed.connect(
             lambda _hex: self._gpu_apply_trace_color())
+        # Spectrum fill (operator request 2026-05-09) — toggle +
+        # color, same pattern as the CPU widget.  fill.frag draws the
+        # gradient under the trace; widget falls back to deriving
+        # from trace color when no explicit fill color is picked.
+        self.widget.set_spectrum_fill_enabled(
+            self.radio.spectrum_fill_enabled)
+        self.widget.set_spectrum_fill_color(
+            self.radio.spectrum_fill_color)
+        self.radio.spectrum_fill_enabled_changed.connect(
+            self.widget.set_spectrum_fill_enabled)
+        self.radio.spectrum_fill_color_changed.connect(
+            self.widget.set_spectrum_fill_color)
 
     def _gpu_on_spectrum_ready(self, spec_db, center_hz, rate):
         # Push tuning info first so any subsequent overlay /
@@ -4502,6 +4793,12 @@ class SpectrumPanel(GlassPanel):
             self.widget.set_peak_markers_enabled)
         radio.peak_markers_decay_changed.connect(
             self.widget.set_peak_markers_decay_dbps)
+        # Peak-hold timer + Clear button — same wiring as the GPU
+        # SpectrumPanel above; both backends honor these signals.
+        self.widget.set_peak_hold_secs(radio.peak_hold_secs)
+        radio.peak_hold_secs_changed.connect(
+            self.widget.set_peak_hold_secs)
+        radio.peak_holds_cleared.connect(self.widget.clear_peak_holds)
         # Spectrum smoothing — display-only EWMA. Seed + subscribe.
         self.widget.set_spectrum_smoothing_enabled(
             radio.spectrum_smoothing_enabled)
@@ -4515,10 +4812,16 @@ class SpectrumPanel(GlassPanel):
         self.widget.landmark_clicked.connect(self._on_landmark_clicked)
         # User color picks — seed widget from Radio, subscribe to updates.
         self.widget.set_spectrum_trace_color(radio.spectrum_trace_color)
+        self.widget.set_spectrum_fill_enabled(radio.spectrum_fill_enabled)
+        self.widget.set_spectrum_fill_color(radio.spectrum_fill_color)
         self.widget.set_segment_color_overrides(radio.segment_colors)
         self.widget.set_noise_floor_color(radio.noise_floor_color)
         radio.spectrum_trace_color_changed.connect(
             self.widget.set_spectrum_trace_color)
+        radio.spectrum_fill_enabled_changed.connect(
+            self.widget.set_spectrum_fill_enabled)
+        radio.spectrum_fill_color_changed.connect(
+            self.widget.set_spectrum_fill_color)
         radio.segment_colors_changed.connect(
             self.widget.set_segment_color_overrides)
         radio.noise_floor_color_changed.connect(
@@ -4666,7 +4969,9 @@ class SpectrumPanel(GlassPanel):
             # clicked signal at +pitch from the new VFO we subtract
             # pitch from the click freq. CWL mirrored.
             target += -pitch if mode == "CWU" else +pitch
-        self.radio.set_freq_hz(target)
+        # Route through panadapter-aware setter so the operator's
+        # Exact / Round 100 Hz toggle applies (no-op when off).
+        self.radio.set_freq_from_panadapter(target)
 
     def _on_spot_clicked(self, freq_hz):
         # User clicked on a spot marker — tune + emit TCI spot_activated.
@@ -5612,9 +5917,32 @@ class TciPanel(GlassPanel):
 
 
 class WaterfallPanel(GlassPanel):
+    """Waterfall panel with operator-toggleable collapse.
+
+    Tester request from 2026-05-09: a small triangle button in the
+    panel header (next to the help `?` badge) that collapses the
+    waterfall to just its header strip — operator can free up
+    vertical space for the spectrum view without losing access to
+    re-expand.  Tick the triangle again to restore.
+
+    Signal contract: ``collapsed_changed(bool)`` fires whenever the
+    operator toggles the button.  MainWindow listens and adjusts the
+    central QSplitter sizes accordingly (we don't reach across into
+    the splitter from here — keeps the panel layout-host-agnostic).
+    """
+
+    # Emitted when the collapse toggle flips.  bool is the new
+    # collapsed state (True = collapsed, False = expanded).  Wired
+    # in MainWindow to drive the central QSplitter resize.
+    collapsed_changed = Signal(bool)
+
     def __init__(self, radio: Radio, parent=None):
         super().__init__("WATERFALL", parent, help_topic="spectrum")
         self.radio = radio
+        # Collapse state — restored from QSettings in
+        # MainWindow._restore_waterfall_collapse_state() after the
+        # splitter is also restored.  Default expanded.
+        self._collapsed = False
 
         # Branch on graphics backend (mirror of SpectrumPanel — see
         # that class's __init__ for the full rationale).
@@ -5623,6 +5951,10 @@ class WaterfallPanel(GlassPanel):
             self._setup_gpu_waterfall()
         else:
             self._setup_qpainter_waterfall()
+
+        # Build the collapse toggle button AFTER the inner widget is
+        # created so we can hide/show it via the toggle.
+        self._build_collapse_button()
 
     # ── GPU waterfall (BACKEND_GPU_OPENGL) ─────────────────────────
     def _setup_gpu_waterfall(self) -> None:
@@ -5722,7 +6054,9 @@ class WaterfallPanel(GlassPanel):
             # clicked signal at +pitch from the new VFO we subtract
             # pitch from the click freq. CWL mirrored.
             target += -pitch if mode == "CWU" else +pitch
-        self.radio.set_freq_hz(target)
+        # Route through panadapter-aware setter so the operator's
+        # Exact / Round 100 Hz toggle applies (no-op when off).
+        self.radio.set_freq_from_panadapter(target)
 
     def _on_right_click(self, freq_hz, shift, global_pos):
         # Mirrors SpectrumPanel — both gestures gated on notch_enabled
@@ -5746,3 +6080,139 @@ class WaterfallPanel(GlassPanel):
 
     def _on_notch_q_drag(self, freq_hz, new_q):
         self.radio.set_notch_q_at(freq_hz, new_q)
+
+    # ── Collapse toggle (tester request 2026-05-09) ────────────────
+    # Small triangle button in the panel header that hides the
+    # waterfall content area to free vertical space for the spectrum
+    # view above.  Persists via QSettings.
+
+    # Glyphs match the rest of Lyra's tone — single-character
+    # triangles for the toggle.  Down-pointing = "click to collapse
+    # downward (hide me)" / right-pointing = "click to expand
+    # rightward (show me)".  Same convention as Qt's tree widgets
+    # and most file managers.
+    _COLLAPSE_GLYPH_EXPANDED  = "▾"   # ▾
+    _COLLAPSE_GLYPH_COLLAPSED = "▸"   # ▸
+
+    def _build_collapse_button(self) -> None:
+        """Create the small triangle toggle in the panel header.
+        Anchored to the right edge just LEFT of the help `?` badge
+        so it reads as a related header control."""
+        self._collapse_btn = QPushButton(self._COLLAPSE_GLYPH_EXPANDED, self)
+        self._collapse_btn.setFixedSize(18, 18)
+        self._collapse_btn.setCursor(Qt.PointingHandCursor)
+        self._collapse_btn.setToolTip(
+            "Collapse / expand the waterfall.\n\n"
+            "Click to hide the waterfall content area and free\n"
+            "vertical space for the spectrum view above.  Tick\n"
+            "again to bring the waterfall back at its previous\n"
+            "size.\n\n"
+            "State is remembered between sessions.")
+        # Match the help-badge's visual style so the two header
+        # controls feel like a coherent set (same color, same
+        # rounded outline, same hover treatment).
+        self._collapse_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: transparent;"
+            "  color: #00e5ff;"
+            "  border: 1px solid #00e5ff;"
+            "  border-radius: 9px;"
+            "  font-weight: 700;"
+            "  font-size: 11px;"
+            "  padding: 0; margin: 0;"
+            "  text-align: center;"
+            "}"
+            "QPushButton:hover {"
+            "  background: rgba(0, 229, 255, 50);"
+            "  color: #7ff7ff;"
+            "}"
+        )
+        self._collapse_btn.clicked.connect(self._on_collapse_clicked)
+        self._collapse_btn.raise_()
+        self._position_collapse_btn()
+
+    def _position_collapse_btn(self) -> None:
+        """Anchor the collapse triangle to the top-right of the
+        header, sitting just LEFT of the help `?` badge if present.
+        Matches the help button's vertical centering for a clean row
+        of header controls."""
+        btn = getattr(self, "_collapse_btn", None)
+        if btn is None:
+            return
+        margin = 8
+        gap = 4
+        # Help button is 18 px wide + 8 px right margin = 26 px from
+        # the right edge.  Park the collapse button to its left
+        # with a 4 px gap.
+        if self._help_btn is not None:
+            x = max(0, self.width()
+                    - self._help_btn.width() - margin
+                    - btn.width() - gap)
+        else:
+            x = max(0, self.width() - btn.width() - margin)
+        y = max(1, (self.HEADER_HEIGHT - btn.height()) // 2 + 1)
+        btn.move(x, y)
+        btn.raise_()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._position_collapse_btn()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self._position_collapse_btn()
+
+    def _on_collapse_clicked(self) -> None:
+        """Operator clicked the collapse triangle — flip state, hide
+        / show the waterfall content, persist, notify MainWindow."""
+        new_state = not self._collapsed
+        self._set_collapsed(new_state, persist=True)
+
+    def _set_collapsed(self, collapsed: bool, *, persist: bool) -> None:
+        """Apply a collapse state.  Used by both the operator click
+        path and the startup-restore path.  Only persists when
+        ``persist=True`` so the restore-from-QSettings flow doesn't
+        re-write the same value."""
+        collapsed = bool(collapsed)
+        self._collapsed = collapsed
+        # Hide / show the inner waterfall widget.  The panel itself
+        # remains visible so the operator can see the header + the
+        # toggle to re-expand.
+        if hasattr(self, "widget") and self.widget is not None:
+            self.widget.setVisible(not collapsed)
+        # Update the toggle glyph to reflect the NEW state.
+        btn = getattr(self, "_collapse_btn", None)
+        if btn is not None:
+            btn.setText(
+                self._COLLAPSE_GLYPH_COLLAPSED
+                if collapsed else self._COLLAPSE_GLYPH_EXPANDED)
+        # Persist for next session.
+        if persist:
+            try:
+                from PySide6.QtCore import QSettings
+                s = QSettings("N8SDR", "Lyra")
+                s.setValue("waterfall/collapsed", collapsed)
+            except Exception as exc:
+                print(f"[WaterfallPanel] persist collapsed: {exc}")
+        # Tell MainWindow so it can resize the splitter section.
+        self.collapsed_changed.emit(collapsed)
+
+    def is_collapsed(self) -> bool:
+        return bool(self._collapsed)
+
+    def restore_collapse_state(self) -> None:
+        """Load the persisted collapse state from QSettings and
+        apply it.  Called by MainWindow during startup AFTER the
+        splitter sizes have been restored, so we know what
+        "expanded" size to remember on the splitter side."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            collapsed = bool(s.value(
+                "waterfall/collapsed", False, type=bool))
+        except Exception:
+            collapsed = False
+        if collapsed:
+            # Pass persist=False so we don't re-write the same value
+            # back to QSettings during the restore.
+            self._set_collapsed(True, persist=False)

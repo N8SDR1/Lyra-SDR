@@ -32,7 +32,7 @@
 
 - **File → Network / TCI…** — straight to TCI settings (bypasses dock)
 - **File → Hardware…** — N2ADR / USB-BCD setup
-- **File → DSP…** — AGC / NR / NB / EQ
+- **File → DSP…** — AGC / NR / NB / ANF / LMS / SQ / APF
 - **Toolbar TCI indicator** — click to open Network/TCI settings
 
 ## Frequency display (LED readout)
@@ -84,7 +84,7 @@ matches your habit:
 | Panel              | Right-click action                                          |
 |--------------------|--------------------------------------------------------------|
 | AGC cluster (DSP panel) | Pick AGC profile (Off / Fast / Med / Slow / Auto / Custom) |
-| NR button (DSP panel)   | Pick NR profile (Light / Medium / Aggressive / Neural)     |
+| NR button (DSP panel)   | Pick NR Mode (1 / 2 / 3 / 4) + AEPF on/off + NPE method (OSMS / MCRA / etc.) |
 | Meter              | Switch style (Analog / LED)                                  |
 | BAND               | Per-band memory context menu                                 |
 | Spectrum/Waterfall | Notch context menu when NF on; Enable-NF-only menu when NF off |

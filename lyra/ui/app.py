@@ -245,6 +245,25 @@ class MainWindow(QMainWindow):
             self.radio.autoload_panadapter_scroll_step()
         except Exception as exc:
             print(f"[app] panadapter scroll-step autoload error: {exc}")
+        # Panadapter Exact / Round 100 Hz toggle — Display panel
+        # button, persisted under display/panadapter_round_to_100hz.
+        # Default OFF (Exact).  Tester request from Brent (2026-05-09).
+        try:
+            self.radio.autoload_panadapter_round_to_100hz()
+        except Exception as exc:
+            print(f"[app] panadapter round-to-100hz autoload error: {exc}")
+        # Peak-hold timer + decay preset — Display panel combos.
+        # Persisted under display/peak_hold_secs (-1 = Hold/Infinite)
+        # and display/peak_hold_decay_preset ("fast"/"med"/"slow").
+        # Tester request from Brent (2026-05-09).
+        try:
+            self.radio.autoload_peak_hold_secs()
+        except Exception as exc:
+            print(f"[app] peak_hold_secs autoload error: {exc}")
+        try:
+            self.radio.autoload_peak_hold_decay_preset()
+        except Exception as exc:
+            print(f"[app] peak_hold_decay_preset autoload error: {exc}")
         # NCDXF beacon auto-follow — Propagation panel dropdown,
         # persisted under propagation/ncdxf_follow_station.  Empty
         # string means follow is off.
@@ -442,6 +461,16 @@ class MainWindow(QMainWindow):
         # Initial size ratio (overridden by restored state if present)
         self.center_splitter.setSizes([300, 600])
         self.setCentralWidget(self.center_splitter)
+
+        # Waterfall collapse toggle — operator request 2026-05-09.
+        # When the WaterfallPanel emits collapsed_changed(True), squish
+        # its splitter section down to ~the panel header height so the
+        # operator gets that vertical space back for the spectrum view.
+        # When collapsed_changed(False), restore the size we remembered
+        # before collapse.
+        self._waterfall_expanded_h: int = 600
+        self.pnl_waterfall.collapsed_changed.connect(
+            self._on_waterfall_collapsed)
 
         # Create all control docks (no more Connection dock — it's in
         # the toolbar + Settings dialog now).
@@ -1099,6 +1128,43 @@ class MainWindow(QMainWindow):
         # React to Radio state changes so the start button + status label
         # always reflect reality (e.g., TCI toggling the stream).
         self.radio.stream_state_changed.connect(self._on_stream_state_changed)
+
+    def _on_waterfall_collapsed(self, collapsed: bool) -> None:
+        """Handle the WaterfallPanel's collapse toggle by adjusting
+        the central QSplitter so the waterfall section shrinks to
+        just its header height (collapsed) or returns to the size
+        we remembered before collapse (expanded).
+
+        We don't reach into the splitter from inside WaterfallPanel;
+        this keeps the panel layout-host-agnostic and lets a future
+        layout reuse the panel without inheriting the splitter
+        coupling.
+
+        Header-only height is 32 px — empirically just enough to
+        show the panel's title strip + the collapse + help buttons
+        without clipping.  Anything smaller and the title text
+        starts to clip.
+        """
+        HEADER_ONLY_HEIGHT = 32
+        sizes = self.center_splitter.sizes()
+        if len(sizes) < 2:
+            return
+        spec_h, wf_h = int(sizes[0]), int(sizes[1])
+        if collapsed:
+            # Remember the expanded waterfall size so we can restore
+            # it on un-collapse.  Don't trust a stale value if the
+            # operator dragged the splitter manually since last
+            # collapse — always grab fresh.
+            if wf_h > HEADER_ONLY_HEIGHT:
+                self._waterfall_expanded_h = wf_h
+            target_wf = HEADER_ONLY_HEIGHT
+            target_spec = spec_h + (wf_h - target_wf)
+        else:
+            target_wf = max(120, int(self._waterfall_expanded_h))
+            # If the saved size doesn't fit (e.g. operator shrank the
+            # window while collapsed), give it back at least 120 px.
+            target_spec = max(60, spec_h - (target_wf - wf_h))
+        self.center_splitter.setSizes([target_spec, target_wf])
 
     def _on_start_toggled(self, on: bool):
         if on and not self.radio.is_streaming:
@@ -2948,7 +3014,14 @@ class MainWindow(QMainWindow):
                 # saved span is < 30 dB.
                 _wlo, _whi = wf_range
                 if _whi - _wlo >= 30.0:
-                    r.set_waterfall_db_range(_wlo, _whi)
+                    # from_user=False — autoload restores the LAST
+                    # global waterfall range as the fallback for
+                    # bands that have never been customized.  Per-
+                    # band waterfall values (added 2026-05-09) get
+                    # restored later via _apply_band_range when
+                    # recall_band fires for the current band.
+                    r.set_waterfall_db_range(
+                        _wlo, _whi, from_user=False)
             if s.contains("visuals/spectrum_cal_db"):
                 r.set_spectrum_cal_db(float(s.value("visuals/spectrum_cal_db")))
             # NOTE: key bumped to _v2 when the S-meter became
@@ -3056,6 +3129,12 @@ class MainWindow(QMainWindow):
         # User-picked colors
         if s.contains("visuals/trace_color"):
             r.set_spectrum_trace_color(str(s.value("visuals/trace_color")))
+        if s.contains("visuals/spectrum_fill_enabled"):
+            r.set_spectrum_fill_enabled(
+                s.value("visuals/spectrum_fill_enabled", True, type=bool))
+        if s.contains("visuals/spectrum_fill_color"):
+            r.set_spectrum_fill_color(
+                str(s.value("visuals/spectrum_fill_color")))
         if s.contains("visuals/nf_color"):
             r.set_noise_floor_color(str(s.value("visuals/nf_color")))
         if s.contains("visuals/peak_color"):
@@ -3091,6 +3170,16 @@ class MainWindow(QMainWindow):
         split_state = s.value("center_split")
         if isinstance(split_state, QByteArray) and not split_state.isEmpty():
             self.center_splitter.restoreState(split_state)
+        # Now that the splitter sizes are settled, re-apply the
+        # operator's collapse-state preference for the waterfall
+        # (tester request 2026-05-09).  Order matters: restore
+        # splitter FIRST so the panel knows what "expanded" size
+        # to remember; THEN restore collapsed flag, which may
+        # squish the waterfall section back down again immediately.
+        try:
+            self.pnl_waterfall.restore_collapse_state()
+        except Exception as exc:
+            print(f"[app] waterfall collapse-state restore: {exc}")
         # Re-apply the panel-lock state so the operator's preference
         # carries over a restart. Done AFTER restoreState() so the
         # docks exist and have their default features set first.
@@ -3203,6 +3292,10 @@ class MainWindow(QMainWindow):
         s.setValue("visuals/peak_decay_dbps",  r.peak_markers_decay_dbps)
         # User-picked colors
         s.setValue("visuals/trace_color",      r.spectrum_trace_color)
+        s.setValue("visuals/spectrum_fill_enabled",
+                   r.spectrum_fill_enabled)
+        s.setValue("visuals/spectrum_fill_color",
+                   r.spectrum_fill_color)
         s.setValue("visuals/nf_color",         r.noise_floor_color)
         s.setValue("visuals/peak_color",       r.peak_markers_color)
         for kind, hex_str in r.segment_colors.items():

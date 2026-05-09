@@ -81,10 +81,12 @@ is kept current.
 
 ## Who's behind Lyra
 
-Lyra was started by **Rick Langford (N8SDR)** and is now jointly
-developed with **Brent Crier (N9BC)** as of v0.0.9.1.  Both are
-licensed amateur radio operators who actually use the rigs Lyra
-targets.
+Lyra is built by **Rick Langford (N8SDR)** — project lead and
+sole developer through the v0.0.9.x line.  **Brent Crier
+(N9BC)** joined as co-contributor during v0.0.9.1 testing,
+bringing the Hermes Lite 2+ and ANAN G2 perspective; joint
+development begins with the v0.1 RX2 work.  Both are licensed
+amateur radio operators who actually use the rigs Lyra targets.
 
 See `CONTRIBUTORS.md` at the project root for the full contributor
 list.

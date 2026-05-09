@@ -120,12 +120,39 @@ phone sub-band, FT8 frequency for digital, etc.).
 
 ## Mouse wheel on the panadapter
 
-- **Over empty spectrum** → zooms bandwidth (1× / 2× / 4× / 8× /
-  16× preset levels)
+- **Over empty spectrum** → tunes the VFO by the **Panafall Step**
+  set on the Display panel (default 1 kHz; presets 100 Hz / 500 Hz /
+  1 kHz / 5 kHz / 10 kHz / 25 kHz / 100 kHz).  Wheel up = freq up.
+- **Ctrl + wheel over empty spectrum** → zooms bandwidth (escape
+  hatch for the legacy zoom gesture; same 1× / 2× / 4× / 8× / 16×
+  preset levels as the Display panel Zoom combo)
 - **Over a notch rectangle** → adjusts that notch's width (down =
   wider, up = narrower)
 - **Over the LED freq display** → tunes (see "three-tier behavior"
   above)
+
+### Exact / 100 Hz quantization
+
+The toggle button next to the Panafall Step combo controls whether
+panadapter freq-set actions land on a clean grid:
+
+- **Exact** (default): wheel-tune, click-tune, drag-pan, and
+  Shift+click peak-snap set the VFO to the exact freq derived from
+  the gesture (e.g. 7.155.232 MHz).
+- **100 Hz**: the result freq rounds to the nearest 100 Hz grid
+  using half-up rounding:
+    - 7.155.232 → 7.155.200 (32 < 50, down)
+    - 7.155.251 → 7.155.300 (51 ≥ 50, up)
+    - 7.155.250 → 7.155.300 (exact .50, up)
+
+Independent of the Panafall Step combo — Step controls the per-tick
+increment, this controls whether the FINAL freq lands on a 100 Hz
+grid.  First wheel tick after enabling 100 Hz snaps to grid;
+subsequent ticks step cleanly.
+
+Direct freq entry, memory recall, band buttons, and CAT writes are
+NOT affected — exact-precision tuning paths stay exact regardless
+of this toggle.
 
 ## VFO lock / split / RIT / XIT
 

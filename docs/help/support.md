@@ -1,9 +1,10 @@
 # Support Lyra — Buy the developer a coffee ☕
 
 Lyra is **free**, **open-source** (GPL v3 or later — see the
-**License** topic for details), and built by one person — Rick
-Langford, **N8SDR** — in his spare time. There are no ads, no
-telemetry, no subscription tier, no "pro" upsells.
+**License** topic for details), and primarily built by **Rick
+Langford, N8SDR**, in his spare time, with **Brent Crier, N9BC**
+joining as co-contributor during v0.0.9.1 testing.  There are no
+ads, no telemetry, no subscription tier, no "pro" upsells.
 
 If Lyra has saved you from a clunky SDR workflow, helped you work a
 new state on FT8, or just makes your shack a little more

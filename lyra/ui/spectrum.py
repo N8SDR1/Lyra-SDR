@@ -203,10 +203,25 @@ class SpectrumWidget(_PaintedWidget):
         self._peak_markers_show_db: bool = False
         self._peak_hold_db: np.ndarray | None = None
         self._peak_last_ts: float | None = None
+        # Peak-hold timer (operator request 2026-05-09 tester Brent).
+        # 0.0 = Off, decay starts immediately (legacy behavior).
+        # >0  = freeze each bin's peak for that many seconds, then
+        #        let the existing decay slope take over.
+        # -1  = Infinite — never decay; cleared via clear_peak_holds().
+        # Per-bin freeze tracked via _peak_last_updated parallel array.
+        self._peak_hold_secs: float = 0.0
+        self._peak_last_updated: np.ndarray | None = None
         # User-picked colors. Empty trace color falls back to the
         # default TRACE constant. Segment overrides are layered on top
         # of band_plan.SEGMENT_COLORS at paint time.
         self._user_trace_color: str = ""
+        # Spectrum fill controls (operator request 2026-05-09).
+        # _user_fill_enabled — True to draw the gradient fill below
+        # the trace.  Default True = pre-patch behavior.
+        # _user_fill_color  — hex override; empty = derive from
+        # trace color (the legacy behavior).
+        self._user_fill_enabled: bool = True
+        self._user_fill_color:   str  = ""
         self._user_segment_colors: dict[str, str] = {}
         self._user_nf_color: str = ""   # NF-line override, "" = default sage
         self._user_peak_color: str = "" # peak marker override, "" = default amber
@@ -315,6 +330,18 @@ class SpectrumWidget(_PaintedWidget):
         self._user_trace_color = str(hex_str or "")
         self.update()
 
+    def set_spectrum_fill_enabled(self, on: bool):
+        """Toggle the gradient fill below the spectrum trace.
+        Operator request 2026-05-09 — was always-on before."""
+        self._user_fill_enabled = bool(on)
+        self.update()
+
+    def set_spectrum_fill_color(self, hex_str: str):
+        """Override the fill color (which by default is derived
+        from the trace color).  Empty string = use trace color."""
+        self._user_fill_color = str(hex_str or "")
+        self.update()
+
     def set_segment_color_overrides(self, overrides: dict):
         """Merge a {kind: hex} dict of per-segment color overrides
         (CW/DIG/SSB/FM). Absent keys use band_plan defaults."""
@@ -345,6 +372,34 @@ class SpectrumWidget(_PaintedWidget):
 
     def set_peak_markers_decay_dbps(self, dbps: float):
         self._peak_markers_decay_dbps = float(dbps)
+
+    def set_peak_hold_secs(self, secs: float) -> None:
+        """Set the peak-hold mode for the buffer.
+
+        Values:
+            0.0   — Off  (buffer cleared, peaks not shown)
+            -1.0  — Hold (Infinite freeze, manual clear)
+            -2.0  — Live (track current spectrum, no accumulation)
+            >0.0  — Timed: hold N sec then decay
+
+        Snaps negatives to the closest sentinel to defend against
+        float drift if the value comes from a serialized source.
+        """
+        v = float(secs)
+        if v < -1.5:
+            v = -2.0   # Live sentinel
+        elif v < 0:
+            v = -1.0   # Infinite sentinel
+        self._peak_hold_secs = v
+
+    def clear_peak_holds(self) -> None:
+        """Reset the peak-hold buffer to None so the next tick
+        re-seeds it from the current spectrum.  Used by the Clear
+        button on the Display panel (and by the Radio's
+        peak_holds_cleared signal)."""
+        self._peak_hold_db = None
+        self._peak_last_updated = None
+        self.update()
 
     def set_peak_markers_style(self, name: str):
         name = (name or "dots").strip().lower()
@@ -1056,23 +1111,111 @@ class SpectrumWidget(_PaintedWidget):
         self._spec_db = spec_db
         self._center_hz = center_hz
         self._span_hz = span_hz
-        # Maintain peak-hold buffer — linear dB/sec decay, clamped by
-        # the live spectrum (so a peak can never be below the current
-        # signal level at that bin).
-        if self._peak_markers_enabled and spec_db is not None and spec_db.size > 0:
+        # Maintain peak-hold buffer with optional per-bin hold timer.
+        #
+        # Mode semantics (set via set_peak_hold_secs from Radio):
+        #   secs == 0.0  (Off)    — buffer cleared, peaks not shown.
+        #   secs == -1.0 (Hold)   — Infinite hold; never decay,
+        #                           manual clear via Clear button.
+        #   secs == -2.0 (Live)   — buffer = live spectrum each tick;
+        #                           no max accumulation, no decay.
+        #                           Renders in the operator's chosen
+        #                           style (line/dots/triangles) as a
+        #                           ride-along overlay tracking the
+        #                           current spectrum.
+        #   secs > 0     (timed)  — hold N sec then decay.
+        #
+        # Algorithm (timed + Infinite modes):
+        #   1. Refresh: bins where the live spectrum exceeds the
+        #      current peak get the new max + their last-updated
+        #      timestamp reset.
+        #   2. Decay: bins whose age (now - last_updated) exceeds the
+        #      operator's _peak_hold_secs threshold lose
+        #      decay_dbps × dt.  Bins still inside the hold window
+        #      stay frozen.
+        #   3. Clamp-up: peaks can never drop below the live signal
+        #      (a quiet bin doesn't hold a stale peak from a previous
+        #      strong burst — that would produce visual lies).
+        #
+        # Live mode is its own short branch — peak_hold_db is just
+        # the live spectrum, every tick.  The same paint path renders
+        # in the chosen style; visually, the marker rides along.
+        if (self._peak_markers_enabled
+                and self._peak_hold_secs != 0.0
+                and spec_db is not None and spec_db.size > 0):
             import time as _time
             now = _time.monotonic()
-            if (self._peak_hold_db is None
+            hold_secs = self._peak_hold_secs
+            if hold_secs == -2.0:
+                # Live — buffer always equals live spectrum.  No
+                # accumulation, no decay, no last-updated tracking
+                # needed.  Cheap (single assignment per tick).
+                self._peak_hold_db = spec_db.astype(np.float32).copy()
+                self._peak_last_ts = now
+                self._peak_last_updated = None  # not used in Live
+            elif (self._peak_hold_db is None
                     or self._peak_hold_db.shape != spec_db.shape):
                 self._peak_hold_db = spec_db.astype(np.float32).copy()
                 self._peak_last_ts = now
+                self._peak_last_updated = np.full(
+                    spec_db.shape, now, dtype=np.float64)
             else:
                 dt = max(0.005, now - (self._peak_last_ts or now))
                 self._peak_last_ts = now
-                # Decay then clamp-up to current level
-                self._peak_hold_db -= self._peak_markers_decay_dbps * dt
-                np.maximum(self._peak_hold_db, spec_db,
-                           out=self._peak_hold_db)
+
+                if hold_secs < 0:
+                    # Infinite — never decay; only clamp-up.
+                    if self._peak_last_updated is None:
+                        self._peak_last_updated = np.full(
+                            spec_db.shape, now, dtype=np.float64)
+                    new_peak_mask = spec_db > self._peak_hold_db
+                    np.maximum(self._peak_hold_db, spec_db,
+                               out=self._peak_hold_db)
+                    self._peak_last_updated[new_peak_mask] = now
+                else:
+                    # Hold-then-decay (operator-tested 2026-05-09):
+                    #   1. Bins past their hold window decay at the
+                    #      configured rate.
+                    #   2. ALL bins always max-clamp up to the live
+                    #      spectrum — peak can never sit below
+                    #      current signal level.
+                    #   3. Hold timer only RESETS when a new higher
+                    #      peak hits a bin that's ALREADY DECAYING
+                    #      (i.e., past its prior hold window).  Bins
+                    #      still inside their hold window get their
+                    #      peak max-clamped without timer extension —
+                    #      otherwise a continuously-rising real
+                    #      signal would keep resetting the timer
+                    #      forever, freezing the peak indefinitely
+                    #      and making Fast/Med/Slow visibly
+                    #      identical to the operator (the bug
+                    #      Brent reported).
+                    if self._peak_last_updated is None:
+                        self._peak_last_updated = np.full(
+                            spec_db.shape, now, dtype=np.float64)
+                    ages = now - self._peak_last_updated
+                    decay_mask = ages > hold_secs
+                    if decay_mask.any():
+                        self._peak_hold_db[decay_mask] -= (
+                            self._peak_markers_decay_dbps * dt)
+                    new_peak_mask = spec_db > self._peak_hold_db
+                    np.maximum(self._peak_hold_db, spec_db,
+                               out=self._peak_hold_db)
+                    # Reset timer only for bins past the hold window
+                    # AND with a fresh higher peak — i.e., bins
+                    # transitioning from decay back to a fresh hold.
+                    # Bins still inside the original window keep
+                    # their existing timer.
+                    reset_mask = new_peak_mask & decay_mask
+                    self._peak_last_updated[reset_mask] = now
+        elif self._peak_hold_db is not None:
+            # Off mode (or master toggled off) — drop the buffer so a
+            # stale peak doesn't linger on screen after the operator
+            # picked Off.  The paint code's `is not None` check then
+            # naturally skips the overlay this frame and onward.
+            # Cheap (just None assignment) and idempotent.
+            self._peak_hold_db = None
+            self._peak_last_updated = None
         self.update()
 
     def set_db_range(self, min_db: float, max_db: float):
@@ -1313,31 +1456,37 @@ class SpectrumWidget(_PaintedWidget):
             p.drawText(w - 90, nf_y - 3,
                        f"NF {self._noise_floor_db:+.0f} dBFS")
 
-        # Filled area under trace — uses the user's trace color if
-        # picked, else the default TRACE. Gradient uses two alphas of
-        # the same color so the user's pick drives the whole scheme.
+        # Trace + (optional) gradient fill below.  Color resolution:
+        #   trace_color = user's trace pick or theme default
+        #   fill_color  = user's fill pick (separate slot) or, if
+        #                 unset, derived from trace_color (legacy)
+        # Fill is gated on _user_fill_enabled (operator request
+        # 2026-05-09 to allow a "line-only" look).
         trace_color = QColor(self._user_trace_color) \
             if self._user_trace_color else QColor(TRACE)
-        grad_top = QColor(trace_color)
-        grad_top.setAlpha(100)
-        grad_bot = QColor(trace_color)
-        grad_bot.setAlpha(10)
-        grad = QLinearGradient(0, 0, 0, h)
-        grad.setColorAt(0.0, grad_top)
-        grad.setColorAt(1.0, grad_bot)
+        if self._user_fill_enabled:
+            fill_base = (QColor(self._user_fill_color)
+                         if self._user_fill_color else trace_color)
+            grad_top = QColor(fill_base)
+            grad_top.setAlpha(100)
+            grad_bot = QColor(fill_base)
+            grad_bot.setAlpha(10)
+            grad = QLinearGradient(0, 0, 0, h)
+            grad.setColorAt(0.0, grad_top)
+            grad.setColorAt(1.0, grad_bot)
 
-        from PySide6.QtGui import QPolygonF
-        from PySide6.QtCore import QPointF
-        poly = QPolygonF()
-        poly.append(QPointF(0, h))
-        for i in range(w):
-            poly.append(QPointF(i, ys[i]))
-        poly.append(QPointF(w - 1, h))
-        p.setBrush(grad)
-        p.setPen(Qt.NoPen)
-        p.drawPolygon(poly)
+            from PySide6.QtGui import QPolygonF
+            from PySide6.QtCore import QPointF
+            poly = QPolygonF()
+            poly.append(QPointF(0, h))
+            for i in range(w):
+                poly.append(QPointF(i, ys[i]))
+            poly.append(QPointF(w - 1, h))
+            p.setBrush(grad)
+            p.setPen(Qt.NoPen)
+            p.drawPolygon(poly)
 
-        # Trace line (same color, full opacity)
+        # Trace line (always drawn, full opacity)
         p.setPen(QPen(trace_color, 1.2))
         for i in range(w - 1):
             p.drawLine(i, int(ys[i]), i + 1, int(ys[i + 1]))

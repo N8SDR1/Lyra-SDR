@@ -215,6 +215,7 @@ class Radio(QObject):
     # Panadapter zoom + update rates
     zoom_changed                  = Signal(float)      # 1.0 = full span
     panadapter_scroll_step_changed = Signal(int)       # mouse-wheel-tune step, Hz
+    panadapter_round_to_100hz_changed = Signal(bool)   # Exact / Round 100 Hz toggle
     _ncdxf_follow_changed         = Signal(str)        # NCDXF follow station callsign, "" = off
     spectrum_fps_changed          = Signal(int)        # frames/sec
     waterfall_divider_changed     = Signal(int)        # push 1 row per N FFT ticks
@@ -395,6 +396,14 @@ class Radio(QObject):
     peak_markers_enabled_changed = Signal(bool)
     peak_markers_decay_changed   = Signal(float)   # dB / second
     peak_markers_style_changed   = Signal(str)     # "line"/"dots"/"triangles"
+    # Peak-hold timer + decay preset (Display-panel combos).
+    # peak_hold_secs payload is float seconds; -1.0 means Infinite.
+    # peak_hold_decay_preset payload is "fast"/"med"/"slow".
+    peak_hold_secs_changed         = Signal(float)
+    peak_hold_decay_preset_changed = Signal(str)
+    # Fired by clear_peak_holds(); spectrum widgets reset their
+    # per-bin peak buffers + last-updated arrays in response.
+    peak_holds_cleared             = Signal()
     peak_markers_show_db_changed = Signal(bool)    # show numeric dB at peaks
 
     # Spectrum trace smoothing — display-only EWMA filter applied before
@@ -408,6 +417,12 @@ class Radio(QObject):
     # fills. Stored as #RRGGBB hex strings for simple QSettings
     # round-trip. Empty string = use the built-in default color.
     spectrum_trace_color_changed = Signal(str)
+    # Fill-area-under-trace controls (operator request 2026-05-09).
+    # Toggle enables/disables the gradient fill below the spectrum
+    # trace; color picker overrides the default (which is the trace
+    # color itself).  Empty color string = "use trace color".
+    spectrum_fill_enabled_changed = Signal(bool)
+    spectrum_fill_color_changed   = Signal(str)
     segment_colors_changed       = Signal(dict)    # {kind: hex, ...}
     noise_floor_color_changed    = Signal(str)    # NF line color hex
     peak_markers_color_changed   = Signal(str)    # peak marker color hex
@@ -1130,6 +1145,13 @@ class Radio(QObject):
         # default" so the UI can reset by clearing. Segment overrides
         # apply on top of band_plan.SEGMENT_COLORS.
         self._spectrum_trace_color: str = ""    # e.g. "#5ec8ff"
+        # Spectrum trace fill — gradient-filled area below the trace
+        # line.  Default ON (matches pre-patch behavior — was always
+        # on before).  Operator can disable for a "line-only" look.
+        # Color "" means "derive from trace color"; explicit hex
+        # uses that hex for the fill regardless of trace color.
+        self._spectrum_fill_enabled: bool = True
+        self._spectrum_fill_color:   str  = ""
         self._segment_colors: dict[str, str] = {}  # kind → hex override
         self._noise_floor_color: str = ""       # NF line color override
         self._peak_markers_color: str = ""      # peak marker color override
@@ -2603,6 +2625,34 @@ class Radio(QObject):
         self.spectrum_trace_color_changed.emit(v)
 
     @property
+    def spectrum_fill_enabled(self) -> bool:
+        """When True, the spectrum trace gets a gradient fill below
+        the curve (alpha 100 → 10, top-to-bottom).  Default True —
+        matches pre-patch behavior where the fill was always drawn."""
+        return bool(getattr(self, "_spectrum_fill_enabled", True))
+
+    def set_spectrum_fill_enabled(self, on: bool):
+        on = bool(on)
+        if on == self.spectrum_fill_enabled:
+            return
+        self._spectrum_fill_enabled = on
+        self.spectrum_fill_enabled_changed.emit(on)
+
+    @property
+    def spectrum_fill_color(self) -> str:
+        """Hex string for the spectrum trace fill color, or empty
+        to derive from the trace color (default)."""
+        return str(getattr(self, "_spectrum_fill_color", ""))
+
+    def set_spectrum_fill_color(self, hex_str: str):
+        """Hex like '#5ec8ff', or '' to derive from trace color."""
+        v = str(hex_str or "").strip()
+        if v == self.spectrum_fill_color:
+            return
+        self._spectrum_fill_color = v
+        self.spectrum_fill_color_changed.emit(v)
+
+    @property
     def segment_colors(self) -> dict:
         return dict(self._segment_colors)
 
@@ -2660,14 +2710,195 @@ class Radio(QObject):
         self.peak_markers_color_changed.emit(v)
 
     def set_peak_markers_decay_dbps(self, dbps: float):
-        """Set peak decay rate in dB/second. 0.1 = very slow (peaks
-        linger ~5 minutes), 60 = very fast (peaks gone in half a
+        """Set peak decay rate in dB/second. 0.5 = very slow (peaks
+        linger ~5 minutes), 120 = very fast (peaks gone in half a
         second). Clamp 0.5..120."""
         v = max(0.5, min(120.0, float(dbps)))
         if abs(v - self._peak_markers_decay_dbps) < 1e-3:
             return
         self._peak_markers_decay_dbps = v
         self.peak_markers_decay_changed.emit(v)
+
+    # ── Peak-hold timer + decay preset (operator request 2026-05-09)
+    # Tester Brent asked for a configurable hold timer on the panadapter
+    # peak markers — freeze the peaks for N seconds before letting the
+    # existing decay slope take over.  Common spectrum-analyzer feature
+    # ("MAX HOLD" with timed release).  Plus a 4-preset decay combo on
+    # the Display panel (None / Fast / Med / Slow) so the operator can
+    # swap decay speed without diving into Settings.
+    #
+    # Sentinel values for peak_hold_secs:
+    #   0.0  — Off:   peak markers hidden entirely
+    #   -1.0 — Hold:  freeze forever, never decay (operator clears
+    #                 manually via the Display-panel Clear button or
+    #                 radio.clear_peak_holds())
+    #   -2.0 — Live:  no max accumulation; markers track the live
+    #                 spectrum bin-for-bin, rendering in whatever
+    #                 style is set in Settings → Visuals (line /
+    #                 dots / triangles).  Decay is irrelevant in
+    #                 Live mode — there's nothing to fade.  Tester
+    #                 request 2026-05-09 (Brent) for a "ride-along"
+    #                 visual that highlights the current spectrum
+    #                 in the chosen style without freezing or fading.
+    #   >0.0 — Timed: freeze for that many seconds per bin, then
+    #                 decay at the operator's selected rate.
+    PEAK_HOLD_INFINITE = -1.0
+    PEAK_HOLD_LIVE     = -2.0
+    # Combo presets (seconds), in display order.  Single source of
+    # truth used by both the Display-panel combo and any future
+    # Settings dialog readout.
+    PEAK_HOLD_PRESETS_SECS = (
+        0.0,    # Off
+        -2.0,   # Live (NEW 2026-05-09)
+        1.0,
+        2.0,
+        5.0,
+        10.0,
+        30.0,
+        -1.0,   # Hold / Infinite
+    )
+    # Decay preset map — combo on Display panel picks one of three.
+    # Operator-tuned 2026-05-09 (Brent) for "fade in N seconds for a
+    # typical 60 dB peak" intuition:
+    #   "fast" — 30 dB/sec (~2 sec to fade 60 dB)
+    #   "med"  — 12 dB/sec (~5 sec to fade 60 dB)  default
+    #   "slow" — 6 dB/sec  (~10 sec to fade 60 dB)
+    # ("None" preset removed — operator-tested 2026-05-09: with the
+    # 30 dB/s Fast preset, instant-snap behavior is visually
+    # indistinguishable from Fast at any reasonable viewing
+    # distance.  Use Hold + Clear if you really need a strobe.)
+    PEAK_HOLD_DECAY_PRESETS = {
+        "fast": 30.0,
+        "med":  12.0,
+        "slow":  6.0,
+    }
+
+    @property
+    def peak_hold_secs(self) -> float:
+        """How long (seconds) to freeze the peak buffer at its current
+        max before letting the decay slope take over.
+
+        Special values:
+            0.0  — Off  (peak markers hidden entirely)
+            -1.0 — Hold (Infinite; never decay; manual clear required)
+            -2.0 — Live (no max accumulation; track current spectrum
+                         in the operator's chosen style)
+            >0.0 — Timed: freeze N seconds, then decay
+
+        Implementation lives in the spectrum widgets — they consume
+        this value via their per-tick set_spectrum() call."""
+        # Default Live (-2.0) — matches the pre-patch behavior where
+        # peak markers were always-visible-and-tracking (operator
+        # request 2026-05-09: Option B for the upgrade UX so legacy
+        # operators don't lose their peak markers on first launch).
+        return float(getattr(self, "_peak_hold_secs", -2.0))
+
+    def set_peak_hold_secs(self, secs: float) -> None:
+        """Set the peak-hold mode / freeze duration.  See
+        ``peak_hold_secs`` for special values.  Persists via
+        QSettings.  Snaps negative values to the closest sentinel
+        (-1 Hold or -2 Live) to avoid float-rounding drift."""
+        v = float(secs)
+        # Snap negatives to the closest sentinel — operator-passed
+        # values come from the combo via item-data so they're
+        # already exact, but be defensive against float drift.
+        if v < -1.5:
+            v = self.PEAK_HOLD_LIVE
+        elif v < 0:
+            v = self.PEAK_HOLD_INFINITE
+        old = self.peak_hold_secs
+        if abs(v - old) < 1e-3:
+            return
+        self._peak_hold_secs = v
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("display/peak_hold_secs", v)
+        except Exception as exc:
+            print(f"[Radio] persist peak_hold_secs: {exc}")
+        self.peak_hold_secs_changed.emit(v)
+
+    def autoload_peak_hold_secs(self) -> None:
+        """Restore the persisted peak-hold seconds on startup.
+        Default 0.0 (Off) — preserves pre-toggle behavior."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            # Default Live (-2.0) on missing key — see property comment
+            # for rationale (legacy-operator upgrade UX).
+            v = float(s.value("display/peak_hold_secs", -2.0, type=float))
+        except Exception:
+            return
+        # Same sentinel-snap as set_peak_hold_secs.
+        if v < -1.5:
+            v = self.PEAK_HOLD_LIVE
+        elif v < 0:
+            v = self.PEAK_HOLD_INFINITE
+        self._peak_hold_secs = v
+
+    @property
+    def peak_hold_decay_preset(self) -> str:
+        """Currently-active decay preset key ('fast' / 'med' / 'slow').
+
+        Picking a preset on the Display-panel combo snaps
+        peak_markers_decay_dbps to the preset's value via
+        set_peak_hold_decay_preset().  When the operator drags the
+        Settings → Visuals decay slider directly, this property
+        returns whichever preset is closest (or '' if no preset is
+        within tolerance) — useful for the combo to reflect external
+        slider drags."""
+        return str(getattr(self, "_peak_hold_decay_preset", "med"))
+
+    def set_peak_hold_decay_preset(self, preset: str) -> None:
+        """Apply a decay preset.  Snaps the existing
+        peak_markers_decay_dbps slider to the preset's dB/sec value
+        AND records the preset name for the Display-panel combo to
+        display.  Two-way-syncs with the slider through this call.
+        """
+        key = (preset or "").strip().lower()
+        if key not in self.PEAK_HOLD_DECAY_PRESETS:
+            key = "med"
+        old = self.peak_hold_decay_preset
+        # Push the slider value first so the existing decay-changed
+        # signal cascade fires once with the right number.
+        self.set_peak_markers_decay_dbps(self.PEAK_HOLD_DECAY_PRESETS[key])
+        if key == old:
+            return
+        self._peak_hold_decay_preset = key
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("display/peak_hold_decay_preset", key)
+        except Exception as exc:
+            print(f"[Radio] persist peak_hold_decay_preset: {exc}")
+        self.peak_hold_decay_preset_changed.emit(key)
+
+    def autoload_peak_hold_decay_preset(self) -> None:
+        """Restore the persisted decay preset on startup.  Default
+        'med'.  Also pushes the slider value so Settings + Display
+        panel start in sync."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            key = str(s.value(
+                "display/peak_hold_decay_preset", "med", type=str))
+        except Exception:
+            return
+        if key not in self.PEAK_HOLD_DECAY_PRESETS:
+            key = "med"
+        self._peak_hold_decay_preset = key
+        # Also snap the underlying slider so the two stay coherent
+        # at startup (without firing through set_peak_hold_decay_preset
+        # which would re-persist).
+        self._peak_markers_decay_dbps = self.PEAK_HOLD_DECAY_PRESETS[key]
+
+    def clear_peak_holds(self) -> None:
+        """Clear the panadapter peak-hold buffer.  Emits a signal that
+        the spectrum widgets listen to so they reset their per-bin
+        peak_hold_db arrays.  Operator path: Display-panel Clear
+        button.  Useful primarily when peak_hold_secs is Infinite —
+        otherwise the decay handles it eventually."""
+        self.peak_holds_cleared.emit()
 
     PEAK_MARKER_STYLES = ("line", "dots", "triangles")
 
@@ -4779,21 +5010,27 @@ class Radio(QObject):
         self._band_memory[band.name] = existing
 
     def _save_current_band_range(self):
-        """Save the operator's current spectrum range as the bounds
-        for whichever band we're currently tuned to. Called whenever
-        set_spectrum_db_range fires with from_user=True."""
+        """Save the operator's current spectrum + waterfall ranges as
+        the bounds for whichever band we're currently tuned to.
+        Called whenever set_spectrum_db_range or set_waterfall_db_range
+        fires with from_user=True.
+
+        Persists:
+            range_min_db / range_max_db       — spectrum bounds
+            floor_locked / ceiling_locked     — spectrum per-edge locks
+            waterfall_min_db / max_db         — waterfall manual range
+                (per-band 2026-05-09 — was global before the fix)
+        """
         band = band_for_freq(self._freq_hz)
         if band is None:
             return
         existing = self._band_memory.get(band.name, {})
         existing["range_min_db"] = float(self._user_range_min_db)
         existing["range_max_db"] = float(self._user_range_max_db)
-        # Persist per-edge locks too — switching bands and back
-        # should restore both the bounds AND which edges were
-        # locked, otherwise auto-scale would re-take control of
-        # an edge the operator had pinned.
         existing["floor_locked"]   = bool(self._user_floor_locked)
         existing["ceiling_locked"] = bool(self._user_ceiling_locked)
+        existing["waterfall_min_db"] = float(self._waterfall_min_db)
+        existing["waterfall_max_db"] = float(self._waterfall_max_db)
         self._band_memory[band.name] = existing
 
     def _apply_band_range(self, band_name: str):
@@ -4834,6 +5071,23 @@ class Radio(QObject):
         # restoring from memory; saving again would be a no-op at
         # best, lock-misdetection at worst).
         self.set_spectrum_db_range(lo, hi, from_user=False)
+        # Restore waterfall manual range too if this band has one
+        # saved (per-band waterfall persistence added 2026-05-09).
+        # When the band has never been visited or no waterfall range
+        # is in memory, the operator's last global waterfall manual
+        # values are kept — same effect as pre-patch behavior for
+        # un-customized bands.
+        if (memory.get("waterfall_min_db") is not None
+                and memory.get("waterfall_max_db") is not None):
+            wf_lo = float(memory["waterfall_min_db"])
+            wf_hi = float(memory["waterfall_max_db"])
+            # Tiny-span guard — same logic that protects the
+            # spectrum range autoload (visuals/waterfall_db_range
+            # fall-back in app.py).  A pinched < 30 dB span would
+            # produce a near-monochrome waterfall.
+            if wf_hi - wf_lo >= 30.0:
+                self.set_waterfall_db_range(
+                    wf_lo, wf_hi, from_user=False)
 
     def recall_band(self, band_name: str, defaults_freq: int,
                     defaults_mode: str):
@@ -4872,11 +5126,38 @@ class Radio(QObject):
         return dict(self._band_memory)
 
     def restore_band_memory(self, snapshot: dict):
-        if isinstance(snapshot, dict):
-            self._band_memory = {
-                k: dict(v) for k, v in snapshot.items()
-                if isinstance(v, dict) and "freq_hz" in v
-            }
+        """Restore the per-band memory dict from QSettings.
+
+        Each band entry can carry a mix of fields:
+          - freq_hz / mode / gain_db (saved by _save_current_band_memory
+            on tuning changes)
+          - range_min_db / range_max_db / floor_locked / ceiling_locked
+            (saved by _save_current_band_range on dB-scale drag)
+          - waterfall_min_db / waterfall_max_db (per-band waterfall
+            persistence added 2026-05-09)
+
+        Bug fix 2026-05-09: the previous filter `"freq_hz" in v`
+        was too aggressive — it dropped any band entry that had
+        ONLY dB-scale-drag data without a freq write.  Operator-
+        reported: dB-lock recall didn't work on restart for bands
+        the operator had drag-customized but not tuned to during
+        the session.  New filter accepts any dict-shaped entry
+        with at least one known field, so partial entries
+        survive.
+        """
+        if not isinstance(snapshot, dict):
+            return
+        valid_keys = {
+            "freq_hz", "mode", "gain_db",
+            "range_min_db", "range_max_db",
+            "floor_locked", "ceiling_locked",
+            "waterfall_min_db", "waterfall_max_db",
+        }
+        self._band_memory = {
+            k: dict(v) for k, v in snapshot.items()
+            if isinstance(v, dict)
+               and any(field in v for field in valid_keys)
+        }
 
     # ── External filter board (N2ADR) ─────────────────────────────────
     def set_filter_board_enabled(self, enabled: bool):
@@ -5764,11 +6045,29 @@ class Radio(QObject):
     def waterfall_db_range(self) -> tuple[float, float]:
         return (self._waterfall_min_db, self._waterfall_max_db)
 
-    def set_waterfall_db_range(self, min_db: float, max_db: float):
+    def set_waterfall_db_range(self, min_db: float, max_db: float,
+                                *, from_user: bool = True):
+        """Apply a new waterfall heatmap dB range.
+
+        ``from_user=True`` (default) means an interactive change
+        (Settings → Visuals slider drag).  The value is saved to the
+        current band's per-band memory so switching bands restores
+        whichever waterfall range you last set there — symmetric
+        with the spectrum dB range behavior (operator request
+        2026-05-09 to match the per-band semantic).
+
+        Internal callers that drive the waterfall from auto-scale
+        (the auto-scale tick in `_process_spec_db`) pass
+        ``from_user=False`` so a continuous mirror-from-spectrum
+        update doesn't pollute the operator's saved per-band
+        manual values.
+        """
         lo, hi = float(min_db), float(max_db)
         if hi - lo < 3.0:
             hi = lo + 3.0
         self._waterfall_min_db, self._waterfall_max_db = lo, hi
+        if from_user:
+            self._save_current_band_range()
         self.waterfall_db_range_changed.emit(lo, hi)
 
     # ── Panadapter zoom ──────────────────────────────────────────────
@@ -5842,14 +6141,35 @@ class Radio(QObject):
         freq up (matches physical-radio VFO knob convention).  Step
         size comes from ``panadapter_scroll_step_hz``, settable via
         the Display panel combo.
+
+        When the operator has Exact / Round 100 Hz set to Round, the
+        result freq is quantized to the nearest 100 Hz — first wheel
+        tick after enabling Round snaps to grid, subsequent ticks
+        step cleanly by the chosen step.
         """
         if delta_units == 0:
             return
         step = self.panadapter_scroll_step_hz
         new_freq = int(self._freq_hz) + int(delta_units) * step
+        # Apply Exact / Round 100 Hz preference (no-op when off).
+        new_freq = self.round_panadapter_freq(new_freq)
         # Clamp to HL2's tunable range (~0..30 MHz on RX1).
         new_freq = max(0, min(30_000_000, new_freq))
         self.set_freq_hz(new_freq)
+
+    def set_freq_from_panadapter(self, hz: int) -> None:
+        """Set the VFO frequency from a panadapter-driven gesture
+        (click-tune, Shift+click peak-snap, drag-pan).  Single
+        chokepoint that applies the operator's Exact / Round 100 Hz
+        preference before the actual freq write.
+
+        Use this instead of ``set_freq_hz`` from any UI path that
+        derives a freq from panadapter pixel position; direct entry
+        / band buttons / memory recall / CAT all bypass rounding by
+        calling ``set_freq_hz`` straight.
+        """
+        rounded = self.round_panadapter_freq(int(hz))
+        self.set_freq_hz(rounded)
 
     def autoload_panadapter_scroll_step(self) -> None:
         """Restore the operator's persisted scroll step on startup."""
@@ -5861,6 +6181,78 @@ class Radio(QObject):
         except Exception:
             return
         self._panadapter_scroll_step_hz = max(1, step)
+
+    # ── Panadapter freq quantization (Exact / Round 100 Hz) ──────────
+    # Operator request 2026-05-09 (tester Brent): when wheel-tuning or
+    # click-tuning the panadapter, optionally round the resulting
+    # frequency to the nearest 100 Hz so the display lands on a
+    # "round" freq instead of pixel-derived values like 7.155.232 MHz.
+    # Half-up rounding: 7,155,232 -> 7,155,200 (32 < 50, down);
+    # 7,155,251 -> 7,155,300 (51 >= 50, up).  Independent of the
+    # Panafall Step setting (which controls per-tick increment); this
+    # controls whether the FINAL freq is quantized to a 100 Hz grid.
+    # Default OFF — preserves pre-toggle behavior.
+    PANADAPTER_ROUND_QUANTUM_HZ = 100
+
+    @property
+    def panadapter_round_to_100hz(self) -> bool:
+        """When True, panadapter freq-set actions (wheel-tune, click-
+        tune, drag-pan, peak-snap) round the resulting freq to the
+        nearest 100 Hz grid.  When False, the freq is set exactly as
+        derived from the gesture.
+
+        Direct freq entry, memory recall, band buttons, TIME / GEN /
+        Memory presets, and CAT-driven freq writes all bypass this —
+        only panadapter pixel-driven tuning is affected.
+        """
+        return bool(getattr(self, "_panadapter_round_to_100hz", False))
+
+    def set_panadapter_round_to_100hz(self, on: bool) -> None:
+        """Toggle the Exact / Round 100 Hz quantization for panadapter
+        freq-set actions.  Persists via QSettings.  Emits
+        ``panadapter_round_to_100hz_changed`` so the Display panel
+        toolbutton stays in sync."""
+        on = bool(on)
+        if on == self.panadapter_round_to_100hz:
+            return
+        self._panadapter_round_to_100hz = on
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            s.setValue("display/panadapter_round_to_100hz", on)
+        except Exception as exc:
+            print(f"[Radio] persist panadapter round-to-100hz: {exc}")
+        self.panadapter_round_to_100hz_changed.emit(on)
+
+    def round_panadapter_freq(self, hz: int) -> int:
+        """Apply the operator's Exact / Round 100 Hz preference to a
+        candidate freq.  Returns the freq unchanged if rounding is
+        off, else the half-up 100 Hz round.
+
+        Used as a single chokepoint by ``panadapter_scroll_tune`` and
+        the four panadapter UI freq-emit sites (click-tune, wheel-
+        tune, drag-pan, Shift+click peak-snap).  Centralizing here
+        prevents per-call-site drift if the rule ever changes (e.g.
+        per-mode quantum someday).
+        """
+        if not self.panadapter_round_to_100hz:
+            return int(hz)
+        q = int(self.PANADAPTER_ROUND_QUANTUM_HZ)
+        # Half-up to nearest q.  +q/2 then integer-divide handles the
+        # 5 → 10 case the operator's request specifies (251 → 300).
+        return ((int(hz) + q // 2) // q) * q
+
+    def autoload_panadapter_round_to_100hz(self) -> None:
+        """Restore the operator's persisted round-to-100Hz flag on
+        startup.  Default False (Exact mode)."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            on = bool(s.value(
+                "display/panadapter_round_to_100hz", False, type=bool))
+        except Exception:
+            return
+        self._panadapter_round_to_100hz = on
 
     # ── NCDXF beacon auto-follow ──────────────────────────────────────
     # When enabled, Lyra auto-tunes its VFO to whichever band the
@@ -7737,7 +8129,13 @@ class Radio(QObject):
                 # off in Settings lets them keep that look while the
                 # spectrum still auto-fits.
                 if self._waterfall_auto_scale:
-                    self.set_waterfall_db_range(target_lo, target_hi)
+                    # from_user=False so the auto-mirror doesn't
+                    # overwrite the operator's per-band manual
+                    # waterfall preference (only matters when the
+                    # operator has manually set a waterfall range
+                    # for this band; auto-scale just tracks).
+                    self.set_waterfall_db_range(
+                        target_lo, target_hi, from_user=False)
         elif self._auto_scale_peak_history:
             # Auto turned off — drop the history so it doesn't grow
             # unbounded if the operator never re-enables.
