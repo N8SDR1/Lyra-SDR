@@ -109,10 +109,34 @@ class CapturedProfileIQ:
     -3 dB) forfeits most of the noise-reduction benefit.  -12 dB
     is the textbook starting point for spectral subtraction."""
 
+    DEFAULT_GAIN_SMOOTHING: float = 0.6
+    """Default temporal-smoothing coefficient on the gain mask.
+
+    First-order IIR low-pass per bin across frames:
+
+        G_smoothed[k, t] = γ · G_smoothed[k, t-1] + (1-γ) · G_raw[k, t]
+
+    Reduces the "musical noise" / watery artifact characteristic
+    of pure Wiener spectral subtraction.  Per-frame gain
+    fluctuations (caused by Rayleigh-distributed noise magnitudes
+    in the FFT bins) get low-passed across frames; signal-driven
+    gain changes still come through because they persist across
+    many frames.
+
+    Time-constant calc with hop=N/2 = 1024 at 192 kHz IQ:
+        τ = -hop/rate / log(γ)
+    γ=0.0 → no smoothing (instantaneous, original watery output)
+    γ=0.6 →  ~10 ms (default, gentle suppression)
+    γ=0.8 →  ~24 ms (stronger, slower response)
+    γ=0.95 → ~104 ms (heavy, can blur signal onset)
+
+    Phase 5 will expose this as a Settings slider."""
+
     def __init__(self,
                  rate_hz: int,
                  fft_size: int = DEFAULT_FFT_SIZE,
-                 hop: Optional[int] = None) -> None:
+                 hop: Optional[int] = None,
+                 gain_smoothing: float = DEFAULT_GAIN_SMOOTHING) -> None:
         """Construct an IQ-domain capture/apply engine.
 
         Args:
@@ -136,6 +160,15 @@ class CapturedProfileIQ:
         if self.fft_size <= 0 or self.hop <= 0 or self.hop > self.fft_size:
             raise ValueError(
                 f"invalid fft_size/hop: {self.fft_size}/{self.hop}")
+        # Temporal smoothing coefficient — clamped to [0.0, 0.99]
+        # so the gain can never get fully frozen.  Set via
+        # constructor + ``set_gain_smoothing()`` for runtime A/B.
+        self.gain_smoothing = max(
+            0.0, min(0.99, float(gain_smoothing)))
+        # Smoother state: previous frame's gain mask (per-bin
+        # ndarray, length fft_size).  Lazy-initialized on first
+        # apply() call; reset by reset_apply_streaming_state.
+        self._prev_gain: Optional[np.ndarray] = None
 
         # Periodic Hann (length-N), then sqrt for use as both
         # analysis and synthesis windows.  At hop=N/2,
@@ -224,6 +257,14 @@ class CapturedProfileIQ:
             return None
         return self._profile_mag.copy()
 
+    def set_gain_smoothing(self, value: float) -> None:
+        """Set the temporal-smoothing coefficient (0.0..0.99).
+
+        Effective immediately on the next ``apply()`` call.  Does
+        not reset the smoother state — operator can adjust live.
+        """
+        self.gain_smoothing = max(0.0, min(0.99, float(value)))
+
     @property
     def last_capture_duration_sec(self) -> float:
         """Length in seconds of the most recently armed capture
@@ -258,6 +299,11 @@ class CapturedProfileIQ:
         self._out_overlap = np.zeros(
             self.fft_size - self.hop, dtype=np.complex64)
         self._out_ring = np.zeros(0, dtype=np.complex64)
+        # Drop temporal-smoothing state too — first apply frame
+        # post-reset reinitializes from current band data, so the
+        # smoother doesn't carry stale gain values across a toggle/
+        # rate/profile transition.
+        self._prev_gain = None
 
     def reset_streaming_state(self) -> None:
         """Drop the input/output ring buffers, overlap state, AND
@@ -532,6 +578,29 @@ class CapturedProfileIQ:
             # is non-negative and we subtract from 1) but the
             # clip caps them defensively.
             gain = np.clip(gain, floor_lin, 1.0).astype(np.float32)
+            # Temporal smoothing on the gain mask — first-order
+            # IIR low-pass per bin across frames.  Reduces the
+            # "musical noise" / watery character of pure Wiener
+            # spectral subtraction (per-frame Rayleigh-distributed
+            # noise magnitudes cause gain flicker even on
+            # noise-only bins; smoothing low-passes that flicker
+            # while signal-driven gain changes still come through
+            # because they persist across many frames).
+            #
+            # γ=0 is identity (no smoothing).  Lazy-init on first
+            # frame so the smoother starts from the current
+            # spectrum's gain, not zeros (which would warm up
+            # over τ ≈ 10ms producing audible level slew).
+            if self.gain_smoothing > 0.0:
+                if (self._prev_gain is None
+                        or self._prev_gain.shape != gain.shape):
+                    self._prev_gain = gain.copy()
+                else:
+                    g = float(self.gain_smoothing)
+                    smoothed = (g * self._prev_gain
+                                + (1.0 - g) * gain).astype(np.float32)
+                    self._prev_gain = smoothed
+                    gain = smoothed
             # Apply gain (real scalar per bin → preserves phase).
             modified = spectrum * gain
             # Synthesis: IFFT then window.
