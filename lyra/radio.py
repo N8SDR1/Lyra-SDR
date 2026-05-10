@@ -7311,18 +7311,43 @@ class Radio(QObject):
               f"{getattr(self, '_nr_use_captured_profile', '<unset>')}",
               flush=True)
         from lyra.dsp.wdsp_engine import RxChannel, RxConfig
-        # Tear down the old one if any.
-        if self._wdsp_rx is not None:
-            print("[Radio open_wdsp] (1) closing old WDSP channel",
-                  flush=True)
-            try:
-                self._wdsp_rx.close()
-            except Exception as exc:
-                print(f"[Radio] WDSP rx close error: {exc}",
+        # ── §14.6 v0.0.9.9 lock fix ──
+        # The entire teardown + create + state-push sequence runs
+        # under ``_iq_capture_lock``.  Without this, the worker
+        # thread (running ``_do_demod_wdsp``) could call
+        # ``self._wdsp_rx.process(iq)`` between the close() and the
+        # ``= None`` assignment in step (1), or between (1) and (2),
+        # and that's a cffi call into a freed C-side channel handle
+        # → Windows access violation → silent process death (no
+        # Python traceback because Python isn't on the call stack).
+        # That matches the operator-reported 192→96→192 crash
+        # signature: prompt returned with no traceback.
+        #
+        # Extending the lock to the whole method also serves the
+        # ``_do_demod_wdsp`` companion fix (which now takes the
+        # same lock around its WDSP process call), so worker and
+        # main thread cannot collide on _wdsp_rx during rate
+        # change.  RLock allows the inner ``with self._iq_capture_lock:``
+        # block (engine swap) and the recursive
+        # ``set_nr_use_captured_profile(False)`` call below to
+        # re-enter from this same thread.
+        #
+        # Cost: main thread waits up to ~5 ms (one WDSP block) for
+        # the worker to release the lock before it can swap.
+        # Imperceptible to operator.
+        with self._iq_capture_lock:
+            # Tear down the old one if any.
+            if self._wdsp_rx is not None:
+                print("[Radio open_wdsp] (1) closing old WDSP channel",
                       flush=True)
-            self._wdsp_rx = None
-            print("[Radio open_wdsp] (1) done — wdsp_rx=None",
-                  flush=True)
+                try:
+                    self._wdsp_rx.close()
+                except Exception as exc:
+                    print(f"[Radio] WDSP rx close error: {exc}",
+                          flush=True)
+                self._wdsp_rx = None
+                print("[Radio open_wdsp] (1) done — wdsp_rx=None",
+                      flush=True)
         # Pick an in_size that keeps the per-call audio block within
         # Lyra's existing 512-sample audio cadence. WDSP returns
         # in_size * out_rate / in_rate audio frames per call:
@@ -7863,7 +7888,18 @@ class Radio(QObject):
         # invocation may be DirectConnection on the same thread).
         fired_done = False
         iq_for_wdsp = iq
+        audio = None
         with self._iq_capture_lock:
+            # ── §14.6 v0.0.9.9 lock fix (companion to _open_wdsp_rx) ──
+            # Re-check ``_wdsp_rx is None`` INSIDE the lock.  The
+            # top-of-method check passed when we entered, but a
+            # rate change on the main thread could have set it to
+            # None between then and now.  With main thread holding
+            # this same lock during close+None (see _open_wdsp_rx
+            # step 1), this re-check is the worker's safe gate:
+            # if None, rate change is in flight, drop the block.
+            if self._wdsp_rx is None:
+                return
             if self._iq_capture is not None:
                 # Capture pass — no-op unless state == "capturing".
                 prev_state = self._iq_capture.state
@@ -7903,6 +7939,22 @@ class Radio(QObject):
                         # keeps flowing — operator gets logspam
                         # but no audio gap.
                         iq_for_wdsp = iq
+
+            # WDSP process — UNDER THE SAME LOCK so main thread
+            # can't close+null _wdsp_rx while we're mid-process().
+            # Cost: lock is held for ~5 ms (one WDSP block at
+            # 192 kHz IQ in_size=1024) — operator-imperceptible.
+            # Main thread rate change waits at most one block
+            # before the swap can begin.
+            try:
+                audio = self._wdsp_rx.process(iq_for_wdsp)
+            except Exception as exc:
+                print(f"[Radio] WDSP rx process error: {exc}")
+                audio = None
+
+        # Signal emit OUTSIDE the lock so slot handlers don't run
+        # under the engine lock (PySide6 emit may be DirectConnection
+        # on the same thread).
         if fired_done:
             try:
                 # Signal is declared Signal(str); the legacy
@@ -7914,12 +7966,7 @@ class Radio(QObject):
             except Exception:
                 pass
 
-        try:
-            audio = self._wdsp_rx.process(iq_for_wdsp)
-        except Exception as exc:
-            print(f"[Radio] WDSP rx process error: {exc}")
-            return
-        if audio.size == 0:
+        if audio is None or audio.size == 0:
             return
 
         # Squelch is handled inside WDSP (FM SQ / AM SQ / SSQL all-
