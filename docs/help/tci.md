@@ -113,6 +113,31 @@ Three side-by-side columns:
   U/L, force how Lyra renders it: `Default` / `Force CWU` /
   `Force CWL`.
 
+## Spot frequency convention — carrier vs tune-to
+
+Lyra expects TCI spots to carry the **carrier frequency** of the
+spotted signal — same convention used by every DX cluster, the
+Reverse Beacon Network (RBN), and CW Skimmer Server.  When you
+click a CW spot, Lyra applies the operator's CW pitch offset
+automatically so the VFO lands at `carrier − pitch` for CWU
+(or `carrier + pitch` for CWL) and the spot is audible at the
+configured pitch tone.  Non-CW spots (USB / LSB / DIGU / AM /
+FM / etc.) tune to the spot freq exactly — no offset.
+
+This is the convention SDRLogger+ uses, and it's what Lyra is
+designed for.  If you bridge in a TCI source that **pre-adjusts**
+CW spots to a tune-to frequency before sending (rare; some
+custom logger builds do this), Lyra will double-offset the
+click and you'll land `2 × pitch` Hz off.  In that case either
+configure the source to send carrier freq, or bridge through
+SDRLogger+ which always passes the upstream value through
+unchanged.
+
+The `spot_activated` signal Lyra emits back to TCI clients
+carries the **original** carrier frequency, not the offset
+target — so spot round-trips with SDRLogger+ (and any other
+listener) preserve the cluster value.
+
 ## Audio over TCI — setup recipes
 
 ### WSJT-X (FT8 / FT4 / etc.)

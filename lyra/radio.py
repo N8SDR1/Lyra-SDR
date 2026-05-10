@@ -6427,13 +6427,42 @@ class Radio(QObject):
 
     def activate_spot_near(self, freq_hz: float, tolerance_hz: float = 500.0) -> bool:
         """Click-to-activate: find the nearest spot to `freq_hz` and
-        fire spot_activated. Tune the radio there. Returns True on hit."""
+        fire spot_activated. Tune the radio there. Returns True on hit.
+
+        CW pitch offset (v0.0.9.7.2 fix): TCI spots forwarded by
+        SDRLogger+ (and by every cluster / RBN / Skimmer source it
+        upstreams from) carry the **carrier frequency** of the spot,
+        not a tune-to value.  For CW spots that means the operator's
+        VFO would land AT the carrier — which sits AT the marker —
+        and Lyra's CW filter at +cw_pitch_hz would miss the signal,
+        producing zero-beat silence.
+
+        Same fix as NCDXF + click-to-tune: tune the VFO to
+        ``carrier - pitch`` for CWU (and bare "CW", which
+        SDRLogger+ maps to CWU before the TCI send anyway), or
+        ``carrier + pitch`` for CWL.  Non-CW spots tune to the
+        spot freq exactly — the cluster convention there matches
+        Lyra's USB/DIGU/AM/FM/etc. tuning model.
+
+        The ``spot_activated`` signal still emits the ORIGINAL
+        stored freq (carrier), not the offset target, so any TCI
+        clients subscribed to spot_activated get the unmodified
+        spot — preserves round-trip behaviour with SDRLogger+ and
+        any other listener.
+        """
         if not self._spots:
             return False
         best = min(self._spots.values(), key=lambda s: abs(s["freq_hz"] - freq_hz))
         if abs(best["freq_hz"] - freq_hz) > tolerance_hz:
             return False
-        self.set_freq_hz(best["freq_hz"])
+        target = int(best["freq_hz"])
+        spot_mode = str(best.get("mode", "")).strip().upper()
+        if spot_mode in ("CW", "CWU", "CWL"):
+            pitch = int(self._cw_pitch_hz)
+            # Bare "CW" defaults to CWU offset direction (matches
+            # Lyra's existing {"CW": "CWU"} mode alias).  CWL flips.
+            target += +pitch if spot_mode == "CWL" else -pitch
+        self.set_freq_hz(target)
         self.spot_activated.emit(best["call"], best["mode"], best["freq_hz"])
         return True
 

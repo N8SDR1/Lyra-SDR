@@ -13,6 +13,46 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.7.2] — 2026-05-10 — "Display Polish" (TCI CW spot tuning fix)
+
+Bug-fix patch on top of v0.0.9.7.1.  Companion to the NCDXF
+tuning fix — same class of issue, different tuning surface.
+
+### Fixed
+
+* **TCI CW spot click now applies the CW pitch offset.**  When a
+  cluster / RBN / Skimmer spot arrives via TCI and the operator
+  clicks it on the panadapter, the VFO previously tuned to the
+  spot's listed frequency exactly.  Cluster traffic (which is
+  what SDRLogger+ and every other TCI bridge forwards) reports
+  the **carrier** frequency, not a tune-to value.  For CW spots
+  in CWU/CWL that meant the carrier landed AT the marker and
+  Lyra's CW filter (offset by ±cw_pitch_hz from the marker)
+  missed it — operator heard zero-beat silence instead of a CW
+  tone at their configured pitch.
+
+  ``radio.activate_spot_near`` now subtracts pitch for CWU /
+  bare "CW" spots and adds pitch for CWL spots — same offset
+  pattern ``_on_click`` and ``_ncdxf_follow_pump`` already used.
+  Non-CW spots (USB / LSB / DIGU / FM / AM / etc.) tune to the
+  spot freq exactly, no change.
+
+* The ``spot_activated`` signal still emits the **original**
+  carrier frequency (not the offset target), so any TCI clients
+  subscribed to it (SDRLogger+ included) get the unmodified
+  spot — round-trip behaviour preserved.
+
+### Convention notes (`docs/help/tci.md`)
+
+Locked the spot-frequency convention with SDRLogger+: spots
+carry the **carrier** frequency; Lyra applies the CW pitch
+offset on click.  Non-CW spots tune to the spot freq exactly.
+Worth knowing if you ever bridge a non-SDRLogger+ TCI source —
+if that source pre-adjusts CW spots to a tune-to value, Lyra
+will double-offset.  See tci.md for the full convention.
+
+---
+
 ## [0.0.9.7.1] — 2026-05-09 — "Display Polish" (NCDXF tuning fix)
 
 Bug-fix patch on top of v0.0.9.7.  No new features — same WDSP

@@ -62,6 +62,21 @@ content below has been mass-renumbered to the new scheme.
   nb, lms, anf, squelch, nr2, PythonRxChannel.process, etc.).
   See §13 (audio architecture), §14 (WDSP-DLL integration), §14.9
   (cleanup arc).
+- **v0.0.9.7.2** "Display Polish" (TCI CW spot tuning fix,
+  2026-05-10) — patch over v0.0.9.7.1.  Companion to the NCDXF
+  fix; same class of issue, different tuning surface.  TCI CW
+  spots forwarded by SDRLogger+ (and every cluster / RBN /
+  Skimmer source it upstreams from) carry the **carrier**
+  frequency — clicking them in CWU/CWL previously landed at
+  zero-beat.  ``radio.activate_spot_near`` now subtracts pitch
+  for CWU / bare "CW" spots and adds pitch for CWL spots; non-
+  CW spots untouched.  ``spot_activated`` signal still emits
+  the original carrier freq so TCI round-trip is preserved.
+  Verified SDRLogger+ source at ``Y:/Claude local/hamlog/
+  main.py:3808+`` does no mode-aware adjustment — passes
+  upstream cluster freq through unchanged, locking the
+  carrier-freq convention between the two sibling apps.
+  Convention documented in `docs/help/tci.md`.
 - **v0.0.9.7.1** "Display Polish" (NCDXF tuning fix, 2026-05-09)
   — patch over v0.0.9.7.  Bug fix only: NCDXF beacon tuning
   (marker click + auto-follow) now applies the CW pitch offset,
