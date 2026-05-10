@@ -62,6 +62,30 @@ content below has been mass-renumbered to the new scheme.
   nb, lms, anf, squelch, nr2, PythonRxChannel.process, etc.).
   See §13 (audio architecture), §14 (WDSP-DLL integration), §14.9
   (cleanup arc).
+- **v0.0.9.9** "IQ Captured Profiles" (2026-05-10) — §14.6
+  IQ-domain captured-profile rebuild lands LIVE.  Replaces the
+  v0.0.9.6-era "capture works, apply is INERT in WDSP mode"
+  state with a full pre-WDSP IQ-domain pipeline: capture taps
+  raw IQ at the operator's native rate, apply runs Wiener-from-
+  profile spectral subtraction on raw IQ before WDSP's RXA
+  chain.  Sidesteps the AGC-mismatch that broke three rounds
+  of post-WDSP audio-domain attempts.  Schema bump to v2
+  (rate-specific full complex-FFT magnitudes); v1 audio-domain
+  profiles refused on load with recapture hint.  New STFT
+  engine (sqrt-Hann WOLA, COLA-1 exact, Wiener gain with
+  temporal smoothing) in ``lyra/dsp/captured_profile_iq.py``;
+  10/10 synthetic-bench validation.  Phase 5 UX: Switch
+  profile right-click submenu (single-click reload), gain
+  smoothing slider (live-tunable, default γ=0.6 ~10 ms time
+  constant), FFT size dropdown (1024/2048/4096), badge
+  tooltip refresh.  Crash fix: ``_iq_capture_lock`` extended
+  to cover WDSP close+null and worker's ``_wdsp_rx.process()``
+  call, closing the TOCTOU race that produced silent crashes
+  on rapid rate-change cycles.  ``faulthandler.enable()``
+  added permanently for general crash forensics.  Operator
+  field-tested through 3+ rate cycles with captured profile;
+  watery character "light, becomes inaudible after a minute"
+  per operator with γ=0.6 default.
 - **v0.0.9.8.1** "AGC + persistence patch" (2026-05-10) —
   substantial bug-fix patch over v0.0.9.8.  Headline: a
   latent ``SetRXAAGCSlope`` cffi binding bug from v0.0.9.6

@@ -13,6 +13,188 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.9] — 2026-05-10 — IQ Captured Profiles
+
+The captured-noise-profile feature is **LIVE** in the WDSP audio
+engine.  v0.0.9.6 introduced WDSP audio + parked the captured-
+profile **apply** path because three rounds of post-WDSP
+audio-domain attempts produced operator-perceptible artifacts;
+v0.0.9.9 rebuilds the apply path in the **IQ domain pre-WDSP**,
+sidestepping the AGC interaction that broke the previous
+approaches.
+
+Operator experience:
+* Press **📷 Cap** → captures raw IQ samples (pre-WDSP) for 2
+  seconds → save dialog → JSON profile written to disk
+* Toggle the source badge to "use captured" → spectral
+  subtraction runs on the IQ stream before WDSP sees it
+* Noise floor drops 6-12 dB on bands where the profile
+  matches; signals pass through with their amplitude
+  essentially unchanged
+* Phase-preserving Wiener-from-profile gain mask (real-valued
+  per-bin scalars) keeps WDSP's downstream demod happy
+
+### Schema bump v1 → v2
+
+* ``lyra/dsp/noise_profile_store.py`` SCHEMA_VERSION = 2.  v2
+  profiles store full complex-FFT magnitudes at the operator's
+  IQ rate, with new ``rate_hz`` and ``domain="iq"`` fields.
+* v1 audio-domain profiles (captured pre-v0.0.9.9) are refused
+  on load with a clear "Recapture in v0.0.9.9+ to use the new
+  IQ-domain engine" hint.  No silent migration — v1 magnitudes
+  are wrong shape and wrong domain for the v2 apply path.
+* Cross-rate and cross-FFT-size profile loads refused with
+  operator-friendly errors ("captured at 192 kHz; current
+  rate is 96 kHz — switch radio rate or recapture").
+
+### New DSP engine
+
+* ``lyra/dsp/captured_profile_iq.py`` — ``CapturedProfileIQ``
+  class with weighted overlap-add (WOLA) STFT.
+* sqrt-Hann analysis + synthesis windows at hop=N/2 → exact
+  COLA-1 perfect reconstruction of unmodified signals
+  (numerical-precision verified at -124 dB error).
+* Wiener-from-profile gain mask:
+  ``G[k] = max(floor, 1 - profile_mag[k] / |frame_mag[k]|)``.
+* Temporal IIR low-pass on the gain mask per bin reduces the
+  "watery" musical-noise character of pure spectral
+  subtraction.  Default γ = 0.6 (~10 ms time constant at
+  192 kHz IQ); operator-tunable via Settings → Noise → Gain
+  smoothing slider.
+* Separate ``_capture_in_buf`` / ``_apply_in_buf`` ring
+  buffers so capture-while-listening doesn't corrupt either
+  path.
+* CPU cost ~0.8% real-time at 192 kHz IQ + in_size=1024.
+* 10-test synthetic-IQ bench at ``scratch/test_captured_profile_iq.py``
+  validates math + state machine + buffer correctness +
+  thread safety.
+
+### Capture + apply wiring
+
+* ``Radio._iq_capture`` lifecycle tied to the WDSP channel
+  (rate-matched, recreated on rate change).
+* ``Radio._iq_capture_lock`` (RLock) mediates worker thread
+  (``_do_demod_wdsp``) and UI thread access to the engine.
+* Pre-WDSP IQ tap in ``_do_demod_wdsp``: capture's
+  ``accumulate(iq)`` runs first (so profile reflects raw band
+  noise), then apply's ``apply(iq)`` produces cleaned IQ for
+  WDSP.
+* ``noise_capture_done`` signal fires when the engine
+  transitions ``capturing → ready``, prompting the save
+  dialog.
+* On rate change, engine recreated at the new rate, any
+  loaded profile dropped, ``_active_captured_profile_name``
+  cleared, source toggle flipped off so the UI mental model
+  stays consistent.
+
+### Operator-facing UX (Phase 5)
+
+* **Switch profile submenu** on the 📷 Cap right-click menu.
+  Lists all on-disk profiles with their IQ rate tag (e.g.
+  ``WX-40m daytime [192k]``).  Compatible profiles
+  one-click load + auto-engage; incompatible greyed with
+  explanatory tooltips (legacy v1, rate mismatch, FFT-size
+  mismatch).  Active profile shows a checkmark.  Replaces
+  the prior 3-click reload flow.
+* **Gain smoothing slider** in Settings → Noise → Captured
+  Noise Profile.  γ = 0.00..0.95, default 0.6.  Live-tunable
+  — drag while listening to A/B the watery character.
+  Tooltip lists the time-constant family.
+* **FFT size dropdown** in Settings → Noise → Captured
+  Noise Profile.  Choices 1024 / 2048 / 4096 with bin-width
+  labels.  Takes effect on next IQ rate change or Lyra
+  restart (deferred to avoid silently invalidating loaded
+  profile mid-session).
+* **Badge tooltip refresh** — when a captured profile is
+  active, the source-badge tooltip shows IQ rate at capture
+  + FFT size, plus a hint about the right-click Switch
+  profile submenu.
+
+### Crash fix — rate-change race
+
+* Operator hit a silent crash during a 192→96→192 IQ rate
+  cycle while a captured profile was loaded (no traceback,
+  prompt just returned).  Root cause: between
+  ``self._wdsp_rx.close()`` and ``self._wdsp_rx = None`` in
+  ``_open_wdsp_rx``, the worker thread could read the
+  still-non-None reference and call ``process(iq)`` on a
+  channel WDSP had just torn down → cffi access violation
+  → process death without traceback (Python isn't on the
+  stack when the DLL crashes).
+* Fix: ``_iq_capture_lock`` extended to wrap the
+  close + None assignment in ``_open_wdsp_rx``, AND the
+  ``_wdsp_rx.process()`` call in ``_do_demod_wdsp`` (plus
+  a re-check of ``_wdsp_rx is None`` inside the lock).
+  Worker and main thread now serialize through the lock —
+  no window where worker can dereference a freed handle.
+* ``faulthandler.enable()`` added at app startup so any
+  future C-side crash prints a Python stack + crashing
+  thread state to stderr before the process dies.  Cheap;
+  permanent.
+
+### Quality cycle
+
+* Per-phase independent reviews caught: `is_compatible`
+  signature drift (Phase 1), shared-buffer collision +
+  iq.size-capped drain (Phase 2), `noise_capture_done` signal
+  signature mismatch + rate-change state drift +
+  RuntimeError catch (Phase 3), stale Phase-4-pending
+  comments (Phase 4), `_switch_profile` exception-catch
+  narrowness + engine-not-initialized submenu UX (Phase 5).
+* Joint 2-agent holistic re-read of Phases 1-4 caught 6
+  additional P1s (apply-ring reset on toggle, rate-change
+  toggle-off, `clear_profile` mid-capture orphan,
+  CLAUDE.md §14.2 drift, troubleshooting.md stale FFT-size
+  hardcode claim, `load_saved_noise_profile` docstring).
+* Operator field testing caught the rate-change crash +
+  the watery sound (both fixed before ship).
+* Pre-Phase-1 backup bundle at
+  ``_backups/lyra-2026-05-10-pre-iq-noise-rebuild.bundle``
+  preserved as the wholesale-rewind point.
+
+### Operator-facing docs
+
+* ``docs/help/nr.md`` — Right-click menu listing updated for
+  the Switch profile submenu; new "Tuning the captured-profile
+  apply (v0.0.9.9+)" section documenting the gain smoothing
+  slider + FFT size dropdown with tables; audio-chain diagram
+  shows the captured-profile pre-pass before WDSP.
+* ``docs/help/troubleshooting.md`` — "Greyed/strikethrough
+  profiles" section rewritten for v2 reality (legacy v1 →
+  recapture; rate/FFT mismatches caught at load).  Stale
+  "v0.0.9.6 INERT" caveat flipped to "v0.0.9.9 LIVE."
+* Settings → Noise → Captured Noise Profile intro paragraph
+  describes v0.0.9.9 LIVE state.
+
+### Known background characteristic (deferred)
+
+* PC Soundcard audio path logs ~13-26 underruns/10s at the
+  rate-matcher level during steady-state operation; spikes
+  to 40-65/10s during rapid rate-change activity.  Operator
+  reports no audible glitches — the rate-matcher absorbs
+  them invisibly.  Not investigated this release; if any
+  operator reports audible pops/clicks correlated with the
+  log lines, investigation moves to v0.0.9.9.1.
+
+### Files touched (summary)
+
+* New: ``lyra/dsp/captured_profile_iq.py``,
+  ``scratch/test_captured_profile_iq.py``
+* Schema-bumped: ``lyra/dsp/noise_profile_store.py``
+* Wiring: ``lyra/radio.py`` (engine lifecycle + IQ taps +
+  RLock-mediated thread safety + apply-state reset on
+  toggle transitions)
+* UX: ``lyra/ui/panels.py`` (Switch profile submenu + badge
+  tooltip v2 metadata), ``lyra/ui/settings_dialog.py``
+  (gain smoothing slider + FFT size dropdown)
+* Manager dialog: ``lyra/ui/noise_profile_manager.py``
+  (``is_loadable()`` migration)
+* App startup: ``lyra/ui/app.py`` (``faulthandler.enable()``)
+* Docs: ``CLAUDE.md`` §14.6 rewrite, ``docs/help/nr.md``,
+  ``docs/help/troubleshooting.md``
+
+---
+
 ## [0.0.9.8.1] — 2026-05-10 — AGC + persistence patch
 
 Substantial bug-fix patch over v0.0.9.8.  Headline: a latent
