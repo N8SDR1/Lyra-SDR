@@ -2846,6 +2846,69 @@ class DspPanel(GlassPanel):
 
         menu.addSeparator()
 
+        # Switch profile submenu (§14.6 v0.0.9.9 Phase 5 —
+        # operator-requested single-click reload from the front
+        # panel, replaces the prior 3-click flow Cap → Manage
+        # profiles → select → Use Selected).
+        #
+        # Lists all on-disk profiles, newest-first.  Compatible
+        # profiles (same IQ rate + FFT size as the running
+        # engine) are clickable and load on click; incompatible
+        # ones (legacy v1, cross-rate, cross-fft-size) are
+        # greyed with a tooltip explaining why.  The currently-
+        # active profile (if any) shows a checkmark.
+        try:
+            metas = self.radio.list_saved_noise_profiles()
+        except Exception:
+            metas = []
+        if metas:
+            switch_menu = menu.addMenu("Switch profile…")
+            active_name = self.radio.active_captured_profile_name
+            eng = getattr(self.radio, "_iq_capture", None)
+            cur_rate_hz = int(getattr(eng, "rate_hz", 0))
+            cur_fft_size = int(getattr(eng, "fft_size", 0))
+            for meta in metas:
+                rate_label = (f"{meta.rate_hz // 1000}k"
+                              if meta.rate_hz else "?")
+                label = f"{meta.name}  [{rate_label}]"
+                act = QAction(label, switch_menu)
+                if meta.name == active_name:
+                    act.setCheckable(True)
+                    act.setChecked(True)
+                # Compatibility check: schema + domain via
+                # is_loadable(), then rate + fft_size match.
+                loadable = meta.is_loadable()
+                rate_ok = (cur_rate_hz > 0
+                           and meta.rate_hz == cur_rate_hz)
+                fft_ok = (cur_fft_size > 0
+                          and meta.fft_size == cur_fft_size)
+                compat = loadable and rate_ok and fft_ok
+                if not compat:
+                    act.setEnabled(False)
+                    if not loadable:
+                        act.setToolTip(
+                            "Legacy v1 audio-domain profile — "
+                            "recapture in v0.0.9.9+ to use the "
+                            "new IQ-domain engine.")
+                    elif not rate_ok:
+                        act.setToolTip(
+                            f"Captured at {meta.rate_hz // 1000} "
+                            f"kHz IQ rate; current radio rate is "
+                            f"{cur_rate_hz // 1000} kHz.  Switch "
+                            f"radio rate or recapture.")
+                    elif not fft_ok:
+                        act.setToolTip(
+                            f"Captured at FFT size "
+                            f"{meta.fft_size}; current engine "
+                            f"uses {cur_fft_size}.  Recapture or "
+                            f"change the FFT-size setting.")
+                else:
+                    act.triggered.connect(
+                        lambda _=False, n=meta.name:
+                            self._switch_profile(n))
+                switch_menu.addAction(act)
+            menu.addSeparator()
+
         # Manage / Settings shortcuts.
         manage_act = QAction("Manage profiles…", menu)
         manage_act.triggered.connect(self._open_noise_profile_manager)
@@ -2864,6 +2927,30 @@ class DspPanel(GlassPanel):
             menu.addAction(clear_act)
 
         menu.exec(btn.mapToGlobal(pos))
+
+    def _switch_profile(self, name: str) -> None:
+        """Switch the active captured profile via the front-panel
+        Cap → Switch profile submenu (§14.6 Phase 5).
+
+        Loads the named profile into the IQ engine (skipped if
+        already the active one — avoids resetting apply streaming
+        state for an idempotent click) AND auto-engages the
+        ``use captured`` source toggle so the load is immediately
+        audible.  Errors surface as status-bar toasts.
+        """
+        try:
+            if self.radio.active_captured_profile_name != name:
+                self.radio.load_saved_noise_profile(name)
+            if not self.radio.nr_use_captured_profile:
+                self.radio.set_nr_use_captured_profile(True)
+        except (FileNotFoundError, ValueError,
+                RuntimeError, NotImplementedError) as exc:
+            try:
+                self.radio.status_message.emit(
+                    f"Could not load profile {name!r}: {exc}",
+                    5000)
+            except Exception:
+                pass
 
     def _on_noise_capture_done(self, verdict: str) -> None:
         """Slot for ``Radio.noise_capture_done`` — fires when a
@@ -3492,13 +3579,29 @@ class DspPanel(GlassPanel):
             f"  border-color: rgba(80, 208, 255, 0.35);"
             f"}}")
 
+        # v2 metadata for the tooltip — IQ rate + FFT size give
+        # operators visibility into "what kind of profile is
+        # this" + serve as a debug aid when troubleshooting
+        # cross-rate or cross-FFT-size load refusals.  Defaults
+        # are 0 / 0 if the meta dict is missing those keys (older
+        # in-session metadata may not have them; harmless).
+        meta_rate = int(meta.get("rate_hz", 0) or 0)
+        meta_fft = int(meta.get("fft_size", 0) or 0)
+        rate_label = (f"{meta_rate // 1000} kHz" if meta_rate
+                      else "unknown")
+        fft_label = str(meta_fft) if meta_fft else "unknown"
         tooltip_lines = [
             f"Noise Reduction source: Captured profile {cap_name!r}.",
+            f"  IQ rate at capture: {rate_label}",
+            f"  FFT size: {fft_label}",
             "",
             "Click to switch back to the live VAD-tracked estimate.",
             "",
             "Right-click the NR button to change subtraction "
             "strength (Light / Medium / Heavy).",
+            "",
+            "Right-click the 📷 Cap button to switch profile, "
+            "manage profiles, or adjust capture settings.",
         ]
         if mismatch:
             tooltip_lines.append(

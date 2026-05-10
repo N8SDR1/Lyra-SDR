@@ -3556,17 +3556,17 @@ class NoiseSettingsTab(QWidget):
             "Audacity-style noise capture.  Tune to a noise-only "
             "frequency or wait for a transmission gap, then click "
             "the 📷 Cap button on the DSP+Audio panel.  Lyra records "
-            "the band-noise spectrum and saves it to a profile "
-            "library you can name, organize, and reload across "
-            "sessions.",
+            "the band's IQ-domain noise spectrum and saves it to a "
+            "profile library you can name, organize, and reload "
+            "across sessions.",
             "Profiles save to disk and persist across Lyra restarts.",
-            "Note (v0.0.9.6): the apply step — feeding the "
-            "captured profile into live NR — is currently disabled "
-            "in WDSP mode while the IQ-domain rebuild lands.  "
-            "Capture, save, load, and management all work normally; "
-            "your library is being built for when the apply path "
-            "comes back.  See User Guide → Noise Reduction for "
-            "details.",
+            "v0.0.9.9 (§14.6): the IQ-domain apply path is LIVE.  "
+            "Toggling \"use captured\" on the DSP+Audio panel "
+            "actually applies spectral subtraction now — operators "
+            "hear the noise floor drop on bands where the profile "
+            "matches.  Profiles captured pre-v0.0.9.9 use the "
+            "legacy audio-domain format and are refused at load "
+            "with a recapture hint.",
         ]
         for para in intro_paras:
             lbl = QLabel(para)
@@ -3598,6 +3598,103 @@ class NoiseSettingsTab(QWidget):
         dur_row.addWidget(self.dur_slider, 1)
         dur_row.addWidget(self.dur_label)
         gv.addLayout(dur_row)
+
+        # ── §14.6 v0.0.9.9 Phase 5b: gain-smoothing slider ──
+        # Temporal smoothing on the per-bin Wiener gain mask.
+        # Reduces "watery" musical-noise character of pure
+        # spectral subtraction.  Live-tunable: changes apply
+        # instantly to the running engine.
+        from lyra.dsp.captured_profile_iq import CapturedProfileIQ
+        cur_smoothing = float(s.value(
+            "noise/gain_smoothing",
+            CapturedProfileIQ.DEFAULT_GAIN_SMOOTHING,
+            type=float))
+        cur_smoothing = max(0.0, min(0.95, cur_smoothing))
+        smooth_row = QHBoxLayout()
+        smooth_row.addWidget(QLabel("Gain smoothing:"))
+        self.smooth_slider = QSlider(Qt.Horizontal)
+        # Range 0..95 (integer steps, 0.01 resolution).  Slider
+        # below 0.0 doesn't make sense; above 0.95 freezes the
+        # mask audibly (signal onsets are missed).
+        self.smooth_slider.setRange(0, 95)
+        self.smooth_slider.setValue(int(round(cur_smoothing * 100)))
+        self.smooth_slider.setTickPosition(QSlider.TicksBelow)
+        self.smooth_slider.setTickInterval(20)
+        self.smooth_slider.setSingleStep(5)
+        self.smooth_slider.setPageStep(10)
+        self.smooth_slider.setToolTip(
+            "Temporal smoothing on the captured-profile gain mask "
+            "(γ = 0.0..0.95).\n\n"
+            "0.0 = no smoothing — instantaneous gain per frame "
+            "(maximum responsiveness, maximum watery character)\n"
+            "0.6 = ~10 ms time constant (default — good balance)\n"
+            "0.8 = ~24 ms time constant (heavier smoothing, less "
+            "watery, slightly slower onset response)\n"
+            "0.95 = ~104 ms (very heavy — can blur fast signal "
+            "onsets)\n\n"
+            "Effective immediately — drag to A/B while listening.")
+        self.smooth_label = QLabel(f"{cur_smoothing:.2f}")
+        self.smooth_label.setMinimumWidth(60)
+        self.smooth_label.setStyleSheet(
+            "color: #50d0ff; font-family: Consolas, monospace; "
+            "font-weight: 700;")
+        self.smooth_slider.valueChanged.connect(
+            self._on_gain_smoothing_changed)
+        smooth_row.addWidget(self.smooth_slider, 1)
+        smooth_row.addWidget(self.smooth_label)
+        gv.addLayout(smooth_row)
+
+        # ── §14.6 v0.0.9.9 Phase 5c: FFT-size dropdown ──
+        # IQ analysis FFT size for new captures.  Bigger = finer
+        # bin resolution (better noise discrimination) but more
+        # CPU.  Operators rarely need to change this; the default
+        # 2048 is the §14.6 sweet spot at 192 kHz IQ rate.
+        #
+        # Change takes effect on the NEXT engine recreation
+        # (i.e., the next IQ rate change OR the next Lyra start).
+        # Reason: changing FFT size invalidates any loaded
+        # profile (different bin count); rather than dropping
+        # the profile silently, we defer the change to the
+        # natural recreation point so the operator's session
+        # state stays stable.  Tooltip explains.
+        from lyra.dsp.captured_profile_iq import CapturedProfileIQ as _CPI
+        cur_fft = int(s.value(
+            "noise/iq_capture_fft_size",
+            _CPI.DEFAULT_FFT_SIZE,
+            type=int))
+        if cur_fft not in (1024, 2048, 4096):
+            cur_fft = _CPI.DEFAULT_FFT_SIZE
+        from PySide6.QtWidgets import QComboBox
+        fft_row = QHBoxLayout()
+        fft_row.addWidget(QLabel("FFT size:"))
+        self.fft_size_combo = QComboBox()
+        for size, label in [
+            (1024, "1024  (~188 Hz/bin @ 192k IQ)"),
+            (2048, "2048  (~94 Hz/bin @ 192k IQ — default)"),
+            (4096, "4096  (~47 Hz/bin @ 192k IQ)"),
+        ]:
+            self.fft_size_combo.addItem(label, size)
+        # Pick the active row.
+        for i in range(self.fft_size_combo.count()):
+            if self.fft_size_combo.itemData(i) == cur_fft:
+                self.fft_size_combo.setCurrentIndex(i)
+                break
+        self.fft_size_combo.setToolTip(
+            "FFT bin count for the IQ analysis window.\n\n"
+            "1024 = ~188 Hz bin width at 192 kHz IQ.  Lower CPU.\n"
+            "2048 = ~94 Hz (default; §14.6 sweet spot)\n"
+            "4096 = ~47 Hz.  Finer noise discrimination, ~2× CPU.\n\n"
+            "Change takes effect on the next IQ rate change OR "
+            "the next Lyra restart — whichever comes first.  "
+            "Profiles captured at a different FFT size won't "
+            "load (different bin count); recapture if you "
+            "change this.")
+        self.fft_size_combo.setMinimumWidth(280)
+        self.fft_size_combo.currentIndexChanged.connect(
+            self._on_iq_fft_size_changed)
+        fft_row.addWidget(self.fft_size_combo, 1)
+        fft_row.addStretch(1)
+        gv.addLayout(fft_row)
 
         # Profile staleness fire threshold — operator-tunable in
         # v0.0.9.5.  Was previously a hard-coded 10 dB constant.
@@ -4016,6 +4113,45 @@ class NoiseSettingsTab(QWidget):
         self.dur_label.setText(f"{seconds:.1f} s")
         s = self._QSettings("N8SDR", "Lyra")
         s.setValue("noise/capture_duration_sec", float(seconds))
+
+    def _on_gain_smoothing_changed(self, val_centi: int) -> None:
+        """Operator changed the gain-smoothing slider (§14.6 Phase
+        5b).  Live-tunable: pushes the new γ to the running IQ
+        engine immediately AND persists to QSettings.  Range guard
+        on Radio side keeps γ ∈ [0.0, 0.99]."""
+        gamma = max(0.0, min(0.95, val_centi / 100.0))
+        self.smooth_label.setText(f"{gamma:.2f}")
+        s = self._QSettings("N8SDR", "Lyra")
+        s.setValue("noise/gain_smoothing", float(gamma))
+        # Push to running engine (under Radio's lock).  Skip
+        # silently if engine not initialized — first pickup will
+        # happen via autoload at next launch.
+        try:
+            eng = getattr(self.radio, "_iq_capture", None)
+            lock = getattr(self.radio, "_iq_capture_lock", None)
+            if eng is not None and lock is not None:
+                with lock:
+                    eng.set_gain_smoothing(gamma)
+        except Exception as exc:
+            print(f"[Settings] gain_smoothing push failed: {exc}")
+
+    def _on_iq_fft_size_changed(self, _idx: int) -> None:
+        """Operator changed the IQ-capture FFT size dropdown
+        (§14.6 Phase 5c).  Persists to QSettings AND updates
+        ``Radio._iq_capture_fft_size`` so the next engine
+        recreation (rate change or restart) picks the new value
+        up.  Does NOT recreate the engine immediately — that
+        would silently invalidate any loaded profile, surprising
+        the operator.  Tooltip on the combo explains."""
+        size = int(self.fft_size_combo.currentData() or 2048)
+        if size not in (1024, 2048, 4096):
+            return
+        s = self._QSettings("N8SDR", "Lyra")
+        s.setValue("noise/iq_capture_fft_size", int(size))
+        try:
+            self.radio._iq_capture_fft_size = int(size)
+        except Exception as exc:
+            print(f"[Settings] iq_capture_fft_size push failed: {exc}")
 
     def _on_staleness_threshold_changed(self, val_db: int) -> None:
         """Operator changed the staleness fire threshold via the

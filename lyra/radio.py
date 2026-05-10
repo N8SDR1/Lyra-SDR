@@ -898,14 +898,46 @@ class Radio(QObject):
         # another locked method without deadlock.
         self._iq_capture: CapturedProfileIQ | None = None
         self._iq_capture_lock = threading.RLock()
-        # FFT size used for new captures.  Phase 5 will add a
-        # Settings dropdown (1024/2048/4096); Phase 3 hardcodes
-        # the §14.6 default.  Existing profiles stamp their own
-        # fft_size into the JSON so loaded profiles are
-        # self-describing regardless of what the runtime default
-        # is at apply time.
-        self._iq_capture_fft_size: int = (
-            CapturedProfileIQ.DEFAULT_FFT_SIZE)
+        # FFT size used for new captures and engine init.
+        # Operator-configurable via Settings → DSP → Captured
+        # Profile → FFT size dropdown (Phase 5c).  Persisted via
+        # QSettings ``noise/iq_capture_fft_size``.  Existing
+        # profiles stamp their own fft_size into the JSON so
+        # loaded profiles are self-describing regardless of what
+        # the runtime default is at apply time.
+        try:
+            from PySide6.QtCore import QSettings as _QS
+            _s = _QS("N8SDR", "Lyra")
+            _fft = int(_s.value(
+                "noise/iq_capture_fft_size",
+                CapturedProfileIQ.DEFAULT_FFT_SIZE,
+                type=int))
+            if _fft not in (1024, 2048, 4096):
+                _fft = CapturedProfileIQ.DEFAULT_FFT_SIZE
+            self._iq_capture_fft_size: int = _fft
+        except Exception:
+            self._iq_capture_fft_size = (
+                CapturedProfileIQ.DEFAULT_FFT_SIZE)
+        # Gain-smoothing coefficient for the temporal-smoothing
+        # IIR on the Wiener gain mask.  Operator-tunable via
+        # Settings → DSP → Captured Profile → Gain smoothing
+        # slider (Phase 5b).  Persisted via QSettings
+        # ``noise/gain_smoothing``.  Live-pushed to the engine
+        # on slider change AND seeded into the engine at each
+        # _open_wdsp_rx so a fresh engine starts at the
+        # operator's last-set value.
+        try:
+            from PySide6.QtCore import QSettings as _QS
+            _s = _QS("N8SDR", "Lyra")
+            _g = float(_s.value(
+                "noise/gain_smoothing",
+                CapturedProfileIQ.DEFAULT_GAIN_SMOOTHING,
+                type=float))
+            self._iq_capture_gain_smoothing: float = max(
+                0.0, min(0.95, _g))
+        except Exception:
+            self._iq_capture_gain_smoothing = (
+                CapturedProfileIQ.DEFAULT_GAIN_SMOOTHING)
         try:
             self._open_wdsp_rx(self._rate)
         except Exception as exc:
@@ -7397,6 +7429,7 @@ class Radio(QObject):
             new_engine = CapturedProfileIQ(
                 rate_hz=int(in_rate),
                 fft_size=self._iq_capture_fft_size,
+                gain_smoothing=self._iq_capture_gain_smoothing,
             )
         except Exception as exc:
             print(f"[Radio] iq_capture init: {exc}", flush=True)
