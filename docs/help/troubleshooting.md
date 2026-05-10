@@ -268,13 +268,29 @@ profile is **loaded** in NR.
 
 ## Profile manager shows greyed/strikethrough profiles
 
-Profiles saved with a different FFT size than the current NR
-config show greyed with strikethrough. **Cannot be loaded.**
+A profile is shown greyed-out with strikethrough when Lyra can't
+load it. Two reasons:
 
-This shouldn't happen with normal use — Lyra's NR FFT size is
-hardcoded at 256 across versions. If you see it, you've imported
-a profile from a custom build with a different FFT setting, or
-the profile JSON was hand-edited.
+- **Legacy v1 audio-domain profile** (captured in v0.0.7 –
+  v0.0.9.8). Hover the strikethrough name and the tooltip
+  reads: *"Recapture in v0.0.9.9+ to use the new IQ-domain
+  noise-reduction engine."* The v1 format isn't applicable in
+  the new IQ-domain pipeline, and Lyra refuses to load it
+  rather than producing nonsense output. Recapture on the same
+  band you used for the old profile and you're back in
+  business.
+- **Unknown schema** — if a JSON in your profile folder claims
+  a schema version Lyra doesn't recognize (e.g., a future
+  build's profile copied into your library), it's also greyed
+  with a "schema not supported" tooltip.
+
+**Rate / FFT-size mismatches** (v2 profile from a different IQ
+rate or a different FFT-size setting) are NOT greyed in the
+manager — they look loadable, but clicking **Use Selected**
+produces a clean error message ("captured at X Hz, current
+rate is Y Hz, switch back or recapture") instead of silently
+plausible-but-wrong output. Switch the radio to the matching
+IQ rate or recapture at the current rate.
 
 ## TCI client can't connect
 

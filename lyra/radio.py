@@ -3393,6 +3393,15 @@ class Radio(QObject):
         # orphan ``_rx_channel._nr`` instance (no consumer in WDSP
         # mode); deferred for the cleanup pass.
         self._rx_channel.set_use_captured_profile(on)
+        # Reset apply streaming state on every transition so the
+        # ring buffers don't carry stale IQ across an OFF→ON
+        # cycle.  Without this the first frame after re-engage
+        # would be a mix of leftover samples from the last ON
+        # period with new IQ — audible as a click (joint-audit
+        # finding, Phase 4 review).  Cheap (~µs) and on-thread.
+        with self._iq_capture_lock:
+            if self._iq_capture is not None:
+                self._iq_capture.reset_apply_streaming_state()
         self.nr_use_captured_profile_changed.emit(on)
         # §14.6 Phase 4: the IQ-domain apply pass is now wired
         # (pre-WDSP, in _do_demod_wdsp).  Toggling this flag
@@ -3634,11 +3643,12 @@ class Radio(QObject):
         plausible-but-wrong subtraction.
 
         Apply-path activation is operator-controlled separately
-        via ``set_nr_use_captured_profile`` — loading just stages
-        the profile in the engine.  Phase 4 wires the actual
-        spectral subtraction; until then loading succeeds but the
-        apply pass remains a passthrough (operator-visible flag
-        will be added in Phase 5 once the apply runs).
+        via ``set_nr_use_captured_profile`` — loading stages the
+        profile in the engine, but the spectral subtraction only
+        runs when the operator turns the source toggle ON.
+        Loading also resets the engine's apply streaming state so
+        the first frame after a load doesn't carry stale samples
+        from a previous profile (joint-audit P1, Phase 4 review).
 
         Raises:
             FileNotFoundError: profile doesn't exist on disk.
@@ -7346,6 +7356,14 @@ class Radio(QObject):
         # the wrong band/mode for the persisted profile — let
         # the operator decide.  Signal emit is outside the lock.
         #
+        # ALSO flip the source toggle OFF so the operator's UI
+        # mental model stays consistent: the new engine has no
+        # profile, so "use captured" can't actually do anything.
+        # Leaving the toggle ON would show a checked checkbox
+        # while the apply path is silently a passthrough — exactly
+        # the kind of stale-state confusion the Phase 4 joint
+        # audit flagged as P1.  Operator re-flips the toggle ON
+        # after manually reloading a profile from the manager.
         if had_iq_capture and self._active_captured_profile_name:
             self._active_captured_profile_name = ""
             self._active_captured_profile_meta = None
@@ -7353,6 +7371,17 @@ class Radio(QObject):
                 self.noise_active_profile_changed.emit("")
             except Exception:
                 pass
+            if self._nr_use_captured_profile:
+                # Direct call rather than set_nr_use_captured_profile
+                # because the lock is already partially involved
+                # (engine recreate just happened); we want the
+                # toggle change to also fire its UI signal +
+                # persist to QSettings, which set_nr_use_captured_profile
+                # does for us cleanly.  set_nr_use_captured_profile
+                # also resets apply streaming state which is
+                # redundant here (engine is brand new) but
+                # harmless.
+                self.set_nr_use_captured_profile(False)
 
         # Push current operator state into the new channel.
         try:

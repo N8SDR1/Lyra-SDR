@@ -239,6 +239,26 @@ class CapturedProfileIQ:
         return float(self._capture_frames_target * self.hop
                      / self.rate_hz)
 
+    def reset_apply_streaming_state(self) -> None:
+        """Drop the apply pipeline's input/output rings + overlap.
+
+        Lighter-weight sibling of :meth:`reset_streaming_state`
+        that touches ONLY the apply path — capture state and
+        loaded profile are preserved.  Call this when the apply
+        path is being toggled on or when a new profile is loaded
+        mid-stream so the first apply frame after the transition
+        starts from clean buffers (no stale-from-previous-on-
+        period samples bleeding into the OLA frame).
+
+        Joint-audit finding (Phase 4 review): without this,
+        flipping the source toggle OFF then ON would queue stale
+        IQ inside ``_apply_in_buf`` and produce an audible click
+        on toggle re-engage."""
+        self._apply_in_buf = np.zeros(0, dtype=np.complex64)
+        self._out_overlap = np.zeros(
+            self.fft_size - self.hop, dtype=np.complex64)
+        self._out_ring = np.zeros(0, dtype=np.complex64)
+
     def reset_streaming_state(self) -> None:
         """Drop the input/output ring buffers, overlap state, AND
         cancel any in-progress capture.
@@ -253,11 +273,8 @@ class CapturedProfileIQ:
         any partial accumulator is dropped.  Profile (if loaded)
         is preserved.
         """
-        self._apply_in_buf = np.zeros(0, dtype=np.complex64)
+        self.reset_apply_streaming_state()
         self._capture_in_buf = np.zeros(0, dtype=np.complex64)
-        self._out_overlap = np.zeros(
-            self.fft_size - self.hop, dtype=np.complex64)
-        self._out_ring = np.zeros(0, dtype=np.complex64)
         # cancel_capture handles state transition + accumulator
         # drop; no-op if not currently capturing.
         self.cancel_capture()
@@ -388,14 +405,31 @@ class CapturedProfileIQ:
         # explicit operator load action.
         if self._state == "capturing":
             self.cancel_capture()
+        # Reset apply rings so the first frame on the new profile
+        # doesn't combine with stale samples from any previous
+        # apply session (Phase 4 audit P1).  Capture state is
+        # untouched.
+        self.reset_apply_streaming_state()
         self._state = "ready"
 
     def clear_profile(self) -> None:
         """Drop the loaded profile.  Apply path becomes a
-        passthrough.  Streaming state (input ring, overlap) is
-        preserved so downstream WDSP doesn't see a discontinuity.
+        passthrough.  Apply streaming state (input ring, overlap,
+        output ring) is reset so a subsequent profile load starts
+        from clean buffers.  Capture state is also cleared if a
+        capture was in progress (joint-audit P1: previously left
+        ``_capture_accum`` orphan + ``_capture_frames_*`` stale
+        when clear was called mid-capture).
         """
+        # Cancel any in-flight capture so its accumulator is
+        # released and counters reset.  No-op when state is not
+        # "capturing".
+        if self._state == "capturing":
+            self.cancel_capture()
         self._profile_mag = None
+        # Discard apply pipeline state so a future load_profile
+        # doesn't see ghost IQ in the rings.
+        self.reset_apply_streaming_state()
         self._state = "idle"
 
     # ── Apply API ──────────────────────────────────────────────────

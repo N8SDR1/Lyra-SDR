@@ -1263,17 +1263,16 @@ section is the operative reference for how that's wired.
   (incl. waterfall min/max as of v0.0.9.7) + carrier-freq VFO
   convention with central DDS offset (v0.0.9.8 — see §15.6
   trailer / version-numbering history).
+- Captured noise profile capture + apply (v0.0.9.9 §14.6 Phase 4
+  IQ-domain rebuild) — both halves run pre-WDSP via
+  ``CapturedProfileIQ`` (``lyra/dsp/captured_profile_iq.py``);
+  v2 schema with rate-specific full complex-FFT magnitudes
+  (``lyra/dsp/noise_profile_store.py`` SCHEMA_VERSION = 2);
+  v1 audio-domain profiles refused on load with recapture hint;
+  cross-rate / cross-FFT-size profiles refused with
+  operator-friendly errors.
 
 **Inert in WDSP mode (deferred):**
-- Captured noise profile **apply** path.  Capture itself works
-  (operator presses Cap, profile saves to disk, profile manager
-  lists/loads it across sessions); the apply step is currently
-  bypassed because three rounds of post-WDSP audio-domain attempts
-  produced audible artifacts traceable to AGC's dynamic gain vs.
-  the static captured noise reference.  IQ-domain rebuild
-  architectural plan locked in §14.6; deferred to v0.1 polish.
-  Toggle fires a status-bar warning when the operator turns it
-  on in WDSP mode.
 - NR3 (RNNoise) and NR4 (Spectral Bleach).  ``rnnoise.dll`` and
   ``specbleach.dll`` are bundled but no operator UI is wired
   yet.  Adding a fifth and sixth NR mode to the picker is a
