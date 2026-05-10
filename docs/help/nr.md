@@ -84,35 +84,43 @@ into a saved spectral profile.  The intent is "lock in a
 measured noise model so NR has a perfect a-priori reference"
 instead of inferring noise from live audio.
 
-### Current status (v0.0.9.6)
+### Current status (v0.0.9.9)
 
-> **Capture works.  Apply is currently disabled.**
+> **Capture and apply both work — in the IQ domain.**
 
-The capture button still records, names, and saves profiles —
-all the operator-facing flow is preserved.  However, applying a
-captured profile to live audio is disabled in WDSP mode.
+The full capture → save → load → apply flow is live.  Lyra
+captures raw IQ samples from the radio (before WDSP's RXA chain
+sees them), records the per-bin magnitude spectrum of your QTH's
+noise, and saves a v2 profile to disk.  When you toggle "use
+captured" on, that profile feeds back into the IQ stream as a
+Wiener-from-profile gain mask **before** WDSP runs — so AGC,
+demod, and audio downstream all see the cleaned IQ.
 
-The reason: the captured-profile-apply path was originally
-implemented in Lyra's pure-Python NR.  After the WDSP audio
-rebuild (v0.0.9.6) that Python path was bypassed, and several
-attempts at a WDSP-side equivalent (initial direct-spectrum
-subtraction, gentle Wiener, adaptive scaling, gain-floor) all
-produced audible artifacts that the operator field-tested as
-worse than the un-captured WDSP NR output.  The apply step is
-disabled until a clean IQ-domain rebuild lands (tracked in the
-project backlog as the "captured-profile IQ-domain rebuild"
-item).
+Real-world result: noise floor drops 6–12 dB depending on band
+conditions and how clean the capture window was.  Signals pass
+through with their amplitude essentially unchanged (within ~0.1
+dB on synthetic tests).
 
-In the meantime:
+A bit of history: in v0.0.9.6 the apply step was inert in WDSP
+mode for a stretch — three attempts at a post-WDSP audio-domain
+implementation produced audible artifacts (ticks + tonal drift)
+because they collided with WDSP's AGC.  The v0.0.9.9 rebuild
+moved the subtraction to the IQ layer pre-WDSP, sidestepping the
+AGC interaction.  Profiles captured before v0.0.9.9 use a
+different on-disk format and won't load — Lyra will surface a
+clear "recapture in v0.0.9.9+" message if you try.
 
-- **Capture** still works — you can build a library of profiles
-  for your bands, locations, and noise environments.
+What this means in practice:
+
+- **Capture and apply** both fully active — toggle "use captured"
+  on and listen for the noise floor drop.
 - **Save / load / rename / export / import** all work normally.
-- The profiles are tagged with band, mode, freq, and timestamp
-  so they're ready to use the moment the apply path comes back.
-- The source badge below the DSP buttons may show ⚠ if you
-  toggle "use captured" — that's the engine telling you the
-  apply step is inert.
+- Profiles are tagged with band, mode, freq, and timestamp;
+  load-time checks refuse mismatches (different IQ rate or FFT
+  size) with a friendly message rather than producing
+  plausible-but-wrong subtraction.
+- The source badge below the DSP buttons shows the loaded
+  profile name when one is active.
 
 ### How to capture (for future-proofing your library)
 
@@ -241,13 +249,20 @@ broadband noise during quiet moments.
 
 ## Future work
 
-The captured-profile apply path will return as a clean
-IQ-domain rebuild (tracked in the backlog).  When it lands, the
-"use captured" toggle on the source badge will start affecting
-the audio again, the apply step will produce visibly cleaner
-output on noise-floor-dominated signals, and the inert-warning
-indicator will go away.
+The captured-profile apply path landed in v0.0.9.9 as an
+IQ-domain rebuild (see "Current status" above).  Backlog items
+that may surface in later releases:
 
-Until then, treat captured profiles as a library you're
-building for the moment they become live again — every clean
-capture you save now is one less you'll need to record later.
+- **Settings → DSP → Captured Profile FFT-size dropdown.**
+  Currently fixed at 2048-bin FFTs (~94 Hz resolution at 192
+  kHz IQ).  A 1024 / 2048 / 4096 picker would let operators
+  trade resolution for CPU on slower machines or at lower
+  rates.
+- **Operator-tunable mask floor.**  The Wiener gain mask
+  currently bottoms out at -12 dB (the textbook starting
+  point).  Some band conditions might benefit from a stricter
+  -18 dB or a looser -6 dB; a slider would expose this.
+- **Per-band auto-load.**  Right now the operator manually
+  loads the right profile for the band they're on.  A future
+  enhancement could auto-pick the most recent profile that
+  matches band + IQ rate.

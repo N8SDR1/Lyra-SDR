@@ -257,12 +257,16 @@ class _NR2State:
     / gain method) plus the captured-noise-profile machinery
     (load / clear / use-captured).
 
-    Captured-profile apply is INERT in WDSP mode (see CLAUDE.md
-    §14.6 — capture works, apply step is parked until the
-    IQ-domain rebuild lands).  This dataclass STORES the captured
-    magnitudes so they survive in memory and the future apply
-    path can pick them up; nothing in the audio path reads them
-    today.
+    **v0.0.9.9 (§14.6 Phase 4):** the captured-profile apply path
+    is now LIVE in WDSP mode — but it lives on
+    ``Radio._iq_capture`` (a ``CapturedProfileIQ`` instance), NOT
+    on this dataclass.  This struct's ``_use_captured_profile``
+    flag is now an orphan state mirror kept around for legacy-
+    callsite compatibility (``Radio.set_nr_use_captured_profile``
+    still mirror-writes it).  The captured magnitudes stored here
+    are also orphan — the live apply path uses the magnitudes on
+    the ``CapturedProfileIQ`` engine instead.  Deferred deletion
+    until the post-§14.6 cleanup pass.
     """
     rate: int = 48000
     enabled: bool = False

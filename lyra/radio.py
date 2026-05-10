@@ -28,6 +28,7 @@ from lyra.protocol.stream import HL2Stream, SAMPLE_RATES
 # tuples via _push_wdsp_notches).  See git history for the prior
 # Python implementations.
 from lyra.dsp.audio_sink import AK4951Sink, SoundDeviceSink, NullSink
+from lyra.dsp.captured_profile_iq import CapturedProfileIQ
 from lyra.hardware.oc import (
     N2ADR_PRESET, n2adr_pattern_for_band, format_bits,
 )
@@ -872,6 +873,39 @@ class Radio(QObject):
         # / mute / capture-feed / BIN post-processor / TCI tap on top.
         self._wdsp_rx = None
         self._wdsp_rx_in_rate: int = 0
+        # Captured-profile IQ-domain engine (§14.6, v0.0.9.9).
+        # Created/recreated alongside the WDSP channel so the
+        # engine's IQ rate always matches the radio's.  None until
+        # _open_wdsp_rx successfully completes.  Lifecycle:
+        #   * Created in _open_wdsp_rx
+        #   * Recreated on rate change (_open_wdsp_rx tears down +
+        #     rebuilds at the new rate; profiles captured at the
+        #     old rate remain on disk but won't be applicable until
+        #     the operator switches back)
+        #   * Profile loaded via Radio.load_saved_noise_profile
+        #     once the engine exists
+        #
+        # Thread safety: the worker thread reads/writes engine
+        # state (~188 calls/sec at 192 kHz IQ) via _do_demod_wdsp's
+        # IQ tap, while UI calls (begin_capture / cancel_capture /
+        # load_profile / clear_profile / save / has_profile /
+        # progress) come from the Qt main thread.  CapturedProfileIQ's
+        # docstring is explicit that it's NOT thread-safe across
+        # multiple owners, so Radio mediates with this RLock.
+        # Contention is essentially zero (worker holds for tens of
+        # microseconds per accumulate; UI calls are operator-rate).
+        # RLock so a method that takes the lock can call into
+        # another locked method without deadlock.
+        self._iq_capture: CapturedProfileIQ | None = None
+        self._iq_capture_lock = threading.RLock()
+        # FFT size used for new captures.  Phase 5 will add a
+        # Settings dropdown (1024/2048/4096); Phase 3 hardcodes
+        # the §14.6 default.  Existing profiles stamp their own
+        # fft_size into the JSON so loaded profiles are
+        # self-describing regardless of what the runtime default
+        # is at apply time.
+        self._iq_capture_fft_size: int = (
+            CapturedProfileIQ.DEFAULT_FFT_SIZE)
         try:
             self._open_wdsp_rx(self._rate)
         except Exception as exc:
@@ -3355,24 +3389,18 @@ class Radio(QObject):
         if on == self._nr_use_captured_profile:
             return
         self._nr_use_captured_profile = on
+        # Legacy nr.py state-mirror call.  Harmless flag-set on the
+        # orphan ``_rx_channel._nr`` instance (no consumer in WDSP
+        # mode); deferred for the cleanup pass.
         self._rx_channel.set_use_captured_profile(on)
         self.nr_use_captured_profile_changed.emit(on)
-        # KNOWN-INACTIVE flag: in WDSP mode the captured-profile
-        # spectral-subtraction apply path is not currently wired
-        # (see _do_demod_wdsp comment block + CLAUDE.md §14.6 for
-        # the why).  Capture itself works (Cap button still saves
-        # profiles to disk), but enabling the toggle has no audio
-        # effect in WDSP mode.  Surface that visibly so the operator
-        # doesn't quietly wonder why nothing changed.
-        if on:
-            msg = ("Captured profile is currently INERT in WDSP mode "
-                   "(known issue, needs attention).  Capture saves "
-                   "to disk; spectral subtraction is not applied.")
-            print(f"[Radio] {msg}")
-            try:
-                self.status_message.emit(msg, 6000)
-            except Exception:
-                pass
+        # §14.6 Phase 4: the IQ-domain apply pass is now wired
+        # (pre-WDSP, in _do_demod_wdsp).  Toggling this flag
+        # actually enables/disables spectral subtraction at the
+        # IQ layer, so the previous "INERT in WDSP mode" status
+        # warning is no longer applicable and has been removed.
+        # Operators can hear the effect directly; the DSP+Audio
+        # panel badge shows the loaded profile name.
         # Persist the toggle state so the next Lyra start matches
         # what the operator left running.
         try:
@@ -3385,32 +3413,55 @@ class Radio(QObject):
     # ── Captured noise profile API (Phase 3.D #1) ────────────────────
 
     def begin_noise_capture(self, seconds: float = 2.0) -> None:
-        """Start an N-second capture of the current band noise.
+        """Start an N-second IQ-domain capture of the current
+        band noise (§14.6, v0.0.9.9 IQ-domain engine).
 
         Operator-driven entry point.  UI button hooks into this.
-        Caller is responsible for tuning to a noise-only frequency
-        (or being inside a transmission gap) before invoking.
-        Capture progresses inside the audio chain on subsequent
-        IQ blocks; when it completes, ``noise_capture_done`` fires
-        so UI can prompt for a save name.
+        Caller is responsible for tuning to a noise-only patch of
+        band (or being inside a transmission gap) before invoking.
+        Capture progresses inside the IQ chain on subsequent
+        blocks (tapped pre-WDSP in ``_do_demod_wdsp``); when it
+        completes, ``noise_capture_done`` fires so UI can prompt
+        for a save name.
 
-        ``seconds`` is clamped to NR's CAPTURE_MIN_SEC..MAX_SEC
-        range (1.0..5.0 in normal operator UI).
+        ``seconds`` is clamped at the engine to a minimum of one
+        frame (very short captures produce overfit profiles); UI
+        typically clamps to 1.0..5.0 s for operator sanity.
+
+        No-op if the IQ capture engine isn't available (failed to
+        initialize at WDSP channel open time).
         """
-        self._rx_channel.begin_noise_capture(float(seconds))
+        with self._iq_capture_lock:
+            if self._iq_capture is None:
+                print("[Radio] capture skipped — iq_capture not "
+                      "initialized")
+                return
+            self._iq_capture.begin_capture(float(seconds))
 
     def cancel_noise_capture(self) -> None:
-        """Abort an in-progress capture.  No-op if none running."""
-        self._rx_channel.cancel_noise_capture()
+        """Abort an in-progress IQ capture.  No-op if none
+        running or engine not initialized."""
+        with self._iq_capture_lock:
+            if self._iq_capture is None:
+                return
+            self._iq_capture.cancel_capture()
 
     def has_captured_profile(self) -> bool:
-        """True if a captured profile is currently loaded into NR."""
-        return self._rx_channel.has_captured_profile()
+        """True if a v2 IQ-domain profile is currently loaded
+        into the apply engine."""
+        with self._iq_capture_lock:
+            if self._iq_capture is None:
+                return False
+            return self._iq_capture.has_profile
 
     def nr_capture_progress(self) -> tuple[str, float]:
         """Return ``(state, fraction_complete)`` for UI progress
-        bar.  state ∈ {"idle", "capturing", "ready"}."""
-        return self._rx_channel.nr_capture_progress()
+        bar.  ``state ∈ {"idle", "capturing", "ready"}``.
+        Returns ``("idle", 0.0)`` if engine not initialized."""
+        with self._iq_capture_lock:
+            if self._iq_capture is None:
+                return ("idle", 0.0)
+            return self._iq_capture.progress()
 
     @property
     def active_captured_profile_name(self) -> str:
@@ -3429,11 +3480,14 @@ class Radio(QObject):
         return self._active_captured_profile_meta
 
     def clear_captured_profile(self) -> None:
-        """Drop the loaded captured profile.  If NR profile was
-        "captured", caller should typically also switch to a live
-        NR profile (UI handles that)."""
+        """Drop the loaded captured profile from the IQ apply
+        engine.  Apply path becomes a passthrough.  If the NR
+        source toggle was on, callers typically also flip it back
+        to "stock" (UI handles that)."""
         had = self.has_captured_profile()
-        self._rx_channel.clear_captured_profile()
+        with self._iq_capture_lock:
+            if self._iq_capture is not None:
+                self._iq_capture.clear_profile()
         if self._active_captured_profile_name:
             self._active_captured_profile_name = ""
             self._active_captured_profile_meta = None
@@ -3488,57 +3542,71 @@ class Radio(QObject):
 
     def save_current_capture_as(self, name: str,
                                 overwrite: bool = False):
-        """Persist the currently-loaded captured profile to disk
-        under ``name``.
+        """Persist the currently-loaded v2 IQ-domain captured
+        profile to disk under ``name``.
 
-        Pulls the live magnitudes array from NR plus current
-        operator metadata (freq, mode, capture duration as
-        recorded) and packages it via the noise_profile_store.
+        Pulls the live magnitudes array from the IQ capture
+        engine plus current operator metadata (freq, mode, IQ
+        rate, FFT size, capture duration as recorded) and packages
+        it via :func:`noise_profile_store.make_profile_from_capture`.
 
         Returns the Path the profile was saved to.  Raises
-        FileExistsError if a profile with the same name already
-        exists and ``overwrite`` is False; ValueError if there's
-        no captured profile to save.
+        ``FileExistsError`` if a profile with the same name
+        already exists and ``overwrite`` is False; ``ValueError``
+        if there's no captured profile to save.
         """
         from lyra.dsp import noise_profile_store as nps
         from lyra import __version__ as lyra_version
 
-        mag = self._rx_channel.captured_profile_array()
-        if mag is None:
-            raise ValueError(
-                "no captured profile loaded — capture one first")
-        # Capture duration: try to recover from NR's stored target.
-        # If NR has been re-armed since the capture, the stored
-        # values won't represent the *saved* capture, so we fall
-        # back to a sentinel of 0.0.  UI typically passes the
-        # actual duration via a kwarg in a future enhancement;
-        # for v1 we just store the live NR's target.
-        nr = self._rx_channel._nr  # noqa: SLF001 — controlled access
-        target_frames = getattr(nr, "_capture_frames_target", 0)
-        # frames-per-second = rate / hop; reverse-derive seconds.
-        if target_frames > 0:
-            duration = float(target_frames * nr.HOP / nr.rate)
-        else:
-            duration = 0.0
-        profile = nps.make_profile_from_nr(
+        # Snapshot engine state under the lock so worker-thread
+        # mutations during a re-capture can't tear our values
+        # apart.  Do file I/O (save_profile) outside the lock —
+        # save can take milliseconds on a slow disk and we don't
+        # want to block the worker's _do_demod_wdsp tap.
+        with self._iq_capture_lock:
+            if self._iq_capture is None:
+                raise ValueError(
+                    "no IQ capture engine — open a WDSP channel "
+                    "first")
+            mag = self._iq_capture.captured_profile_array()
+            if mag is None:
+                raise ValueError(
+                    "no captured profile loaded — capture one "
+                    "first")
+            # Capture duration: derived from the engine's
+            # last-armed frame target.  See
+            # ``CapturedProfileIQ.last_capture_duration_sec`` for
+            # the math + edge-case behavior (returns 0.0 if no
+            # local capture has been armed in this session, e.g.
+            # operator is saving a profile they just loaded from
+            # disk — acceptable since "save loaded profile under
+            # new name" is a fringe flow with Export as a cleaner
+            # path).
+            duration = self._iq_capture.last_capture_duration_sec
+            engine_fft_size = int(self._iq_capture.fft_size)
+            engine_rate_hz = int(self._iq_capture.rate_hz)
+
+        profile = nps.make_profile_from_capture(
             name=name,
             magnitudes=mag,
             freq_hz=int(self._freq_hz),
             mode=str(self._mode),
             duration_sec=duration,
-            fft_size=int(self._rx_channel.nr_fft_size),
+            fft_size=engine_fft_size,
+            rate_hz=engine_rate_hz,
             lyra_version=str(lyra_version),
         )
         path = nps.save_profile(self.noise_profile_folder,
                                 profile, overwrite=overwrite)
+
         # Mark this profile as the active one (it IS what's loaded
-        # in NR right now) so a subsequent Lyra restart auto-
-        # restores it.
+        # in the IQ engine right now) so a subsequent Lyra restart
+        # auto-restores it via autoload_active_noise_profile.
         self._active_captured_profile_name = name
-        # Cache the metadata bundle the inline badge needs.  We use
-        # the same fields that get serialized to JSON so the badge
-        # can display matching info whether the profile was just
-        # captured or loaded from disk.
+        # Cache the metadata bundle the inline DSP-panel badge
+        # needs.  Mirror of the JSON fields so the badge can
+        # display matching info regardless of whether the profile
+        # was just captured or loaded from disk.
         self._active_captured_profile_meta = {
             "name": name,
             "captured_at_iso": profile.captured_at_iso,
@@ -3546,6 +3614,7 @@ class Radio(QObject):
             "mode": profile.mode,
             "duration_sec": profile.duration_sec,
             "fft_size": profile.fft_size,
+            "rate_hz": profile.rate_hz,
         }
         self._save_active_profile_name_setting(name)
         self.noise_active_profile_changed.emit(name)
@@ -3553,22 +3622,65 @@ class Radio(QObject):
         return path
 
     def load_saved_noise_profile(self, name: str) -> None:
-        """Load a profile from disk into NR.
+        """Load a v2 IQ-domain profile from disk into the apply
+        engine.
 
-        Raises FileNotFoundError if the profile doesn't exist,
-        ValueError if it's incompatible (different FFT size, bad
-        schema)."""
+        The on-disk profile must be schema v2 IQ-domain (v1
+        audio-domain profiles are refused upstream by
+        :func:`noise_profile_store.load_profile` with a clear
+        recapture hint).  Profile FFT size and IQ rate must match
+        the current engine; mismatches raise ``ValueError`` so
+        the operator gets a clean error rather than silently
+        plausible-but-wrong subtraction.
+
+        Apply-path activation is operator-controlled separately
+        via ``set_nr_use_captured_profile`` — loading just stages
+        the profile in the engine.  Phase 4 wires the actual
+        spectral subtraction; until then loading succeeds but the
+        apply pass remains a passthrough (operator-visible flag
+        will be added in Phase 5 once the apply runs).
+
+        Raises:
+            FileNotFoundError: profile doesn't exist on disk.
+            ValueError: schema mismatch, FFT size mismatch, or
+                IQ rate mismatch.
+            RuntimeError: IQ engine not initialized (no WDSP
+                channel open).
+        """
         from lyra.dsp import noise_profile_store as nps
+        # File I/O (load_profile reads the JSON) happens outside
+        # the engine lock — disk reads can be milliseconds and we
+        # don't want to block the worker thread.  The engine
+        # check + rate/FFT match + actual load go under the lock.
         prof = nps.load_profile(self.noise_profile_folder, name)
-        if prof.fft_size != self._rx_channel.nr_fft_size:
-            raise ValueError(
-                f"profile {name!r} was saved with FFT size "
-                f"{prof.fft_size}; current NR uses "
-                f"{self._rx_channel.nr_fft_size} — incompatible")
-        self._rx_channel.load_captured_profile(prof.magnitudes)
+        with self._iq_capture_lock:
+            if self._iq_capture is None:
+                raise RuntimeError(
+                    "no IQ capture engine — open a WDSP channel "
+                    "first")
+            # Refuse cross-rate or cross-FFT-size profiles up
+            # front.  Phase 4 apply assumes the loaded profile
+            # matches engine config bin-for-bin; refusing here
+            # is the explicit "interpolation across rates not
+            # supported" decision from §14.6.
+            if prof.rate_hz != self._iq_capture.rate_hz:
+                raise ValueError(
+                    f"profile {name!r} was captured at "
+                    f"{prof.rate_hz} Hz IQ rate; current radio "
+                    f"rate is {self._iq_capture.rate_hz} Hz.  "
+                    f"Switch the radio to {prof.rate_hz} Hz or "
+                    f"recapture at the current rate.")
+            if prof.fft_size != self._iq_capture.fft_size:
+                raise ValueError(
+                    f"profile {name!r} was captured at FFT size "
+                    f"{prof.fft_size}; current engine uses "
+                    f"{self._iq_capture.fft_size}.  Recapture, "
+                    f"or change the FFT-size setting before "
+                    f"loading.")
+            self._iq_capture.load_profile(prof.magnitudes)
         self._active_captured_profile_name = prof.name
-        # Cache the metadata so the inline badge has freq/mode/age
-        # info to display without re-reading the JSON file.
+        # Cache metadata for the DSP+Audio panel inline badge
+        # (freq / mode / age / rate display).
         self._active_captured_profile_meta = {
             "name": prof.name,
             "captured_at_iso": prof.captured_at_iso,
@@ -3576,6 +3688,7 @@ class Radio(QObject):
             "mode": prof.mode,
             "duration_sec": prof.duration_sec,
             "fft_size": prof.fft_size,
+            "rate_hz": prof.rate_hz,
         }
         self._save_active_profile_name_setting(prof.name)
         self.noise_active_profile_changed.emit(prof.name)
@@ -4533,11 +4646,46 @@ class Radio(QObject):
             # the profile loaded but switched source to Live before
             # closing.
             self.set_nr_use_captured_profile(use_captured)
-        except (FileNotFoundError, ValueError) as exc:
+        except (OSError, ValueError, RuntimeError,
+                NotImplementedError) as exc:
+            # OSError covers FileNotFoundError + PermissionError +
+            # other Windows ACL / antivirus / network-share read
+            # failures that can hit on startup with a stale
+            # QSettings active-profile pointer.  Without this,
+            # an unreadable JSON would crash __init__ and the
+            # operator couldn't reach the manager dialog to
+            # clear it.
+            #
+            # ValueError covers schema-version refusal (v1 hint),
+            # rate / FFT-size mismatches from
+            # load_saved_noise_profile's strict checks, and
+            # json.JSONDecodeError (which is itself a ValueError
+            # subclass).
+            #
+            # RuntimeError covers the §14.6 Phase 3 guard on
+            # load_saved_noise_profile when the IQ engine failed
+            # init (e.g., DLL set missing, exception caught at
+            # _open_wdsp_rx and _iq_capture left as None).
+            # Without this catch, autoload would propagate the
+            # RuntimeError up out of __init__ and crash startup.
+            #
+            # NotImplementedError is the legacy §14.6 Phase 1
+            # guard, now dead code (Phase 3 replaced the stub
+            # bodies with real implementations).  Kept as
+            # belt-and-suspenders since adding to the catch
+            # tuple is free.
             print(f"[Radio] could not auto-load captured profile "
                   f"{name!r}: {exc}")
-            # Clear the stale pointer so we don't keep retrying.
-            self._save_active_profile_name_setting("")
+            # Don't clear the persisted name — once Phases 3-4 land
+            # the operator's last-used profile should auto-restore.
+            # If the file is genuinely missing, FileNotFoundError
+            # will fire and we leave the stale name on disk; the
+            # manager dialog surfaces "missing profile" cleanly
+            # enough that an auto-clear here would be premature.
+            # (When the captured-profile feature ships fully in
+            # v0.0.9.9, revisit whether to restore the old auto-
+            # clear behavior — for the rebuild window we err on
+            # the side of preserving operator intent.)
 
     # ── APF (Audio Peaking Filter) ─────────────────────────────────
     @property
@@ -7158,6 +7306,54 @@ class Radio(QObject):
         )
         self._wdsp_rx = RxChannel(channel=0, cfg=cfg)
         self._wdsp_rx_in_rate = int(in_rate)
+
+        # Captured-profile IQ-domain engine (§14.6, v0.0.9.9).
+        # Tied to the WDSP channel's lifetime — same in_rate, same
+        # close+reopen cadence on rate change.  Profiles are
+        # rate-specific; if a profile was loaded from disk and the
+        # rate matches, callers can reload it via load_profile()
+        # after this method returns.  We don't auto-reload here
+        # because the profile name+folder lives at the Radio
+        # facade level, not in the WDSP-channel layer.
+        #
+        # Build the new engine OUTSIDE the lock (construction
+        # touches numpy/FFT setup; no shared state mutation
+        # until we assign it), then take the lock briefly to
+        # swap.  This minimizes worker-thread blocking on rate
+        # change.
+        try:
+            new_engine = CapturedProfileIQ(
+                rate_hz=int(in_rate),
+                fft_size=self._iq_capture_fft_size,
+            )
+        except Exception as exc:
+            print(f"[Radio] iq_capture init: {exc}")
+            new_engine = None
+
+        with self._iq_capture_lock:
+            had_iq_capture = self._iq_capture is not None
+            self._iq_capture = new_engine
+
+        # On a recreate (rate change), clear the active-profile
+        # name + meta + emit the changed signal so the DSP+Audio
+        # panel badge stops showing a "loaded" profile that the
+        # new engine doesn't actually have.  The persisted-via-
+        # QSettings profile name on disk is preserved (we don't
+        # call _save_active_profile_name_setting("") here) so the
+        # operator could switch back to the original rate and
+        # reload manually from the manager dialog.  We don't
+        # auto-reload because the rate-change path may also be
+        # the wrong band/mode for the persisted profile — let
+        # the operator decide.  Signal emit is outside the lock.
+        #
+        if had_iq_capture and self._active_captured_profile_name:
+            self._active_captured_profile_name = ""
+            self._active_captured_profile_meta = None
+            try:
+                self.noise_active_profile_changed.emit("")
+            except Exception:
+                pass
+
         # Push current operator state into the new channel.
         try:
             self._wdsp_rx.set_mode(self._wdsp_mode_for(self._mode))
@@ -7540,8 +7736,85 @@ class Radio(QObject):
         blocks per call. Empty result = no full block ready yet, which is
         expected on the first few calls after a freq / mode change.
         """
+        # ── §14.6 pre-WDSP IQ taps for captured-profile ──
+        # IQ-domain capture (Phase 3) and apply (Phase 4) both run
+        # BEFORE WDSP's RXA chain, sidestepping the AGC-mismatch
+        # that broke three rounds of post-WDSP audio-domain
+        # attempts in v0.0.9.6 (see CLAUDE.md §14.6).
+        #
+        # Order matters:
+        #   1. CAPTURE accumulates from RAW iq (so the profile
+        #      reflects the band's actual noise spectrum, NOT a
+        #      cleaned version).
+        #   2. APPLY runs Wiener-from-profile on the same raw iq
+        #      and produces ``iq_for_wdsp`` for downstream demod.
+        # The two passes can run simultaneously (operator
+        # re-capturing while listening to the previous profile)
+        # — the engine has separate input buffers for each path
+        # so they don't collide.  See Phase 2 review test #10
+        # for verification.
+        #
+        # Lock the engine for the entire window so UI-thread
+        # calls (begin_capture / cancel / load / clear) can't
+        # mutate engine state mid-call.  Emit the capture-done
+        # signal OUTSIDE the lock so signal handlers don't run
+        # under the engine lock (PySide6 emit is fast but slot
+        # invocation may be DirectConnection on the same thread).
+        fired_done = False
+        iq_for_wdsp = iq
+        with self._iq_capture_lock:
+            if self._iq_capture is not None:
+                # Capture pass — no-op unless state == "capturing".
+                prev_state = self._iq_capture.state
+                try:
+                    self._iq_capture.accumulate(iq)
+                except Exception as exc:
+                    print(f"[Radio] IQ capture accumulate: {exc}")
+                else:
+                    # Detect capture-done state transition.  This
+                    # method runs ~188 times/sec at 192 kHz IQ +
+                    # in_size=1024, so the latency between
+                    # capture-done and signal-emit is well under
+                    # 6 ms (replaces the nr.py done-callback the
+                    # legacy path used).
+                    if (prev_state == "capturing"
+                            and self._iq_capture.state == "ready"):
+                        fired_done = True
+
+                # Apply pass — runs only when the operator's
+                # source toggle is on AND a profile is loaded.
+                # ``apply()`` returns variable-length output:
+                # zero on the first call after profile load
+                # (algorithm warmup, ~one frame fills the
+                # overlap buffer); ~len(iq) samples per call in
+                # steady state.  WDSP buffers internally and is
+                # fine with variable-length input — total bytes
+                # balance over time, with a constant
+                # ``fft_size - hop`` sample pipeline delay
+                # (~5.3 ms at 192 kHz IQ + fft_size=2048).
+                if (self._nr_use_captured_profile
+                        and self._iq_capture.has_profile):
+                    try:
+                        iq_for_wdsp = self._iq_capture.apply(iq)
+                    except Exception as exc:
+                        print(f"[Radio] IQ apply: {exc}")
+                        # Fall back to raw IQ on error so audio
+                        # keeps flowing — operator gets logspam
+                        # but no audio gap.
+                        iq_for_wdsp = iq
+        if fired_done:
+            try:
+                # Signal is declared Signal(str); the legacy
+                # "verdict" arg is always "" post-v0.0.9.5
+                # (smart-guard removed).  See declaration at the
+                # top of Radio class + the matching emit in
+                # _on_nr_capture_done.
+                self.noise_capture_done.emit("")
+            except Exception:
+                pass
+
         try:
-            audio = self._wdsp_rx.process(iq)
+            audio = self._wdsp_rx.process(iq_for_wdsp)
         except Exception as exc:
             print(f"[Radio] WDSP rx process error: {exc}")
             return
@@ -7567,37 +7840,14 @@ class Radio(QObject):
             if v != 1.0:
                 audio = audio * np.float32(v)
 
-        # Capture-active path — when the operator presses "Cap", NR1
-        # (which owns the FFT magnitude accumulator) needs to see the
-        # post-demod audio so it can build the captured profile.
-        # WDSP doesn't ship a capture facility, so we feed the WDSP
-        # audio output directly to nr.process() with enabled forced
-        # to False — that triggers nr.py's lightweight "capture-
-        # without-NR" branch which accumulates magnitudes and returns
-        # audio untouched.  When capture finalizes, NR1's done-
-        # callback (already wired to _on_nr_capture_done) loads the
-        # profile into both NR1 and NR2 and fires noise_capture_done
-        # so the UI prompts for a save name.
-        nr1 = getattr(self._rx_channel, "_nr", None)
-        if nr1 is not None and getattr(nr1, "_capture_state", "idle") == "capturing":
-            try:
-                was_enabled = nr1.enabled
-                nr1.enabled = False
-                mono_for_capture = audio[:, 0] if audio.ndim == 2 else audio
-                nr1.process(mono_for_capture)
-                nr1.enabled = was_enabled
-            except Exception as exc:
-                print(f"[Radio] WDSP capture feed error: {exc}")
-
-        # Captured-profile spectral-subtraction apply path is INERT
-        # in WDSP mode (surgical revert 2026-05-07 evening).  Multiple
-        # rounds of iteration (initial post-WDSP pass, Path A gentle
-        # Wiener, Path B adaptive scaling, Plan C gain floor) didn't
-        # eliminate audible artifacts.  Capture itself works (the
-        # capture-feed wiring above this comment routes audio into
-        # NR1's accumulator), profiles save/load/persist, but the
-        # apply step is skipped to avoid degrading the audio.
-        # See CLAUDE.md §14.6 for the full history.
+        # ── §14.6 IQ-domain captured-profile path (LIVE) ─────────
+        # Capture and apply both happen pre-WDSP in the IQ domain
+        # at the top of this method (search for "Phase 3" /
+        # "Phase 4" tags above the lock-held block).  The legacy
+        # post-WDSP audio capture-feed that used to live HERE
+        # (feeding nr.SpectralSubtractionNR.process(enabled=False)
+        # with WDSP's output audio) was removed in Phase 3.  See
+        # CLAUDE.md §14.6 for the full architectural rationale.
         # WDSP returns mono-equivalent stereo (L == R) so we hand the
         # left channel to BinauralFilter, which on enabled returns a
         # genuinely-different (N, 2) Hilbert-pair stereo that the

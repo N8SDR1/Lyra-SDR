@@ -304,7 +304,6 @@ class NoiseProfileManager(QDialog):
 
         metas = self.radio.list_saved_noise_profiles()
         active = self.radio.active_captured_profile_name
-        current_fft = self.radio._rx_channel.nr_fft_size
 
         self.table.setRowCount(len(metas))
         for row, meta in enumerate(metas):
@@ -319,18 +318,35 @@ class NoiseProfileManager(QDialog):
                 font.setBold(True)
                 name_item.setFont(font)
                 name_item.setForeground(QColor("#39ff14"))
-            # Mark incompatible profiles with strikethrough font +
-            # tooltip.  load_saved_noise_profile() will reject these
-            # at load time; we also visually flag them.
-            if not meta.is_compatible(current_fft):
+            # Mark unloadable profiles with strikethrough font +
+            # tooltip.  ``is_loadable()`` returns False for v1
+            # legacy audio-domain profiles (no consumer in
+            # v0.0.9.9+) and for any future schema version that
+            # this build doesn't recognize.  load_saved_noise_profile()
+            # also rejects these at load time with a clear recapture
+            # hint; the strikethrough is a visual fast-fail so the
+            # operator doesn't waste a click.  Apply-time
+            # compatibility (rate / FFT size) is checked separately
+            # at load — a v2 profile from a different rate is NOT
+            # struck through here, just refused at load with a
+            # rate-mismatch message.
+            if not meta.is_loadable():
                 font = name_item.font()
                 font.setStrikeOut(True)
                 name_item.setFont(font)
                 name_item.setForeground(QColor("#7a8a9c"))
-                name_item.setToolTip(
-                    f"Profile FFT size {meta.fft_size} doesn't match "
-                    f"current NR config ({current_fft}).  Cannot be "
-                    f"loaded.")
+                if meta.schema_version == 1:
+                    tip = ("This profile was captured in the legacy "
+                           "audio-domain format (pre-v0.0.9.6).  "
+                           "Recapture in v0.0.9.9+ to use the new "
+                           "IQ-domain noise-reduction engine.")
+                else:
+                    tip = (f"Profile schema_version "
+                           f"{meta.schema_version} (domain "
+                           f"{meta.domain!r}) is not supported by "
+                           f"this Lyra build.  Recapture or upgrade "
+                           f"Lyra.")
+                name_item.setToolTip(tip)
             self.table.setItem(row, self.COL_NAME, name_item)
 
             self.table.setItem(
@@ -365,9 +381,14 @@ class NoiseProfileManager(QDialog):
     def _refresh_button_states(self) -> None:
         meta = self._selected_meta()
         has_sel = meta is not None
-        compat = (has_sel
-                  and meta.is_compatible(self.radio._rx_channel.nr_fft_size))
-        self.btn_use.setEnabled(has_sel and compat)
+        # Use button enables on any v2-loadable profile (loadable
+        # in this Lyra build).  Apply-time rate / FFT mismatches
+        # surface as a clean error message from
+        # ``load_saved_noise_profile`` when the operator clicks
+        # Use — preferred over a silently-disabled button that
+        # leaves them wondering why.
+        loadable = has_sel and meta.is_loadable()
+        self.btn_use.setEnabled(loadable)
         self.btn_recapture.setEnabled(has_sel)
         self.btn_rename.setEnabled(has_sel)
         self.btn_delete.setEnabled(has_sel)

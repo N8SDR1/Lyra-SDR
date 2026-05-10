@@ -219,15 +219,15 @@ NB is over-active. Either:
 
 ## Captured noise profile is muting real signals
 
-> **v0.0.9.6 note:** the captured-profile **apply** path is
-> currently INERT in the WDSP DSP engine — capture, save, load,
-> and management all work normally, but enabling "use captured
-> profile" doesn't yet feed the profile back into live NR.
-> Lyra fires a status-bar warning when you toggle it on.  The
-> recipe below applies in legacy DSP mode only
-> (`LYRA_USE_LEGACY_DSP=1`); a proper IQ-domain rebuild for
-> WDSP-mode apply is on the v0.1 backlog (see
-> `CLAUDE.md` §14.6).
+> **v0.0.9.9 note:** captured-profile apply is now LIVE in the
+> WDSP engine — the IQ-domain rebuild landed in v0.0.9.9
+> (capture taps raw IQ pre-WDSP; apply runs Wiener-from-profile
+> spectral subtraction also pre-WDSP, before WDSP's RXA chain
+> sees the IQ).  The "use captured" toggle now actually does
+> something.  Profiles captured in v0.0.9.6 / v0.0.9.7 / v0.0.9.8
+> use the legacy v1 audio-domain format and will refuse to load
+> with a "recapture in v0.0.9.9+" hint — recapture them in
+> v0.0.9.9 to migrate.
 
 If a captured profile makes your signal-of-interest quieter than
 NR-off, the captured noise model probably contains some signal

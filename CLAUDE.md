@@ -1368,12 +1368,15 @@ no longer compete with the DSP for the GIL.
      required complex-rmatch routing (L into I, R into Q) so
      channels survive rate-matching independent.
    - **Leveler** ✓ DROPPED — WDSP AGC subsumes it.
-   - **Captured noise profile** ⚠️ **CAPTURE-WORKS-APPLY-INERT**
-     (see §14.6 below).  Capture button still saves profiles to
-     disk in WDSP mode.  Spectral-subtraction-apply is NOT wired
-     — three rounds of fixes (post-WDSP nr2 pass + temporal
-     smoothing + auto-VAD) didn't eliminate audible artifacts.
-     Operator visible flag at toggle time + status-bar message.
+   - **Captured noise profile** ✓ **WIRED — IQ-domain (v0.0.9.9
+     §14.6 Phase 4)**.  Both capture and apply run pre-WDSP on
+     raw IQ; the operator-driven "use captured" toggle now
+     enables real spectral subtraction at the IQ layer.  Operator
+     hears noise floor drop ~6-12 dB.  Three earlier post-WDSP
+     audio-domain attempts in v0.0.9.6 produced AGC-mismatch
+     artifacts and were reverted; the IQ-domain rebuild
+     sidesteps that interaction (see §14.6 below for the full
+     trail).
 
 5. **Cleanup pass.** Once RX/TX/PS are all on the native engine,
    audit `lyra/dsp/agc_wdsp.py`, `nr.py`, `anf.py`, `lms.py`,
@@ -1437,13 +1440,35 @@ no longer compete with the DSP for the GIL.
   Confirm `RxChannel.out_size` matches `in_size * out_rate /
   in_rate` (when in_rate ≥ out_rate).
 
-### 14.6 Known-issue flag — captured-profile-apply inert in WDSP mode
+### 14.6 Captured-profile IQ-domain rebuild (v0.0.9.9)
 
-**TL;DR:** in WDSP mode the operator can capture noise profiles
-(Cap button works, profiles save / load / persist), but enabling
-"use captured profile" does NOT apply spectral subtraction to the
-audio.  Capture half works, apply half doesn't.  Operator sees a
-status-bar warning at the moment of toggle.  Legacy mode unchanged.
+**Status as of v0.0.9.9 Phase 4 (2026-05-10):** the IQ-domain
+rebuild is **LIVE in WDSP mode**.  Capture taps raw IQ pre-WDSP
+(``Radio._do_demod_wdsp`` → ``CapturedProfileIQ.accumulate``),
+apply runs Wiener-from-profile spectral subtraction on raw IQ
+also pre-WDSP (``CapturedProfileIQ.apply``), the cleaned IQ goes
+to ``_wdsp_rx.process``.  Operator-perceptible noise reduction
+~6-12 dB depending on band conditions and mask floor (default
+-12 dB).  Phase 5 still pending: Settings → DSP FFT-size dropdown
+(1024/2048/4096) and DSP+Audio panel badge polish for the v2
+metadata.
+
+**Schema:** profiles are v2 (``noise_profile_store.SCHEMA_VERSION
+= 2``), domain ``"iq"``, full complex-FFT magnitudes (``fft_size``
+floats), with per-profile ``rate_hz`` field.  v1 audio-domain
+profiles from before v0.0.9.6's WDSP cleanup arc are refused on
+load with a clear "recapture in v0.0.9.9+" hint
+(``noise_profile_store.load_profile``).
+
+**Historical context — what this rebuild replaced** (preserved
+below for reference; the post-WDSP audio-domain path described
+here is gone):
+
+In WDSP mode the operator could capture noise profiles
+(Cap button worked, profiles saved / loaded / persisted), but
+enabling "use captured profile" did NOT apply spectral subtraction
+to the audio.  Capture half worked, apply half didn't.  Operator
+saw a status-bar warning at the moment of toggle.
 
 **What we tried (2026-05-07 evening):**
 1. First pass — wired `nr2.process()` as a Python post-WDSP audio
@@ -1536,15 +1561,23 @@ meantime:
   COLA-perfect reconstruction) — same pattern as `nr2.py`'s
   audio-domain implementation.
 
-**Operator-visible behavior to preserve:**
+**Operator-visible behavior in v0.0.9.9 (Phase 4 LIVE):**
 
-* Capture button still works (countdown, save dialog).
+* Capture button works (countdown, save dialog) — captures raw
+  IQ pre-WDSP at the operator's current rate.
 * Captured profiles persist across sessions.
-* Toggle "use captured" on while in WDSP mode → status bar shows
-  "Captured profile is currently INERT in WDSP mode (known issue,
-  needs attention)..." for 6 seconds.
-* In legacy mode (`LYRA_USE_LEGACY_DSP=1`), captured profile
-  applies normally — no regression.
+* Toggle "use captured" on → spectral subtraction is applied
+  to the IQ stream BEFORE WDSP's RXA chain.  Operator hears
+  the noise floor drop ~6-12 dB depending on band conditions.
+* INERT status warning REMOVED — apply path is no longer inert.
+* Cross-rate profile load → refused with operator-friendly
+  "captured at X Hz, current rate is Y Hz, switch back or
+  recapture" message (v2 profiles are rate-specific by design).
+* Cross-FFT-size profile load → similar refusal message.
+* Legacy mode (``LYRA_USE_LEGACY_DSP=1``) — env var no longer
+  has any effect (cleanup arc deleted the legacy DSP path).
+  v1 audio-domain profiles on disk from pre-v0.0.9.6 → refused
+  on load with clear "recapture in v0.0.9.9+" hint.
 
 #### Toggle-pattern UX for §14.6 (operator design lens, 2026-05-09)
 
@@ -1594,6 +1627,43 @@ implementation is real.
 Same QSettings keys we already have for the captured profile
 selection (`nr/use_captured_profile`, `nr/active_profile_name`).
 No schema bump.
+
+#### Forward-compatibility with TX (v0.2) and PureSignal (v0.3)
+
+Operator asked at the start of Phase 2 (2026-05-10) whether the
+IQ-domain pre-pass would interfere with TX or PureSignal work
+landing in v0.2 / v0.3.  Recorded answer so future sessions don't
+re-derive it.
+
+**The pre-pass is wired exclusively into ``Radio._do_demod_wdsp``,
+which only ever sees DDC0 (RX1's receive IQ stream).**  TX, PS
+feedback, and self-monitoring are independent code paths that
+share none of the new code:
+
+| Concern | Status |
+|---|---|
+| §14.6 affects PureSignal calibration math? | **No** — PS uses DDC2/DDC3 feedback at TX freq (§3.4 / §6.4 — ``ddc[2].freq_source = "TX"``), dispatched to a separate ``ps_calcc.py`` / ``ps_iqc.py`` handler that the captured-profile pre-pass has zero hooks into |
+| §14.6 affects TX modulation chain? | **No** — TX is mic → ``ssb_mod.py`` → baseband I/Q → EP2 framing → HL2 PA, totally independent of any RX path |
+| §14.6 affects RX1 self-monitoring during TX? | **No** — Wiener gain ``G[k] = max(floor, 1 - profile_mag[k] / frame_mag[k])`` produces ``G ≈ 1`` on strong signals (operator's own carrier bleeding through ≫ profile magnitude), so the pre-pass is transparent to the operator's TX content while still attenuating background noise on RX1 |
+| §14.6 affects duplex / ``puresignal_run`` flags? | **No** — C4 bit 2 (duplex) and frame 11/16 C2 bit 6 (``puresignal_run``) are protocol-layer concerns in ``stream.py``; §14.6 doesn't touch the protocol layer at all |
+| §14.6 affects RX2 (v0.1)? | **Eventually yes** — RX2 will need its OWN ``CapturedProfileIQ`` instance for its own band's noise spectrum, but that's a clean per-channel duplication (one IQ pre-pass per WDSP channel) handled when v0.1 lands.  Not a cross-cutting concern. |
+
+**On full duplex during PS:** operator was correct that PS needs
+the duplex bit set + ``puresignal_run`` flags + nddc=4 — already
+documented in §3.2 and §3.7.  None of that protocol surface is
+touched by §14.6.  During PS+TX the gateware delivers DDC2/DDC3
+feedback at ``rx1_rate`` while DDC0 keeps running RX1 normally;
+the captured-profile pre-pass continues running on DDC0 (where
+it's transparent to the strong self-monitoring signal per the
+table above), and DDC2/DDC3 PS feedback dispatch never enters
+``_do_demod_wdsp``.
+
+**Bonus side-property:** when v0.1 RX2 lands, each RX channel can
+have its own captured profile (operator listening to 40m on RX1
+and 20m on RX2 might want band-specific QTH noise subtraction
+on each).  The per-WDSP-channel pre-pass model from Phase 4
+naturally supports this — just instantiate a second
+``CapturedProfileIQ`` for RX2's IQ stream.
 
 #### Companion investigations (parked alongside §14.6)
 
@@ -1773,8 +1843,8 @@ audible difference between OSMS and MCRA.
   adaptive — useful but distinctive)
 * LMS slider works (controls ANR step size mu logarithmically)
 * APF works (CW-only, mode-gated)
-* Captured-profile capture path works; apply path inert in WDSP
-  mode (status warning fires); IQ-domain rebuild planned per §14.6
+* Captured-profile both capture AND apply paths work in WDSP
+  mode (v0.0.9.9 §14.6 Phase 4 — IQ-domain rebuild landed)
 
 ### 14.8 All-mode squelch — WDSP SSQL native (2026-05-07 night)
 
@@ -1934,7 +2004,7 @@ If anyone needs to recover a deleted file by name (e.g. the spectral-subtraction
 
 #### Follow-ups still open (NOT part of cleanup arc)
 
-* **§14.6 Captured-profile IQ-domain rebuild** — capture works, save / load / manage all work, apply step is INERT in WDSP mode.  Future work: rebuild apply path in IQ domain pre-WDSP rather than audio-domain post-WDSP.
+* ~~**§14.6 Captured-profile IQ-domain rebuild**~~ **CLOSED 2026-05-10 (v0.0.9.9):** IQ-domain rebuild landed across Phases 1-4.  Schema v2 (rate-specific full complex-FFT magnitudes), `CapturedProfileIQ` STFT engine in `lyra/dsp/captured_profile_iq.py`, capture + apply both wired in `_do_demod_wdsp` pre-WDSP.  v1 audio-domain profiles refused on load with recapture hint.  Still pending: Phase 5 (Settings FFT-size dropdown + DSP panel badge polish) and Phase 6 (operator A/B test matrix).
 * **§14.10 _open_wdsp_rx audit (partially closed)** — Phase 6.A3 + 6.A4 wired the AGC + FM SQ + ANF + AM SQ gaps the audit found.  Lower-priority gaps (FM Deviation, FM Limiter, FM AF Filter, CTCSS, AM DSBMode, AM Fade, NR3-RNNoise, NR4-SpectralBleach, EMNR Position, ANR Position, Pan, etc.) deferred until operator surfaces specific need.
 * ~~**HL2 audio smoothing regression check** — Phase 9.5 Item 2.  A "less harsh" smoothing change landed during the v0.0.9.6 audio rebuild on 2026-05-07 may have been dropped during a subsequent revert chain.  Worth a `git log -p lyra/dsp/audio_sink.py` review.~~  **CLOSED 2026-05-09: NO regression.**  The smoothing change in question was Option Z (commit `022d1fd`, half-cosine slewed-silence-fill on EP2 underrun, 2026-05-06 12:47).  It was deliberately reverted (`f29f53d`, 12:56) when the real root cause was found 19 minutes later: HL2 command 0x17 (`config_txbuffer`) was never being sent, so the FPGA's TX-side audio buffer ran at the gateware default 10 ms and underran with Python-side jitter.  The actual fix landed in `c7916bc` (13:15) and lives at `lyra/protocol/stream.py:356` as the `0x2e` register entry (`(0, 0, 12 & 0x1F, 40 & 0x7F)` = 12 ms PTT hang, **40 ms TX latency**), pushed at startup via the standard C&C cycle.  Plus TPDF dither (stream.py:207-260) and S-meter peak-hold smoothing (radio.py:1358 `_SMETER_PEAK_DECAY = 0.85`) are also still in place.  The revert was correct — Option Z would have masked symptoms while c7916bc fixes the cause.  No code action; CLAUDE.md note kept here as the audit trail in case anyone re-reads §14.9 and wonders why the strikethrough.
 * **AGC profile A/B at the operator level** — meter movement is verified (Phase 6.A3 fix), but per-time-constant audible differences (Fast vs Slow vs Long on real speech / CW) need operator confirmation when band conditions improve.
