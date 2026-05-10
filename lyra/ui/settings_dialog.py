@@ -3487,11 +3487,12 @@ class NoiseSettingsTab(QWidget):
     """Noise toolkit settings.
 
     Operator-tunable knobs for the noise-toolkit features:
-      * Captured Noise Profile — capture duration, staleness
+      * Captured Noise Profile — capture duration, gain
+        smoothing (Phase 5b), FFT size (Phase 5c), staleness
         threshold, storage location, age-warning thresholds,
-        profile manager + folder shortcuts.  Capture works;
-        live apply is currently disabled in WDSP mode (see
-        CLAUDE.md §14.6).
+        profile manager + folder shortcuts.  v0.0.9.9 §14.6:
+        full IQ-domain capture + apply pipeline is LIVE in
+        WDSP mode.
       * Noise Blanker (NB) — profile picker (advisory) +
         threshold slider (advisory).  Live engine: WDSP NOB.
       * Auto Notch Filter (ANF) — profile picker (advisory) +

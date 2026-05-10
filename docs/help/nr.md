@@ -134,9 +134,10 @@ What this means in practice:
    name is `<band> <date time>` like "80m 2026-04-30 14:22" —
    edit to whatever's meaningful: "Powerline 80m", "Storm
    noise", "FT8 hash 20m", etc.
-4. Profile saves to your noise-profile folder.  When the apply
-   path returns in a future build, your library is already
-   ready.
+4. Profile saves to your noise-profile folder.  Toggle the
+   "use captured" badge below the DSP buttons (or use the
+   right-click → Switch profile submenu) to engage spectral
+   subtraction with this profile.
 
 ### Capture quality — your ear is the filter
 
@@ -161,11 +162,32 @@ Capture for 1.0 s
 Capture for 3.0 s
 Capture for 5.0 s
 ─────
+Switch profile…  ▶                 ← v0.0.9.9: single-click reload
+   ✓ Powerline 80m  [192k]            (compatible profiles clickable)
+     WX-40m daytime  [192k]
+     ─Storm 20m  [96k]                (greyed: rate mismatch)
+     ─Old profile  [legacy v1]        (greyed: recapture in 0.0.9.9+)
 Manage profiles…                   ← opens the profile manager
 Open Noise settings…               ← jumps to Settings → Noise
 ─────
 Clear loaded profile (Powerline 80m)
 ```
+
+The **Switch profile…** submenu (added in v0.0.9.9) lists every
+profile in your library with its IQ rate in brackets.  Clicking
+a compatible profile loads it AND auto-engages "use captured" in
+a single click — saves you the Manage profiles → select → Use
+Selected three-step.
+
+- ✓ marker = profile currently loaded
+- Greyed entries = profile can't be loaded right now.  Hover for
+  the reason: **legacy v1** (captured pre-v0.0.9.9 audio-domain
+  format — recapture); **rate mismatch** (captured at a
+  different IQ rate — switch radio rate or recapture); **FFT
+  size mismatch** (captured at a different FFT bin count —
+  recapture or change Settings → Noise → FFT size).
+- Clicking the already-loaded profile is a no-op (no audio
+  glitch from re-loading).
 
 ### Manage Profiles dialog
 
@@ -180,15 +202,21 @@ your captured profiles in a list with:
 
 Buttons:
 
-- **Use Selected** — load this profile (applies once the apply
-  path returns)
+- **Use Selected** — load this profile into the IQ engine.  Then
+  toggle "use captured" on the source badge to engage spectral
+  subtraction.  (Quicker alternative for v0.0.9.9+: right-click
+  📷 Cap → Switch profile → click — that does both in one step.)
 - **Re-capture** — overwrite this profile with fresh band noise
 - **Rename / Delete** — standard ops
 - **Export… / Import…** — single-profile JSON files for sharing
   or backup
 
 Profiles persist across Lyra restarts.  The last-active profile
-auto-restores at startup so you pick up where you left off.
+auto-restores at startup if it matches the current radio IQ
+rate; if it doesn't, you'll see a console line about the
+rate-mismatch and the badge will show "no captured profile" —
+load a different one from the manager or right-click → Switch
+profile submenu.
 
 ### Profile storage location
 
@@ -200,18 +228,84 @@ Settings → Noise → "Storage location" lets you point Lyra at a
 custom folder — Dropbox/OneDrive for sync between shacks, USB
 drive for portable operation, NAS for shared club resources, etc.
 
+### Tuning the captured-profile apply (v0.0.9.9+)
+
+Two operator-tunable knobs in **Settings → Noise → Captured
+Noise Profile** control how the apply pass sounds:
+
+#### Gain smoothing (γ slider, 0.00–0.95)
+
+Controls temporal smoothing on the per-bin Wiener gain mask.
+Pure spectral subtraction has a characteristic "watery" /
+musical-noise sound caused by per-frame gain flicker on
+noise-only bins; the smoothing low-passes that flicker across
+frames, making the output cleaner.  Live-tunable — drag the
+slider while listening to A/B.
+
+| Setting | Time constant @ 192k IQ | Character |
+|---|---|---|
+| **0.00** | instantaneous | Maximum responsiveness, maximum watery character |
+| **0.40** | ~5 ms | Light smoothing |
+| **0.60** *(default)* | ~10 ms | Good balance — recommended starting point |
+| **0.80** | ~24 ms | Heavier smoothing, slightly slower onset response |
+| **0.95** | ~104 ms | Very heavy — can blur fast signal onsets |
+
+Most operators land in 0.5–0.7.  Push higher (0.8) if the
+default still sounds watery on noisy bands; drop to 0.3–0.4 if
+you want maximum responsiveness on weak fast-fading signals
+where slow onset matters more than musical-noise suppression.
+
+#### FFT size (1024 / 2048 / 4096)
+
+Number of bins in the IQ analysis window.  Smaller = coarser
+bin width (less precise noise discrimination) and lower CPU;
+larger = finer bin width (better discrimination on narrow
+features) and more CPU.
+
+| Size | Bin width @ 192 kHz IQ | CPU @ 192k in_size=1024 | Suggested for |
+|---|---|---|---|
+| **1024** | ~188 Hz | ~0.4% real-time | Slow CPUs, voice modes |
+| **2048** *(default)* | ~94 Hz | ~0.8% real-time | General use, all modes |
+| **4096** | ~47 Hz | ~2× the 2048 cost | CW / digital-mode environments where narrow features matter |
+
+**Change takes effect on the next IQ rate change OR Lyra
+restart** — not immediately.  The reason: changing FFT size
+invalidates any loaded profile (different bin count), so a
+mid-session change would silently drop your profile.  Lyra
+defers the change to the natural recreation point so your
+session stays stable.  Recapture after changing FFT size if you
+want fresh profiles in the new format.
+
 ## Where NR sits in the audio chain
 
 WDSP's RXA chain runs entirely inside the C-side cffi engine.
 For operator mental-model purposes:
 
 ```
-IQ → NB → notches → demod → LMS → NR (EMNR) → ANF → AGC → APF (CW) → audio out
+IQ → [Captured-profile pre-pass] → WDSP RXA chain → audio out
+
+WDSP RXA chain (inside the cffi engine):
+   NB → notches → demod → LMS → NR (EMNR) → ANF → AGC → APF (CW)
 ```
 
 NR sees the post-demod audio; AGC then evaluates the
 NR-cleaned output for level decisions, so AGC doesn't pump on
 broadband noise during quiet moments.
+
+The **captured-profile pre-pass** (v0.0.9.9+) sits **before**
+WDSP — it runs Wiener-from-profile spectral subtraction on the
+raw IQ stream BEFORE WDSP's RXA chain sees it.  This placement
+is deliberate: WDSP's AGC (later in the chain) modulates audio
+levels dynamically, and earlier attempts to do captured-profile
+subtraction in the audio domain after WDSP produced audible
+artifacts because the static captured noise reference clashed
+with AGC's dynamic gain.  Pre-WDSP placement sidesteps the
+issue: AGC sees cleaned IQ and adjusts to the reduced noise
+floor instead of fighting it.
+
+The pre-pass only runs when the source toggle is "use
+captured" AND a profile is loaded.  Otherwise it's a fast
+passthrough — zero cost.
 
 ## What NR doesn't do
 

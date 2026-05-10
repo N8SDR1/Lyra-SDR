@@ -2867,6 +2867,23 @@ class DspPanel(GlassPanel):
             eng = getattr(self.radio, "_iq_capture", None)
             cur_rate_hz = int(getattr(eng, "rate_hz", 0))
             cur_fft_size = int(getattr(eng, "fft_size", 0))
+            # Phase 5 review P1: if the engine isn't initialized
+            # (failed init, mid-rate-change, or some unexpected
+            # teardown), don't grey out every entry with a
+            # confusing "current radio rate is 0 kHz" tooltip —
+            # surface the actual problem instead.  Operator can
+            # try a rate change to force engine recreation, or
+            # restart Lyra.
+            if eng is None or cur_rate_hz <= 0 or cur_fft_size <= 0:
+                stub = QAction(
+                    "(IQ engine not ready — try a rate change "
+                    "or restart Lyra)", switch_menu)
+                stub.setEnabled(False)
+                switch_menu.addAction(stub)
+                menu.addSeparator()
+                # Skip the per-profile loop — every entry would be
+                # greyed with the same uninformative tooltip.
+                metas = []
             for meta in metas:
                 rate_label = (f"{meta.rate_hz // 1000}k"
                               if meta.rate_hz else "?")
@@ -2943,8 +2960,16 @@ class DspPanel(GlassPanel):
                 self.radio.load_saved_noise_profile(name)
             if not self.radio.nr_use_captured_profile:
                 self.radio.set_nr_use_captured_profile(True)
-        except (FileNotFoundError, ValueError,
+        except (OSError, ValueError,
                 RuntimeError, NotImplementedError) as exc:
+            # OSError covers FileNotFoundError + PermissionError +
+            # IsADirectoryError + Windows ACL/network-share read
+            # failures.  Phase 5 review catch — without OSError,
+            # an unreadable profile JSON would surface as a Qt
+            # slot-dispatcher traceback popup instead of a clean
+            # status-bar toast.  ValueError covers schema
+            # mismatches + cross-rate / cross-FFT-size refusals
+            # from load_saved_noise_profile.
             try:
                 self.radio.status_message.emit(
                     f"Could not load profile {name!r}: {exc}",
