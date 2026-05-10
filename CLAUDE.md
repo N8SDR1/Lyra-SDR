@@ -1033,12 +1033,45 @@ hardware:
 
 ### Releases
 
-- Single-source version: `lyra/__init__.py` + `build/installer.iss`.
-- Update `CHANGELOG.md` (consolidated; replaces per-version
-  RELEASE_NOTES files).
-- Annotated tag (`git tag -a v0.0.X`).
-- Build via `build/build.cmd` (PyInstaller + Inno Setup).
-- Draft GitHub Release manually with installer .exe attached.
+Numbered steps so nothing slips through the cracks — this list
+exists because the v0.0.9.6 through v0.0.9.9 releases all
+skipped step 8 (push to main), leaving anyone tracking
+``origin/main`` pulling v0.0.9.5 code while four feature releases
+piled up on the feature branch.
+
+1. **Bump version** in two places: `lyra/__init__.py`
+   (`__version__`, `__version_name__`, and flip `__build_date__`
+   from ``"dev"`` to today's `YYYY-MM-DD`) and
+   `build/installer.iss` (`LyraVersion`, `LyraVersionName`,
+   `LyraBuildDate`).
+2. **Update `CHANGELOG.md`** — new dated entry at the top
+   (consolidated; replaces per-version RELEASE_NOTES files).
+3. **Update `CLAUDE.md`** version-numbering history near the top
+   of the file.
+4. **Commit** the version bump.
+5. **Annotated tag** with release notes:
+   `git tag -a v0.0.X -m "..."`.
+6. **Build** via `build/build.cmd` (PyInstaller + Inno Setup).
+   Verify installer lands at `dist/installer/Lyra-Setup-X.Y.Z.exe`.
+7. **Push feature branch + tag**:
+   `git push origin <feature-branch>` then
+   `git push origin v0.0.X`.
+8. **Push to main** (the step that was missing from v0.0.9.6
+   through v0.0.9.9): `git push origin <feature-branch>:main`,
+   which fast-forwards `origin/main` to the release commit
+   without needing a local main checkout.  If you skip this,
+   GitHub's web UI shows the release correctly but
+   `git pull origin main` returns stale code — anyone tracking
+   main is reading v0.0.9.5 while installers up through v0.0.9.9
+   ship.
+9. **Create GitHub Release** manually (or via `gh release create`
+   if the CLI is installed): tag = `v0.0.X`, title = `v0.0.X —
+   <Version Name>`, body = release notes, attach the
+   `Lyra-Setup-X.Y.Z.exe` from `dist/installer/`.
+
+``build/build.cmd`` prints a reminder of this sequence after the
+build completes — if a step is missed, the cmd-window output is
+the place to spot it.
 
 ### Pre-releases for tester feedback
 
