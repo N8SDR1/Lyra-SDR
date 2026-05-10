@@ -333,13 +333,29 @@ class RxChannel:
         with self._lock:
             self._lib.SetRXAAGCHang(self.channel, int(hang_ms))
 
-    def set_agc_slope(self, slope: float) -> None:
-        """AGC compression slope (dB).  Pushes to engine field
-        ``var_gain``; affects the threshold→max_gain calculation
-        in SetRXAAGCThresh.  WDSP default at create time = 1.5
-        (RXA.c create_wcpagc var_gain=1.5)."""
+    def set_agc_slope(self, slope: int) -> None:
+        """AGC compression slope, in 0.1 dB units (WDSP convention).
+        Pushes to engine field ``var_gain`` via
+        ``var_gain = pow(10, slope / 200)`` — i.e., slope=0 →
+        var_gain=1.0; slope=35 → var_gain≈1.5 (WDSP create-time
+        default ≈ 3.5 dB).  ``var_gain`` then drives the
+        threshold→max_gain calculation in SetRXAAGCThresh.
+
+        v0.0.9.8 fix: parameter type was previously declared as
+        ``double`` in the cffi binding but the WDSP C function
+        signature is ``int slope``.  On Windows x86_64 that
+        mismatch caused a register-class bug — cffi passed the
+        value via XMM1 (the double slot) but the C function read
+        RDX (the int slot), getting garbage.  Result was a
+        randomly-set var_gain at every channel open, max_gain
+        therefore wonky, and AGC stuck at whatever max_gain
+        happened to land on — which presented as "AGC profiles
+        all sound the same" / "gain meter pinned" since v0.0.9.6.
+        See lyra/dsp/wdsp_native.py for the binding side of the
+        same fix.
+        """
         with self._lock:
-            self._lib.SetRXAAGCSlope(self.channel, float(slope))
+            self._lib.SetRXAAGCSlope(self.channel, int(slope))
 
     def set_agc_hang_threshold(self, hang_threshold: int) -> None:
         """AGC hang-engagement threshold (operator-tunable).

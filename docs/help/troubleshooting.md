@@ -112,9 +112,9 @@ If you hear AGC pumping (the gain visibly riding speech
 syllables or breaths), try a slower AGC profile:
 
 1. Right-click the **AGC** cluster on the DSP & AUDIO panel.
-2. Pick **Slow** for SSB or AM broadcast / steady carrier
-   listening.  Faster profiles (Fast / Med) react too quickly
-   on speech.
+2. Pick **Slow** for SSB, or **Long** for AM broadcast / steady
+   carrier listening.  Faster profiles (Fast / Med) react too
+   quickly on speech.
 3. For digital modes (FT8 / FT4 / RTTY) where AGC pumping is
    especially distracting, just turn AGC **Off** — set AF Gain
    high enough to bring weak signals up to your decoder's

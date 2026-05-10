@@ -2884,6 +2884,25 @@ class MainWindow(QMainWindow):
                 pass
         if s.contains("bw_locked"):
             r.set_bw_lock(s.value("bw_locked", False, type=bool))
+        # Per-mode RX bandwidth — stored as JSON dict {mode_str: bw_hz}
+        # since QSettings doesn't natively round-trip a Python dict.
+        # v0.0.9.8.1: was previously NEVER persisted — every restart
+        # silently reset _rx_bw_by_mode to BW_DEFAULTS regardless of
+        # what the operator had dialed in (operator-reported 2026-05-10
+        # alongside the waterfall persistence bug).  ``set_rx_bw`` is
+        # mode-aware so we restore each entry individually.
+        if s.contains("rx_bw_by_mode"):
+            import json
+            try:
+                _rx_bw_dict = json.loads(str(s.value("rx_bw_by_mode")))
+                if isinstance(_rx_bw_dict, dict):
+                    for _m, _bw in _rx_bw_dict.items():
+                        try:
+                            r.set_rx_bw(str(_m), int(_bw))
+                        except (TypeError, ValueError):
+                            pass
+            except (ValueError, TypeError):
+                pass
         if s.contains("filter_board"):
             r.set_filter_board_enabled(
                 s.value("filter_board", False, type=bool))
@@ -2917,7 +2936,18 @@ class MainWindow(QMainWindow):
                 pass
         if s.contains("agc/threshold"):
             try:
-                r.set_agc_threshold(float(s.value("agc/threshold")))
+                v = float(s.value("agc/threshold"))
+                # v0.0.9.8 changed the AGC threshold semantic from a
+                # 0..1 linear field to a dBFS value.  Stale linear
+                # saves (range 0.05..0.9) would clamp to the new
+                # range minimum (-150) and produce no audio.
+                # Detect-and-discard: if the loaded value is in the
+                # old linear range, drop it and let the radio's
+                # default (-100 dBFS) apply.
+                if -1.0 < v < 1.0:
+                    pass  # legacy linear value — ignore
+                else:
+                    r.set_agc_threshold(v)
             except (TypeError, ValueError):
                 pass
         # TCI Spots persistence
@@ -3003,7 +3033,24 @@ class MainWindow(QMainWindow):
                 # the first few frames show a usable trace.
                 _lo, _hi = spec_range
                 if _hi - _lo >= 30.0:
-                    r.set_spectrum_db_range(_lo, _hi)
+                    # from_user=False — autoload restores the global
+                    # spectrum range as the live display value WITHOUT
+                    # writing to the per-band memory dict.  Critical:
+                    # ``set_spectrum_db_range(from_user=True)`` calls
+                    # ``_save_current_band_range`` which writes the
+                    # CURRENT ``_waterfall_min_db / _max_db`` to the
+                    # band entry — at this point in the load those
+                    # values are still the constructor defaults
+                    # (-140 / -60), so a from_user=True call here
+                    # would CLOBBER the operator's saved per-band
+                    # waterfall in band_memory before
+                    # ``apply_current_band_range`` (later in
+                    # _load_settings) gets to read it.  Operator-
+                    # reported 2026-05-10 — diagnostic showed
+                    # band_memory[20m].waterfall flipping to (-140,
+                    # -60) between restore_band_memory and
+                    # apply_current_band_range.
+                    r.set_spectrum_db_range(_lo, _hi, from_user=False)
             wf_range = _migrate_range(
                 "visuals/waterfall_min_db", "visuals/waterfall_max_db")
             if wf_range is not None:
@@ -3016,12 +3063,25 @@ class MainWindow(QMainWindow):
                 if _whi - _wlo >= 30.0:
                     # from_user=False — autoload restores the LAST
                     # global waterfall range as the fallback for
-                    # bands that have never been customized.  Per-
-                    # band waterfall values (added 2026-05-09) get
-                    # restored later via _apply_band_range when
-                    # recall_band fires for the current band.
+                    # bands that have never been customized.
                     r.set_waterfall_db_range(
                         _wlo, _whi, from_user=False)
+            # Per-band ranges live in ``r._band_memory`` (restored
+            # above via ``r.restore_band_memory(snap)``) but
+            # ``recall_band`` — the only path that applies them via
+            # ``_apply_band_range`` — only fires when the operator
+            # clicks a band button.  At startup we want the per-band
+            # values applied immediately so the operator's
+            # last-set waterfall min/max + spectrum bounds for the
+            # current band override the global autoload above.
+            # v0.0.9.8.1 fix: was the cause of the operator-reported
+            # "waterfall min-max isn't staying where set with manual
+            # when you restart Lyra" symptom — values WERE saved,
+            # they just weren't being applied at startup.
+            try:
+                r.apply_current_band_range()
+            except Exception as exc:
+                print(f"[app] apply_current_band_range error: {exc}")
             if s.contains("visuals/spectrum_cal_db"):
                 r.set_spectrum_cal_db(float(s.value("visuals/spectrum_cal_db")))
             # NOTE: key bumped to _v2 when the S-meter became
@@ -3236,6 +3296,12 @@ class MainWindow(QMainWindow):
         # "WASAPI shared" / "WASAPI exclusive" / "WDM-KS" / etc.)
         s.setValue("pc_audio_host_api", r.pc_audio_host_api)
         s.setValue("bw_locked", r.bw_locked)
+        # Per-mode RX bandwidth dict — JSON since QSettings doesn't
+        # natively serialize dicts.  See _load_settings counterpart
+        # for context (was never persisted before v0.0.9.8.1).
+        import json as _json_bw
+        s.setValue("rx_bw_by_mode",
+                   _json_bw.dumps(dict(r._rx_bw_by_mode)))
         s.setValue("filter_board", r.filter_board_enabled)
         s.setValue("usb_bcd/serial", r.usb_bcd_serial)
         s.setValue("usb_bcd/60m_as_40m", r.bcd_60m_as_40m)

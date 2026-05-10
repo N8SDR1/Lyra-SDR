@@ -36,29 +36,57 @@ opening Settings.
 | **Off**  | No automatic gain — Volume scales raw demod output | Digital modes (FT8/FT4/RTTY)         |
 | **Fast** | Quick attack/decay, no hang                         | CW, weak-signal work                  |
 | **Med**  | Moderate decay, no hang (default)                   | SSB / ragchew                         |
-| **Slow** | Longer decay with short hang                        | DX nets, steady AM broadcast, beacons |
+| **Slow** | Longer decay with short hang                        | DX nets, steady AM broadcast          |
+| **Long** | Long decay with long hang                           | Beacons, steady-carrier listening     |
 | **Auto** | Med time-constants + auto-threshold tracking        | Strong fading signals, condition shifts |
 | **Cust** | Persisted UI sliders (advisory only)                | (Future direct-WDSP control)          |
 
 The time constants come from WDSP's canonical mode presets, so
-behavior is consistent with what operators have used on
-Thetis-class clients for over a decade.
+the behaviour is consistent with what operators have heard on
+HF SDR applications for over a decade.
 
 Label color on the panel tells you which profile is active at
 a glance:
 
 - **Gray** = Off
-- **Amber** = Fast / Med / Slow (static)
+- **Amber** = Fast / Med / Slow / Long (static)
 - **Cyan** = Auto (Med time-constants + threshold-tracks-noise-floor)
 - **Magenta** = Cust (UI sliders persisted, advisory only)
 
 ## Threshold
 
 The **thr** value (in dBFS) on the panel cluster shows the AGC
-target level.  WDSP's engine handles threshold internally; the
-Settings → DSP threshold slider is currently advisory state
-(persisted in the UI but not pushed to WDSP) — it will be wired
-through in a future build alongside the Custom profile work.
+threshold — the noise-floor reference WDSP uses to compute
+``max_gain`` (the AGC's gain ceiling).  Lower values give more
+AGC headroom (boosts weak signals harder); higher values
+compress earlier.
+
+* **Default**: -100 dBFS (~70 dB AGC headroom; comfortable for
+  normal HF operation).
+* **Adjust via**: Settings → DSP → AGC → **Auto** button.  Click
+  it on a quiet patch of band; Lyra recalibrates the threshold
+  to ~5 dB above the current rolling noise floor so AGC engages
+  on real signals while letting noise itself ride through at
+  full max_gain.
+* **Persistence**: the value persists across Lyra launches.
+
+Operator-typical settings:
+
+| Threshold | Use |
+|-----------|-----|
+| -130 dBFS | Quiet band, weak-signal / DX hunting |
+| -100 dBFS | Normal HF operation (default) |
+| -80 dBFS  | Moderate signals, less AGC boost |
+| -60 dBFS  | Broadcast / strong-signal listening |
+
+The Settings → DSP → AGC row used to have a 0..1 linear "audio
+target" slider; it was removed in v0.0.9.8.1 because that legacy
+field had different semantics from WDSP's actual threshold and
+was never wired to the engine.  The label readout + Auto button
+covers the common cases.  Power users wanting direct dBFS
+control can edit the QSettings registry key
+``HKCU\Software\N8SDR\Lyra\agc\threshold`` between sessions, or
+ask for a slider to be re-added.
 
 ## Live gain readout
 
@@ -86,20 +114,22 @@ AGC  <PROFILE>  thr <-NN dBFS>  gain <±N.N dB>
 
 - **Left-click digits / labels** — no action (read-only display).
 - **Right-click** anywhere on the cluster — pops a profile menu:
-  Off / Fast / Med / Slow / Auto / Custom. Checked radio =
+  Off / Fast / Med / Slow / Long / Auto / Custom. Checked radio =
   current profile.
 
-Deeper configuration — Release / Hang / Threshold sliders —
-lives on **DSP Settings…** (the button on the right side of the
-DSP & AUDIO panel, or File → DSP… in the menubar).  Note: those
-sliders are currently **advisory** in WDSP mode (see "Custom
-profile" below).
+Deeper configuration — Release / Hang sliders + Threshold
+label + Auto button — lives on **DSP Settings…** (the button on
+the right side of the DSP & AUDIO panel, or File → DSP… in the
+menubar).  The Threshold value is wired to WDSP via the Auto
+button (and the persisted default).  The Release / Hang sliders
+are still **advisory** in WDSP mode — see "Custom profile"
+below.
 
 ## Custom profile
 
-The **Release**, **Hang**, and **Threshold** sliders in DSP
-Settings are persisted across restarts but are not currently
-pushed to the WDSP engine — WDSP uses its own canonical
+The **Release** and **Hang** sliders in DSP Settings are
+persisted across restarts but are not currently pushed to the
+WDSP engine — WDSP uses its own canonical
 seconds-form parameters per mode preset, and Lyra hasn't yet
 exposed the WDSP-side knobs (attack ms / decay ms / hang ms /
 hang threshold) one-to-one.  Selecting **Custom** today produces
@@ -112,7 +142,9 @@ to WDSP parameters so Custom regains full operator control.
 
 - **Pumping on FT8?** — Use **Off**. FT8 / FT4 / RTTY want fixed
   gain; AF Gain on the panel is your "station loudness" knob.
-- **Pumping on AM with strong fades?** — **Slow**.
+- **Pumping on AM with strong fades?** — **Slow** or **Long**
+  (Long has the longest decay + hang — good for steady-carrier
+  listening like AM broadcast or beacon monitoring).
 - **CW echo / distortion?** — **Fast**. Let each dit/dah settle.
 - **AM broadcast fading?** — **Slow** + a healthy AF Gain dial.
 - **Stronger station punches through?** — **Auto** uses Med

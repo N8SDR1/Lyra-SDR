@@ -62,6 +62,29 @@ content below has been mass-renumbered to the new scheme.
   nb, lms, anf, squelch, nr2, PythonRxChannel.process, etc.).
   See §13 (audio architecture), §14 (WDSP-DLL integration), §14.9
   (cleanup arc).
+- **v0.0.9.8.1** "AGC + persistence patch" (2026-05-10) —
+  substantial bug-fix patch over v0.0.9.8.  Headline: a
+  latent ``SetRXAAGCSlope`` cffi binding bug from v0.0.9.6
+  was caught by an audit of every cffi binding's parameter
+  types vs. the WDSP C source — only one mismatch found
+  (the binding declared ``double slope`` while the C
+  function is ``int slope``, producing a register-class
+  calling-convention bug on Windows x86_64 → garbage
+  ``var_gain`` → ``max_gain`` pinned at random value →
+  AGC profile time constants masked).  Fix made
+  AGC profiles audibly distinct for the first time since
+  v0.0.9.6.  Plus per-band waterfall + spectrum scale
+  persistence repair (apply_current_band_range public
+  method + spectrum autoload from_user=False + auto-scale
+  waterfall protection); per-mode RX bandwidth
+  persistence (was never saved/loaded); AGC threshold UX
+  modernization (legacy 0..1 linear field repurposed as
+  dBFS, Settings slider replaced by label + Auto button,
+  Auto reads live noise floor); AGC slope default 0 → 35
+  (industry soft-knee convention); ``Long`` AGC profile
+  restored to UI menu; click-to-tune snap polish (SNR
+  threshold 6→8 dB, 2 kHz effective-range cap); CLAUDE.md
+  §15.1/§15.5 closed, §9.8 withdrawn.
 - **v0.0.9.8** "Display Polish" (CW VFO convention switch,
   2026-05-10) — operator-visible behaviour change for CW
   operators: the VFO LED now shows the **carrier frequency**
@@ -162,9 +185,13 @@ Lite 2 / 2+, written in Python.  Native HPSDR Protocol 1.
 - **Repo**: <https://github.com/N8SDR1/Lyra-SDR>.  Branches: `main`
   is the published release branch; `feature/threaded-dsp` is the
   active development trunk (kept fast-forward-able with `main`).
-- **Current version**: 0.0.7 ("Polish Pass") — see `lyra/__init__.py`
-  for the canonical version string.  Bump in one place; everything
-  else follows.
+- **Current version**: see `lyra/__init__.py` for the canonical
+  ``__version__`` + ``__version_name__`` strings.  The
+  version-numbering history near the top of this file lists the
+  delivered releases through to today.  Bump in one place
+  (``__init__.py`` + ``build/installer.iss``); everything else —
+  About dialog, status bar, installer filename, GitHub release
+  tag — follows.
 
 ## 2. License posture for WDSP ports
 
@@ -864,7 +891,17 @@ wrong (which test case fails -- weak signal? wide zoom? CW
 sidelobe pickup?) before tweaking the algorithm.  Each candidate
 above has a different fix.
 
-## 9.8. Speaker-selective audio attenuator — parked as niche feature
+## 9.8. Speaker-selective audio attenuator — WITHDRAWN 2026-05-10
+
+Operator removed from the backlog 2026-05-10: post-WDSP audio
+chain (NR Mode 1-4 + AEPF + NPE + ANF + NB + APF + per-band
+SQ) handles the original use cases well enough that the
+"selectively attenuate one voice in a roundtable" feature is no
+longer needed.  Section retained below as historical record so
+anyone reading old docs that reference §9.8 can find context,
+but no implementation work expected.
+
+**Original entry preserved below, marked WITHDRAWN.**
 
 **Operator-suggested 2026-05-02:** in a roundtable QSO, attenuate
 ONE specific operator's voice while keeping the others audible.
@@ -1179,35 +1216,75 @@ section is the operative reference for how that's wired.
 - Mode: USB / LSB / AM / FM / CWU / CWL / DSB / SAM / DIGU / DIGL / DRM / SPEC
 - RX bandwidth (per-mode, propagates filter freqs to NBP0 + BP1)
 - Rate change (closes + reopens WDSP channel at new in_rate)
-- AGC mode (FIXED/LONG/SLOW/MED/FAST/CUSTOM via SetRXAAGCMode)
+- AGC mode + the operator picker (Off / Fast / Med / Slow / Auto /
+  Custom) via SetRXAAGCMode.  ``"long"`` is fully wired in
+  ``radio.py`` but currently NOT exposed in the ``_AGC_PROFILES``
+  right-click menu — see §15.5 to re-add (one-line change in
+  ``panels.py``).  Auto profile additionally runs
+  ``auto_set_agc_threshold`` on a 1-sec timer to re-calibrate
+  ~18 dB above the rolling noise floor.
 - AGC gain readout (GetRXAMeter / RXA_AGC_GAIN, throttled to ~6 Hz)
-- NR (EMNR for nr1+nr2 backend, ANR for lms backend)
-- ANF (auto-notch)
-- LMS (independent toggle from NR backend)
-- AM / FM squelch
-- CW pitch (refilters when active mode is CWU / CWL)
-- Volume + mute (applied in Python after WDSP)
-- TCI audio tap (applied in Python after WDSP)
-- Spectrum / panadapter / S-meter (FFT path is independent of WDSP)
+- AGC threshold + AF gain wiring (SetRXAAGCThresh + WDSP PanelGain1
+  per Phase 6.A1/A3 fixes during the v0.0.9.6 cleanup arc)
+- **NR-mode UX**: 4-position picker (Mode 1 / 2 / 3 / 4) mapping
+  to WDSP gain methods 0..3 (Wiener+SPP / Wiener simple / MMSE-LSA
+  default / Trained adaptive) + AEPF anti-musical post-filter
+  + NPE method picker (OSMS / MCRA / etc.).  See §14.7.
+- ANF (auto-notch) — profile picker + μ slider mapped to
+  ``SetRXAANFVals`` (Phase 6.A4).
+- LMS (independent toggle, μ slider drives WDSP ANR step size).
+- All-mode squelch via WDSP SSQL (SSB/CW/DIG/SPEC), FMSQ (FM),
+  AMSQ (AM/SAM/DSB) — see §14.8.  Threshold sliders mapped
+  per-module.
+- Manual notches (right-click on spectrum) — wired via
+  ``RXANBPAddNotch`` / ``DeleteNotch`` / ``SetNotchesRun`` /
+  ``SetTuneFrequency`` (Phase 6.A4).
+- NB (noise blanker) — ``create_nob`` / ``create_anb`` initialized
+  in ``RxChannel.__init__``; profile picker drives NOB threshold
+  via ``_push_wdsp_nb_state`` (xnobEXT / xanbEXT splice into the
+  IQ path).
+- Binaural (BIN) Hilbert phase split — runs as Python post-
+  processor on WDSP's stereo output, both HL2-jack and
+  PC-Soundcard paths.
+- APF (CW peaking, mode-gated to CWU/CWL) via WDSP SetRXABiQuad
+  SPEAK biquad — center freq tracks ``cw_pitch_hz`` in audio
+  domain.
+- CW pitch (refilters BP1 + NBP0 + SNBA collectively via
+  RXASetPassband when active mode is CWU/CWL; under v0.0.9.8's
+  carrier-freq VFO convention also re-pushes the DDS-vs-VFO
+  offset so the operator's tuned carrier stays inside the
+  passband at the new pitch).
+- Volume + mute (applied in Python after WDSP).
+- TCI audio tap (applied in Python after WDSP).
+- TPDF dither on float→int16 quantization for HL2 audio jack.
+- S-meter peak-hold smoothing (~500 ms decay) — Python-side
+  fast-attack / slow-release on the FFT-derived meter.
+- Spectrum / panadapter / waterfall + per-band bounds memory
+  (incl. waterfall min/max as of v0.0.9.7) + carrier-freq VFO
+  convention with central DDS offset (v0.0.9.8 — see §15.6
+  trailer / version-numbering history).
 
 **Inert in WDSP mode (deferred):**
-- Manual notches (right-click on spectrum) — needs WDSP NotchDB
-  cffi bindings + per-notch RXANBPSetFreqs handling
-- NB (noise blanker) UI — needs `create_nob` / `create_anb` cffi
-  bindings + initial-config in `_open_wdsp_rx`. Without those,
-  `SetEXTANBRun` segfaults the DLL because the EXT-blanker
-  objects are not created by `OpenChannel` alone.
-- Captured noise profile UX — Lyra's spectral-subtraction noise
-  reference. WDSP's EMNR uses its own internal noise tracker;
-  the captured-profile UX still loads/saves but doesn't apply
-  in WDSP mode. Either rewire to influence EMNR's noise estimate,
-  or leave as a Python-fallback feature.
-- Binaural (BIN) Hilbert phase split. WDSP returns plain stereo
-  with both channels equal. BIN was a Python-side post-processor
-  in the legacy chain. Either port to WDSP equivalent or run BIN
-  on top of WDSP's stereo output as a thin Python pass.
-- Leveler / APF — same story. Decide per-feature whether to wire
-  to a WDSP equivalent or keep as Python post-processing.
+- Captured noise profile **apply** path.  Capture itself works
+  (operator presses Cap, profile saves to disk, profile manager
+  lists/loads it across sessions); the apply step is currently
+  bypassed because three rounds of post-WDSP audio-domain attempts
+  produced audible artifacts traceable to AGC's dynamic gain vs.
+  the static captured noise reference.  IQ-domain rebuild
+  architectural plan locked in §14.6; deferred to v0.1 polish.
+  Toggle fires a status-bar warning when the operator turns it
+  on in WDSP mode.
+- NR3 (RNNoise) and NR4 (Spectral Bleach).  ``rnnoise.dll`` and
+  ``specbleach.dll`` are bundled but no operator UI is wired
+  yet.  Adding a fifth and sixth NR mode to the picker is a
+  small task once a tester asks for it.
+- Audio Leveler — DELETED in the v0.0.9.6 cleanup arc (Phase 4).
+  WDSP AGC subsumed its dynamic-range function; the
+  ``lyra/dsp/leveler.py`` source is gone.  RX2 plan §7.x still
+  references it at a few spots — see §15.2 backlog item.
+- TX (Phase v0.2) and PureSignal (Phase v0.3) — entire chains
+  are out of scope for the v0.0.9.x line; first TX work begins
+  with v0.1 RX2 finished.
 
 **Crucial gotcha — WDSP filter convention:**
 WDSP's USB filter at `(+200, +3100)` selects content from the
@@ -1968,32 +2045,24 @@ captured-profile WDSP-mode INERT caveat, AGC Auto profile docs
 correction).  The items below are non-blocking and parked for a
 future session.
 
-### 15.1 — Internal architecture doc cleanup
+### 15.1 — Internal architecture doc cleanup (CLOSED 2026-05-10)
 
-* **`CLAUDE.md` line 107** — `**Current version**: 0.0.7 ("Polish
-  Pass")` is stale.  The actual `__version__` in
-  `lyra/__init__.py` has tracked through 0.0.7 → 0.0.8 → 0.0.9 →
-  0.0.9.6 and (when this doc TODO is acted on) onward.  Either
-  remove the inline version line entirely (the version-numbering
-  history at the top of the doc already covers it) or update each
-  release.  Removing is probably cleaner.
-* **`CLAUDE.md` §14.2 "Wired" / "Inert" lists** — the wired list
-  uses pre-§14.7 NR1/NR2 backend wording ("EMNR for nr1+nr2
-  backend, ANR for lms backend").  Should be rewritten to reflect
-  the Mode 1-4 + AEPF + NPE picker on the DSP+Audio panel.  The
-  inert list still names features that are now wired: manual
-  notches (done per §14.4 #3), NB UI (done per §14.4 #2), BIN
-  (done per §14.4 #4), APF (done per §14.4 #4 — Leveler is the
-  one that was deleted, not parked).  Captured-profile UX wording
-  is mostly accurate but predates §14.6's IQ-domain rebuild plan.
-* **`CLAUDE.md` "Last updated" trailer** — frozen at 2026-05-07
-  late night.  Should be refreshed on the next major touch
-  (probably during v0.1 RX2 work) to call out the 2026-05-08
-  cleanup-arc completion (§14.9 r9 tag) and the 2026-05-09
-  v0.0.9.6.1 patch surface (Settings dialog hardening, panadapter
-  wheel-tune polish, peak-hold combo + decay + clear, waterfall
-  collapse, per-band waterfall, spectrum trace fill, dead-widget
-  guards).
+All three items closed in the v0.0.9.8.x doc cleanup pass:
+
+* **`CLAUDE.md` "Current version" line** — replaced with a
+  pointer to ``lyra/__init__.py`` so the line doesn't go stale
+  again.
+* **§14.2 "Wired" / "Inert" lists** — rewritten.  Wired list
+  reflects the v0.0.9.6 NR-mode UX overhaul (Mode 1-4 + AEPF +
+  NPE), v0.0.9.6 manual-notches / NB UI / BIN / APF wiring, and
+  v0.0.9.8's central DDS offset for the carrier-freq VFO
+  convention.  Inert list pruned to just the genuinely-deferred
+  items: captured-profile apply (IQ-domain rebuild per §14.6),
+  NR3/NR4 (DLLs bundled but no UI), TX/PS chains (Phase v0.2/v0.3).
+  Audio Leveler removed entirely (deleted, not parked).
+* **"Last updated" trailer** — refreshed to 2026-05-10 with the
+  v0.0.9.7 → v0.0.9.7.1 → v0.0.9.7.2 → v0.0.9.8 sprint summary
+  + §15 backlog pointers.
 
 ### 15.2 — RX2 plan leveler references (`docs/architecture/v0.1_rx2_consensus_plan.md`)
 
@@ -2048,39 +2117,59 @@ All three items closed during the v0.0.9.6.1 doc audit:
     * `license.md` — already had both names in copyright; left
       as-is.
 
-### 15.5 — `_AGC_PROFILES` Long re-add (code, not doc)
+### 15.5 — `_AGC_PROFILES` Long re-add (CLOSED 2026-05-10)
 
-The `"long"` AGC profile is fully wired in `radio.py` (release
-time 0.040 s, hang_blocks 46, WDSP mode mapping `"long" → "LONG"`)
-but `panels.py:3835 _AGC_PROFILES = ("off", "fast", "med", "slow",
-"auto", "custom")` doesn't include it, so operators can't pick it
-via the right-click menu.  The v0.0.9.6.1 doc fix removed Long
-from operator-facing docs to match what the UI offers.  If a
-future build wants Long back in the menu, it's a one-line
-addition to `_AGC_PROFILES` plus restoring the entries to
-`agc.md`, `index.md`, and `troubleshooting.md`.
+Done.  `panels.py:3835 _AGC_PROFILES` now includes `"long"`
+between `"slow"` and `"auto"`; matching entries added to
+`_AGC_PROFILE_LABELS`, `_AGC_PROFILE_COLORS`, and
+`_AGC_PROFILE_TEXT` (label "Long", amber, text "LONG").  Long
+mentions restored in `agc.md` (table row + label color note +
+right-click menu list + AM-fade tip), `index.md` (Quick Start
++ Topic index), and `troubleshooting.md` (AGC pumping recipe).
+The full radio-side wiring already existed (release time
+0.040 s, hang_blocks 46, WDSP mode mapping `"long" → "LONG"`)
+since the v0.0.9.6 cleanup arc — only the UI exposure was
+missing.
 
 ---
 
-*Last updated: 2026-05-07 late night — Phase A of legacy-DSP
-cleanup landed (env-var dispatch removed, `_use_wdsp_engine`
-constant True, WDSP-init failure raises clear error).  Tag
-`v0.0.9.6-rx1-working-r3`, bundle
-`_backups/lyra-2026-05-07-rx1-working-r3.bundle`.  Resume Phase 3
-next session — see §14.9 "Resume plan".  Earlier same night:
-§14.10 (AM/FM/DSB right-channel-silent bug, root-caused to
-EMNR-zeroes-Q + WDSP-default-copy=0, fixed via
-SetRXAPanelBinaural(0); operator-verified on WWV AM and across all
-modes).  §14.8 (WDSP SSQL all-mode squelch architecture).  §14.9
-(legacy pure-Python DSP path deprecated, Phase A done, Phases 3-9
-remaining).  Earlier same day: §14.7 NR-mode UX overhaul (in
-operator testing) + extended §14.6 with the IQ-domain captured-
-profile architectural plan (operator-confirmed direction to keep
-the feature alive).  Earlier 2026-05-07: RX1 polish push
-(1-5 + APF + BIN-PC-Sound + dither + S-meter peak-hold + capture-
-feed + captured-profile-apply revert + LMS slider wiring + EMNR
-gainMethod + AEPF cffi bindings).  Earlier 2026-05-06: §14 added
-when RX1 went live on the native engine.  Earlier 2026-05-06: §13
-audio architecture decision; 2026-05-02 senior-engineering pass
-that produced `implementation_playbook.md`.  Update this file when
-key decisions change.*
+*Last updated: 2026-05-10 — v0.0.9.8 "Display Polish" CW VFO
+convention switch shipped.  VFO LED now reads the carrier of the
+tuned signal in every mode (matching the standard convention used
+across major HF SDR applications); central DDS offset in
+``Radio._compute_dds_freq_hz`` replaces the per-call-site offsets
+from v0.0.9.7.1 / v0.0.9.7.2.  v0.0.9.7.2 was committed and
+tagged but skipped on GitHub release — superseded by the
+convention switch.  Earlier 2026-05-10: v0.0.9.7.2 spot-pitch
+fix (now reverted), Thetis spot-handling research that informed
+the convention switch decision.  2026-05-09: v0.0.9.7 "Display
+Polish" main release (Peak Hold combo + Decay + Clear, Exact /
+100 Hz quantization, spec/wf zoom slider live-preview, spectrum
+trace fill master toggle + custom color, waterfall collapse
+toggle, per-band waterfall persistence, Settings dialog
+hardening) and v0.0.9.7.1 NCDXF tuning fix.  2026-05-08:
+v0.0.9.6 "Audio Foundation" final release + the cleanup arc
+finishing up (Phase 4-9: Audio Leveler delete + agc_wdsp / apf /
+demod / nb / lms / anf / squelch / nr2 deletion + state-container
+dataclasses replacing Python DSP modules + AGC plumbing fixes).
+2026-05-07 late night: Phase A of legacy-DSP cleanup landed +
+§14.10 AM/FM/DSB right-channel-silent fix + §14.8 WDSP SSQL +
+§14.7 NR-mode UX overhaul + §14.6 IQ-domain captured-profile
+architectural plan.  2026-05-07: RX1 polish push (APF + BIN-
+PC-Sound + dither + S-meter peak-hold + capture-feed + LMS
+slider wiring + EMNR gainMethod + AEPF cffi bindings).
+2026-05-06: §14 added when RX1 went live on the native engine.
+2026-05-06: §13 audio architecture decision.  2026-05-02:
+senior-engineering pass that produced `implementation_playbook.md`.
+
+§15 backlog (post-v0.0.9.8):
+* §15.2 — RX2 plan leveler refs cleanup (file deleted; plan
+  references stale)
+* §15.3 — Settings dialog deeper disconnect-on-close refactor
+  (noise-suppression layer landed v0.0.9.6.1 / v0.0.9.7;
+  proper fix parked for v0.1)
+* §15.5 — ``_AGC_PROFILES`` Long re-add (one-line code +
+  doc restore — see entry for the change set)
+* v0.1 RX2 Phase 0 (multi-channel refactor, no behavior change)
+
+Update this file when key decisions change.*

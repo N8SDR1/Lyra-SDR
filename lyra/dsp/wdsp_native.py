@@ -205,7 +205,16 @@ void SetRXAAGCDecay(int channel, int decay_ms);
 void SetRXAAGCHang(int channel, int hang_ms);
 void SetRXAAGCTop(int channel, double max_gain_db);
 void SetRXAAGCThresh(int channel, double thresh_db, double size, double rate);
-void SetRXAAGCSlope(int channel, double slope);
+/* SetRXAAGCSlope: WDSP source declares the slope parameter as
+ * `int slope` (units: 0.1 dB; passed via the integer calling
+ * convention).  Earlier Lyra cffi declarations had `double slope`
+ * which on Windows x86_64 caused a register-class mismatch — cffi
+ * passed the value via XMM1 (double) but the C function reads
+ * RDX (int), getting register garbage.  Result: var_gain (and
+ * therefore max_gain) was set to a random value at every channel
+ * open, which presented as "AGC pinned, no profile differences"
+ * since v0.0.9.6.  Fixed v0.0.9.8 to match the C source. */
+void SetRXAAGCSlope(int channel, int slope);
 void SetRXAAGCHangThreshold(int channel, int hangthreshold);
 
 /* ----- Meters (meter.c) ------------------------------------------------ */

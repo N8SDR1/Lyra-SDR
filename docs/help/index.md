@@ -24,8 +24,8 @@ up changes.
 3. Click a digit on the main frequency display and scroll the
    mouse wheel to tune — or type a frequency in MHz directly.
 4. Right-click the **AGC** cluster on the DSP & AUDIO panel →
-   pick **Med** for SSB, **Slow** for AM, or **Off** for digital
-   modes (FT8 / FT4).
+   pick **Med** for SSB, **Slow** or **Long** for AM, or **Off**
+   for digital modes (FT8 / FT4).
 5. Pick a mode (LSB / USB / CWL / CWU / AM / FM / DIG) in the
    MODE & FILTER panel.
 
@@ -45,8 +45,8 @@ up changes.
   panadapter inside SW broadcast bands; suppressed inside your
   region's ham bands by default
 - **Modes & Filters** — demodulation modes, bandwidth presets
-- **AGC** — profiles (Off / Fast / Med / Slow / Auto / Custom),
-  live gain readout, WDSP-driven engine
+- **AGC** — profiles (Off / Fast / Med / Slow / Long / Auto /
+  Custom), live gain readout, WDSP-driven engine
 - **Notch Filters** — placing, adjusting, multi-notch, saved
   notch banks
 - **Noise Reduction** — WDSP EMNR with mode 1-4 picker, AEPF

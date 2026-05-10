@@ -177,13 +177,19 @@ frequency.  Click-to-tune honors landmark triangles on the band-plan
 overlay — clicking a triangle tunes AND switches to the landmark's
 suggested mode (FT8 → DIGU, WSPR → DIGU, PSK → DIGU, etc.).
 
-### Shift+click — snap to nearest peak (v0.0.8)
+### Shift+click — snap to nearest peak
 
 Hold **Shift** while clicking and Lyra snaps the VFO to the
-strongest spectrum peak within ±200 Hz of the cursor, provided that
-peak is at least 6 dB above the rolling noise floor.  If no peak
-is found inside the snap window, the click falls through to literal
-click-to-tune (cursor freq).
+strongest spectrum peak within range of the cursor, provided
+that peak is at least **8 dB above the rolling noise floor**.
+If no peak passes the SNR test inside the snap window, the
+click falls through to literal click-to-tune (cursor freq).
+
+The effective snap range is zoom-aware: at narrow zoom you get
+±200 Hz around the cursor; at wide zoom it scales up with the
+pixel-radius equivalent so the snap-near-cursor behaviour stays
+sensible.  Capped at **±2 kHz** so wide-zoom clicks stay locally
+targeted (won't accidentally grab a strong signal 5-10 kHz away).
 
 Snap is sub-bin precise — parabolic interpolation around the peak
 bin gives placement accuracy of ~10–20 Hz at typical FFT bin

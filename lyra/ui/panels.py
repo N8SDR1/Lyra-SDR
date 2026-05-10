@@ -3832,23 +3832,25 @@ class DspPanel(GlassPanel):
     # Menu order. "Auto" is a full profile that owns continuous
     # threshold tracking (radio-side timer). "Custom" is settable from
     # the DSP settings tab only (need release + hang values from user).
-    _AGC_PROFILES = ("off", "fast", "med", "slow", "auto", "custom")
+    _AGC_PROFILES = ("off", "fast", "med", "slow", "long", "auto", "custom")
     _AGC_PROFILE_LABELS = {
         "off":    "Off",
         "fast":   "Fast",
         "med":    "Med",
         "slow":   "Slow",
+        "long":   "Long",
         "auto":   "Auto",
         "custom": "Custom…",
     }
     # Color the profile label differently so the operator sees at a
     # glance which mode is active. Auto + Custom are "special" (cyan +
-    # magenta), static Fast/Med/Slow stay amber, Off is muted gray.
+    # magenta), static Fast/Med/Slow/Long stay amber, Off is muted gray.
     _AGC_PROFILE_COLORS = {
         "off":    "#8a9aac",   # muted gray — disabled
         "fast":   "#ffab47",   # amber — static fast release
         "med":    "#ffab47",   # amber — static medium release
         "slow":   "#ffab47",   # amber — static slow release
+        "long":   "#ffab47",   # amber — static long release w/ hang
         "auto":   "#00e5ff",   # cyan — actively tracking noise floor
         "custom": "#ff6bcb",   # magenta — user parameters in effect
     }
@@ -3857,6 +3859,7 @@ class DspPanel(GlassPanel):
         "fast":   "FAST",
         "med":    "MED",
         "slow":   "SLOW",
+        "long":   "LONG",
         "auto":   "AUTO",
         "custom": "CUST",
     }
@@ -3897,10 +3900,12 @@ class DspPanel(GlassPanel):
             f"min-width: 48px; letter-spacing: 1px; }}")
         self.agc_profile_lbl.setText(text)
 
-    def _update_agc_threshold(self, threshold: float):
-        import math
-        dbfs = 20 * math.log10(max(threshold, 1e-6))
-        self.agc_threshold_lbl.setText(f"{dbfs:+.0f} dBFS")
+    def _update_agc_threshold(self, threshold_dbfs: float):
+        # v0.0.9.8: ``threshold_dbfs`` is now WDSP's
+        # SetRXAAGCThresh value directly (dBFS).  No log10
+        # conversion — was a 0..1 linear field under the legacy
+        # semantic.
+        self.agc_threshold_lbl.setText(f"{int(round(threshold_dbfs)):+d} dBFS")
 
     # Pre-built stylesheets for the three AGC action color buckets — cached
     # so we don't force Qt to reparse CSS on every repaint.

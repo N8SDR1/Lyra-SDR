@@ -13,6 +13,188 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.8.1] — 2026-05-10 — AGC + persistence patch
+
+Substantial bug-fix patch over v0.0.9.8.  Headline: a latent
+``SetRXAAGCSlope`` cffi binding bug present since v0.0.9.6 was
+fixed, finally making AGC profile differences (Fast / Med / Slow
+/ Long) audible.  Plus per-band waterfall + spectrum scale
+persistence repair, per-mode RX bandwidth persistence, AGC
+threshold UX modernization, click-to-tune polish, doc cleanup.
+
+### AGC bug-hunt — `SetRXAAGCSlope` calling-convention fix
+
+* **Root cause**: ``lyra/dsp/wdsp_native.py`` declared
+  ``SetRXAAGCSlope`` as ``(int channel, double slope)`` while
+  WDSP's actual C signature is ``(int channel, int slope)``.  On
+  Windows x86_64 that mismatch caused a register-class bug —
+  cffi passed the value via XMM1 (the double slot) but the C
+  function read RDX (the int slot), getting whatever register
+  garbage happened to be there.  The garbage went into
+  ``var_gain`` via ``pow(10, slope/200)``, and ``var_gain``
+  drives the ``max_gain`` calculation in
+  ``SetRXAAGCThresh`` — so AGC ended up pinned at a randomly-
+  computed ``max_gain`` regardless of profile.  Visible
+  symptom: "AGC profiles all sound the same except Off",
+  reported repeatedly since v0.0.9.6 and dismissed as
+  "working correctly."  The bug was caught by an audit of
+  every cffi binding's parameter types against the WDSP C
+  source — only ``SetRXAAGCSlope`` had a mismatch.
+* **Fix**: binding declaration corrected to ``int slope``;
+  the Python wrapper passes ``int(slope)``; the operator-
+  observable result is that Fast / Med / Slow / Long now
+  produce audibly distinct decay/hang character on real
+  signals (validated on-air by the operator).
+
+### AGC threshold semantics + UX
+
+* ``Radio._agc_target`` repurposed from a 0..1 linear
+  output-target value (legacy from the pre-WDSP Python AGC
+  engine, never properly wired) to a dBFS-domain threshold
+  value matching WDSP's ``SetRXAAGCThresh`` parameter.
+  Default -100 dBFS (~70 dB AGC headroom — known-comfortable
+  starting point used by other major HF SDR applications).
+* ``set_agc_threshold(dbfs)`` now actually pushes to WDSP
+  (was a no-op store-and-emit-signal before).
+* ``auto_set_agc_threshold`` now reads the live FFT-derived
+  noise floor (``_noise_floor_db``) instead of the
+  hardcoded-and-never-updated ``_noise_baseline = 1e-4``.
+  Auto threshold is now genuinely "track the noise floor" —
+  was effectively static at -75 dBFS regardless of band
+  conditions since the v0.0.9.6 cleanup arc deleted the
+  legacy noise tracker but left the consumer wired to a
+  dead field.  Default margin lowered from 18 dB to 5 dB —
+  conservative legacy value would clamp AGC compression
+  region too tightly.
+* ``_open_wdsp_rx`` field-name fix — was reading
+  ``self._agc_threshold`` (which doesn't exist) and silently
+  failing the threshold push every time.  Reads
+  ``self._agc_target`` now.
+* AGC slope default raised from 0 → 35 — matches WDSP /
+  industry convention (var_gain = 1.5 vs 1.0; soft-knee vs
+  hard-knee).
+* Settings → DSP → AGC threshold slider removed in favour of
+  a label readout + the Auto button.  The 0..1 linear slider
+  it replaced was advisory-only since the v0.0.9.6 cleanup;
+  the new dBFS-direct push works through the Auto button +
+  the default startup value.  Power users wanting direct
+  dBFS control can edit the QSettings key, or we can re-add
+  a slider in a future release if a tester asks.
+
+### AGC profile menu — Long restored
+
+* ``_AGC_PROFILES`` in ``panels.py`` now includes ``"long"``
+  between ``"slow"`` and ``"auto"``; matching entries added
+  to ``_AGC_PROFILE_LABELS`` ("Long"), ``_AGC_PROFILE_COLORS``
+  (amber), ``_AGC_PROFILE_TEXT`` ("LONG").  The full
+  WDSP-side wiring (release time 0.040 s, hang_blocks 46,
+  WDSP mode mapping ``"long" → "LONG"``) was already
+  present in ``radio.py`` since the v0.0.9.6 cleanup arc —
+  the UI exposure was the only thing missing.
+* Restored Long mentions in ``agc.md``, ``index.md``,
+  ``troubleshooting.md`` (had been stripped in v0.0.9.6.1
+  doc audit when the menu and code were out of sync).
+
+### Per-band scale persistence — repair
+
+Operator reported: "Waterfall Min-Max isn't staying where set
+with manual when you restart Lyra"; "I dont think that the
+Spectrum floor is being saved either".  Root cause was a
+two-part bug:
+
+1. **No per-band restore at startup** — ``_apply_band_range``
+   (which applies ``range_min_db`` / ``range_max_db`` /
+   ``floor_locked`` / ``ceiling_locked`` /
+   ``waterfall_min_db`` / ``waterfall_max_db`` from
+   ``_band_memory`` to live state) was only called from
+   ``recall_band``, which only fires on operator band-button
+   click — not at startup.  Operator's saved per-band values
+   were correctly serialized to QSettings and correctly
+   restored to the in-memory dict at load, but never
+   APPLIED to the live radio state.
+
+2. **Spectrum autoload clobbering band_memory** — the global
+   ``visuals/spectrum_min_db`` / ``_max_db`` autoload
+   called ``set_spectrum_db_range(_lo, _hi)`` with default
+   ``from_user=True``, which triggered
+   ``_save_current_band_range()`` to write CURRENT
+   ``_waterfall_min_db / _max_db`` (= still constructor
+   defaults at that point in the load) into
+   ``_band_memory[band].waterfall_*``, OVERWRITING the just-
+   restored operator values.  Same problem hit
+   ``range_min_db`` / ``range_max_db`` / locks because
+   ``_save_current_band_range`` writes all six fields
+   together.
+
+3. **Auto-scale tick clobbering live state** — even if the
+   per-band waterfall was correctly restored at startup, the
+   auto-scale tick (every ~2 sec) calls
+   ``set_waterfall_db_range(target_lo, target_hi,
+   from_user=False)``.  ``from_user=False`` only skips the
+   band_memory write — it still updates the LIVE
+   ``_waterfall_min_db / _max_db`` fields, so the operator's
+   restored values were getting overwritten on the first
+   auto-scale tick.
+
+Fixes applied:
+
+* New ``Radio.apply_current_band_range()`` public method
+  resolves the current band and calls
+  ``_apply_band_range(band.name)``.  Called from app.py's
+  ``_load_settings`` after both ``restore_band_memory``
+  AND the global spectrum/waterfall autoload have run.
+* ``app.py`` spectrum autoload now passes
+  ``set_spectrum_db_range(_lo, _hi, from_user=False)`` —
+  sets the live display value without writing to
+  band_memory.
+* Auto-scale tick skips its waterfall mirror when the
+  current band has a manually-set ``waterfall_min_db`` in
+  band_memory (operator manually set it = "respect their
+  choice; don't auto-overwrite").
+
+### RX bandwidth persistence
+
+* ``_rx_bw_by_mode`` (the per-mode RX bandwidth dict) was
+  NEVER saved to or loaded from QSettings — every Lyra
+  restart silently reset it to ``BW_DEFAULTS`` regardless
+  of operator state.  Caught alongside the waterfall
+  persistence investigation.  Now saved as JSON dict
+  (since QSettings doesn't natively serialize Python
+  dicts) under ``rx_bw_by_mode``; restored entry-by-entry
+  via ``set_rx_bw`` so per-mode WDSP filter pushes follow.
+
+### Click-to-tune snap refinement
+
+* ``_snap_tune_min_snr_db`` raised from 6 to 8 dB — at the
+  old threshold, snap was occasionally biting on noise-
+  floor breathing or sidelobe artifacts (operator-reported
+  "click misses").  8 dB is still permissive enough for
+  weak-signal DX work while reducing false positives.
+* New ``SNAP_RANGE_MAX_HZ = 2000`` Hz cap on the effective
+  search radius.  At wide zoom (192 kHz / 1500 px),
+  ``SNAP_PIXEL_RADIUS = 80`` px translated to ~10 kHz
+  effective range — way too wide; "click near a CW signal"
+  could grab any strong signal within ±10 kHz.  Cap keeps
+  snap "the signal you pointed at" at every zoom level.
+
+### Documentation cleanup
+
+* ``CLAUDE.md`` §15.1 (current-version line stale, §14.2
+  wired/inert lists out of sync, "Last updated" trailer
+  frozen at 2026-05-07) — CLOSED.  §14.2 rewritten to
+  reflect the v0.0.9.6 NR-mode UX overhaul + manual-
+  notches/NB UI/BIN/APF wiring + v0.0.9.8 carrier-freq VFO
+  convention; trailer refreshed with the v0.0.9.6.1 →
+  v0.0.9.7 → v0.0.9.7.1 → v0.0.9.7.2 → v0.0.9.8 sprint
+  + this v0.0.9.8.1 patch summary.
+* ``CLAUDE.md`` §15.5 (``_AGC_PROFILES`` Long re-add) —
+  CLOSED.
+* ``CLAUDE.md`` §9.8 (Speaker-selective audio attenuator) —
+  WITHDRAWN per operator decision (post-WDSP audio chain
+  covers the original use cases).
+
+---
+
 ## [0.0.9.8] — 2026-05-10 — "Display Polish" (CW VFO convention switch)
 
 Operator-visible behaviour change for CW operators: the VFO LED

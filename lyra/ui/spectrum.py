@@ -187,7 +187,16 @@ class SpectrumWidget(_PaintedWidget):
         # peak is at least min_snr_db above the rolling noise floor.
         # Operator-tunable defaults can be wired through Radio later.
         self._snap_tune_range_hz: float = 200.0
-        self._snap_tune_min_snr_db: float = 6.0
+        # SNR threshold for snap acceptance — peak must be at least
+        # this far above the rolling noise floor for the click to
+        # snap (else it falls through to literal click-to-tune).
+        # v0.0.9.8.1 refinement: bumped 6 → 8 dB.  At 6 dB the snap
+        # was occasionally biting on noise floor breathing or
+        # sidelobe artifacts ("click misses" reported by operator).
+        # 8 dB is still permissive enough for weak-signal DX work
+        # (a typical readable CW signal sits 10+ dB above the 20th-
+        # percentile NF) while reducing false-positive snaps.
+        self._snap_tune_min_snr_db: float = 8.0
         # When True, hover with the modifier held shows a reticle at
         # the predicted snap target so the operator sees where the
         # click will land before committing.
@@ -671,9 +680,19 @@ class SpectrumWidget(_PaintedWidget):
     # At wide zoom (192 kHz span / 1500 px = 128 Hz/px) a 200 Hz
     # Hz-based range is only ~3 px wide, smaller than typical
     # operator click precision.  Effective range is
-    # max(snap_tune_range_hz, SNAP_PIXEL_RADIUS * hz_per_px) so the
-    # snap-near-cursor behaviour stays sensible at every zoom level.
+    # min(SNAP_RANGE_MAX_HZ, max(snap_tune_range_hz,
+    # SNAP_PIXEL_RADIUS * hz_per_px)) so the snap-near-cursor
+    # behaviour stays sensible at every zoom level WITHOUT reaching
+    # 10 kHz wide at full-band zoom (which would let a click "near"
+    # a CW signal accidentally grab any strong signal nearby).
     SNAP_PIXEL_RADIUS = 80
+    # Hard ceiling on the effective snap range, in Hz.  v0.0.9.8.1
+    # refinement: at 192 kHz span / 1500 px the pixel-based range
+    # was ~10240 Hz (operator-reported "click misses" / "snap finds
+    # the wrong signal").  Cap at 2 kHz — covers an SSB voice
+    # passband, multiple CW signals, but stays "the signal you
+    # pointed at" rather than "anything strong within ±10 kHz".
+    SNAP_RANGE_MAX_HZ = 2000.0
 
     def _find_snap_target(self, x_pixel: float) -> float | None:
         """Find the strongest spectrum bin within +/- snap_range_hz of
@@ -695,7 +714,9 @@ class SpectrumWidget(_PaintedWidget):
         widget_w = max(1, self.width())
         hz_per_px = self._span_hz / widget_w
         pixel_range_hz = self.SNAP_PIXEL_RADIUS * hz_per_px
-        eff_range_hz = max(self._snap_tune_range_hz, pixel_range_hz)
+        eff_range_hz = min(
+            self.SNAP_RANGE_MAX_HZ,
+            max(self._snap_tune_range_hz, pixel_range_hz))
         half_bins = max(1, int(round(
             eff_range_hz * bins_per_hz)))
         # Cursor bin index (clamped) — the search window centers here.

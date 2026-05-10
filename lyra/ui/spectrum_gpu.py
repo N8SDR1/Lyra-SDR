@@ -362,7 +362,9 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # min_snr_db.  Hover with Shift held = reticle preview of
         # where the next click will land.  See click_to_tune_plan.md.
         self._snap_tune_range_hz: float = 200.0
-        self._snap_tune_min_snr_db: float = 6.0
+        # v0.0.9.8.1 refinement: 6 → 8 dB SNR threshold (see
+        # matching block in lyra/ui/spectrum.py for rationale).
+        self._snap_tune_min_snr_db: float = 8.0
         self._snap_tune_show_reticle: bool = True
         self._snap_hover_freq: Optional[float] = None
 
@@ -1124,10 +1126,14 @@ class SpectrumGpuWidget(QOpenGLWidget):
     # Pixel-based search radius for click-to-tune snap.  At wide
     # zoom (192 kHz span), the 200 Hz Hz-based range is only ~3 px
     # wide -- way smaller than typical operator click precision.
-    # The actual snap window is max(snap_tune_range_hz,
-    # SNAP_PIXEL_RADIUS * hz_per_px) so the click-near-cursor
-    # behaviour stays consistent at every zoom level.
+    # The actual snap window is min(SNAP_RANGE_MAX_HZ,
+    # max(snap_tune_range_hz, SNAP_PIXEL_RADIUS * hz_per_px)) so the
+    # click-near-cursor behaviour stays consistent at every zoom
+    # level WITHOUT reaching ~10 kHz wide at full-band zoom.
     SNAP_PIXEL_RADIUS = 80
+    # v0.0.9.8.1: hard ceiling on the effective snap range — see
+    # matching constant in lyra/ui/spectrum.py for rationale.
+    SNAP_RANGE_MAX_HZ = 2000.0
 
     def _find_snap_target_gpu(self, x_pixel: float) -> Optional[float]:
         """Click-to-tune snap (GPU widget).  Mirrors the QPainter
@@ -1150,7 +1156,9 @@ class SpectrumGpuWidget(QOpenGLWidget):
         widget_w = max(1, self.width())
         hz_per_px = self._span_hz / widget_w
         pixel_range_hz = self.SNAP_PIXEL_RADIUS * hz_per_px
-        eff_range_hz = max(self._snap_tune_range_hz, pixel_range_hz)
+        eff_range_hz = min(
+            self.SNAP_RANGE_MAX_HZ,
+            max(self._snap_tune_range_hz, pixel_range_hz))
         half_bins = max(1, int(round(
             eff_range_hz * bins_per_hz)))
         cursor_bin = int(round(

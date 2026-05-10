@@ -473,6 +473,16 @@ class Radio(QObject):
     }
     AGC_AUTO_INTERVAL_MS = 3000   # re-track threshold every 3 s in auto mode
 
+    # WDSP AGC threshold operator-tunable range, in dBFS.  Drives
+    # the Settings → DSP → AGC Threshold slider clamp + auto-
+    # threshold output clamp.  Range -150..-40 covers everything
+    # from "very quiet receiver / weak DX hunting" to "broadcast
+    # / strong-signal listening" with the Thetis-typical -100
+    # comfortable in the middle.
+    _AGC_THRESH_MIN_DBFS: float = -150.0
+    _AGC_THRESH_MAX_DBFS: float = -40.0
+    _AGC_THRESH_DEFAULT_DBFS: float = -100.0
+
     # ── Notch v2 presets (operator-facing right-click choices) ──────
     # Each preset maps to (depth_db, cascade).  See notch_v2_design.md
     # §4.2 for the bench-validated behaviour of each profile.
@@ -817,7 +827,19 @@ class Radio(QObject):
         # facing presets via ``_wdsp_rx.set_agc(mode)``.  The Python
         # WdspAgc wrapper that used to forward these was deleted in
         # Phase 6.A.
-        self._agc_target = 0.0316        # -30 dBFS, UI-displayed
+        # AGC threshold, in dBFS.  This is WDSP's
+        # SetRXAAGCThresh parameter — the noise-floor reference
+        # used to compute ``max_gain`` (= the AGC's gain ceiling).
+        # Lower threshold → larger max_gain → AGC boosts weak
+        # signals more.  Higher threshold → smaller max_gain →
+        # AGC compresses earlier.  Operator-facing range
+        # ``_AGC_THRESH_MIN_DBFS .. _AGC_THRESH_MAX_DBFS``;
+        # default -100 dBFS (~70 dB AGC headroom; Thetis-default
+        # territory).  v0.0.9.8 fix: was previously a 0..1 linear
+        # field with the wrong semantic (output target rather
+        # than input threshold) and never reached WDSP — see
+        # ``set_agc_threshold`` for the fix history.
+        self._agc_target = -100.0        # dBFS, UI-displayed and pushed to WDSP
         self._agc_profile = "med"        # off / fast / med / slow / long / auto / custom
         self._agc_release = 0.003        # custom-slider value, UI only
         self._agc_hang_blocks = 23       # custom-slider value, UI only
@@ -5214,6 +5236,29 @@ class Radio(QObject):
         """Snapshot for QSettings persistence."""
         return dict(self._band_memory)
 
+    def apply_current_band_range(self) -> None:
+        """Apply the per-band saved spectrum + waterfall ranges for
+        whichever band the radio is currently tuned to.
+
+        Public wrapper around ``_apply_band_range`` for use during
+        startup autoload — ``recall_band`` (the only other caller of
+        ``_apply_band_range``) only runs when the operator clicks a
+        band button, NOT at startup, so without this call the
+        operator's per-band saved waterfall min/max + spectrum
+        bounds would only take effect after a manual band-button
+        click.  v0.0.9.8.1 fix: bug surfaced when operator reported
+        "Waterfall Min-Max isn't staying where set with manual when
+        you restart Lyra" — actual cause was per-band values WERE
+        saved and restored to the in-memory ``_band_memory`` dict,
+        but never APPLIED to the live radio state on startup.
+
+        ``band_for_freq`` is the same helper ``_save_current_band_range``
+        uses (imported at module top from ``lyra.bands``)."""
+        band = band_for_freq(int(self._freq_hz))
+        if band is None:
+            return
+        self._apply_band_range(band.name)
+
     def restore_band_memory(self, snapshot: dict):
         """Restore the per-band memory dict from QSettings.
 
@@ -7147,23 +7192,57 @@ class Radio(QObject):
             # NOT push Top.  See wcpAGC.c::SetRXAAGCThresh for
             # the math.
             try:
-                # Slope first — SetRXAAGCThresh's noise_offset
-                # calculation depends on var_gain (set by Slope).
-                # WDSP create-time default is var_gain=1.5 which
-                # corresponds to slope ≈ 3.5 dB.  We pass 0 here
-                # (linear ratio); operator could surface this in
-                # a future Settings slider.
-                self._wdsp_rx.set_agc_slope(0.0)
-                # Threshold (dBFS, fft_size, sample_rate) — drives
-                # the noise-floor-relative max_gain calculation.
-                # Lyra's operator-facing _agc_threshold is a linear
-                # 0..1 multiplier of full scale (legacy from the
-                # pre-WDSP AGC engine); convert to dBFS for WDSP.
-                import math as _m
-                thresh_lin = max(self._agc_threshold, 1e-6)
-                thresh_db = float(20.0 * _m.log10(thresh_lin))
+                # Slope — drives ``var_gain`` via
+                # ``var_gain = pow(10, slope / 200)``.
+                # SetRXAAGCThresh's noise_offset calculation uses
+                # ``var_gain`` to compute ``max_gain``.
+                #
+                # WDSP create-time default is ``var_gain = 1.5``,
+                # which is what other major HF SDR applications use
+                # (and what produces the soft-knee AGC character
+                # operators expect from the FAST/MED/SLOW/LONG
+                # presets).  ``var_gain = 1.5`` corresponds to
+                # ``slope = 200 * log10(1.5) ≈ 35``.  Lyra was
+                # passing slope=0 (var_gain=1.0, hard-knee) before
+                # the v0.0.9.8.1 polish — flatter, more limiter-
+                # like character.  Switching to 35 matches the
+                # canonical WDSP / industry convention.
+                #
+                # Note SetRXAAGCSlope's parameter is `int slope`
+                # (0.1 dB units per WDSP source); the v0.0.9.8 cffi
+                # binding fix made the int-vs-double calling
+                # convention right — see lyra/dsp/wdsp_native.py.
+                self._wdsp_rx.set_agc_slope(35)
+                # WDSP AGC "threshold" parameter — dBFS-domain
+                # value that, with the bandpass-width noise_offset
+                # WDSP computes internally, sets ``max_gain`` via
+                #
+                #     max_gain = out_target /
+                #                (var_gain * 10^((thresh + noise_offset)/20))
+                #
+                # This is conceptually a "noise floor reference"
+                # for the AGC to boost weak signals up FROM, NOT
+                # an output-level target.  Operator-typical values
+                # are around -100 to -130 dBFS (similar to Thetis
+                # /PowerSDR/EESDR's AGC threshold sliders).  Lyra's
+                # ``_agc_target`` field is a legacy 0..1 audio-level
+                # target from the pre-WDSP Python AGC engine; it
+                # is NOT the same concept and must NOT be
+                # converted to a WDSP threshold (doing so makes
+                # max_gain ≈ 1.0 → AGC clamped → very quiet audio,
+                # operator-reported during the v0.0.9.8 fix
+                # iteration).
+                #
+                # Use a Thetis-default-ish -100 dBFS here so AGC
+                # has ~70 dB of headroom to boost weak signals
+                # AND so the per-mode tau_decay differences (Fast
+                # 50ms / Med 250ms / Slow 500ms / Long 2000ms set
+                # by SetRXAAGCMode) are audible because the gain
+                # is actually free to move.  When Lyra grows a
+                # proper Settings → DSP → AGC threshold slider
+                # (dBFS-domain), it will replace this constant.
                 self._wdsp_rx.set_agc_threshold(
-                    thresh_db, 4096, in_rate)
+                    float(self._agc_target), 4096, in_rate)
             except Exception as exc:
                 print(f"[Radio] WDSP AGC init-state push: {exc}")
             # AF Gain → WDSP PanelGain1 (Thetis-style pre-AGC makeup
@@ -7770,32 +7849,94 @@ class Radio(QObject):
         # delta — re-emit so the spectrum's marker tracks it.
         self._emit_marker_offset()
 
-    # ── AGC threshold (target audio level) ───────────────────────────
+    # ── AGC threshold (WDSP SetRXAAGCThresh parameter, dBFS) ───────
     @property
     def agc_threshold(self) -> float:
+        """AGC threshold in dBFS — see ``set_agc_threshold``."""
         return self._agc_target
 
-    def set_agc_threshold(self, threshold: float):
-        """Set AGC target audio level. Range 0.05..0.9 — the peak level
-        AGC tries to hold the audio at. Higher = AGC kicks in at louder
-        signals (less responsive); lower = AGC reacts to weaker signals
-        (more sensitive)."""
-        self._agc_target = max(0.05, min(0.9, float(threshold)))
-        self.agc_threshold_changed.emit(self._agc_target)
+    def set_agc_threshold(self, threshold_dbfs: float):
+        """Set the AGC threshold in dBFS.  This is WDSP's
+        ``SetRXAAGCThresh`` parameter — the noise-floor reference
+        used to compute ``max_gain`` (the AGC's gain ceiling).
 
-    def auto_set_agc_threshold(self, margin_db: float = 18.0) -> float:
-        """Calibrate AGC threshold to sit `margin_db` above the current
-        rolling noise floor. Bound to the AGC right-click "Auto" action.
-        Returns the new threshold value."""
-        baseline = max(self._noise_baseline, 1e-4)
-        factor = 10 ** (margin_db / 20.0)
-        target = max(0.05, min(0.9, baseline * factor))
-        self.set_agc_threshold(target)
+        Lower threshold → larger ``max_gain`` → AGC has more room
+        to boost weak signals (good for weak-signal / DX work).
+        Higher threshold → smaller ``max_gain`` → AGC starts
+        compressing earlier (good for strong-signal / broadcast
+        listening).
+
+        Operator-typical values:
+          -130 dBFS → very quiet band, weak-signal hunting
+          -100 dBFS → normal HF operation (default)
+           -90 dBFS → mid-strength signals, less AGC boost
+           -60 dBFS → broadcast / strong-signal listening only
+
+        Range clamped to ``_AGC_THRESH_MIN_DBFS``..
+        ``_AGC_THRESH_MAX_DBFS`` (-150..-40 dBFS).
+
+        v0.0.9.8 fix history: this method previously took a
+        legacy 0..1 linear "audio output target" value, never
+        pushed to WDSP, and was responsible for the operator-
+        reported "AGC profiles all sound the same" symptom (max_gain
+        clamped at WDSP create-time default since the v0.0.9.6
+        cleanup arc, no headroom for the per-mode tau_decay
+        differences to be audible).  Switched to the proper
+        dBFS-domain semantic + direct WDSP push so the slider
+        actually drives the engine.
+        """
+        v = max(self._AGC_THRESH_MIN_DBFS,
+                min(self._AGC_THRESH_MAX_DBFS,
+                    float(threshold_dbfs)))
+        self._agc_target = v
+        # Push to WDSP so the slider movement reaches the engine.
+        if self._wdsp_rx is not None:
+            try:
+                self._wdsp_rx.set_agc_threshold(
+                    v, 4096, int(self._rate))
+            except Exception as exc:
+                print(f"[Radio] WDSP AGC threshold push: {exc}")
+        self.agc_threshold_changed.emit(v)
+
+    def auto_set_agc_threshold(self, margin_db: float = 5.0) -> float:
+        """Calibrate AGC threshold to sit ``margin_db`` above the
+        current rolling noise floor (in dBFS).  Bound to the AGC
+        right-click "Auto" action and the Settings → DSP → AGC
+        Threshold "Auto" button.  Returns the new threshold (dBFS).
+
+        ``margin_db`` defaults to +5 dB above NF — places the
+        threshold just above the noise so AGC engages on actual
+        signals while still letting the noise floor itself ride
+        through at full max_gain.
+
+        v0.0.9.8 fix: now reads the live FFT-derived noise floor
+        (``_noise_floor_db`` — 20th-percentile of the spectrum,
+        rolling-averaged + EMA-smoothed in the FFT pipeline at
+        ``radio.py:8258``).  Previously read ``_noise_baseline``
+        which was hardcoded to ``1e-4`` (-80 dBFS) and never
+        updated since the legacy Python noise-floor tracker was
+        deleted in the v0.0.9.6 cleanup arc — so Auto always
+        produced -75 dBFS regardless of actual band conditions
+        ("Auto sounds the same as Med" symptom).  When the
+        spectrum noise-floor estimate is unavailable (operator
+        disabled the NF reference line OR the FFT pipeline
+        hasn't accumulated enough history yet), falls back to a
+        sensible -100 dBFS default."""
+        nf_db = self._noise_floor_db
+        if nf_db is None:
+            # No live estimate available — use a sensible default
+            # so Auto still produces a usable threshold.
+            nf_db = -100.0
+        target_dbfs = float(nf_db) + float(margin_db)
+        target_dbfs = max(self._AGC_THRESH_MIN_DBFS,
+                          min(self._AGC_THRESH_MAX_DBFS,
+                              target_dbfs))
+        self.set_agc_threshold(target_dbfs)
         self.status_message.emit(
-            f"AGC auto-threshold: {20*np.log10(target):+.0f} dBFS "
-            f"(noise floor {20*np.log10(baseline):+.0f} + {margin_db:.0f} dB)",
+            f"AGC auto-threshold: {target_dbfs:+.0f} dBFS "
+            f"(noise floor {nf_db:+.0f} dBFS + {margin_db:.0f} dB margin)",
             3000)
-        return target
+        return target_dbfs
 
     # Note: _decimate_to_48k and _rebuild_demods used to live here,
     # then moved to self._rx_channel.  Phase 5 (v0.0.9.6) deleted
@@ -8246,19 +8387,33 @@ class Radio(QObject):
                 # Mirror the same range to the waterfall so its
                 # heatmap fits the band's actual dynamic range too —
                 # but ONLY if the operator has waterfall auto-scale
-                # enabled (default). Some operators prefer a fixed
+                # enabled (default).  Some operators prefer a fixed
                 # darker waterfall so weaker signals 'pop' against a
                 # near-black background; turning waterfall auto-scale
                 # off in Settings lets them keep that look while the
                 # spectrum still auto-fits.
+                #
+                # v0.0.9.8.1 fix: also skip the auto-mirror when the
+                # current band has a per-band MANUALLY-SET waterfall
+                # range in band_memory.  Without this skip, the auto-
+                # tick (every ~2 sec) would overwrite the operator's
+                # restored manual values 2 seconds after every
+                # startup → "Waterfall Min-Max isn't staying where
+                # set with manual when you restart Lyra" (operator-
+                # reported 2026-05-10).  The from_user=False arg to
+                # set_waterfall_db_range was supposed to prevent
+                # this but only protects the band_memory write —
+                # the live ``_waterfall_min_db / _max_db`` fields
+                # (and the visible heatmap) still got overwritten.
                 if self._waterfall_auto_scale:
-                    # from_user=False so the auto-mirror doesn't
-                    # overwrite the operator's per-band manual
-                    # waterfall preference (only matters when the
-                    # operator has manually set a waterfall range
-                    # for this band; auto-scale just tracks).
-                    self.set_waterfall_db_range(
-                        target_lo, target_hi, from_user=False)
+                    cur_band = band_for_freq(int(self._freq_hz))
+                    has_manual_wf = (
+                        cur_band is not None
+                        and "waterfall_min_db" in self._band_memory.get(
+                            cur_band.name, {}))
+                    if not has_manual_wf:
+                        self.set_waterfall_db_range(
+                            target_lo, target_hi, from_user=False)
         elif self._auto_scale_peak_history:
             # Auto turned off — drop the history so it doesn't grow
             # unbounded if the operator never re-enables.

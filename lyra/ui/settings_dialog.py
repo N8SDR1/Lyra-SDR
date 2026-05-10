@@ -1411,26 +1411,30 @@ class DspSettingsTab(QWidget):
         self.hang_label = QLabel()
         ga.addWidget(self.hang_label, 3, 4)
 
-        # AGC threshold slider + auto button.  Currently advisory —
-        # WDSP applies its own per-mode hang threshold internally;
-        # this slider is persisted UI state only.  Column layout
-        # mirrors Release/Hang rows above: label col 0, slider
-        # cols 1-3, value-readout col 4, Auto button col 5.
+        # AGC threshold — operator-tunable slider was removed in
+        # v0.0.9.8.  The default (-100 dBFS, set in Radio
+        # ``_open_wdsp_rx``) is comfortable for typical HF
+        # operation, and the **Auto** button below recalibrates it
+        # to ~5 dB above the current noise floor for band-condition
+        # changes.  The DSP+Audio panel cluster's ``thr <-NN dBFS>``
+        # readout still shows the current value live.  Power users
+        # who want direct dBFS control can edit
+        # ``HKCU\Software\N8SDR\Lyra\agc\threshold`` between
+        # sessions, or hit Auto on a quiet patch of band.  Keeping
+        # the row to display the readout + Auto button only.
         ga.addWidget(QLabel("Threshold"), 4, 0)
-        self.threshold_slider = QSlider(Qt.Horizontal)
-        self.threshold_slider.setRange(5, 90)   # 0.05 .. 0.90
-        self.threshold_slider.setValue(int(radio.agc_threshold * 100))
-        self.threshold_slider.setFixedWidth(200)
-        self.threshold_slider.valueChanged.connect(
-            lambda v: self.radio.set_agc_threshold(v / 100.0))
-        ga.addWidget(self.threshold_slider, 4, 1, 1, 3)
         self.threshold_label = QLabel()
-        ga.addWidget(self.threshold_label, 4, 4)
+        self.threshold_label.setToolTip(
+            "Current AGC threshold in dBFS.  Read-only — use the\n"
+            "Auto button to recalibrate.  Default -100 dBFS is a\n"
+            "comfortable starting point for normal HF operation.")
+        ga.addWidget(self.threshold_label, 4, 1, 1, 3)
         self.auto_thresh_btn = QPushButton("Auto")
         self.auto_thresh_btn.setToolTip(
-            "Recalculate the threshold value ~18 dB above the current\n"
-            "noise floor.  Persists the UI value; advisory in WDSP mode.\n"
-            "Best run on a quiet part of the band.")
+            "Recalibrate the threshold to ~5 dB above the current\n"
+            "rolling noise floor.  Best run on a quiet part of the\n"
+            "band — places the threshold just above the noise so\n"
+            "AGC engages on actual signals, not on the noise itself.")
         self.auto_thresh_btn.clicked.connect(self._on_auto_threshold)
         ga.addWidget(self.auto_thresh_btn, 4, 5)
 
@@ -1783,17 +1787,13 @@ class DspSettingsTab(QWidget):
         else:
             self.release_label.setText(f"{release:.3f}  (no decay)")
         self.hang_label.setText(f"{hang} blk  ({hang_ms} ms)")
-        t = self.threshold_slider.value() / 100.0
-        self.threshold_label.setText(
-            f"{t:.2f}  ({20 * math.log10(max(t, 1e-6)):+.0f} dBFS)")
+        # Threshold readout — read directly from radio (no slider).
+        t_dbfs = float(self.radio.agc_threshold)
+        self.threshold_label.setText(f"{int(round(t_dbfs)):+d} dBFS")
 
     @_swallow_dead_widget
     def _on_threshold_changed(self, value: float):
-        v = int(round(value * 100))
-        if self.threshold_slider.value() != v:
-            self.threshold_slider.blockSignals(True)
-            self.threshold_slider.setValue(v)
-            self.threshold_slider.blockSignals(False)
+        # Just refresh the label; no slider to sync.
         self._update_labels()
 
     def _on_auto_threshold(self):
