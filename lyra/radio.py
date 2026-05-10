@@ -7284,14 +7284,45 @@ class Radio(QObject):
         Closes any existing channel before opening so we never leak a
         stale WDSP channel across rate changes.
         """
+        # §14.6 v0.0.9.9 diagnostic: verbose step-by-step logging
+        # so we can pinpoint where rate-change crashes happen if
+        # the operator hits one again.  Rate change is rare (only
+        # on Settings → Audio sample-rate changes), so the log
+        # spam is bounded.  If/when the rate-change-cycle crash
+        # is fixed and stable, this can be reverted in a single
+        # follow-up commit.
+        #
+        # Use getattr with defaults — _open_wdsp_rx is called from
+        # __init__ before all the captured-profile state fields
+        # are initialized, so referring to them as ``self._foo``
+        # would AttributeError on first launch.
+        import threading as _t
+        _tname = _t.current_thread().name
+        print(f"[Radio open_wdsp] start in_rate={in_rate} "
+              f"thread={_tname} "
+              f"prev_rate={getattr(self, '_wdsp_rx_in_rate', '?')} "
+              f"have_old_wdsp="
+              f"{getattr(self, '_wdsp_rx', None) is not None} "
+              f"have_old_iq="
+              f"{getattr(self, '_iq_capture', None) is not None} "
+              f"active_profile="
+              f"{getattr(self, '_active_captured_profile_name', '<unset>')!r} "
+              f"toggle="
+              f"{getattr(self, '_nr_use_captured_profile', '<unset>')}",
+              flush=True)
         from lyra.dsp.wdsp_engine import RxChannel, RxConfig
         # Tear down the old one if any.
         if self._wdsp_rx is not None:
+            print("[Radio open_wdsp] (1) closing old WDSP channel",
+                  flush=True)
             try:
                 self._wdsp_rx.close()
             except Exception as exc:
-                print(f"[Radio] WDSP rx close error: {exc}")
+                print(f"[Radio] WDSP rx close error: {exc}",
+                      flush=True)
             self._wdsp_rx = None
+            print("[Radio open_wdsp] (1) done — wdsp_rx=None",
+                  flush=True)
         # Pick an in_size that keeps the per-call audio block within
         # Lyra's existing 512-sample audio cadence. WDSP returns
         # in_size * out_rate / in_rate audio frames per call:
@@ -7314,8 +7345,12 @@ class Radio(QObject):
             dsp_rate=48000,
             out_rate=48000,
         )
+        print(f"[Radio open_wdsp] (2) creating new WDSP channel "
+              f"in_size={in_size}", flush=True)
         self._wdsp_rx = RxChannel(channel=0, cfg=cfg)
         self._wdsp_rx_in_rate = int(in_rate)
+        print(f"[Radio open_wdsp] (2) done — wdsp_rx ready "
+              f"@ {in_rate} Hz", flush=True)
 
         # Captured-profile IQ-domain engine (§14.6, v0.0.9.9).
         # Tied to the WDSP channel's lifetime — same in_rate, same
@@ -7331,18 +7366,26 @@ class Radio(QObject):
         # until we assign it), then take the lock briefly to
         # swap.  This minimizes worker-thread blocking on rate
         # change.
+        print("[Radio open_wdsp] (3) creating new IQ capture engine",
+              flush=True)
         try:
             new_engine = CapturedProfileIQ(
                 rate_hz=int(in_rate),
                 fft_size=self._iq_capture_fft_size,
             )
         except Exception as exc:
-            print(f"[Radio] iq_capture init: {exc}")
+            print(f"[Radio] iq_capture init: {exc}", flush=True)
             new_engine = None
+        print(f"[Radio open_wdsp] (3) done — new_engine="
+              f"{new_engine is not None}", flush=True)
 
+        print("[Radio open_wdsp] (4) acquiring lock to swap engine",
+              flush=True)
         with self._iq_capture_lock:
             had_iq_capture = self._iq_capture is not None
             self._iq_capture = new_engine
+        print(f"[Radio open_wdsp] (4) done — had_iq_capture="
+              f"{had_iq_capture}", flush=True)
 
         # On a recreate (rate change), clear the active-profile
         # name + meta + emit the changed signal so the DSP+Audio
@@ -7365,12 +7408,16 @@ class Radio(QObject):
         # audit flagged as P1.  Operator re-flips the toggle ON
         # after manually reloading a profile from the manager.
         if had_iq_capture and self._active_captured_profile_name:
+            print("[Radio open_wdsp] (5) clearing active profile "
+                  "name + meta (rate change with profile loaded)",
+                  flush=True)
             self._active_captured_profile_name = ""
             self._active_captured_profile_meta = None
             try:
                 self.noise_active_profile_changed.emit("")
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[Radio open_wdsp] (5) signal emit failed: "
+                      f"{exc}", flush=True)
             if self._nr_use_captured_profile:
                 # Direct call rather than set_nr_use_captured_profile
                 # because the lock is already partially involved
@@ -7381,7 +7428,15 @@ class Radio(QObject):
                 # also resets apply streaming state which is
                 # redundant here (engine is brand new) but
                 # harmless.
+                print("[Radio open_wdsp] (5) flipping toggle off",
+                      flush=True)
                 self.set_nr_use_captured_profile(False)
+            print("[Radio open_wdsp] (5) done", flush=True)
+        else:
+            print(f"[Radio open_wdsp] (5) skipped — had_iq_capture="
+                  f"{had_iq_capture} active_name="
+                  f"{getattr(self, '_active_captured_profile_name', '<unset>')!r}",
+                  flush=True)
 
         # Push current operator state into the new channel.
         try:
@@ -7553,10 +7608,14 @@ class Radio(QObject):
                 print(f"[Radio] WDSP AM SQ tail init: {exc}")
         except Exception as exc:
             print(f"[Radio] WDSP rx initial-state push error: {exc}")
+        print("[Radio open_wdsp] (6) pushing operator state into "
+              "new channel", flush=True)
         try:
             self._wdsp_rx.start()
         except Exception as exc:
-            print(f"[Radio] WDSP rx start error: {exc}")
+            print(f"[Radio] WDSP rx start error: {exc}", flush=True)
+        print(f"[Radio open_wdsp] (7) DONE — channel running @ "
+              f"{in_rate} Hz", flush=True)
 
     def _wdsp_mode_for(self, mode: str) -> str:
         """Map Lyra's mode string to a WDSP mode name."""
@@ -7765,6 +7824,19 @@ class Radio(QObject):
         blocks per call. Empty result = no full block ready yet, which is
         expected on the first few calls after a freq / mode change.
         """
+        # §14.6 v0.0.9.9 diagnostic: log every Nth call so we can
+        # confirm the worker thread is actively processing IQ
+        # blocks, AND log every call where the WDSP channel is
+        # None or has been just-recreated.  Heavy log spam is
+        # avoided by counting blocks; the unconditional "wdsp_rx
+        # is None" branch logs only when there's a problem.
+        self._iq_demod_block_count = (
+            getattr(self, "_iq_demod_block_count", 0) + 1)
+        if self._wdsp_rx is None:
+            print("[Radio _do_demod_wdsp] CALLED WITH wdsp_rx=None "
+                  "— rate-change race?", flush=True)
+            return
+
         # ── §14.6 pre-WDSP IQ taps for captured-profile ──
         # IQ-domain capture (Phase 3) and apply (Phase 4) both run
         # BEFORE WDSP's RXA chain, sidestepping the AGC-mismatch

@@ -10,7 +10,17 @@ across app restarts via `saveState()`/`restoreState()`.
 """
 from __future__ import annotations
 
+import faulthandler
 import sys
+
+# §14.6 v0.0.9.9 diagnostic: catch C-side segfaults from cffi'd DLLs
+# (WDSP, FFTW, RNNoise, SpecBleach) and print a Python stack trace +
+# crashing thread state to stderr BEFORE the process dies.  Without
+# this, a segfault in a DLL leaves no trace at all — the prompt just
+# returns.  Cheap (no overhead unless a fatal signal fires); leaving
+# it on permanently is fine and gives operators something useful to
+# paste into bug reports.
+faulthandler.enable()
 
 from PySide6.QtCore import Qt, QSettings, QByteArray, QObject, Signal
 from PySide6.QtGui import QFont, QPalette, QAction
