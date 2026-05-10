@@ -166,7 +166,15 @@ class Radio(QObject):
     hl2_telemetry_changed = Signal(dict)  # {temp_c, supply_v, fwd_w, rev_w}
 
     # ── Streaming data signals ─────────────────────────────────────────
-    spectrum_ready       = Signal(object, float, int)   # db, center_hz, rate
+    spectrum_ready       = Signal(object, float, int)   # db, center_hz (= DDS in v0.0.9.8+), rate
+    # VFO marker offset from spectrum visual center, in Hz.  Under
+    # v0.0.9.8's carrier-freq VFO convention the spectrum widget
+    # centers FFT data on DDS (= VFO ± cw_pitch in CW modes) — the
+    # operator's VFO marker therefore needs a horizontal offset to
+    # land where the actual carrier sits.  0 in non-CW; +pitch in
+    # CWU; -pitch in CWL.  Re-emitted on freq, mode, or pitch
+    # changes (anything that shifts the DDS-vs-VFO relationship).
+    marker_offset_changed = Signal(int)
     smeter_level         = Signal(float)
     smeter_mode_changed  = Signal(str)                  # "peak" | "avg"
     status_message       = Signal(str, int)             # text, timeout_ms
@@ -1508,6 +1516,65 @@ class Radio(QObject):
             self._ip = ip
             self.ip_changed.emit(ip)
 
+    # ── DDS / VFO frequency separation (v0.0.9.8 convention) ─────────
+    #
+    # ``_freq_hz`` is the operator-displayed VFO frequency — i.e., the
+    # carrier frequency of the signal the operator wants to hear.  This
+    # matches the convention used across the major HF SDR applications,
+    # where the displayed freq is the on-air carrier and the radio
+    # internally offsets the actual hardware tuning (DDC) by the CW
+    # pitch in CW modes so the carrier lands inside the receive
+    # bandpass and the operator hears it as a tone at the configured
+    # pitch.
+    #
+    # Until v0.0.9.7.x Lyra used the inverse convention: ``_freq_hz``
+    # was the filter-zero (= where the bandpass sat in the IQ
+    # baseband), and operator-side tuning surfaces (click-to-tune,
+    # NCDXF marker click, NCDXF auto-follow, TCI spot click) each
+    # applied the CW pitch offset themselves before writing
+    # ``_freq_hz``.  v0.0.9.8 moves the offset CENTRALLY into this
+    # method (and into ``set_mode`` / ``set_cw_pitch_hz`` so a mode
+    # or pitch change re-pushes the corrected DDS freq).  All
+    # per-call-site offsets in the tuning surfaces are reverted so we
+    # don't double-offset.
+    def _compute_dds_freq_hz(self, vfo_hz: Optional[int] = None) -> int:
+        """Compute the actual HL2 DDC0 freq for the given (or current)
+        operator-displayed VFO freq.  Mode-aware: subtracts the CW
+        pitch in CWU, adds it in CWL, identity for every other mode.
+        """
+        if vfo_hz is None:
+            vfo_hz = self._freq_hz
+        m = self._mode
+        if m == "CWU":
+            return int(vfo_hz) - int(self._cw_pitch_hz)
+        if m == "CWL":
+            return int(vfo_hz) + int(self._cw_pitch_hz)
+        return int(vfo_hz)
+
+    @property
+    def dds_freq_hz(self) -> int:
+        """Read-only convenience: the actual hardware DDC0 freq Lyra
+        is using right now, accounting for CW pitch offset.  Useful
+        for the spectrum widget (which centers FFT bins on the DDS
+        freq) and any layer that needs to know "where the radio is
+        actually tuned" vs "what the operator sees on the LED"."""
+        return self._compute_dds_freq_hz()
+
+    @property
+    def marker_offset_hz(self) -> int:
+        """VFO marker offset from the spectrum's visual center, in
+        Hz.  = (VFO − DDS).  0 in non-CW modes; +cw_pitch in CWU
+        (marker right of center); -cw_pitch in CWL.  Drives the
+        spectrum widget's marker positioning under v0.0.9.8's
+        carrier-freq VFO convention."""
+        return int(self._freq_hz) - self._compute_dds_freq_hz()
+
+    def _emit_marker_offset(self) -> None:
+        """Re-emit the marker offset.  Call from any state change
+        that shifts the DDS-vs-VFO relationship — freq, mode, or
+        CW pitch."""
+        self.marker_offset_changed.emit(int(self.marker_offset_hz))
+
     def set_freq_hz(self, hz: int):
         hz = int(hz)
         if hz == self._freq_hz:
@@ -1515,7 +1582,10 @@ class Radio(QObject):
         self._freq_hz = hz
         if self._stream:
             try:
-                self._stream._set_rx1_freq(hz)  # noqa: SLF001
+                # Send the offset DDS freq to the protocol layer, NOT
+                # the operator-displayed value.  See the convention
+                # note above _compute_dds_freq_hz for the why.
+                self._stream._set_rx1_freq(self._compute_dds_freq_hz(hz))  # noqa: SLF001
             except Exception as e:
                 self.status_message.emit(f"Freq set failed: {e}", 3000)
         with self._ring_lock:
@@ -1556,6 +1626,11 @@ class Radio(QObject):
         # Advisory: fire a toast on band-plan edge transitions.
         self._check_in_band()
         self.freq_changed.emit(hz)
+        # Marker offset only changes if mode or pitch shift, not on
+        # freq alone — but emit it here too so the widget stays in
+        # sync if it was constructed mid-session and missed earlier
+        # mode/pitch events (defensive; cost is negligible).
+        self._emit_marker_offset()
 
     def set_rate(self, rate: int):
         if rate not in SAMPLE_RATES or rate == self._rate:
@@ -1699,11 +1774,25 @@ class Radio(QObject):
         # HL2Stream._rx_loop keeps every register fresh.
         if not self._suppress_band_save:
             self._save_current_band_memory()
+        # Re-push the freq to the protocol layer.  Switching between a
+        # CW mode and a non-CW mode (or between CWU and CWL) changes
+        # the DDS-vs-VFO offset, so the actual hardware tuning needs
+        # to follow even though the operator-displayed VFO didn't
+        # change.  Without this, switching SSB→CWU would leave the
+        # DDS at carrier (= VFO) instead of carrier - pitch and the
+        # operator would hear zero-beat silence at their pitch tone.
+        if self._stream:
+            try:
+                self._stream._set_rx1_freq(self._compute_dds_freq_hz())  # noqa: SLF001
+            except Exception as exc:
+                print(f"[Radio] mode-change DDS re-push error: {exc}")
         self.mode_changed.emit(alias)
         self._emit_passband()
         # CW Zero line lives at +/-pitch in CWU/CWL, hidden elsewhere —
         # re-emit so the panadapter draws or removes the white line.
         self._emit_cw_zero()
+        # Marker offset shifts when entering / leaving CW modes.
+        self._emit_marker_offset()
 
     def _compute_passband(self) -> tuple[int, int]:
         """Return (low_hz, high_hz) offsets from the tuned center for
@@ -6325,22 +6414,18 @@ class Radio(QObject):
             if ncdxf_station_for_band(band_idx, slot) == target_idx:
                 # Followed station is on this band right now —
                 # tune to it.  Set mode to CWU first so the operator
-                # actually hears the CW callsign + tones.
-                #
-                # CW pitch offset (v0.0.9.7.1 fix): the listed
-                # NCDXF freqs are the beacons' actual transmitted
-                # CARRIERS (e.g. 14.100.000 MHz exactly).  Lyra's
-                # CW filter sits offset from the VFO marker by
-                # +cw_pitch_hz in CWU, so to hear the beacon at the
-                # operator's pitch tone we tune the VFO to
-                # (carrier − pitch).  Without this the carrier
-                # lands AT the marker and the filter misses it.
-                # Same logic as `_on_click`'s click-to-tune offset.
+                # actually hears the CW callsign + tones.  Under
+                # v0.0.9.8's carrier-freq VFO convention the listed
+                # NCDXF freq (= the beacon's transmitted carrier)
+                # is exactly what ``set_freq_hz`` accepts — the
+                # DDS-vs-VFO offset is applied centrally inside the
+                # radio.  No per-call-site CW pitch math (the
+                # v0.0.9.7.1 fix was reverted with the convention
+                # switch).
                 try:
                     if self._mode != "CWU":
                         self.set_mode("CWU")
-                    target_hz = freq_khz * 1000 - int(self._cw_pitch_hz)
-                    self.set_freq_hz(target_hz)
+                    self.set_freq_hz(freq_khz * 1000)
                 except Exception as exc:
                     print(f"[Radio] NCDXF auto-follow tune: {exc}")
                 return
@@ -6429,40 +6514,19 @@ class Radio(QObject):
         """Click-to-activate: find the nearest spot to `freq_hz` and
         fire spot_activated. Tune the radio there. Returns True on hit.
 
-        CW pitch offset (v0.0.9.7.2 fix): TCI spots forwarded by
-        SDRLogger+ (and by every cluster / RBN / Skimmer source it
-        upstreams from) carry the **carrier frequency** of the spot,
-        not a tune-to value.  For CW spots that means the operator's
-        VFO would land AT the carrier — which sits AT the marker —
-        and Lyra's CW filter at +cw_pitch_hz would miss the signal,
-        producing zero-beat silence.
-
-        Same fix as NCDXF + click-to-tune: tune the VFO to
-        ``carrier - pitch`` for CWU (and bare "CW", which
-        SDRLogger+ maps to CWU before the TCI send anyway), or
-        ``carrier + pitch`` for CWL.  Non-CW spots tune to the
-        spot freq exactly — the cluster convention there matches
-        Lyra's USB/DIGU/AM/FM/etc. tuning model.
-
-        The ``spot_activated`` signal still emits the ORIGINAL
-        stored freq (carrier), not the offset target, so any TCI
-        clients subscribed to spot_activated get the unmodified
-        spot — preserves round-trip behaviour with SDRLogger+ and
-        any other listener.
+        Under v0.0.9.8's carrier-freq VFO convention the spot's
+        stored freq (= the cluster's reported carrier) is exactly
+        what ``set_freq_hz`` accepts — the DDS-vs-VFO offset for
+        CW spots is applied centrally inside the radio.  No
+        per-call-site CW pitch math (the v0.0.9.7.2 fix that added
+        it was reverted with the convention switch).
         """
         if not self._spots:
             return False
         best = min(self._spots.values(), key=lambda s: abs(s["freq_hz"] - freq_hz))
         if abs(best["freq_hz"] - freq_hz) > tolerance_hz:
             return False
-        target = int(best["freq_hz"])
-        spot_mode = str(best.get("mode", "")).strip().upper()
-        if spot_mode in ("CW", "CWU", "CWL"):
-            pitch = int(self._cw_pitch_hz)
-            # Bare "CW" defaults to CWU offset direction (matches
-            # Lyra's existing {"CW": "CWU"} mode alias).  CWL flips.
-            target += +pitch if spot_mode == "CWL" else -pitch
-        self.set_freq_hz(target)
+        self.set_freq_hz(int(best["freq_hz"]))
         self.spot_activated.emit(best["call"], best["mode"], best["freq_hz"])
         return True
 
@@ -7643,10 +7707,14 @@ class Radio(QObject):
         flip applied in _tick_fft), so CWU appears RIGHT of marker
         like USB. The HL2 baseband mirror is handled inside CWDemod.
         """
-        if self._mode == "CWU":
-            return +int(self._cw_pitch_hz)
-        if self._mode == "CWL":
-            return -int(self._cw_pitch_hz)
+        # v0.0.9.8 carrier-freq VFO convention: the operator's marker
+        # IS the carrier (= where the audio comes from), so the CW
+        # Zero indicator line is redundant — it would draw on top of
+        # the marker.  Always return 0 here so the spectrum widget
+        # hides the line; the marker itself carries the signal-
+        # position information now.  Property + signal kept for API
+        # compatibility (widget still subscribes to the signal) but
+        # the value is always 0.
         return 0
 
     def _emit_cw_zero(self) -> None:
@@ -7681,11 +7749,26 @@ class Radio(QObject):
                 self._wdsp_rx.set_apf_freq(float(new_pitch))
             except Exception as exc:
                 print(f"[Radio] WDSP rx cw-pitch error: {exc}")
+        # Re-push DDS freq when in CW mode — pitch change shifts the
+        # DDS-vs-VFO offset (DDS = VFO ± pitch), so the actual hardware
+        # tuning needs to follow.  Without this, dialing pitch from
+        # 650 to 800 Hz mid-CW would leave the DDS at the old
+        # carrier - 650 offset and the operator would hear the tone
+        # at 650 Hz audio instead of the new 800 Hz audio.  No-op in
+        # non-CW modes (offset is identity there).
+        if self._stream and self._mode in ("CWU", "CWL"):
+            try:
+                self._stream._set_rx1_freq(self._compute_dds_freq_hz())  # noqa: SLF001
+            except Exception as exc:
+                print(f"[Radio] cw-pitch DDS re-push error: {exc}")
         # Recompute + re-emit passband so the panadapter overlay
         # shifts to the new CW position immediately.
         self._emit_passband()
         self.cw_pitch_changed.emit(new_pitch)
         self._emit_cw_zero()
+        # Pitch change shifts the DDS-vs-VFO offset by the pitch
+        # delta — re-emit so the spectrum's marker tracks it.
+        self._emit_marker_offset()
 
     # ── AGC threshold (target audio level) ───────────────────────────
     @property
@@ -8194,7 +8277,14 @@ class Radio(QObject):
             spec_out = spec_db
             eff_rate = int(self._rate)
 
-        self.spectrum_ready.emit(spec_out, float(self._freq_hz), eff_rate)
+        # Emit DDS freq (= VFO ± cw_pitch in CW modes) as the
+        # spectrum's center, since that's where the FFT data is
+        # actually centered.  Spectrum widget handles marker
+        # placement separately via marker_offset_hz so the
+        # operator's tuned freq lands on the carrier visually
+        # under v0.0.9.8's carrier-freq VFO convention.
+        self.spectrum_ready.emit(
+            spec_out, float(self._compute_dds_freq_hz()), eff_rate)
         if self._radio_debug:
             self._dbg_fft_emits += 1
 
@@ -8219,7 +8309,7 @@ class Radio(QObject):
                 # previous frame to interp from yet).
                 for _ in range(mult):
                     self.waterfall_ready.emit(
-                        spec_out, float(self._freq_hz), eff_rate)
+                        spec_out, float(self._compute_dds_freq_hz()), eff_rate)
             else:
                 # Hot path: emit M interpolated frames spanning
                 # prev → spec_out. The kth (1-based) frame is
@@ -8231,7 +8321,7 @@ class Radio(QObject):
                     frame = (prev * (1.0 - t) + spec_out * t).astype(
                         spec_out.dtype, copy=False)
                     self.waterfall_ready.emit(
-                        frame, float(self._freq_hz), eff_rate)
+                        frame, float(self._compute_dds_freq_hz()), eff_rate)
             # Snapshot for next tick's interpolation. Use a copy so
             # the consumer side doesn't see future mutations.
             self._wf_prev_spec = np.array(spec_out, copy=True)

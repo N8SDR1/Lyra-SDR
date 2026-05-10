@@ -4562,6 +4562,13 @@ class SpectrumPanel(GlassPanel):
         self.widget.set_cw_zero_offset(int(self.radio.cw_zero_offset_hz))
         self.radio.cw_zero_offset_changed.connect(
             self.widget.set_cw_zero_offset)
+        # VFO marker offset (v0.0.9.8 carrier-freq convention) —
+        # widget receives DDS as ``center_hz`` from spectrum_ready;
+        # this drives the marker line's horizontal offset so it
+        # lands on the operator's tuned carrier in CW modes.
+        self.widget.set_marker_offset_hz(int(self.radio.marker_offset_hz))
+        self.radio.marker_offset_changed.connect(
+            self.widget.set_marker_offset_hz)
         # Lyra constellation watermark — operator-toggleable.
         self.widget.set_show_constellation(
             bool(self.radio.show_lyra_constellation))
@@ -4752,6 +4759,12 @@ class SpectrumPanel(GlassPanel):
         # CW Zero (white) reference line — visible only in CWU/CWL.
         self.widget.set_cw_zero_offset(int(radio.cw_zero_offset_hz))
         radio.cw_zero_offset_changed.connect(self.widget.set_cw_zero_offset)
+        # VFO marker offset (v0.0.9.8 carrier-freq convention) — see
+        # the matching block in the QPainter panel setup above for
+        # the design notes.
+        self.widget.set_marker_offset_hz(int(radio.marker_offset_hz))
+        radio.marker_offset_changed.connect(
+            self.widget.set_marker_offset_hz)
         # Lyra constellation watermark — operator-toggleable.
         self.widget.set_show_constellation(bool(radio.show_lyra_constellation))
         radio.lyra_constellation_changed.connect(
@@ -4955,23 +4968,15 @@ class SpectrumPanel(GlassPanel):
             print(f"[SpectrumPanel] EiBi overlay refresh failed: {ex}")
 
     def _on_click(self, freq_hz):
-        # Click-to-tune. CW filters sit OFFSET from the marker by
-        # ±cw_pitch (CWU passband above the marker, CWL below). For
-        # the clicked signal to land INSIDE the filter we tune the
-        # marker to (signal - pitch) for CWU, or (signal + pitch)
-        # for CWL. Other modes tune directly.
-        target = int(freq_hz)
-        mode = self.radio.mode
-        if mode in ("CWU", "CWL"):
-            pitch = int(self.radio.cw_pitch_hz)
-            # Panadapter is sky-freq convention (display-mirror flip).
-            # CWU signal sits ABOVE the carrier visually, so to put a
-            # clicked signal at +pitch from the new VFO we subtract
-            # pitch from the click freq. CWL mirrored.
-            target += -pitch if mode == "CWU" else +pitch
-        # Route through panadapter-aware setter so the operator's
-        # Exact / Round 100 Hz toggle applies (no-op when off).
-        self.radio.set_freq_from_panadapter(target)
+        # Click-to-tune.  Under v0.0.9.8's carrier-freq VFO
+        # convention the spectrum's pixel-to-freq math already
+        # returns the carrier of the signal at that pixel, and
+        # ``set_freq_hz`` handles the DDS-vs-VFO offset centrally.
+        # No per-call-site CW pitch offset here — the v0.0.9.7.x
+        # offsets were reverted with the convention switch.  See
+        # ``Radio._compute_dds_freq_hz`` for the central offset
+        # point.
+        self.radio.set_freq_from_panadapter(int(freq_hz))
 
     def _on_spot_clicked(self, freq_hz):
         # User clicked on a spot marker — tune + emit TCI spot_activated.
@@ -4982,22 +4987,14 @@ class SpectrumPanel(GlassPanel):
         and switch to the landmark's suggested mode (FT8 → DIGU,
         NCDXF beacons → CWU, etc.).
 
-        For CW landmarks (NCDXF + any future CWU/CWL beacons), the
-        triangle's frequency is the signal's CARRIER, but Lyra's
-        CW filter sits OFFSET from the VFO marker by ±cw_pitch_hz
-        (CWU passband above the marker, CWL below).  To hear the
-        beacon at the operator's CW pitch tone we tune the VFO to
-        (carrier − pitch) for CWU, (carrier + pitch) for CWL —
-        same offset trick `_on_click` already does for click-to-
-        tune on a visible CW signal in the spectrum.  Without this
-        the beacon's carrier lands AT the marker and the filter
-        misses it (operator hears no audible CW tone)."""
+        Under v0.0.9.8's carrier-freq VFO convention the landmark's
+        listed freq IS the signal's carrier and that's what
+        ``set_freq_hz`` accepts directly — the DDS-vs-VFO offset
+        for CW modes is applied centrally inside the radio.  No
+        per-call-site CW pitch math here (the v0.0.9.7.1 fix that
+        added it was reverted with the convention switch)."""
         self.radio.set_mode(mode)
-        target = int(freq_hz)
-        if mode in ("CWU", "CWL"):
-            pitch = int(self.radio.cw_pitch_hz)
-            target += -pitch if mode == "CWU" else +pitch
-        self.radio.set_freq_hz(target)
+        self.radio.set_freq_hz(int(freq_hz))
         self.radio.status_message.emit(
             f"Tuned to {freq_hz/1e6:.3f} MHz {mode}", 2000)
 
@@ -6056,23 +6053,15 @@ class WaterfallPanel(GlassPanel):
         self.widget.push_row(spec_db)
 
     def _on_click(self, freq_hz):
-        # Click-to-tune. CW filters sit OFFSET from the marker by
-        # ±cw_pitch (CWU passband above the marker, CWL below). For
-        # the clicked signal to land INSIDE the filter we tune the
-        # marker to (signal - pitch) for CWU, or (signal + pitch)
-        # for CWL. Other modes tune directly.
-        target = int(freq_hz)
-        mode = self.radio.mode
-        if mode in ("CWU", "CWL"):
-            pitch = int(self.radio.cw_pitch_hz)
-            # Panadapter is sky-freq convention (display-mirror flip).
-            # CWU signal sits ABOVE the carrier visually, so to put a
-            # clicked signal at +pitch from the new VFO we subtract
-            # pitch from the click freq. CWL mirrored.
-            target += -pitch if mode == "CWU" else +pitch
-        # Route through panadapter-aware setter so the operator's
-        # Exact / Round 100 Hz toggle applies (no-op when off).
-        self.radio.set_freq_from_panadapter(target)
+        # Click-to-tune.  Under v0.0.9.8's carrier-freq VFO
+        # convention the spectrum's pixel-to-freq math already
+        # returns the carrier of the signal at that pixel, and
+        # ``set_freq_hz`` handles the DDS-vs-VFO offset centrally.
+        # No per-call-site CW pitch offset here — the v0.0.9.7.x
+        # offsets were reverted with the convention switch.  See
+        # ``Radio._compute_dds_freq_hz`` for the central offset
+        # point.
+        self.radio.set_freq_from_panadapter(int(freq_hz))
 
     def _on_right_click(self, freq_hz, shift, global_pos):
         # Mirrors SpectrumPanel — both gestures gated on notch_enabled

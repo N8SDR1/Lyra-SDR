@@ -11,7 +11,7 @@ bar, About dialog, status bar, settings dialog footer) and the install
 guide all read from this string — bump it once here per release and
 everything else follows automatically.
 """
-__version__      = "0.0.9.7.2"
+__version__      = "0.0.9.8"
 __version_name__ = "Display Polish"
 # Stamped at release time to today's date when packaging the
 # Inno Setup installer. During raw-source-tree development this stays

@@ -11,6 +11,16 @@ is the RX frequency in `MMM.kkk.hhh` format (MHz.kHz.Hz). Dots are
 thousand-separators (rig-style) — so `7.125.000` reads "seven
 million one hundred twenty-five thousand Hz" = 7.125 MHz.
 
+**What the LED represents.**  In every mode — SSB, CW, AM, FM,
+digital — the LED reads the **carrier frequency** of the signal
+you're tuned to.  In CW modes (CWU / CWL), Lyra automatically
+shifts the actual hardware DDS by your configured CW pitch
+offset on the receive side so the carrier lands inside the CW
+filter and you hear it as a tone at the configured pitch.  This
+is the standard convention used across major HF SDR
+applications: type or click a frequency, hear what's there at
+your pitch tone.  No mental "subtract pitch" math.
+
 ## Mouse wheel — three-tier behavior
 
 The wheel uses the most precise specifier available, in this order:

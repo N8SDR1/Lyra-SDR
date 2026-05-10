@@ -6,13 +6,20 @@
   is the current frame; the dim trace behind is a peak-hold.
 - **Waterfall** (bottom) — scrolling time-history. Each row is one
   FFT. Newer rows at the top; older at the bottom.
-- **Center marker** — dashed orange vertical line at the RX center
-  frequency.
-- **RX passband overlay** — translucent cyan rectangle spanning the
-  current mode's filter window (USB = carrier to +BW, LSB = −BW to
-  carrier, CW = narrow box around the CW pitch, AM/FM = ±BW/2). Any
-  signal inside the rect is reaching the demod; signals outside are
-  blocked by the filter. Updates live as you change mode / RX BW.
+- **VFO marker** — dashed orange vertical line at the operator's
+  tuned carrier frequency.  In SSB / AM / FM / digital modes the
+  marker sits at the visual center of the panadapter.  In CW
+  modes the marker shifts horizontally by the configured CW pitch
+  (right of center for CWU, left for CWL) so it lands on the
+  signal's actual carrier — Lyra centers the FFT data on the
+  hardware tuning point (DDS), which sits ±pitch from the carrier
+  in CW; the marker tracks the carrier, not the DDS.
+- **RX passband overlay** — translucent cyan rectangle spanning
+  the current mode's filter window (USB = carrier to +BW, LSB =
+  −BW to carrier, CW = narrow box centered on the marker, AM/FM
+  = ±BW/2). Any signal inside the rect is reaching the demod;
+  signals outside are blocked by the filter. Updates live as you
+  change mode / RX BW.
 - **Notch rectangles** — filled red rectangles spanning each notch's
   −3 dB bandwidth, with a thin red center line for precise targeting.
   Active notches are saturated red; inactive (bypassed) notches are

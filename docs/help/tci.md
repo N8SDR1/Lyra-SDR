@@ -113,30 +113,26 @@ Three side-by-side columns:
   U/L, force how Lyra renders it: `Default` / `Force CWU` /
   `Force CWL`.
 
-## Spot frequency convention — carrier vs tune-to
+## Spot frequency convention
 
 Lyra expects TCI spots to carry the **carrier frequency** of the
 spotted signal — same convention used by every DX cluster, the
-Reverse Beacon Network (RBN), and CW Skimmer Server.  When you
-click a CW spot, Lyra applies the operator's CW pitch offset
-automatically so the VFO lands at `carrier − pitch` for CWU
-(or `carrier + pitch` for CWL) and the spot is audible at the
-configured pitch tone.  Non-CW spots (USB / LSB / DIGU / AM /
-FM / etc.) tune to the spot freq exactly — no offset.
+Reverse Beacon Network (RBN), CW Skimmer Server, and SDRLogger+.
+This matches the standard convention across major HF SDR
+applications: the displayed VFO frequency IS the signal's carrier,
+and the radio handles the CW pitch offset on the receive side
+internally so the operator hears the signal as a CW tone at their
+configured pitch.
 
-This is the convention SDRLogger+ uses, and it's what Lyra is
-designed for.  If you bridge in a TCI source that **pre-adjusts**
-CW spots to a tune-to frequency before sending (rare; some
-custom logger builds do this), Lyra will double-offset the
-click and you'll land `2 × pitch` Hz off.  In that case either
-configure the source to send carrier freq, or bridge through
-SDRLogger+ which always passes the upstream value through
-unchanged.
+When you click a CW spot, the VFO LED jumps to the spot's listed
+carrier and you hear the signal at your CW pitch tone — no
+pre-math, no mental subtraction, the LED matches what's on the
+air.  Non-CW spots tune to the spot freq exactly, same way.
 
-The `spot_activated` signal Lyra emits back to TCI clients
-carries the **original** carrier frequency, not the offset
-target — so spot round-trips with SDRLogger+ (and any other
-listener) preserve the cluster value.
+The ``spot_activated`` signal Lyra emits back to TCI clients
+carries the same carrier frequency the operator's VFO is sitting
+at, so spot round-trips with SDRLogger+ (and any other listener)
+preserve the cluster value.
 
 ## Audio over TCI — setup recipes
 

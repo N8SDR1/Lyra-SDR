@@ -13,6 +13,112 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.8] — 2026-05-10 — "Display Polish" (CW VFO convention switch)
+
+Operator-visible behaviour change for CW operators: the VFO LED
+now shows the **carrier frequency** of the tuned signal, matching
+the standard convention used across major HF SDR applications.
+This replaces v0.0.9.7.x behaviour where the LED showed the
+filter-zero (= carrier minus pitch) and various tuning surfaces
+(click-to-tune, NCDXF marker, NCDXF auto-follow, TCI spot click)
+each had to apply the CW pitch offset themselves.
+
+### What changes for the operator
+
+* **CW LED reads the carrier.**  Type `14.025.000` for a CW
+  signal whose carrier is at exactly 14.025 MHz, hear it at
+  your configured CW pitch tone (Settings → DSP, default
+  650-700 Hz).  No more mental "subtract pitch" math; what's
+  on the LED is what's on the air.
+* **NCDXF beacon LED reads the listed carrier** — `14.100.000`,
+  `18.110.000`, etc. — exactly as published.
+* **TCI spots** clicked on the panadapter land VFO on the
+  cluster-reported carrier frequency.  No mental conversion
+  between cluster freq and tune-to freq.
+* **Spectrum marker shifts horizontally in CW modes** — the
+  orange dashed line tracks the operator's tuned carrier, which
+  sits ±cw_pitch from the visual center of the panadapter (right
+  of center for CWU, left for CWL).  Visually the marker lands
+  ON the signal you're tuned to; the cyan filter-passband
+  overlay centers on the marker.  In SSB / AM / FM / digital
+  modes the marker stays at visual center as before.
+* **CW Zero white reference line** — removed.  Under the new
+  convention the operator's marker IS the audio source position,
+  so the white line was redundant (would draw on top of the
+  marker).
+
+### What changes under the hood
+
+* New ``Radio._compute_dds_freq_hz`` computes the actual HL2
+  DDC0 frequency from the operator-displayed VFO, applying the
+  CW pitch offset centrally.  ``set_freq_hz``, ``set_mode``, and
+  ``set_cw_pitch_hz`` all push through this helper, so every
+  operation that changes the displayed frequency, the mode, or
+  the CW pitch correctly re-points the DDS.
+* New ``Radio.dds_freq_hz`` property + ``Radio.marker_offset_hz``
+  property + ``marker_offset_changed`` signal expose the
+  central-offset state to the spectrum widget for marker
+  positioning.
+* ``Radio.cw_zero_offset_hz`` returns 0 always (line hidden;
+  signal kept for API compatibility).
+* The ``spectrum_ready`` and ``waterfall_ready`` signals now
+  emit the DDS frequency as their ``center_hz`` argument (= the
+  actual center of the FFT data Lyra received from the HL2).
+  Spectrum widgets handle the DDS-vs-VFO offset via the new
+  ``set_marker_offset_hz`` setter.
+
+### Reverted from v0.0.9.7.x
+
+The per-tuning-surface CW pitch offsets added in v0.0.9.7.1 and
+v0.0.9.7.2 are reverted, since the central offset replaces them:
+
+* ``panels.py`` ``_on_click`` — was subtracting pitch for CWU /
+  adding for CWL; now naive.
+* ``panels.py`` ``_on_landmark_clicked`` — was subtracting pitch
+  for CWU NCDXF clicks; now naive.
+* ``radio.py`` ``_ncdxf_follow_pump`` — was subtracting pitch on
+  every band-switch tune; now naive.
+* ``radio.py`` ``activate_spot_near`` — was subtracting pitch
+  for CWU / "CW" spots; now naive.
+
+### Migration
+
+Saved frequencies under v0.0.9.7.x were stored in the old
+filter-zero convention; under v0.0.9.8 the same stored value is
+interpreted as the carrier.  For non-CW saves (the vast
+majority — SSB / digital / AM / FM) there's no functional
+change.  For CW saves (per-band memory, GEN slots, Memory bank
+entries that were last tuned in CWU/CWL) the LED will display
+the previous filter-zero value as if it were a carrier — i.e.,
+the actual signal you'd be hearing is `pitch` Hz off from where
+you'd have been hearing it before.  Re-tune once and the new
+value saves under the new convention.  No automatic migration
+to keep things simple — operators in active testing will retune
+naturally.
+
+### Documentation
+
+* `docs/help/tuning.md` — new "What the LED represents" note
+  explaining the carrier-freq convention.
+* `docs/help/spectrum.md` — VFO marker + RX passband
+  descriptions updated for CW behaviour (marker tracks carrier,
+  passband centers on marker).
+* `docs/help/propagation.md` — NCDXF section simplified (no
+  more pitch-offset note; LED just reads the carrier).
+* `docs/help/tci.md` — spot frequency convention section
+  simplified (no more "Lyra applies pitch offset on click"
+  note; the LED matches the cluster's carrier directly).
+
+### Skipped from GitHub release
+
+v0.0.9.7.2 (TCI spot per-call-site CW pitch offset) was
+committed and tagged but not released to GitHub — its fix was
+superseded by this convention switch.  Anyone following the
+public release channel goes straight from v0.0.9.7.1 to
+v0.0.9.8.
+
+---
+
 ## [0.0.9.7.2] — 2026-05-10 — "Display Polish" (TCI CW spot tuning fix)
 
 Bug-fix patch on top of v0.0.9.7.1.  Companion to the NCDXF

@@ -401,6 +401,13 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # in Hz. +pitch in CWU, -pitch in CWL, 0 elsewhere (line
         # hidden). Set via radio.cw_zero_offset_changed → set_cw_zero_offset.
         self._cw_zero_offset_hz: int = 0
+        # VFO marker offset from spectrum visual center (Hz).  See
+        # the matching block in lyra/ui/spectrum.py for the design
+        # — under the v0.0.9.8 carrier-freq VFO convention the
+        # widget receives DDS as ``center_hz`` and this field shifts
+        # the operator's marker line onto the actual carrier.
+        # Driven by Radio.marker_offset_changed.  0 in non-CW.
+        self._marker_offset_hz: int = 0
         # Lyra constellation watermark visibility — operator toggle.
         # Default ON; switched via Settings → Visuals.
         self._show_constellation: bool = True
@@ -780,6 +787,15 @@ class SpectrumGpuWidget(QOpenGLWidget):
         Connected to radio.cw_zero_offset_changed. +pitch in CWU,
         -pitch in CWL, 0 outside CW (line hidden)."""
         self._cw_zero_offset_hz = int(offset_hz)
+        self.update()
+
+    def set_marker_offset_hz(self, offset_hz: int) -> None:
+        """VFO marker horizontal offset from spectrum visual center,
+        in Hz.  Under v0.0.9.8's carrier-freq VFO convention this is
+        nonzero in CW modes (= ±cw_pitch); in non-CW it stays 0 so
+        the marker remains at visual center as before.  Connected
+        to radio.marker_offset_changed."""
+        self._marker_offset_hz = int(offset_hz)
         self.update()
 
     def set_show_constellation(self, visible: bool) -> None:
@@ -2594,11 +2610,20 @@ class SpectrumGpuWidget(QOpenGLWidget):
                          f"NF {self._noise_floor_db:+.0f} dBFS")
 
     def _draw_vfo_marker(self, painter: QPainter) -> None:
-        """Vertical dashed orange line at the widget's horizontal
-        center — that's where the radio is tuned. Color + alpha +
-        line style match the QPainter SpectrumWidget exactly so the
-        feel is identical on backend swap."""
-        cx = self.width() // 2
+        """Vertical dashed orange line at the operator's tuned VFO
+        carrier.  Under v0.0.9.8's carrier-freq VFO convention the
+        widget receives DDS as ``_center_hz`` (where the FFT data
+        is centered).  In CW modes the operator's tuned VFO sits
+        ±cw_pitch from there, so the marker is offset horizontally
+        from visual center by ``_marker_offset_hz`` Hz.  In non-CW
+        modes the offset is 0 and the marker stays at visual
+        center, matching the QPainter SpectrumWidget behaviour."""
+        w = self.width()
+        if self._span_hz > 0 and self._marker_offset_hz:
+            hz_per_px = self._span_hz / max(1, w)
+            cx = int(round(w / 2 + self._marker_offset_hz / hz_per_px))
+        else:
+            cx = w // 2
         painter.setPen(QPen(QColor(255, 170, 80, 220), 1, Qt.DashLine))
         painter.drawLine(cx, 0, cx, self.height())
 

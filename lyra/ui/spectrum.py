@@ -160,6 +160,16 @@ class SpectrumWidget(_PaintedWidget):
         # CW Zero (white) reference line offset from the VFO marker,
         # in Hz. +pitch in CWU, -pitch in CWL, 0 elsewhere (line hidden).
         self._cw_zero_offset_hz: int = 0
+        # VFO marker offset from spectrum visual center, in Hz.  Under
+        # the carrier-freq VFO convention (v0.0.9.8+) the spectrum
+        # widget receives DDS as ``center_hz`` (= where the FFT data
+        # is actually centered); the operator's tuned VFO sits at
+        # ±cw_pitch from there in CW modes.  Drives marker line
+        # placement so the visible marker lands ON the carrier of
+        # the signal the operator is tuned to, not at visual center.
+        # Driven by Radio.marker_offset_changed via a panels.py
+        # connection.  0 in non-CW; +pitch in CWU; -pitch in CWL.
+        self._marker_offset_hz: int = 0
         # Lyra constellation watermark visibility — operator toggle.
         # Default ON; switched via Settings → Visuals.
         self._show_constellation: bool = True
@@ -307,6 +317,15 @@ class SpectrumWidget(_PaintedWidget):
         """CW Zero (white) reference line offset from the VFO marker,
         in Hz. +pitch in CWU, -pitch in CWL, 0 outside CW (hidden)."""
         self._cw_zero_offset_hz = int(offset_hz)
+        self.update()
+
+    def set_marker_offset_hz(self, offset_hz: int) -> None:
+        """VFO marker horizontal offset from spectrum visual center,
+        in Hz.  Under v0.0.9.8's carrier-freq VFO convention this is
+        nonzero in CW modes (= ±cw_pitch) so the marker draws on the
+        actual carrier of the tuned signal rather than at visual
+        center (where the DDS sits).  0 in every other mode."""
+        self._marker_offset_hz = int(offset_hz)
         self.update()
 
     def set_show_constellation(self, visible: bool) -> None:
@@ -1595,8 +1614,19 @@ class SpectrumWidget(_PaintedWidget):
             y = int(h * i / 10)
             p.drawText(w - 45, y + 10, f"{db:+.0f}")
 
-        # VFO marker — vertical line at center (radio is tuned here)
-        cx = w // 2
+        # VFO marker — vertical line at the operator's tuned carrier.
+        # Under v0.0.9.8's carrier-freq VFO convention the spectrum
+        # widget receives DDS as ``_center_hz`` (where the FFT data
+        # is centered).  In CW modes the operator's tuned VFO sits
+        # ±cw_pitch from there, so the marker is offset horizontally
+        # from the visual center by ``_marker_offset_hz`` Hz.  0 in
+        # non-CW modes (marker stays at visual center, unchanged
+        # behaviour).
+        if self._span_hz > 0 and self._marker_offset_hz:
+            hz_per_px = self._span_hz / max(1, w)
+            cx = int(round(w / 2 + self._marker_offset_hz / hz_per_px))
+        else:
+            cx = w // 2
         p.setPen(QPen(QColor(255, 170, 80, 220), 1, Qt.DashLine))
         p.drawLine(cx, 0, cx, h)
 

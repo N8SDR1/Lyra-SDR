@@ -62,6 +62,30 @@ content below has been mass-renumbered to the new scheme.
   nb, lms, anf, squelch, nr2, PythonRxChannel.process, etc.).
   See §13 (audio architecture), §14 (WDSP-DLL integration), §14.9
   (cleanup arc).
+- **v0.0.9.8** "Display Polish" (CW VFO convention switch,
+  2026-05-10) — operator-visible behaviour change for CW
+  operators: the VFO LED now shows the **carrier frequency**
+  of the tuned signal, matching the standard convention used
+  across major HF SDR applications.  This replaces the v0.0.9.7.x
+  filter-zero convention where the LED showed (carrier − pitch)
+  for CWU and various tuning surfaces (click-to-tune, NCDXF
+  marker click, NCDXF auto-follow, TCI spot click) each had to
+  apply the CW pitch offset themselves.  v0.0.9.8 puts the
+  offset CENTRALLY in radio.py (``_compute_dds_freq_hz`` helper
+  called by ``set_freq_hz`` / ``set_mode`` / ``set_cw_pitch_hz``)
+  so every freq write to the protocol layer is automatically
+  offset for CW; all per-call-site offsets are reverted.  The
+  spectrum widget receives DDS as its center_hz, and a new
+  ``marker_offset_hz`` (= VFO − DDS) shifts the orange marker
+  line to the operator's tuned carrier — visually right of
+  center for CWU, left for CWL, at center for non-CW.  CW Zero
+  white reference line removed (redundant under new
+  convention).  v0.0.9.7.2 was committed and tagged but NOT
+  released to GitHub — its TCI-spot per-call-site fix was
+  superseded by this convention switch.  Saved CW freqs from
+  v0.0.9.7.x will display ``pitch`` Hz off until retuned once;
+  no auto-migration (operators in active testing retune
+  naturally).
 - **v0.0.9.7.2** "Display Polish" (TCI CW spot tuning fix,
   2026-05-10) — patch over v0.0.9.7.1.  Companion to the NCDXF
   fix; same class of issue, different tuning surface.  TCI CW
