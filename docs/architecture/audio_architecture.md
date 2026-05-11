@@ -124,10 +124,36 @@ operator-decision-grade:
    sample-accurate, latency-known, and doesn't require a
    virtual-audio-cable driver install.  The dual-sink Thetis
    pattern was a workaround for a problem TCI solves cleanly.
-4. **AAmixer routing matrix simpler.**  With one active sink,
-   the AAmixer's state machine is a clean function of (RX1_on,
-   RX2_on, PS_on, MOX); with two parallel sinks, it doubles in
-   width (each route has to know "to which sink").
+4. **AAmixer routing matrix simpler on the destination axis.**
+   With one active sink, route → sink is trivial.  With two
+   parallel sinks, every route has to know "to which sink."
+   **IM-3 Round 1 2026-05-11 correction** to the earlier draft:
+   the state-machine *source* axis is NOT simplified by single
+   sink — it remains 8-way determined by (Power × MOX × diversity
+   × PS), regardless of sink count.  Most cases collapse on
+   no-power-no-MOX-no-PS, but the full enumeration (per Thetis
+   console.cs:28259-28333 HermesLite path) is:
+   ```
+   (a) Power off               → all streams muted
+   (b) Power on, !MOX, !div, !PS → RX1 + RX1S + RX2EN + MON active
+   (c) Power on, !MOX, !div, PS  → identical to (b); PS-armed
+                                     without MOX changes nothing
+   (d) Power on, !MOX, div, !PS  → RX1 + RX1S + MON (no RX2)
+   (e) Power on, !MOX, div, PS   → identical to (d)
+   (f) Power on, MOX, !div, !PS  → RX1 + RX1S + RX2EN + MON
+                                     (operator may hear own TX
+                                      sidetone gated by per-RX
+                                      MuteRX1OnVFOBTX/MuteRX2OnVFOATX)
+   (g) Power on, MOX, !div, PS   → MON only (RX silenced for PS calibrate)
+   (h) Power on, MOX, div, PS    → MON only (same)
+   ```
+   Single-sink design simplifies the *destination* axis only.
+   Operator-mute toggles (`MuteRX1OnVFOBTX`,
+   `MuteRX2OnVFOATX`) live as **post-mixer per-stream
+   multipliers**, NOT state-machine axes (otherwise the matrix
+   would explode 4× more).  Phase 0 stubs the diversity axis
+   to 0 (no diversity in v0.1); v0.2 activates the MOX/MON
+   cases; v0.3 activates the PS-disable-RX rule.
 
 **v0.4 ANAN impact:** ANAN family has no onboard codec, so
 "HL2 audio jack" is unavailable.  PC Soundcard becomes the

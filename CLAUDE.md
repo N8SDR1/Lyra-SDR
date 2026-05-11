@@ -289,12 +289,23 @@ special-case branches for it.
 The "general settings" C&C frame (C0=0x00) C4 byte:
 
 - bits[1:0] = antenna select (HL2 = 00, irrelevant)
-- **bit 2 = duplex bit, ALWAYS 1** (HL2 quirk — without it, RX freq
-  updates don't apply)
-- bits[6:3] = `nddc - 1`.  For nddc=4: `(4-1) << 3 = 0x18`
+- **bit 2 = duplex bit, set on every MAIN-LOOP frame-0 emission**
+  (HL2 quirk — without it, post-priming RX freq updates don't
+  apply).  **Important nuance caught by Round 1 2026-05-11
+  agent A:** the priming function `ForceCandCFrames`
+  (networkproto1.c:111-127) does NOT set the duplex bit — priming
+  emits `C4 = (nddc-1) << 3 = 0x18` (no bit-2).  The gateware
+  accepts the priming VFO writes regardless.  The duplex bit
+  becomes required only for MAIN-LOOP freq updates after priming
+  completes; it's added in `WriteMainLoop_HL2` case-0 path at
+  line 967 (`C4 |= 0x04`).  Lyra's priming function must emit
+  0x18, and Lyra's main-loop frame-0 emission must emit 0x1C.
+- bits[6:3] = `nddc - 1` (4-bit field; `nddc-1` ranges 0..15).
+  For nddc=4: `(4-1) << 3 = 0x18`.
 - bit 7 = diversity (HL2 = 0)
 
-Combined: `c4 = 0x1C` for nddc=4 + duplex bit set.
+Combined for main-loop emission: `c4 = 0x1C` for nddc=4 + duplex
+bit set.  Priming emission: `c4 = 0x18` (no duplex bit).
 
 ### 3.3 EP6 receive frame layout (nddc=4)
 
@@ -350,6 +361,16 @@ in `lyra/dsp/channel.py` already handles arbitrary input rates →
 fixed audio rate, so per-DDC rate independence is "free" for v0.0.9
 (no new code needed).
 
+**HL2 P1 caveat (L-2 Round 1 2026-05-11):** the per-DDC-rate
+flexibility is a Protocol 2 feature.  On HL2 P1 specifically,
+`netInterface.c:1328` proves only `id == 0` (DDC0/RX1) sets the
+global `SampleRateIn2Bits` wire-protocol rate field.  All four
+HL2 DDCs deliver samples at the same on-wire rate (the rate
+RX1 selects).  Host-side post-receive decimation is still
+arbitrary, but the WIRE rate is shared across DDCs.  ANAN P2
+operators get true per-DDC rate independence via the P2 command
+structure; HL2 P1 operators do not.
+
 ### 3.7 PureSignal is one bit (well, three)
 
 To enable PureSignal:
@@ -368,15 +389,43 @@ the rest.
 - **TX attenuator range = -28..+31 dB** (not 0..31).  Negative
   values are gain rather than attenuation.  Used for both normal TX
   gain and PS auto-attenuator state machine.
-- **CWX PTT bit on HL2 = bit 3 in I-sample LSB** (standard HPSDR
-  uses only bits 0..2).
+- **CW state bits on HL2 — TX I-sample bytes are repurposed during
+  CW transmit (L-5 Round 1 2026-05-11 prose clarification).**
+  Per networkproto1.c:1247-1259, when `cw_enable && j == 1` the
+  outer loop sets `temp = (cwx_ptt << 3 | dot << 2 | dash << 1 |
+  cwx) & 0x0f` and writes this directly to the I-sample's two
+  bytes — **OVERWRITING** the normal modulator I/Q.  HL2 has 4
+  CW state bits (cwx_ptt at bit 3 + dot/dash/cwx); non-HL2 has 3
+  (no cwx_ptt).  Practical implication: during CW transmit on HL2,
+  Lyra's TX SSB modulator's I output is replaced by CW state
+  bytes on the wire.  Pitfall: an SSB-on-CW-key combo would
+  produce wild bits if not protocol-gated.
 - **L/R audio channels can be swapped** by some HL2 firmware revs.
   Add a `swap_lr_audio` Settings option to compensate.
 - **HL2 read-loop handles I2C readback inline** — when C0 has bit 7
   set, frame data is I2C response, not ADC overload status.
+- **ADC overload semantics divergence (L-3 Round 1 2026-05-11):**
+  HL2 read loop does single-frame assignment
+  (`adc_overload = ControlBytesIn[1] & 0x01;` at line 502), NOT
+  the OR-until-cleared pattern that the standard read loop uses
+  (`adc_overload = adc_overload || (ControlBytesIn[1] & 0x01);`
+  at line 338).  Glitches that don't persist into the next
+  telemetry frame can be missed on HL2.  If Lyra implements
+  polling with the "OR-until-cleared" semantic on the host side,
+  no behavior change.  If Lyra reads it as live signal, HL2 will
+  under-report transient ADC overloads.
 - **PS sample rate during PS+TX** = `rx1_rate` (whatever user
   selected), NOT the 192 kHz `ps_rate` ANAN uses.  Thetis comment:
   "HL2 can work at a high sample rate."
+- **PS feedback DDC routing (corrected Round 1 2026-05-11 — was
+  wrong in earlier docs):** HL2 PS+TX enables ONLY DDC0+DDC1,
+  with `cntrl1=4` routing the PA coupler ADC to DDC0 and DDC1
+  sync-paired to DDC0 at TX freq.  DDC2 and DDC3 are
+  **gateware-disabled** during HL2 PS+TX — those EP6 slots are
+  zeros, NOT feedback samples.  PS calcc consumer must read from
+  host channels 0 and 2 (DDC0/DDC1) during MOX+PS state, not from
+  the DDC2/DDC3 twist dispatch.  This is a state-product reroute
+  on `(mox, ps_armed)` — see v0.1 plan §2.2.
 - **PS auto-attenuate recalibrate trigger**: `FeedbackLevel > 181 ||
   (FeedbackLevel <= 128 && cur_att > -28)`.
 
@@ -384,14 +433,30 @@ the rest.
 
 ### 4.1 Port directly with attribution
 
-| WDSP file | Lyra target | Effort | Phase |
+**REWRITTEN Round 1 2026-05-11 (CR-5):** the table below
+reflects post-v0.0.9.6 cffi-pivot reality.  Earlier draft listed
+`compress.c` / `cfcomp.c` / `wcpagc.c` (= leveler / ALC) /
+`patchpanel.c` / `varsamp.c` / `rmatch.c` for pure-Python NumPy
+ports — but those all already live in WDSP's cffi engine and
+Lyra calls them via cffi bindings.  No port needed.  iqc.c and
+calcc.c stay on the port list because their algorithm is wrapped
+in operator-tunable PS lifecycle state (FSMs, snapshot capture,
+attestation checkbox) that justifies Lyra-Python wrappers
+around the WDSP-cffi call sites — those wrappers handle
+operator-facing PS dialog state, not the math itself.
+
+| WDSP file | Lyra target | Port approach | Phase |
 |---|---|---|---|
-| `patchpanel.c::SetRXAPanelPan` (50 LOC) | `lyra/dsp/mix.py` (pan curve) | 1 hour | v0.0.9 |
-| `compress.c` (~150 LOC) | `lyra/dsp/tx_compressor.py` | 1 day | v0.1.1 |
-| `lmath.c::xbuilder` (~200 LOC) | `lyra/dsp/ps_xbuilder.py` | 2 days | v0.2 |
-| `delay.c` (~80 LOC) | `lyra/dsp/delay_line.py` | 4 hours | v0.2 |
-| `iqc.c` (315 LOC) | `lyra/dsp/ps_iqc.py` | 4 days | v0.2 |
-| `calcc.c` (1164 LOC) | `lyra/dsp/ps_calcc.py` | 2 weeks | v0.2 |
+| `patchpanel.c::SetRXAPanelPan` (50 LOC) | `wdsp_engine.RxChannel.set_panel_pan` cffi binding | cffi wrap, no port | v0.0.9.6 (shipped) |
+| `compress.c` (~150 LOC) | `wdsp_tx_engine.TxChannel.set_compressor_*` cffi | cffi wrap, no port | v0.2.1 |
+| `cfcomp.c` (~600 LOC) | `wdsp_tx_engine.TxChannel.set_cfcomp_*` cffi | cffi wrap, no port | v0.2.1 |
+| `osctrl.c` (CESSB, ~200 LOC) | `wdsp_tx_engine.TxChannel.set_osctrl_run` cffi | cffi wrap, no port | v0.2.1 (NEW Round 1 — was missing) |
+| `wcpagc.c` mode 5 (leveler) | `wdsp_tx_engine.TxChannel.set_leveler_*` cffi | cffi wrap, no port | v0.2.1 |
+| `wcpagc.c` mode 5 (ALC) | `wdsp_tx_engine.TxChannel.set_alc_*` cffi | cffi wrap, no port | v0.2.0 |
+| `lmath.c::xbuilder` (~200 LOC) | `lyra/dsp/ps_xbuilder.py` | port (used by Python-side calcc orchestration) | v0.3 |
+| `delay.c` (~80 LOC) | `lyra/dsp/delay_line.py` | port (TX/feedback time-alignment in Python) | v0.3 |
+| `iqc.c` (315 LOC) — application | cffi via WDSP's TXA channel (`SetTXAiqcRun`, `SetTXAiqcSwap`) | cffi for math, Python wrap for 5-state lifecycle (RUN, BEGIN, SWAP, END, DONE) | v0.3 |
+| `calcc.c` (1164 LOC) — calibration | cffi via WDSP's TXA channel (calcc thread driven by semaphore) | cffi for math, Python wrap for 8-state PS FSM + 3-state attenuator FSM + PSDialog UI | v0.3 |
 
 ### 4.2 Write Lyra-native (don't port)
 
@@ -590,28 +655,72 @@ on every PR.
    quirks belong in `lyra/protocol/p1_hl2.py` (today) and
    `lyra/protocol/p2_anan.py` (v0.4).
 
-6. **DDC-index → host-channel mapping is family-specific
-   (Amendment A3, 2026-05-11).**  The mapping between wire-protocol
-   DDC indices (0..N-1) and Lyra's host-side DSP channel IDs is
-   NOT identity and varies per radio family.  Per
-   `docs/architecture/v0.1_rx2_consensus_plan.md` §2, HL2 (4-DDC)
-   maps DDC0→ch0 (RX1), DDC1→ch2 (RX2), DDC2+DDC3 twist-paired
-   → ch3 (PS feedback); ANAN 5-DDC maps DDC0→ch0, DDC1→ch2,
-   DDC2→ch5 + DDC3→ch6 (PS A/B), DDC4→ch3 (RX2-sub or
-   diversity).  **Implementation discipline:** the mapping table
-   lives in `lyra/protocol/<family>.py` next to the capability
-   struct (per §13.4 audio architecture) — NOT in `radio.py`
-   or DSP modules.  Dispatch helpers (`twist`, per-DDC
-   demultiplexer) consume the table from `radio.protocol.ddc_map`
-   at runtime.  Hard-coding `DDC0→ch0, DDC1→ch1` anywhere in
-   Lyra is a sign the abstraction has been violated and must be
-   refactored before merging.  Smell test: any `if ddc_idx == 2:`
-   in non-protocol code is wrong; the protocol layer should have
-   already routed it.  Also recall that DDC-to-channel routing
-   is **state-product dependent** (MOX, ps_armed, rx2_enabled,
-   family) per v0.1 plan §9.5 panadapter source matrix — same
-   physical DDC stream can route to different host channels
-   depending on state.
+6. **DDC-index → host-channel mapping is family-specific AND
+   state-product-dependent (Amendment A3 2026-05-11 + CR-3
+   correction Round 1 2026-05-11).**  The mapping between
+   wire-protocol DDC indices (0..N-1) and Lyra's host-side DSP
+   channel IDs is NOT identity, varies per radio family, AND
+   varies by `(mox, ps_armed)` state product within a family.
+
+   **HL2 (4-DDC) — verified Round 1 Agent A at console.cs:8469-8488
+   + networkproto1.c:549-553:**
+   ```
+   RX-only state (no MOX, or MOX without PS):
+     DDC0 → wire-protocol xrouter source 0 → host ch 0 (RX1)
+     DDC1 → xrouter source 2 → host ch 2 (RX2)
+     DDC2+DDC3 twist → source 1 → host ch 3 (idle; gateware does
+       not enable DDC2/DDC3 on HL2 — slots carry zeros)
+
+   MOX+PS state (PS hardware-mod required, cntrl1=4 routing):
+     DDC0 → xrouter source 0 → host ch 0 (now PS feedback I via
+       gateware ADC-mux switch from antenna to PA coupler)
+     DDC1 → xrouter source 2 → host ch 2 (now PS feedback Q, sync-
+       paired to DDC0 at TX freq)
+     DDC2+DDC3 still gateware-disabled (zeros)
+     [RX2's actual VFO B band is NOT being received in this state;
+      operator UI shows "PS-paused" badge on RX2 per v0.1 plan
+      §2.2 CR-1]
+   ```
+
+   **ANAN P1 5-DDC — verified Round 1 Agent A at
+   networkproto1.c:554-558:**
+   ```
+   RX-only state:
+     DDC0+DDC1 twist → xrouter source 0 → host ch 0 (RX1 main +
+       diversity-sync pair if diversity enabled)
+     DDC2 → xrouter source 2 → host ch 2 (RX2 main, independent
+       freq; ANAN's structural advantage over HL2)
+     DDC3+DDC4 twist → xrouter source 1 → host ch 3 (idle when
+       PS not armed)
+
+   MOX+PS state (ANAN with cntrl1=0x08 routing via (rx_adc_ctrl1
+   & 0xf3) | 0x08):
+     DDC0+DDC1 twist → source 0 → host ch 0 (now PS feedback I/Q
+       via cntrl1=0x08 PA-coupler routing)
+     DDC2 → source 2 → host ch 2 (RX2 STAYS LIVE — ANAN advantage)
+     DDC3+DDC4 twist → source 1 → host ch 3 (potential additional
+       feedback path; ANAN-family-specific)
+   ```
+
+   **ANAN P2 family:** dispatch happens through P2's discovery-
+   advertised DDC count + per-family routing table.  Populated
+   in `lyra/protocol/p2_anan.py` in v0.4.4.
+
+   **Implementation discipline:** the mapping table lives in
+   `lyra/protocol/<family>.py` next to the capability struct
+   (per audio_architecture.md §13.4) — NOT in `radio.py` or
+   DSP modules.  Dispatch helpers (`twist`, per-DDC
+   demultiplexer) consume the table from
+   `radio.protocol.ddc_map(mox, ps_armed)` at runtime.  Phase 1
+   `stream.py` MUST already be table-driven on MOX edges (per
+   v0.1 plan §9.5 architectural implication) — hard-coded
+   `if ddc==0: → RX1; if ddc==1: → RX2` is a smell.  Smell tests:
+   - Any `if ddc_idx == N:` in non-protocol code is wrong.
+   - Any `isinstance(radio.protocol, HL2)` in non-protocol code
+     is wrong — use capabilities struct.
+   - Any DDC→host-channel mapping that doesn't account for
+     `(mox, ps_armed)` state product is wrong — the same wire
+     dispatch routes to different consumers depending on state.
 
 When v0.4 starts, the protocol module gets split:
 
@@ -681,14 +790,42 @@ future direction.  Approach:
 - v0.4.3: Settings UI — radio-model picker (auto-discover then
   select if multiple).  Documentation pass for ANAN operators.
 - v0.4.4: Polish, second-radio testing on ANAN-7000DLE Mk2 (P1
-  *or* P2 mode), older ANAN-100/200/8000 (P1-only — should
-  already work via the HL2 path with minor capability
-  differences).
+  *or* P2 mode), older ANAN-100/200/8000 (P1-only — corrected
+  Round 1 2026-05-11 Agent A: these run **nddc=5 not nddc=4**
+  with a different DDC enable mask and `cntrl1=0x08` PS routing.
+  "Should already work via the HL2 path with minor capability
+  differences" understates the work — it's a new protocol module
+  variant (`p1_anan.py`?) sibling to `p1_hl2.py`, NOT a tweak.
+  Revised v0.4.4 timeline accordingly when the work is scoped).
+
+**Brick SDR (L-6 Round 1 2026-05-11 — TBD entry):** operator
+mentioned Brick SDR as a v0.4 candidate during the Round 1
+amendment sequence on 2026-05-11.  Brick is **not** in Thetis
+2.10.3.13 source (Agent A confirmed — greppable for "brick"
+across the entire Thetis tree returns nothing relevant).
+**Operator action required:** specify which "Brick" (HiQSDR's
+Brick SDR? Some other vendor?) AND what protocol it speaks
+(HPSDR P1 like HL2/older ANAN, HPSDR P2 like ANAN G2, or a
+vendor-specific protocol Lyra has never seen).
+
+- If Brick is HL2-class (HermesLite derivative): drops cleanly
+  into `p1_hl2.py` (or sibling) with a different capability
+  struct.  v0.4 additive.
+- If Brick is ANAN-class P1: falls into the ANAN-100/200/8000
+  branch above.  v0.4 additive.
+- If Brick is P2: falls into the G2/7000DLE branch.  v0.4
+  additive.
+- If Brick is vendor-specific (not HPSDR): **NOT** in v0.4
+  scope.  Push to v0.5+ "third protocol" work — would require a
+  new `lyra/protocol/<vendor>.py` module + discovery + audio
+  routing decisions + UI capability extensions.  Six-month
+  scope on its own.
 
 The five hardware-abstraction disciplines in §6.7 govern PRs
 during v0.1-v0.3 to keep this milestone tractable.  Without that
 discipline, v0.4 becomes a six-month rewrite; with it, v0.4 is
-a focused two-month push.
+a focused two-month push (assuming Brick falls into one of the
+existing HPSDR classes).
 
 ## 8. File path conventions
 
@@ -1740,23 +1877,33 @@ which only ever sees DDC0 (RX1's receive IQ stream).**  TX, PS
 feedback, and self-monitoring are independent code paths that
 share none of the new code:
 
-| Concern | Status |
+**CORRECTED Round 1 2026-05-11 (CR-1 + L-9):** the table below
+contains the previous draft's reasoning, corrected for the
+DDC routing facts established by Round 1 Agent A.  The earlier
+"DDC0 keeps running RX1 normally during PS+TX" statement was
+**wrong** — Thetis source proves DDC0 is at TX freq via cntrl1=4
+mux during HL2 MOX+PS.  This corrects the table and adds the
+bypass requirement.
+
+| Concern | Status (corrected Round 1) |
 |---|---|
-| §14.6 affects PureSignal calibration math? | **No** — PS uses DDC2/DDC3 feedback at TX freq (§3.4 / §6.4 — ``ddc[2].freq_source = "TX"``), dispatched to a separate ``ps_calcc.py`` / ``ps_iqc.py`` handler that the captured-profile pre-pass has zero hooks into |
-| §14.6 affects TX modulation chain? | **No** — TX is mic → ``ssb_mod.py`` → baseband I/Q → EP2 framing → HL2 PA, totally independent of any RX path |
-| §14.6 affects RX1 self-monitoring during TX? | **No** — Wiener gain ``G[k] = max(floor, 1 - profile_mag[k] / frame_mag[k])`` produces ``G ≈ 1`` on strong signals (operator's own carrier bleeding through ≫ profile magnitude), so the pre-pass is transparent to the operator's TX content while still attenuating background noise on RX1 |
-| §14.6 affects duplex / ``puresignal_run`` flags? | **No** — C4 bit 2 (duplex) and frame 11/16 C2 bit 6 (``puresignal_run``) are protocol-layer concerns in ``stream.py``; §14.6 doesn't touch the protocol layer at all |
-| §14.6 affects RX2 (v0.1)? | **Eventually yes** — RX2 will need its OWN ``CapturedProfileIQ`` instance for its own band's noise spectrum, but that's a clean per-channel duplication (one IQ pre-pass per WDSP channel) handled when v0.1 lands.  Not a cross-cutting concern. |
+| §14.6 affects PureSignal calibration math? | **Yes, indirectly — IQ pre-pass MUST be bypassed during MOX+PS state.**  PS feedback on HL2 lives in DDC0+DDC1 with cntrl1=4 routing the PA coupler to DDC0 (NOT DDC2/DDC3 as the earlier draft claimed — see CR-1).  If captured-profile pre-pass is still running on DDC0 during MOX+PS, it applies an RX-band noise mask to PA-feedback IQ samples — pure garbage going into calcc.  The pre-pass must be **disabled** by the `(mox, ps_armed)` state hook (same hook driving the panadapter source switch per v0.1 plan §9.5). |
+| §14.6 affects TX modulation chain? | **No** — TX is mic → WDSP TXA cffi → baseband I/Q → EP2 framing → HL2 PA, totally independent of any RX path. |
+| §14.6 affects RX1 self-monitoring during TX? | **N/A — there is no RX1 self-monitoring during HL2 MOX+PS.**  DDC0 is at TX freq, not at RX1's tuned freq.  Operator's RX1 band content is not being received in this state.  Self-monitor visualization comes from the §9.5 source-switch matrix (TX baseband → panadapter during MOX-no-PS; PA-feedback → panadapter during MOX+PS), NOT from a continuing DDC0 RX-band feed. |
+| §14.6 affects duplex / ``puresignal_run`` flags? | **No** — C4 bit 2 (duplex) and frame 11/16 C2 bit 6 (``puresignal_run``) are protocol-layer concerns in ``stream.py``; §14.6 doesn't touch the protocol layer at all. |
+| §14.6 affects RX2 (v0.1)? | **Yes, per-channel duplication + per-channel bypass.**  RX2 gets its OWN ``CapturedProfileIQ`` instance for its band's noise spectrum.  On HL2 MOX+PS, DDC1 is at TX freq (sync-paired to DDC0) — RX2's pre-pass MUST be bypassed in this state since DDC1 isn't carrying RX2-band content either.  On ANAN 5-DDC MOX+PS, DDC2 stays on RX2 freq — RX2's pre-pass keeps running.  State-product-dependent per family. |
+| Pre-pass behavior on PTT release? | **Reset spectral statistics.**  When PS+TX ends and DDC1 returns to RX2's true freq, the pre-pass on RX2 has been bypassed for the MOX duration — its STFT overlap-buffer is stale.  Reset on resume.  Operator MAY see a brief (~200 ms) noise-floor adjustment as the new live samples populate the rolling buffer.  Surface as a faint "RX2 resuming" badge if operator-visible. |
 
 **On full duplex during PS:** operator was correct that PS needs
 the duplex bit set + ``puresignal_run`` flags + nddc=4 — already
 documented in §3.2 and §3.7.  None of that protocol surface is
-touched by §14.6.  During PS+TX the gateware delivers DDC2/DDC3
-feedback at ``rx1_rate`` while DDC0 keeps running RX1 normally;
-the captured-profile pre-pass continues running on DDC0 (where
-it's transparent to the strong self-monitoring signal per the
-table above), and DDC2/DDC3 PS feedback dispatch never enters
-``_do_demod_wdsp``.
+touched by §14.6.  **Important correction:** during HL2 PS+TX,
+the gateware re-routes DDC0/DDC1 to TX freq via cntrl1=4 (see
+§3.8 corrected entry).  Captured-profile pre-pass must therefore
+bypass on MOX+PS edges.  DDC2/DDC3 are gateware-disabled on HL2
+PS+TX — those slots are zeros, not feedback samples (the earlier
+draft's claim that "DDC2/DDC3 feedback enters ``_do_demod_wdsp``"
+was wrong — that path doesn't exist on HL2).
 
 **Bonus side-property:** when v0.1 RX2 lands, each RX channel can
 have its own captured profile (operator listening to 40m on RX1
@@ -2303,7 +2450,22 @@ missing.
 
 ---
 
-*Last updated: 2026-05-10 — v0.0.9.8 "Display Polish" CW VFO
+*Last updated: 2026-05-11 — Round 1 synthesis amendments
+applied across §3.2 (priming vs main-loop duplex bit nuance),
+§3.6 (HL2 P1 shared-rate caveat), §3.8 (CW I-LSB prose +
+adc_overload semantics + HL2 PS feedback DDC routing
+correction), §4.1 (port table rewrite for cffi-pivot reality),
+§6.7 discipline #6 (DDC mapping rewrite for HL2/ANAN actual
+dispatch), §7 v0.4 scope (ANAN nddc=5 scope correction + Brick
+SDR TBD entry), §14.6 forward-compat table (captured-profile
+bypass during MOX+PS state per CR-1 routing correction).
+Companion changes to v0.1_rx2_consensus_plan.md (CR-1 through
+CR-7 critical, IM-1 through IM-6 important, M-1 through M-11
+medium, L-1/L-3/L-5/L-7/L-8/L-9 low — see plan §10 errors-
+corrected table for one-line summaries with citations) and
+audio_architecture.md §2.4 (8-way state machine clarification +
+post-mixer operator-mute multipliers).  Earlier:
+2026-05-10 — v0.0.9.8 "Display Polish" CW VFO
 convention switch shipped.  VFO LED now reads the carrier of the
 tuned signal in every mode (matching the standard convention used
 across major HF SDR applications); central DDS offset in
@@ -2333,13 +2495,23 @@ slider wiring + EMNR gainMethod + AEPF cffi bindings).
 senior-engineering pass that produced `implementation_playbook.md`.
 
 §15 backlog (post-v0.0.9.8):
-* §15.2 — RX2 plan leveler refs cleanup (file deleted; plan
-  references stale)
+* ~~§15.2 — RX2 plan leveler refs cleanup~~ **CLOSED Round 1
+  2026-05-11** — RX2 plan §5.3 / §7.x chain diagrams updated to
+  remove deleted-leveler refs; MODE_COMP signal source switched
+  to `Radio.agc_gain_db` (RX) / `Radio.tx_comp_db_changed` (TX-
+  side WDSP leveler meter) per the cffi engine reality.
 * §15.3 — Settings dialog deeper disconnect-on-close refactor
   (noise-suppression layer landed v0.0.9.6.1 / v0.0.9.7;
   proper fix parked for v0.1)
-* §15.5 — ``_AGC_PROFILES`` Long re-add (one-line code +
-  doc restore — see entry for the change set)
+* ~~§15.5 — ``_AGC_PROFILES`` Long re-add~~ already closed.
+* **NEW Round 1 2026-05-11 — Round 2 validation gate** before
+  v0.1 RX2 Phase 0 work begins.  After Round 1 synthesis
+  amendments commit (this one), spin 2 fresh agents to read the
+  patched plan + CLAUDE.md + audio_architecture.md.  Both must
+  agree 100% the plan is solid for HL2/HL2+/ANAN P1/ANAN P2/
+  Brick (pending Brick scope clarification per §7 L-6 TBD).
+  Failure → loop back to a Round 3 amendment cycle.
 * v0.1 RX2 Phase 0 (multi-channel refactor, no behavior change)
+  — gated on Round 2 unanimous agreement.
 
 Update this file when key decisions change.*
