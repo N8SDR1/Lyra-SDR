@@ -18,7 +18,7 @@ __version_name__ = "Launch Hotfix"
 # "dev"; the packaging script rewrites this constant before the
 # PyInstaller bundle is frozen, so the About dialog + status bar in
 # the released .exe show the date the operator received it.
-__build_date__   = "2026-05-10"
+__build_date__   = "dev"
 
 
 def version_string() -> str:

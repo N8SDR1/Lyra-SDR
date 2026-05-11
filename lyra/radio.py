@@ -7305,7 +7305,8 @@ class Radio(QObject):
     # audio. Lyra applies volume / mute / TCI tap on top.
     #
     # Lifecycle:
-    #   * Constructed in ``__init__`` if ``LYRA_USE_LEGACY_DSP`` is unset.
+    #   * Constructed in ``__init__`` (WDSP is the only DSP path
+    #     as of v0.0.9.6's cleanup arc — see CLAUDE.md §14.9).
     #   * Re-opened on rate change (``set_in_rate`` calls ``_open_wdsp_rx``).
     #   * Mode / filter / AGC pushed via Radio's UI setters.
 
