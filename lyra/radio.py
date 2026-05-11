@@ -908,6 +908,33 @@ class Radio(QObject):
         # / mute / capture-feed / BIN post-processor / TCI tap on top.
         self._wdsp_rx = None
         self._wdsp_rx_in_rate: int = 0
+        # Phase 2 v0.1 (2026-05-11): second WDSP RX channel for RX2.
+        # Mirrors ``_wdsp_rx`` lifecycle (created/recreated together
+        # in ``_open_wdsp_rx``).  RX2's mode/filter/AGC follow RX1
+        # automatically until Phase 3 wires per-RX UI; only the NCO
+        # frequency (via ``_set_rx2_freq``) and the L/R pan position
+        # are RX2-specific in Phase 2.
+        #
+        # HL2/HL2+ hardware nuance (operator-verified 2026-05-11):
+        # the front-end BPF behavior is more permissive than a
+        # strict "RX2 must match RX1's band" rule.  In-ham-band
+        # tuning engages the band's BPF; out-of-ham-band tuning
+        # (BCB / SWL between amateur allocations) often bypasses
+        # to broader RX.  Operator confirmed cross-band dual-RX
+        # works in practice (RX1=40m FT8 + RX2=WWV 15 MHz both
+        # audible simultaneously) -- the DDCs share one wideband
+        # ADC sample stream and tune independently within whatever
+        # the front-end is passing at the time.
+        #
+        # ANAN/Brick rigs with wider ADCs + per-DDC filter switching
+        # have even more cross-band flexibility; their capability
+        # will be flagged on RadioCapabilities (cross_band_rx2 or
+        # similar) in v0.4 multi-radio work.  Phase 3 UI should
+        # NOT hard-block VFO B to RX1's band -- it should warn
+        # only when the operator's setup would clearly attenuate
+        # the RX2 freq (operator-config-dependent).
+        # See CLAUDE.md §6.7 disciplines + Phase 3 UI note.
+        self._wdsp_rx2 = None
         # Captured-profile IQ-domain engine (§14.6, v0.0.9.9).
         # Created/recreated alongside the WDSP channel so the
         # engine's IQ rate always matches the radio's.  None until
@@ -1566,6 +1593,16 @@ class Radio(QObject):
         self._rx_batch_lock = threading.Lock()
         self._bridge = _SampleBridge()
         self._bridge.samples_ready.connect(self._on_samples_main_thread)
+        # Phase 2 v0.1 (2026-05-11): sibling batch accumulator for
+        # RX2 (DDC1).  Lock-step with ``_rx_batch`` -- same threshold
+        # since per-DDC sample counts are equal at nddc=4 (CLAUDE.md
+        # §3.6 HL2 P1 caveat).  Filled by ``_stream_cb_rx2`` on the
+        # RX-loop thread; drained when full into the worker's RX2
+        # queue (or, in single-thread mode, dropped since the
+        # main-thread bridge doesn't carry stereo combine yet --
+        # worker mode is the canonical Phase 2 path).
+        self._rx2_batch: list = []
+        self._rx2_batch_lock = threading.Lock()
 
         # ── Phase 1 v0.1: RX2 stub-consumer diagnostic state ────────
         #
@@ -2094,6 +2131,18 @@ class Radio(QObject):
                 self._push_wdsp_squelch_state()
             except Exception as exc:
                 print(f"[Radio] WDSP rx mode-change error: {exc}")
+        # Phase 2 v0.1: mirror mode + filter onto RX2 so it tracks
+        # RX1 (no per-RX UI until Phase 3).  APF / squelch are
+        # left at WDSP defaults on RX2 in Phase 2 since their
+        # per-module state isn't pushed there.
+        if self._wdsp_rx2 is not None:
+            try:
+                self._wdsp_rx2.reset()
+                self._wdsp_rx2.set_mode(self._wdsp_mode_for(alias))
+                low2, high2 = self._wdsp_filter_for(alias)
+                self._wdsp_rx2.set_filter(low2, high2)
+            except Exception as exc:
+                print(f"[Radio] WDSP rx2 mode-change error: {exc}")
         # Also reset S-meter state. Different demods produce very
         # different peak levels (AM envelope vs SSB sideband vs CW
         # pitched tone), so a peak captured under the old mode
@@ -2329,6 +2378,14 @@ class Radio(QObject):
                 wdsp.set_panel_gain(self.af_gain_linear)
             except Exception as exc:
                 print(f"[Radio] AF Gain → WDSP push error: {exc}")
+        # Phase 2 v0.1: mirror AF Gain onto RX2 so both receivers
+        # share the operator's makeup-gain setting.
+        wdsp2 = getattr(self, "_wdsp_rx2", None)
+        if wdsp2 is not None:
+            try:
+                wdsp2.set_panel_gain(self.af_gain_linear)
+            except Exception as exc:
+                print(f"[Radio] AF Gain → WDSP rx2 push error: {exc}")
         self.af_gain_db_changed.emit(db)
 
     @property
@@ -7558,58 +7615,76 @@ class Radio(QObject):
             self._bridge.samples_ready.emit(batch)
 
     def _stream_cb_rx2(self, samples, _stats):
-        """RX2 stub consumer (Phase 1 v0.1).
+        """RX2 IQ consumer.
 
         Registered on ``HL2Stream`` as the ``RX_AUDIO_CH2`` consumer
-        via ``Radio.start()``.  Per consensus plan §4.2:
+        via ``Radio.start()``.  Called on the RX-loop thread per UDP
+        datagram with the DDC1 (RX2) sample batch (38 samples per
+        UDP at nddc=4 / 192 kHz).
 
-          > In phase 1 ... host channel 2 (RX2) goes to channel 2's
-          > input.  Channel 2 has a stub DSP chain that produces
-          > zero audio (audio routing comes in phase 2).
+        Phase 1 (v0.1) -- this was a stub that only counted samples
+        for §4.4 bench verification.
 
-        This stub:
-        * Increments two diagnostic counters so the operator (and
-          the §4.4 bench-test gate) can verify DDC1 samples are
-          actually flowing through the dispatch path.
-        * Stashes the most-recent IQ samples in a ring buffer that
-          the RX2 Bench Test dialog reads to compute an FFT peak
-          for verification step 2 (tune VFO B to a known carrier,
-          verify carrier shows at expected baseband offset).
+        Phase 2 (v0.1, 2026-05-11) -- mirrors ``_stream_cb`` for
+        RX2.  Accumulates samples into ``_rx2_batch`` until the
+        same threshold as RX1 (``_rx_batch_size``), then enqueues
+        the batch onto the DSP worker's RX2 sibling queue.
+        Worker pairs it with the RX1 batch produced by
+        ``_stream_cb`` for the same UDP-datagram window and
+        invokes ``_do_demod_wdsp_dual`` for the stereo combine.
 
-        No DSP, no audio mixing, no UI signal beyond the diagnostic
-        readouts -- those land in Phase 2.
+        Single-thread mode (no DspWorker) does NOT route RX2 audio
+        in Phase 2 -- worker mode is the canonical path and is
+        what every operator runs by default (per
+        ``_dsp_threading_mode_at_startup``).  Single-thread mode
+        will get RX2 audio in a follow-up if any operator actually
+        uses it.
 
-        Called on the RX-loop thread (same thread as
-        ``_stream_cb``).  Counter writes are tolerable as
-        non-atomic int increments because the only readers are
-        diagnostic / test code; a missed +1 once in a blue moon
-        produces a counter that's off by 1, not a crash.
+        Continues to maintain Phase 1 diagnostic counters + the
+        bench-test ring buffer so the RX2 Bench Test dialog still
+        works alongside live audio.
         """
         n = int(samples.shape[0])
         self._rx2_datagrams_received += 1
         self._rx2_samples_received += n
 
-        # Fill the bench-test ring buffer ONLY when the bench
-        # dialog is open.  At 192 kHz nddc=4 the RX-loop thread
-        # is hot (5053 datagrams/sec) and every avoided memcpy
-        # helps the audio sink stay underrun-free.  The flag is
-        # GIL-atomic for read; a transient flip between open and
-        # close costs at worst one datagram's worth of stale ring
-        # data, which is harmless for an FFT readout.
-        if n == 0 or not self._rx2_bench_active:
+        # ── Phase 1 bench-test ring buffer (gated on dialog open) ──
+        if n != 0 and self._rx2_bench_active:
+            with self._rx2_iq_ring_lock:
+                ring = self._rx2_iq_ring
+                ring_size = ring.shape[0]
+                pos = self._rx2_iq_ring_pos
+                end = pos + n
+                if end <= ring_size:
+                    ring[pos:end] = samples
+                else:
+                    first = ring_size - pos
+                    ring[pos:] = samples[:first]
+                    ring[: n - first] = samples[first:]
+                self._rx2_iq_ring_pos = end % ring_size
+
+        # ── Phase 2 audio path: accumulate batch + enqueue to worker ──
+        # Mirror of ``_stream_cb`` for RX2.  Per nddc=4 design, the
+        # per-UDP sample count here equals the RX1 sample count,
+        # so the two batch lists fill in lock-step and the worker
+        # naturally pairs them.
+        if n == 0:
             return
-        with self._rx2_iq_ring_lock:
-            ring = self._rx2_iq_ring
-            ring_size = ring.shape[0]
-            pos = self._rx2_iq_ring_pos
-            end = pos + n
-            if end <= ring_size:
-                ring[pos:end] = samples
+        with self._rx2_batch_lock:
+            self._rx2_batch.extend(samples.tolist())
+            if len(self._rx2_batch) >= self._rx_batch_size:
+                batch = np.asarray(self._rx2_batch, dtype=np.complex64)
+                self._rx2_batch = []
             else:
-                first = ring_size - pos
-                ring[pos:] = samples[:first]
-                ring[: n - first] = samples[first:]
-            self._rx2_iq_ring_pos = end % ring_size
+                return
+        # Enqueue to the worker's RX2 queue ONLY in worker mode.
+        # Single-thread mode would need a Qt-signal hop to main
+        # thread + a stereo combiner there; that path isn't wired
+        # in Phase 2 (operator default is worker mode).
+        if (self._dsp_threading_mode_at_startup ==
+                self.DSP_THREADING_WORKER
+                and self._dsp_worker is not None):
+            self._dsp_worker.enqueue_iq_rx2(batch)
 
     # ── Phase 1 RX2 bench-test surface ────────────────────────────────
     @property
@@ -7763,13 +7838,22 @@ class Radio(QObject):
         """
         from lyra.dsp.wdsp_engine import RxChannel, RxConfig
         with self._iq_capture_lock:
-            # Tear down the old one if any.
+            # Tear down the old ones if any.  Both RX1 and RX2 are
+            # constructed and torn down together so an in-flight
+            # rate change can't leave a half-state where one channel
+            # is at the old rate and the other at the new.
             if self._wdsp_rx is not None:
                 try:
                     self._wdsp_rx.close()
                 except Exception as exc:
                     print(f"[Radio] WDSP rx close error: {exc}")
                 self._wdsp_rx = None
+            if self._wdsp_rx2 is not None:
+                try:
+                    self._wdsp_rx2.close()
+                except Exception as exc:
+                    print(f"[Radio] WDSP rx2 close error: {exc}")
+                self._wdsp_rx2 = None
         # Pick an in_size that keeps the per-call audio block within
         # Lyra's existing 512-sample audio cadence. WDSP returns
         # in_size * out_rate / in_rate audio frames per call:
@@ -7794,6 +7878,15 @@ class Radio(QObject):
         )
         self._wdsp_rx = RxChannel(channel=0, cfg=cfg)
         self._wdsp_rx_in_rate = int(in_rate)
+        # Phase 2 v0.1 (2026-05-11): construct the RX2 WDSP channel
+        # at the same in_rate / in_size / out_rate so audio output
+        # block alignment matches RX1's (sums cleanly in
+        # ``_do_demod_wdsp_dual`` for stereo combine).  HL2 nddc=4
+        # delivers both DDCs at the same wire rate per CLAUDE.md §3.6
+        # so no per-channel rate divergence is possible on this
+        # hardware family.  ANAN P2 (v0.4) would set RX2's in_rate
+        # separately; that's a multi-radio refactor concern.
+        self._wdsp_rx2 = RxChannel(channel=2, cfg=cfg)
 
         # Captured-profile IQ-domain engine (§14.6, v0.0.9.9).
         # Tied to the WDSP channel's lifetime — same in_rate, same
@@ -8026,12 +8119,58 @@ class Radio(QObject):
                 self._wdsp_rx.set_am_squelch_max_tail(0.5)
             except Exception as exc:
                 print(f"[Radio] WDSP AM SQ tail init: {exc}")
+
+            # Phase 2 v0.1 (2026-05-11) — RX1 hard-left pan default.
+            # WDSP applies the sin-π equal-power pan curve internally
+            # (patchpanel.c::SetRXAPanelPan).  At pan=0.0, L=signal
+            # and R=0.  Combined with RX2's pan=1.0 (set below in
+            # the RX2 init-state block), the stereo combine in
+            # ``_do_demod_wdsp_dual`` produces RX1-left + RX2-right.
+            try:
+                self._wdsp_rx.set_panel_pan(0.0)
+            except Exception as exc:
+                print(f"[Radio] WDSP RX1 pan init: {exc}")
         except Exception as exc:
             print(f"[Radio] WDSP rx initial-state push error: {exc}")
+
+        # ── Phase 2 v0.1: push initial state into RX2 ───────────────
+        # RX2 mirrors RX1's mode / filter / AGC / panel_gain.  Per-
+        # module DSP state (NR, NB, ANF, manual notches, APF,
+        # squelch, LMS, AM SQ tail) is left at WDSP defaults (off)
+        # in Phase 2 -- Phase 3 wires per-RX UI for these.
+        #
+        # Mid-session operator state changes (set_mode, set_filter,
+        # set_agc_profile, set_af_gain_db) fan out to BOTH channels
+        # via the corresponding setter call sites (see the per-setter
+        # ``# Phase 2: also push to RX2`` lines).  Until Phase 3
+        # gives RX2 its own UI surface, RX2 is functionally a clone
+        # of RX1 with a different NCO frequency.
+        try:
+            self._wdsp_rx2.set_mode(self._wdsp_mode_for(self._mode))
+            low, high = self._wdsp_filter_for(self._mode)
+            self._wdsp_rx2.set_filter(low, high)
+            self._wdsp_rx2.set_agc(self._wdsp_agc_for(self._agc_profile))
+            try:
+                self._wdsp_rx2.set_agc_slope(35)
+                self._wdsp_rx2.set_agc_threshold(
+                    float(self._agc_target), 4096, in_rate)
+            except Exception as exc:
+                print(f"[Radio] WDSP RX2 AGC init-state push: {exc}")
+            self._wdsp_rx2.set_panel_gain(self.af_gain_linear)
+            self._wdsp_rx2.set_panel_binaural(False)
+            # RX2 hard-right pan — completes the stereo split.
+            self._wdsp_rx2.set_panel_pan(1.0)
+        except Exception as exc:
+            print(f"[Radio] WDSP RX2 initial-state push error: {exc}")
+
         try:
             self._wdsp_rx.start()
         except Exception as exc:
             print(f"[Radio] WDSP rx start error: {exc}")
+        try:
+            self._wdsp_rx2.start()
+        except Exception as exc:
+            print(f"[Radio] WDSP rx2 start error: {exc}")
 
     def _wdsp_mode_for(self, mode: str) -> str:
         """Map Lyra's mode string to a WDSP mode name."""
@@ -8423,6 +8562,148 @@ class Radio(QObject):
         except Exception:
             pass
 
+    def _do_demod_wdsp_dual(self, rx1_iq, rx2_iq) -> None:
+        """Phase 2 v0.1 — dual-channel RX audio path.
+
+        Processes BOTH WDSP RX channels and sums their stereo output
+        for the audio sink.  Each channel has its own pan applied
+        internally via WDSP's ``SetRXAPanelPan`` (RX1 default 0.0 =
+        hard-left, RX2 default 1.0 = hard-right per consensus plan
+        §6.1), so the summed output is naturally a stereo split with
+        RX1 on the left ear and RX2 on the right.
+
+        Captured-profile IQ-domain pre-pass (§14.6) applies ONLY to
+        RX1 in Phase 2 -- RX2 has no per-RX profile selector UI
+        yet.  Phase 3's per-RX focused-panel design will add it.
+
+        Volume / mute / BIN apply to the COMBINED output for Phase 2.
+        Per-RX volume + balance + mute sliders are a Phase 3 UI
+        deliverable (Thetis-style operator UX) -- the engine
+        already supports them via independent per-channel
+        ``set_panel_gain`` and ``set_panel_pan``, just no operator
+        surface yet.
+
+        Called by ``DspWorker.process_block`` when an RX2 batch is
+        paired with the RX1 batch in ``run_loop``.  Falls back to
+        ``_do_demod_wdsp`` (RX1-only) when RX2 queue is empty at
+        pair time (startup race, rate change).
+        """
+        # Early-out: either channel torn down (rate-change race).
+        if self._wdsp_rx is None or self._wdsp_rx2 is None:
+            return
+
+        # ── RX1 path (with captured-profile pre-pass) ───────────────
+        # Mirrors the head of ``_do_demod_wdsp`` -- accumulate +
+        # apply under the engine lock so a rate-change main-thread
+        # close+null can't collide with our ``process()``.
+        fired_done = False
+        iq_for_wdsp = rx1_iq
+        audio_rx1 = None
+        with self._iq_capture_lock:
+            if self._wdsp_rx is None:
+                return
+            if self._iq_capture is not None:
+                prev_state = self._iq_capture.state
+                try:
+                    self._iq_capture.accumulate(rx1_iq)
+                except Exception as exc:
+                    print(f"[Radio] IQ capture accumulate (dual): {exc}")
+                else:
+                    if (prev_state == "capturing"
+                            and self._iq_capture.state == "ready"):
+                        fired_done = True
+                if (self._nr_use_captured_profile
+                        and self._iq_capture.has_profile):
+                    try:
+                        iq_for_wdsp = self._iq_capture.apply(rx1_iq)
+                    except Exception as exc:
+                        print(f"[Radio] IQ apply (dual): {exc}")
+                        iq_for_wdsp = rx1_iq
+            try:
+                audio_rx1 = self._wdsp_rx.process(iq_for_wdsp)
+            except Exception as exc:
+                print(f"[Radio] WDSP rx1 process error (dual): {exc}")
+                audio_rx1 = None
+
+        if fired_done:
+            try:
+                self.noise_capture_done.emit("")
+            except Exception:
+                pass
+
+        # ── RX2 path (no captured-profile in Phase 2) ───────────────
+        # RX2 has its own engine lock domain (same _iq_capture_lock
+        # is held only for RX1's capture engine -- RX2 doesn't share
+        # state with it).  Phase 3 may introduce an _iq_capture_rx2
+        # mirror; for now RX2 just runs clean through WDSP.
+        audio_rx2 = None
+        try:
+            audio_rx2 = self._wdsp_rx2.process(rx2_iq)
+        except Exception as exc:
+            print(f"[Radio] WDSP rx2 process error: {exc}")
+            audio_rx2 = None
+
+        # ── Combine RX1 + RX2 audio ─────────────────────────────────
+        # WDSP returns (N, 2) float32 stereo.  RX1's pan=0 produced
+        # (L=signal, R=0); RX2's pan=1 produced (L=0, R=signal).
+        # Sum -> (L=RX1, R=RX2) -- the stereo split.  Lengths may
+        # briefly differ across rate-change transients; align to
+        # the shorter buffer to avoid out-of-bounds.
+        if audio_rx1 is None or audio_rx1.size == 0:
+            if audio_rx2 is None or audio_rx2.size == 0:
+                return
+            audio = audio_rx2.copy()
+        elif audio_rx2 is None or audio_rx2.size == 0:
+            audio = audio_rx1.copy()
+        else:
+            n = min(audio_rx1.shape[0], audio_rx2.shape[0])
+            if n == 0:
+                return
+            audio = audio_rx1[:n] + audio_rx2[:n]
+
+        # ── Output stage (mute / volume / BIN / sink / TCI) ─────────
+        # Phase 2: single Vol + Mute apply to combined.  Phase 3
+        # splits per-RX (Thetis-style) -- see CLAUDE.md §6.2 + the
+        # Phase 3 design TODO when that lands.
+        if self._muted:
+            audio = audio * 0.0
+        else:
+            v = float(self._volume)
+            if v != 1.0:
+                audio = audio * np.float32(v)
+
+        if self._bin_enabled and self._binaural.enabled:
+            try:
+                mono_in = audio[:, 0] if audio.ndim == 2 else audio
+                bin_out = self._binaural.process(mono_in)
+                if bin_out.ndim == 2 and bin_out.shape[1] == 2:
+                    audio = bin_out.astype(np.float32, copy=False)
+            except Exception as exc:
+                print(f"[Radio] WDSP BIN error (dual): {exc}")
+
+        try:
+            self._audio_sink.write(audio)
+        except Exception as exc:
+            print(f"[Radio] WDSP audio sink error (dual): {exc}")
+
+        try:
+            self.audio_for_tci_emit.emit(audio)
+        except Exception:
+            pass
+
+        # AGC gain readout -- still reads from RX1 only (RX1 is the
+        # "focused" receiver per CLAUDE.md §6.2 hybrid UI model).
+        # Phase 3 may add a per-RX meter readout when the focused
+        # RX is RX2.
+        try:
+            self._wdsp_agc_meter_skip = (
+                getattr(self, "_wdsp_agc_meter_skip", 0) + 1)
+            if self._wdsp_agc_meter_skip >= 8:
+                self._wdsp_agc_meter_skip = 0
+                self.agc_action_db.emit(self._wdsp_rx.get_agc_gain_db())
+        except Exception:
+            pass
+
     def _emit_tone(self, n: int):
         # n is the size of the incoming IQ block at self._rate. The
         # audio sink runs at AUDIO_RATE (48 kHz) regardless of IQ
@@ -8520,17 +8801,30 @@ class Radio(QObject):
                 self._wdsp_rx.set_agc(self._wdsp_agc_for(name))
             except Exception as exc:
                 print(f"[Radio] WDSP rx agc-change error: {exc}")
-        # Auto-track the threshold only in "auto" profile; everything else
-        # leaves the threshold where the user put it.
-        if name == "auto":
-            # Kick an immediate calibration so the threshold snaps to the
-            # current noise floor rather than waiting a tick.
-            self.auto_set_agc_threshold()
-            if not self._agc_auto_timer.isActive():
-                self._agc_auto_timer.start()
-        else:
-            if self._agc_auto_timer.isActive():
-                self._agc_auto_timer.stop()
+        # Phase 2 v0.1: mirror AGC profile onto RX2.
+        if self._wdsp_rx2 is not None:
+            try:
+                self._wdsp_rx2.set_agc(self._wdsp_agc_for(name))
+            except Exception as exc:
+                print(f"[Radio] WDSP rx2 agc-change error: {exc}")
+        # UNCOMMITTED EXPERIMENT (v0.1 Phase 1 follow-up, 2026-05-11):
+        # auto-track the threshold REGARDLESS of profile choice.
+        # Pre-fix behavior: only "auto" profile re-tracked threshold;
+        # all other profiles froze the threshold at whatever Auto
+        # last computed before the operator switched profiles.
+        # Operator symptom: threshold static at -130 dBFS for hours
+        # in MED / FAST / SLOW profiles, never adapting to band /
+        # antenna / sky-noise changes.  The fix runs the auto
+        # timer in all profiles; only the time-constant choice
+        # differs per profile name now.
+        #
+        # If a future UX needs operator-locked manual threshold,
+        # add a separate "auto threshold ON / OFF" toggle in
+        # Settings → DSP → AGC and gate the timer on THAT, not on
+        # the profile name.
+        self.auto_set_agc_threshold()
+        if not self._agc_auto_timer.isActive():
+            self._agc_auto_timer.start()
         self.agc_profile_changed.emit(name)
 
     def set_agc_custom(self, release: float, hang_blocks: int):
@@ -8681,18 +8975,39 @@ class Radio(QObject):
                     v, 4096, int(self._rate))
             except Exception as exc:
                 print(f"[Radio] WDSP AGC threshold push: {exc}")
+        # Phase 2 v0.1: mirror AGC threshold onto RX2 so both
+        # receivers share the auto-tracker's output.
+        if self._wdsp_rx2 is not None:
+            try:
+                self._wdsp_rx2.set_agc_threshold(
+                    v, 4096, int(self._rate))
+            except Exception as exc:
+                print(f"[Radio] WDSP AGC rx2 threshold push: {exc}")
         self.agc_threshold_changed.emit(v)
 
-    def auto_set_agc_threshold(self, margin_db: float = 5.0) -> float:
+    def auto_set_agc_threshold(self, margin_db: float = 18.0) -> float:
         """Calibrate AGC threshold to sit ``margin_db`` above the
         current rolling noise floor (in dBFS).  Bound to the AGC
         right-click "Auto" action and the Settings → DSP → AGC
         Threshold "Auto" button.  Returns the new threshold (dBFS).
 
-        ``margin_db`` defaults to +5 dB above NF — places the
+        UNCOMMITTED EXPERIMENT (v0.1 Phase 1 follow-up, 2026-05-11):
+        ``margin_db`` default bumped from 5 dB → 18 dB to match
+        the CLAUDE.md §14.2 documentation ("calibrate ~18 dB above
+        the rolling noise floor").  The 5 dB margin produced
+        threshold values too close to noise floor, causing AGC to
+        engage on noise itself and over-amplify on AM mode (with
+        carrier component sitting near baseband DC).  Operator
+        symptom: "audio low like attenuated; NR acts as pre-amp on
+        AM" — AGC was riding the entire envelope including noise.
+        With 18 dB margin, threshold lands at nf+18 (typically
+        -110 to -120 dBFS for HL2 at LNA +12 dB), so AGC only
+        engages on real signals well above noise.
+
+        ``margin_db`` was historically +5 dB — places the
         threshold just above the noise so AGC engages on actual
         signals while still letting the noise floor itself ride
-        through at full max_gain.
+        through at full max_gain.  Replaced 2026-05-11.
 
         v0.0.9.8 fix: now reads the live FFT-derived noise floor
         (``_noise_floor_db`` — 20th-percentile of the spectrum,
@@ -9072,20 +9387,48 @@ class Radio(QObject):
 
         # Noise-floor estimate — 20th percentile rejects the upper 80%
         # of bins (which likely contain signals), leaving the ambient
-        # noise. Rolling-averaged over ~1 s to damp out FFT-to-FFT
-        # jitter. Emitted at ~6 Hz rather than every tick.
+        # noise.  Rolling-averaged over ~1 s to damp out FFT-to-FFT
+        # jitter.  Emitted at ~6 Hz rather than every tick.
+        #
+        # v0.1 Phase 1 follow-up (2026-05-11) -- decouple noise-floor
+        # MEASUREMENT from the NF reference-line DISPLAY gate.
+        # Pre-fix behavior: the entire measurement block was gated
+        # on ``self._noise_floor_enabled``, the same flag that
+        # controls whether the dim NF reference line is drawn in
+        # the panadapter.  When the operator hid the NF marker via
+        # Settings → Visuals (or hadn't enabled it after a fresh
+        # install), ``_noise_floor_db`` froze at whatever stale
+        # value it last had.  ``auto_set_agc_threshold`` reads
+        # ``_noise_floor_db`` every 3 s and pushes ``nf + margin``
+        # to WDSP as the AGC threshold, so the AGC auto-threshold
+        # silently sat at a stale value across band / antenna /
+        # mode changes for hours.  Operator-visible symptom: AGC
+        # threshold static at -130 dBFS, AGC over-amplifying noise,
+        # "audio low + NR acts as pre-amp on AM" complaint.
+        #
+        # Fix: measurement always runs (cheap: one np.percentile
+        # call); the display emit is gated separately below.
+        pct20 = float(np.percentile(spec_db, 20))
+
+        # Update rolling buffer + EMA -- always runs so AGC auto-
+        # threshold sees a fresh nf value even when NF display is
+        # hidden.
+        self._noise_floor_history.append(pct20)
+        if len(self._noise_floor_history) > self._noise_floor_history_max:
+            self._noise_floor_history.pop(0)
+        avg = float(np.mean(self._noise_floor_history))
+
+        # Exponential smoothing on top of the rolling average for
+        # extra stability — reference-line should feel rock-steady.
+        # Always runs so AGC auto-threshold sees a fresh value even
+        # when NF display is hidden.
+        if self._noise_floor_db is None:
+            self._noise_floor_db = avg
+        else:
+            self._noise_floor_db = 0.85 * self._noise_floor_db + 0.15 * avg
+        # Display-only emit -- the reference line stays hidden when
+        # the operator has it disabled.
         if self._noise_floor_enabled:
-            pct20 = float(np.percentile(spec_db, 20))
-            self._noise_floor_history.append(pct20)
-            if len(self._noise_floor_history) > self._noise_floor_history_max:
-                self._noise_floor_history.pop(0)
-            avg = float(np.mean(self._noise_floor_history))
-            # Exponential smoothing on top of the rolling average for
-            # extra stability — reference-line should feel rock-steady.
-            if self._noise_floor_db is None:
-                self._noise_floor_db = avg
-            else:
-                self._noise_floor_db = 0.85 * self._noise_floor_db + 0.15 * avg
             self._nf_emit_counter += 1
             if self._nf_emit_counter >= 5:
                 self._nf_emit_counter = 0

@@ -153,6 +153,18 @@ void SetRXAANFVals(int channel, int taps, int delay, double gain, double leakage
    stage behaviour.  This is what Thetis does at channel init. */
 void SetRXAPanelBinaural(int channel, int bin);
 
+/* Patch panel — pan curve (patchpanel.c::SetRXAPanelPan).
+   ``pan`` is 0.0..1.0:
+     0.0 = hard left  (L = signal, R = 0)
+     0.5 = center     (L = R = signal × sin(π/4))
+     1.0 = hard right (L = 0, R = signal)
+   WDSP applies the standard sin-π equal-power pan curve internally
+   per ``patchpanel.c:158-176``.  Used by v0.1 Phase 2 RX2 stereo
+   split: RX1 pan=0 (left) + RX2 pan=1 (right) routes each receiver
+   to its own ear via the existing single audio sink, no Python
+   pan port needed (consensus plan §5.1 IM-4 — cffi-only). */
+void SetRXAPanelPan(int channel, double pan);
+
 /* SSQL — WDSP's all-mode "Single-mode Squelch Level" voice-activity
    detector.  Used by Thetis for SSB / CW / DIG modes (FM has its
    own FMSQ, AM has its own AMSQ).  SSQL is a frequency-to-voltage

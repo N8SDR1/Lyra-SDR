@@ -180,6 +180,19 @@ class DspWorker(QObject):
         # thread-safe; we use put_nowait/get_nowait to avoid any
         # blocking surprises.
         self._input_queue: Queue = Queue(maxsize=self.INPUT_QUEUE_DEPTH)
+        # Phase 2 v0.1 (2026-05-11): sibling queue for RX2 (DDC1) IQ
+        # batches.  Filled by ``Radio._stream_cb_rx2`` lock-step with
+        # the main ``_input_queue``; drained by ``run_loop`` with a
+        # non-blocking ``get_nowait`` immediately after the RX1
+        # blocking get, so the worker pairs (rx1, rx2) batches per
+        # iteration.  Since RX1 and RX2 per-DDC sample counts are
+        # equal at nddc=4 (per CLAUDE.md §3.6 HL2 P1 caveat) and
+        # ``_stream_cb`` / ``_stream_cb_rx2`` accumulate at the same
+        # rate, the queues stay synchronized in normal operation.
+        # If RX2 queue is empty when RX1 has a batch (transient
+        # startup race), the worker falls back to RX1-only
+        # processing for that iteration (no audible glitch).
+        self._input_queue_rx2: Queue = Queue(maxsize=self.INPUT_QUEUE_DEPTH)
         # Lifecycle flags — set by request_*() and read by run_loop.
         # Plain attribute reads/writes; no locks needed because the
         # Python GIL serializes single-attribute access and we don't
@@ -261,6 +274,30 @@ class DspWorker(QObject):
                 # stutter pattern; fix is to investigate why the
                 # worker is so far behind.  Extremely rare under
                 # normal operating conditions.
+                pass
+
+    def enqueue_iq_rx2(self, samples: np.ndarray) -> None:
+        """Push a batch of RX2 (DDC1) IQ samples onto the sibling
+        input queue.  Phase 2 v0.1.
+
+        Same drop-oldest policy as :meth:`enqueue_iq`.  ``run_loop``
+        pairs RX1 and RX2 batches per iteration via a non-blocking
+        ``get_nowait`` on this queue immediately after the blocking
+        ``get`` on the main RX1 queue; if RX2 is empty at that
+        moment the worker processes RX1 alone for that iteration
+        (single-channel fallback — operator gets RX1 audio with no
+        stereo split for one ~5 ms block, sub-perceptual).
+        """
+        try:
+            self._input_queue_rx2.put_nowait(samples)
+        except Full:
+            try:
+                self._input_queue_rx2.get_nowait()
+            except Empty:
+                pass
+            try:
+                self._input_queue_rx2.put_nowait(samples)
+            except Full:
                 pass
 
     def request_reset(self) -> None:
@@ -437,12 +474,22 @@ class DspWorker(QObject):
                     # still alive).
                     continue
 
+                # Phase 2 v0.1: try to pair an RX2 batch with this
+                # RX1 batch.  Non-blocking -- if the queues fall
+                # out of sync briefly (startup, rate change) we
+                # fall back to RX1-only processing for one block.
+                rx2_samples = None
+                try:
+                    rx2_samples = self._input_queue_rx2.get_nowait()
+                except Empty:
+                    pass
+
                 if self._reset_requested:
                     self._reset_requested = False
                     self._reset()
 
                 try:
-                    self.process_block(samples)
+                    self.process_block(samples, rx2_samples)
                 except Exception as exc:
                     # DSP errors must NEVER kill the worker thread.
                     # Log and continue — operator hears a single
@@ -453,8 +500,23 @@ class DspWorker(QObject):
         finally:
             self.state_changed.emit("stopped")
 
-    def process_block(self, samples: np.ndarray) -> None:
+    def process_block(
+        self,
+        samples: np.ndarray,
+        rx2_samples: Optional[np.ndarray] = None,
+    ) -> None:
         """Run DSP on one block of complex64 IQ samples.
+
+        Phase 2 v0.1 (2026-05-11) signature added ``rx2_samples`` as
+        an optional second IQ batch.  When non-None the worker
+        invokes ``radio._do_demod_wdsp_dual(rx1, rx2)`` which
+        processes BOTH WDSP channels and sums their stereo output
+        for the audio sink (RX1 hard-left + RX2 hard-right by
+        default via per-channel ``SetRXAPanelPan``).  When None
+        (single-channel fallback) the worker invokes the legacy
+        ``radio._do_demod_wdsp(rx1)`` path -- preserves v0.0.9.x
+        behavior for the rare case where the RX2 queue is empty
+        at the moment the RX1 batch is pulled (startup race).
 
         Originally (Phase 3.B B.3) this mirrored ``Radio._do_demod``
         body running on the worker thread instead of the main thread,
@@ -465,9 +527,10 @@ class DspWorker(QObject):
 
         - Mode dispatch (Off / Tone / regular)
         - LNA peak / RMS tracking on the IQ block (B.6 carryover)
-        - ``radio._do_demod_wdsp(samples)`` — the WDSP cffi engine
-          (handles decimation + notches + demod + NR + AGC + audio
-          internally; result lands in radio._audio_sink directly)
+        - ``radio._do_demod_wdsp(samples)`` or _dual — WDSP cffi
+          engine (handles decimation + notches + demod + NR + AGC +
+          audio internally; result lands in radio._audio_sink
+          directly)
         - Sample-ring update + FFT + ``spectrum_ready`` emit (B.8)
 
         Errors at any stage are logged but never crash the worker
@@ -543,8 +606,19 @@ class DspWorker(QObject):
         # its plumbing is independent of audio rendering.  Skipping
         # the FFT path here would freeze the spectrum widget.
         if getattr(radio, "_wdsp_rx", None) is not None:
+            # Phase 2 v0.1: dual-channel path when an RX2 batch was
+            # paired with this RX1 batch in run_loop.  Falls back to
+            # the single-channel ``_do_demod_wdsp`` when RX2 queue
+            # was empty at pair time (startup race, rate change).
+            # Both paths write the final audio to ``radio._audio_sink``
+            # internally; the dual path sums RX1+RX2 outputs for the
+            # stereo split first.
             try:
-                radio._do_demod_wdsp(samples)
+                if (rx2_samples is not None
+                        and getattr(radio, "_wdsp_rx2", None) is not None):
+                    radio._do_demod_wdsp_dual(samples, rx2_samples)
+                else:
+                    radio._do_demod_wdsp(samples)
             except Exception as exc:
                 print(f"[DspWorker] WDSP demod error: {exc}")
         # FFT cadence (B.8): append IQ to the worker-owned sample

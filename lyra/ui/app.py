@@ -215,15 +215,15 @@ class MainWindow(QMainWindow):
             print(f"[app] failed to wire aboutToQuit: {exc}")
         # Phase 3.D #1 — auto-restore the captured noise profile that
         # was last active before Lyra closed (if any).  Silently no-ops
-        # if the saved file is gone or incompatible.  Runs after Radio
-        # construction so the channel's NR processor is alive and
-        # ready to receive load_captured_profile() calls.
-        try:
-            self.radio.autoload_active_noise_profile()
-        except Exception as exc:
-            # Belt-and-suspenders — autoload is opt-in convenience,
-            # never block app startup if something goes sideways.
-            print(f"[app] noise-profile autoload error: {exc}")
+        # if the saved file is gone or incompatible.  Originally ran
+        # here (right after Radio construction) but that fires BEFORE
+        # ``_load_settings`` restores the operator's persisted IQ rate.
+        # The captured profile's rate-validation guard then refused
+        # the load with a startup-noise console line like:
+        #     "profile '...' was captured at 192000 Hz IQ rate;
+        #      current radio rate is 96000 Hz."
+        # Moved to AFTER ``_load_settings`` below so the persisted
+        # rate is in effect when this autoload runs.
         # Operator / Station — callsign + grid square + manual lat/lon.
         # Global settings consumed by TCI spots, WX-Alerts, and any
         # future logging integration.  Migrates from the older
@@ -460,6 +460,19 @@ class MainWindow(QMainWindow):
         self._audio_telem_last_t: float = _time.monotonic()
 
         self._load_settings()
+
+        # Phase 3.D #1 (moved 2026-05-11) — auto-restore the captured
+        # noise profile that was last active before Lyra closed.
+        # MUST run AFTER ``_load_settings`` so the operator's
+        # persisted IQ rate is in effect; the captured profile's
+        # rate-validation guard otherwise refuses the load on every
+        # startup with a console-noise log line.
+        try:
+            self.radio.autoload_active_noise_profile()
+        except Exception as exc:
+            # Belt-and-suspenders — autoload is opt-in convenience,
+            # never block app startup if something goes sideways.
+            print(f"[app] noise-profile autoload error: {exc}")
 
         # Auto-snapshot of settings on every launch — gives the operator
         # a free "yesterday's working config" rollback target whenever

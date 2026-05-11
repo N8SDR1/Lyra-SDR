@@ -411,6 +411,34 @@ class RxChannel:
         with self._lock:
             self._lib.SetRXAPanelGain1(self.channel, float(gain))
 
+    def set_panel_pan(self, pan: float) -> None:
+        """Set the panel's L/R pan position via the WDSP sin-π
+        equal-power pan curve (``patchpanel.c::SetRXAPanelPan``).
+
+        Phase 2 v0.1 (2026-05-11): used for the RX2 stereo-split
+        default routing -- RX1 pan=0.0 (hard left), RX2 pan=1.0
+        (hard right), summed in ``Radio._do_demod_wdsp_dual`` for
+        the final stereo output.  Per consensus plan §5.1 IM-4 the
+        pan math lives in WDSP cffi only -- no Python port.
+
+        Args:
+            pan: 0.0..1.0 inclusive.  0.0 = hard left (L=signal,
+                R=0), 0.5 = center (both at sin(π/4) ≈ 0.707), 1.0
+                = hard right (L=0, R=signal).  Clamped to [0, 1]
+                before pushing to WDSP -- out-of-range values would
+                produce silence or invert phase, neither of which is
+                useful.
+
+        Note this only takes effect when ``set_panel_binaural``
+        is False (panel.copy=1 mono-on-both, Lyra's default per
+        CLAUDE.md §14.10).  With binaural=True (panel.copy=0,
+        L=I/R=Q), the pan curve is applied to I and Q channels
+        independently, which is rarely useful for normal listening.
+        """
+        p = max(0.0, min(1.0, float(pan)))
+        with self._lock:
+            self._lib.SetRXAPanelPan(self.channel, p)
+
     # Per-module run flags ------------------------------------------------
 
     def set_anr(self, run: bool) -> None:
