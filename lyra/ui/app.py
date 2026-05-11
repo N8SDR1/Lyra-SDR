@@ -11,16 +11,64 @@ across app restarts via `saveState()`/`restoreState()`.
 from __future__ import annotations
 
 import faulthandler
+import os
 import sys
 
-# §14.6 v0.0.9.9 diagnostic: catch C-side segfaults from cffi'd DLLs
-# (WDSP, FFTW, RNNoise, SpecBleach) and print a Python stack trace +
-# crashing thread state to stderr BEFORE the process dies.  Without
-# this, a segfault in a DLL leaves no trace at all — the prompt just
-# returns.  Cheap (no overhead unless a fatal signal fires); leaving
-# it on permanently is fine and gives operators something useful to
-# paste into bug reports.
-faulthandler.enable()
+# Catch C-side segfaults from cffi'd DLLs (WDSP, FFTW, RNNoise,
+# SpecBleach) and print a Python stack trace + crashing thread
+# state BEFORE the process dies.  Without this, a segfault in a
+# DLL leaves no trace at all — the prompt just returns.
+#
+# v0.0.9.9 shipped a launch-blocking bug here: PyInstaller's
+# --windowed build (Lyra.exe ships with console=False in
+# build/lyra.spec) sets ``sys.stderr = None``, and
+# ``faulthandler.enable()`` defaults to ``file=sys.stderr``,
+# so the call raised ``RuntimeError: sys.stderr is None`` at
+# import time and the bundled exe couldn't launch.  Bench
+# testing from the source tree didn't catch it because the
+# Python interpreter has a real stderr there.
+#
+# v0.0.9.9.1 fix: route crash output to a user-data-folder log
+# file (%APPDATA%\Lyra\crash.log on Windows, equivalent on
+# macOS/Linux).  Operators can find it after a crash and paste
+# the contents into a bug report.  Falls back to sys.stderr if
+# it exists (development tree); silent no-op if neither works
+# (don't crash on something this small).
+_CRASH_LOG_FILE = None   # module-level keeps the file handle alive
+
+
+def _enable_faulthandler() -> None:
+    global _CRASH_LOG_FILE
+    try:
+        if sys.platform.startswith("win"):
+            base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        elif sys.platform == "darwin":
+            base = os.path.expanduser("~/Library/Application Support")
+        else:
+            base = (os.environ.get("XDG_DATA_HOME")
+                    or os.path.expanduser("~/.local/share"))
+        crash_dir = os.path.join(base, "Lyra")
+        os.makedirs(crash_dir, exist_ok=True)
+        # Append-mode + line-buffered so crash output survives if
+        # multiple sessions overlap or the process dies mid-write.
+        _CRASH_LOG_FILE = open(
+            os.path.join(crash_dir, "crash.log"),
+            "a", buffering=1, encoding="utf-8", errors="replace")
+        faulthandler.enable(file=_CRASH_LOG_FILE)
+        return
+    except (OSError, ValueError, RuntimeError):
+        pass
+    # Fall back to stderr if it exists (source-tree runs).  Silent
+    # no-op otherwise — we'd rather lose crash forensics than fail
+    # to launch.
+    if sys.stderr is not None:
+        try:
+            faulthandler.enable()
+        except (RuntimeError, ValueError):
+            pass
+
+
+_enable_faulthandler()
 
 from PySide6.QtCore import Qt, QSettings, QByteArray, QObject, Signal
 from PySide6.QtGui import QFont, QPalette, QAction

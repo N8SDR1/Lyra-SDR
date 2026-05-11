@@ -13,6 +13,80 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.0.9.9.1] — 2026-05-10 — Launch Hotfix
+
+Emergency patch over v0.0.9.9.  Anyone who downloaded the
+v0.0.9.9 installer found Lyra refused to launch with the
+traceback ``RuntimeError: sys.stderr is None`` at
+``app.py`` line 23.  This release fixes that plus one other
+bug surfaced by tester field-testing of v0.0.9.9.
+
+### sys.stderr crash on bundled Lyra.exe
+
+* **Root cause**: ``faulthandler.enable()`` (added in v0.0.9.9
+  for C-side crash forensics) defaults to writing to
+  ``sys.stderr``.  PyInstaller's ``--windowed`` build (which
+  Lyra ships, since it's a GUI app with ``console=False`` in
+  ``build/lyra.spec``) sets ``sys.stderr = None`` because there's
+  no console attached.  ``faulthandler.enable()`` then raises
+  ``RuntimeError: sys.stderr is None`` at import time and the
+  bundled exe couldn't get past line 23 of ``app.py``.
+* **Why bench didn't catch it**: source-tree runs
+  (``python -m lyra.ui.app``) have a real ``sys.stderr`` so the
+  call succeeded.  The bug only manifested in the PyInstaller-
+  bundled exe.
+* **Fix**: route ``faulthandler`` crash output to a log file in
+  the operator's user-data folder
+  (``%APPDATA%\Lyra\crash.log`` on Windows; equivalent on macOS/
+  Linux) instead of ``sys.stderr``.  Operators get a persistent
+  crash record they can attach to bug reports.  Falls back to
+  ``sys.stderr`` if the file can't be opened (source-tree runs);
+  silent no-op if neither works (won't crash launch).
+
+### EiBi overlay missing on Software / OpenGL graphics backends
+
+* **Root cause**: ``SpectrumPanel`` has two setup paths —
+  ``_setup_gpu_panadapter`` (used for the GPU-shader backend)
+  and ``_setup_qpainter_panadapter`` (used for both Software
+  and OpenGL backends, which share ``SpectrumWidget``).  The
+  GPU path connected four signals (``freq_changed``,
+  ``rate_changed``, ``zoom_changed``,
+  ``eibi_store_changed``) to ``_refresh_eibi_overlay`` and
+  fired an initial pass.  The QPainter path was missing that
+  entire block, so ``_refresh_eibi_overlay`` was never called
+  and ``widget.set_eibi_entries(...)`` was never invoked.
+  ``_eibi_overlay_visible`` stayed False and the paint event's
+  gate ``if self._eibi_overlay_visible and self._eibi_entries...``
+  was always False.  Overlay simply never drew on Software or
+  OpenGL backends.
+* **Reporter**: Brent (field testing v0.0.9.9).
+* **Fix**: mirror the GPU section's EiBi wiring block into
+  ``_setup_qpainter_panadapter`` (``panels.py`` ~line 4870).
+  Operator confirmed the fix works on all three backends.
+
+### Release workflow improvements (also in this patch)
+
+* **CLAUDE.md §11** "Releases" — converted from a 5-item
+  bulleted list to a numbered 9-step procedure with an
+  explicit step 8: ``git push origin <feature-branch>:main``.
+  v0.0.9.6 through v0.0.9.9 all skipped this step, leaving
+  anyone tracking ``origin/main`` pulling v0.0.9.5-era code
+  while the feature branch accumulated four shipped releases.
+* **build/build.cmd** — post-build banner prints the
+  three-push checklist + GitHub release reminder with
+  ``DON'T SKIP`` callouts so the main-push step isn't
+  forgotten again.
+
+### Installer + bench
+
+* Lyra-Setup-0.0.9.9.1.exe rebuilt with the launch fix.
+* Bench suite still 10/10 (no DSP code changed in this patch).
+* The v0.0.9.9 GitHub release is being retracted after this
+  ships — operators who downloaded the broken installer should
+  uninstall and grab v0.0.9.9.1 instead.
+
+---
+
 ## [0.0.9.9] — 2026-05-10 — IQ Captured Profiles
 
 The captured-noise-profile feature is **LIVE** in the WDSP audio

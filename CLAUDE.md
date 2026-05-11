@@ -62,6 +62,27 @@ content below has been mass-renumbered to the new scheme.
   nb, lms, anf, squelch, nr2, PythonRxChannel.process, etc.).
   See §13 (audio architecture), §14 (WDSP-DLL integration), §14.9
   (cleanup arc).
+- **v0.0.9.9.1** "Launch Hotfix" (2026-05-10) — emergency
+  patch over v0.0.9.9.  Two fixes:
+  (1) ``faulthandler.enable()`` added in v0.0.9.9 raised
+  ``RuntimeError: sys.stderr is None`` at import time on the
+  PyInstaller ``--windowed`` build (Lyra.exe ships with
+  ``console=False``, so sys.stderr is None).  Anyone who
+  downloaded v0.0.9.9 from GitHub couldn't launch Lyra.
+  Bench didn't catch it because source-tree runs have a real
+  stderr.  Fix routes crash output to
+  ``%APPDATA%\Lyra\crash.log`` (operator-visible artifact for
+  bug reports); falls back to sys.stderr if the file can't be
+  opened; silent no-op if neither works (won't crash launch).
+  (2) Brent reported EiBi overlay missing on Software /
+  OpenGL graphics backends.  The QPainter SpectrumPanel setup
+  was missing the four-signal EiBi wiring block that the GPU
+  SpectrumPanel had — the renderer was correct, but
+  ``_refresh_eibi_overlay`` was never connected so
+  ``set_eibi_entries(...)`` was never called.  Fix mirrors the
+  GPU section's wiring into ``_setup_qpainter_panadapter``;
+  operator confirmed working on all three backends.  v0.0.9.9
+  GitHub release retracted after v0.0.9.9.1 publishes.
 - **v0.0.9.9** "IQ Captured Profiles" (2026-05-10) — §14.6
   IQ-domain captured-profile rebuild lands LIVE.  Replaces the
   v0.0.9.6-era "capture works, apply is INERT in WDSP mode"
