@@ -91,6 +91,24 @@ DEFAULT_RING_SIZE = 24 * DEFAULT_OUTSIZE
 
 
 # ────────────────────────────────────────────────────────────────────
+# Destination-mask bit positions (Phase 0 scaffolding for the 8-way
+# AAmixer state machine per consensus-plan §3.3 IM-3).
+#
+# Thetis flattens (rx_index, sub_index) into a single mixinid via
+# WDSP.id(rx, sub) (cmaster.c:533, 552) and treats each stream as a
+# bit position in a 32-bit mask for SetAAudioMixStates(valid_mask,
+# active_mask).  Lyra uses Lyra host channel IDs as bit positions.
+#
+# Phase 0 only honors DEST_L | DEST_R for host_ch=0 (= the live
+# RX1-only route).  Phase 1 RX2 adds DEST_L for RX1 + DEST_R for RX2;
+# v0.2 TX-mon and v0.3 PS-disable-RX flip these via the state-product
+# transitions in set_state().
+DEST_L = 0x01    # left output channel
+DEST_R = 0x02    # right output channel
+DEST_LR = DEST_L | DEST_R    # both (RX1-only mono-on-stereo today)
+
+
+# ────────────────────────────────────────────────────────────────────
 # Outbound callback type
 # ────────────────────────────────────────────────────────────────────
 #
@@ -194,6 +212,32 @@ class AudioMixer:
         # full restart.
         self._active = [True] + [False] * (n_inputs - 1)
 
+        # Per-stream destination mask (Phase 0 scaffolding per
+        # consensus-plan §3.1.x item 2 + §3.3 IM-3).  Default route
+        # for stream 0 is DEST_LR (= RX1 mono-on-stereo on both
+        # channels) which preserves v0.0.9.x audible behavior.  All
+        # other streams start with mask 0 (silent).  Phase 1 RX2
+        # rewires stream 0 → DEST_L, stream 1 → DEST_R when the
+        # operator enables RX2; Phase 0 stores values but only the
+        # current live route is honored by _mixer_loop.
+        self._route_mask = [DEST_LR] + [0] * (n_inputs - 1)
+
+        # AAmixer state product (Phase 0 scaffolding per §3.3 IM-3).
+        # Eight-way state machine: Power × MOX × diversity × PS,
+        # most cases collapsing on no-power-no-MOX-no-PS.  Phase 0
+        # accepts the state setters and stores values; no live
+        # behavior change (the mixer still passes host_ch=0 through
+        # to L+R unconditionally).  Phase 1 onward consume this
+        # state to drive route remapping + slewing.  `tx_mon_active`
+        # is in the signature upfront (B-3 fix) so v0.2 doesn't need
+        # to change the API surface.
+        self._state_power: bool = False
+        self._state_mox: bool = False
+        self._state_diversity: bool = False
+        self._state_ps_enabled: bool = False
+        self._state_rx2_enabled: bool = False
+        self._state_tx_mon_active: bool = False
+
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -279,6 +323,85 @@ class AudioMixer:
             return
         with self._lock:
             self._active[stream_id] = active
+
+    # ── Route + AAmixer state surface (Phase 0 scaffolding) ─────
+    #
+    # Phase 0 contract per consensus-plan §3.1.x item 2:
+    #   * set_route(stream_id, dest_mask) and set_state(...) MUST
+    #     exist with their final Phase 1+ signatures.
+    #   * Only route `host_ch=0 → L+R sink` is wired live; all other
+    #     routes are stored but inert (the mixer loop still passes
+    #     host_ch=0 straight through to outbound).
+    #   * `tx_mon_active` is in set_state's signature up-front (the
+    #     B-3 fix from Round 1) so v0.2 TX-mon doesn't change the
+    #     public API.
+    #
+    # Phase 1 RX2 plumbs set_route into _mixer_loop's mixing math
+    # (DEST_L for RX1, DEST_R for RX2 when rx2_enabled=True).
+    # v0.2/v0.3 use set_state to drive the 8-way state machine
+    # (Power × MOX × diversity × PS) per §3.3 IM-3.
+
+    def set_route(self, stream_id: int, dest_mask: int) -> None:
+        """Set per-stream destination mask in the output buffer.
+
+        ``dest_mask`` is a bitwise-OR of ``DEST_L`` and ``DEST_R``;
+        ``0`` means "stream is silenced at the mixer output."  The
+        bit-position pattern matches Thetis's mixinid scheme
+        (aamix.c) so the same code structure absorbs RX2 (Phase 1),
+        TX-mon (v0.2), and PS-disable-RX (v0.3) without an API
+        rewrite.
+
+        Phase 0 stores the value but the mixer loop currently
+        ignores it -- the only live route is host_ch=0 → L+R,
+        preserved by initialization defaults in ``__init__``.  Phase
+        1 RX2 makes the mixer honor the mask.
+
+        Safe to call from any thread.
+        """
+        if stream_id < 0 or stream_id >= self._n_inputs:
+            raise ValueError(
+                f"stream_id {stream_id} out of range "
+                f"[0, {self._n_inputs})")
+        if dest_mask & ~DEST_LR:
+            raise ValueError(
+                f"dest_mask 0x{dest_mask:x} has bits outside "
+                f"DEST_L|DEST_R (0x{DEST_LR:x})")
+        with self._lock:
+            self._route_mask[stream_id] = dest_mask
+
+    def set_state(
+        self,
+        power: bool,
+        mox: bool,
+        diversity: bool,
+        ps_enabled: bool,
+        rx2_enabled: bool,
+        tx_mon_active: bool = False,
+    ) -> None:
+        """Update the AAmixer state product.
+
+        Eight-way state machine (Power × MOX × diversity × PS, most
+        cases collapsing on no-power-no-MOX-no-PS) per consensus-plan
+        §3.3 IM-3.  ``tx_mon_active`` is the v0.2 TX-monitor axis,
+        included in the Phase 0 signature so the public API stays
+        stable across v0.1 → v0.2 → v0.3.
+
+        Phase 0: values stored; no live behavior change (the mixer
+        passes host_ch=0 through to L+R unconditionally regardless
+        of state).  Phase 1+ consume this state to drive route
+        remapping (RX2 enable), per-stream-mute multipliers
+        (MuteRX1OnVFOBTX / MuteRX2OnVFOATX), and slewing on
+        activation transitions.
+
+        Safe to call from any thread.
+        """
+        with self._lock:
+            self._state_power = bool(power)
+            self._state_mox = bool(mox)
+            self._state_diversity = bool(diversity)
+            self._state_ps_enabled = bool(ps_enabled)
+            self._state_rx2_enabled = bool(rx2_enabled)
+            self._state_tx_mon_active = bool(tx_mon_active)
 
     # ── Outbound registration ────────────────────────────────────
 

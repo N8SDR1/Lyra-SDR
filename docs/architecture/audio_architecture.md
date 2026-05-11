@@ -4,6 +4,15 @@
 **Authority:** This document supersedes earlier scattered audio discussions in CHANGELOG entries v0.0.7.x through v0.0.9.5.
 **Related:** `CLAUDE.md` §13 (operative summary), `CLAUDE.md` §6.7 (hardware capability struct).
 
+> **2026-05-11 retraction note (Phase 0 v0.1):** any reference below to
+> `lyra/dsp/mix.py`, `StereoMixer.mix()`, or a Python-side `aamix` port
+> is **OBSOLETE**.  Phase 0 of v0.1 retracted the Python mixer per
+> `docs/architecture/v0.1_rx2_consensus_plan.md` §5.1 IM-4 — pan / mute
+> / gain math lives exclusively in WDSP cffi via `SetRXAPanelPan` etc.;
+> the Lyra-side mixer (`lyra/dsp/audio_mixer.py`) is a dispatcher thread
+> only.  Treat the v0.1 consensus plan as authoritative when it conflicts
+> with this document.
+
 ---
 
 ## 1. The problem we kept failing to solve

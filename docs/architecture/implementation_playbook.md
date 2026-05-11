@@ -1,5 +1,14 @@
 # Lyra HL2/HL2+ implementation playbook: RX2, TX, PureSignal
 
+> **2026-05-11 SUPERSEDED for v0.1 / v0.2 / v0.3 planning.**  See
+> `docs/architecture/v0.1_rx2_consensus_plan.md` (locked after 6
+> rounds of antagonistic agent review).  Specifically: any reference
+> below to `lyra/dsp/mix.py` / `StereoMixer` / Python-side pan math
+> is **OBSOLETE** — pan / mute / gain are WDSP cffi-only per consensus
+> plan §5.1 IM-4 (retracted Phase 0 of v0.1).  This document is
+> retained as historical context for the 2026-05-02 senior-engineering
+> pass that informed the consensus plan.
+
 Senior-engineering deep dive across Thetis 2.10.3.13 and WDSP source
 trees at `D:\sdrprojects\OpenHPSDR-Thetis-2.10.3.13\Project Files\
 Source\`.  Goal: concrete implementation plan for Lyra v0.0.9 (RX2),

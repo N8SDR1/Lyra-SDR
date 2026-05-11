@@ -464,7 +464,10 @@ These are Thetis-specific glue or trivially small:
 
 - `TXA.c`, `RXA.c` — channel scaffolding.  Lyra has its own.
 - `channel.c` — buffer mgmt.  Python's GIL handles it.
-- `aamix.c` — mixer.  Replace with NumPy in `lyra/dsp/mix.py`.
+- `aamix.c` — mixer.  Lyra-native dispatcher thread in
+  `lyra/dsp/audio_mixer.py` (NOT a NumPy port of aamix; the
+  Python port `lyra/dsp/mix.py` was retracted Phase 0 per
+  v0.1 plan §5.1 IM-4 to avoid double-pan with WDSP cffi).
 - `analyzer.c` — spectrum.  Lyra has its own GPU widget.
 - `main.c` — Win32 thread mgmt.  Use Python threading.
 
@@ -527,8 +530,9 @@ HL2Stream._rx_loop  → parser splits to {0,1,2,3}
                     → on_ddc_samples(ddc=2, ...) → drop (v0.0.9) / PS feedback (v0.2)
 
 Radio.dispatch_rx*  → DspChannel[k].process(iq) → audio_k
-                    → both audios in hand → StereoMixer.mix() → stereo
-                    → audio_sink.write(stereo)
+                    → AudioMixer.add_input(stream_id=k, audio_k)
+                    → mixer thread paces wire cadence
+                    → outbound(stereo) → audio_sink.write(stereo)
 ```
 
 dispatch_rx1 and dispatch_rx2 fire on the **same parser invocation**
@@ -847,7 +851,7 @@ lyra/
 │   └── stream.py                  # HPSDR P1 — nddc=4, per-DDC freq, etc.
 ├── dsp/
 │   ├── channel.py                 # per-RX DSP chain (existing)
-│   ├── mix.py                     # NEW v0.0.9 — StereoMixer + WDSP pan curve
+│   ├── audio_mixer.py             # mixer-dispatcher thread (pan lives in WDSP cffi via SetRXAPanelPan)
 │   ├── tx_channel.py              # NEW v0.1 — TX DSP chain
 │   ├── ssb_mod.py                 # NEW v0.1 — SSB modulator
 │   ├── cw_keyer.py                # NEW v0.1.1
@@ -891,7 +895,7 @@ D:\sdrprojects\OpenHPSDR-Thetis-2.10.3.13\Project Files\Source\
 └── wdsp\                          # GPL v3+, OK to port
     ├── calcc.c, calcc.h           # PS calibration
     ├── iqc.c, iqc.h               # PS predistortion application
-    ├── patchpanel.c               # pan curve (port for mix.py)
+    ├── patchpanel.c               # pan curve — called live via WDSP cffi (SetRXAPanelPan); no Python port (v0.1 plan §5.1 IM-4)
     ├── compress.c                 # TX compressor (port for v0.1.1)
     ├── lmath.c                    # xbuilder cubic-spline (port for v0.2)
     ├── delay.c                    # delay line (port for v0.2)
@@ -1363,10 +1367,10 @@ What we DO port (with attribution comment per
 
 | When | WDSP file | Lyra target | LOC | Unblocks |
 |---|---|---|---|---|
-| **v0.0.9.6** | `aamix.c` | `lyra/dsp/mix.py` | ~200 | RX1+RX2 mix routing |
+| **v0.0.9.6** | `aamix.c` | (not ported) `lyra/dsp/audio_mixer.py` is a Lyra-native dispatcher thread, NOT a NumPy port — `mix.py` retracted Phase 0 per v0.1 plan §5.1 IM-4 | — | RX1+RX2 mix routing (dispatcher only; mixing math = WDSP) |
 | **v0.0.9.6** | `varsamp.c` | `lyra/dsp/varsamp.py` | ~400 | PC sound card drift, ANAN audio |
 | **v0.0.9.6** | `rmatch.c` | `lyra/dsp/rmatch.py` | ~700 | PI control loop on top of varsamp |
-| **v0.0.9.6** | `patchpanel.c::SetRXAPanelPan` | `lyra/dsp/mix.py` | ~50 | RX2 stereo pan curve |
+| **v0.0.9.6** | `patchpanel.c::SetRXAPanelPan` | (cffi-only) `wdsp_engine.RxChannel.set_panel_pan` | — | RX2 stereo pan curve (NOT ported to Python — see v0.1 plan §5.1 IM-4) |
 | v0.2 | `compress.c` | `lyra/dsp/tx_compressor.py` | ~150 | TX compressor |
 | v0.2 | `eqp.c` | `lyra/dsp/eq.py` | ~300 | Parametric EQ (RX + TX) |
 | v0.2 | `delay.c` | `lyra/dsp/delay_line.py` | ~80 | TX delay matching, PS feedback |
@@ -1633,8 +1637,10 @@ no longer compete with the DSP for the GIL.
    `wdsp_native.py`, `wdsp_engine.py`, `audio_sink.py`,
    `audio_mixer.py`, `binaural.py`, `rmatch.py`, `varsamp.py`,
    `noise_profile_store.py`, `nr2.py` (used by capture path),
-   `worker.py`, `mix.py`, `squelch.py`.  See
-   `docs/architecture/measurements_and_cleanup.md` for the
+   `worker.py`, `squelch.py`.  (`mix.py` was on this keep-list
+   through v0.0.9.9 but was retracted Phase 0 of v0.1 per plan
+   §5.1 IM-4 — see §13.3 port-table row for `patchpanel.c`.)
+   See `docs/architecture/measurements_and_cleanup.md` for the
    four-phase plan.
 
 **Items still pending — not started:**
@@ -1663,8 +1669,10 @@ no longer compete with the DSP for the GIL.
 * See §14.7 for the NR-mode UX overhaul status (in operator
   testing as of 2026-05-07 evening).
 * RX2 work (v0.1) needs the audio-mixer plumbing already in
-  `mix.py` to be exercised — we built the foundation but haven't
-  driven a second WDSP channel through it.
+  `audio_mixer.py` to be exercised — we built the dispatcher
+  thread but haven't driven a second WDSP channel through it.
+  Per-channel pan / mute / gain math lives in WDSP cffi
+  (`SetRXAPanelPan`, `SetRXAPanelGain1/2`), not in Python.
 * TX (v0.2) will need a sibling `wdsp_tx_engine.py` modeled on
   `wdsp_engine.py`, plus the protocol-layer power scaling per
   `docs/architecture/measurements_and_cleanup.md` §2.2.
