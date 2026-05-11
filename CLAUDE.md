@@ -798,15 +798,25 @@ future direction.  Approach:
   variant (`p1_anan.py`?) sibling to `p1_hl2.py`, NOT a tweak.
   Revised v0.4.4 timeline accordingly when the work is scoped).
 
-**Brick SDR (L-6 Round 1 2026-05-11 — TBD entry):** operator
-mentioned Brick SDR as a v0.4 candidate during the Round 1
-amendment sequence on 2026-05-11.  Brick is **not** in Thetis
-2.10.3.13 source (Agent A confirmed — greppable for "brick"
-across the entire Thetis tree returns nothing relevant).
-**Operator action required:** specify which "Brick" (HiQSDR's
-Brick SDR? Some other vendor?) AND what protocol it speaks
-(HPSDR P1 like HL2/older ANAN, HPSDR P2 like ANAN G2, or a
-vendor-specific protocol Lyra has never seen).
+**Brick SDR (L-6 Round 1 2026-05-11; decided Round 3 2026-05-11
+per R3-8 — non-blocking for v0.1 Phase 0):** operator mentioned
+Brick SDR as a v0.4 candidate during the Round 1 amendment
+sequence on 2026-05-11.  Brick is **not** in Thetis 2.10.3.13
+source (Agent A confirmed — greppable for "brick" across the
+entire Thetis tree returns nothing relevant).
+
+**Round 3 scope decision (2026-05-11):** Brick is **non-blocking
+for v0.1 Phase 0 and the broader v0.1-v0.3 sequence.** The v0.4
+hardware-abstraction discipline in §6.7 (esp. discipline #6
+DDC mapping is family-specific + state-product-dependent) is
+sufficient foundation to absorb Brick when its scope solidifies.
+No Phase 0 deliverables wait on Brick.
+
+**Pending operator action (deferrable until v0.4 work starts):**
+specify which "Brick" (HiQSDR's Brick SDR? Some other vendor?)
+AND what protocol it speaks (HPSDR P1 like HL2/older ANAN,
+HPSDR P2 like ANAN G2, or a vendor-specific protocol Lyra has
+never seen).
 
 - If Brick is HL2-class (HermesLite derivative): drops cleanly
   into `p1_hl2.py` (or sibling) with a different capability
@@ -2450,8 +2460,31 @@ missing.
 
 ---
 
-*Last updated: 2026-05-11 — Round 1 synthesis amendments
-applied across §3.2 (priming vs main-loop duplex bit nuance),
+*Last updated: 2026-05-11 — Round 3 amendments applied (operator
+chose Option A: full sweep of all 9 R3 amendments) on top of
+Round 1 synthesis.  Round 3 changes: §7 v0.4 Brick scope marked
+non-blocking for v0.1 Phase 0 (R3-8).  Companion v0.1 plan edits:
+§8.5 TX chain rewritten to match xtxa() byte-for-byte adding
+gen0/gen1 (PS bench gates 4/5 prerequisite) + two-position
+preemph + per-stage meters + ALC defaults (R3-1); §3.1.x Phase 0
+done-definition added with 13 verifiable items including
+file-collision resolution + capability struct + spectrum mixin
++ regression null test (R3-2); §4.2.x dispatch state contract
+defining DispatchState dataclass + ConsumerID enum + per-family
+ddc_map function + threading model + captured-profile bypass
+call site (R3-3); §3.3 M-2 SpectrumSourceMixin replacing the
+non-existent base class with new lyra/ui/spectrum_common.py
+push-style mixin (R3-4); §5.3 chain diagram order corrected to
+APF before patchpanel matching WDSP internal order (R3-5);
+§4.2 terminology aligned to xrouter source IDs + §1.1 host
+channel 3 row clarification for ANAN (R3-6); §9.3.8 bench-test
+infrastructure subsection adding 6 cffi diagnostic accessor
+prerequisites for PS Gates 4/6/7 (R3-7); pre-commit hook one-liner
+audit gate for capability-driven UI (R3-9).  See
+scratch/round2_synthesis.md for the 16-gap → 9-amendment list
+that drove this round.  Earlier:
+2026-05-11 — Round 1 synthesis amendments applied across
+§3.2 (priming vs main-loop duplex bit nuance),
 §3.6 (HL2 P1 shared-rate caveat), §3.8 (CW I-LSB prose +
 adc_overload semantics + HL2 PS feedback DDC routing
 correction), §4.1 (port table rewrite for cffi-pivot reality),
