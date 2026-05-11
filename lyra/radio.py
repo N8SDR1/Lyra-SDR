@@ -29,6 +29,10 @@ from lyra.protocol.stream import HL2Stream, SAMPLE_RATES
 # Python implementations.
 from lyra.dsp.audio_sink import AK4951Sink, SoundDeviceSink, NullSink
 from lyra.dsp.captured_profile_iq import CapturedProfileIQ
+from lyra.radio_state import DispatchState, RadioFamily
+from lyra.protocol.capabilities import (
+    HL2_CAPABILITIES, RadioCapabilities,
+)
 from lyra.hardware.oc import (
     N2ADR_PRESET, n2adr_pattern_for_band, format_bits,
 )
@@ -98,6 +102,14 @@ class Notch:
 class Radio(QObject):
     # ── State change signals (UI subscribes) ───────────────────────────
     stream_state_changed = Signal(bool)
+    # ── Dispatch state product (v0.1 Phase 0, per consensus-plan §4.2.x) ──
+    # Fires whenever any axis of the DispatchState changes (mox / ps_armed
+    # / rx2_enabled / family).  Payload is the new DispatchState snapshot.
+    # Phase 0 has no live consumers wired -- Phase 1+ subscribes:
+    # protocol layer for per-DDC routing, UI panadapter for source switch,
+    # captured-profile pre-pass for MOX+PS bypass.  See
+    # ``lyra/radio_state.py`` for the dataclass + ConsumerID enum.
+    dispatch_state_changed = Signal(object)        # DispatchState
     # ── TCI streaming taps (v0.0.9.1+) ─────────────────────────────────
     # These signals fire whenever the audio / IQ data is finalised so
     # the TciServer can broadcast binary frames to subscribed clients.
@@ -898,6 +910,28 @@ class Radio(QObject):
         # another locked method without deadlock.
         self._iq_capture: CapturedProfileIQ | None = None
         self._iq_capture_lock = threading.RLock()
+
+        # ── Dispatch state product (v0.1 Phase 0, consensus-plan §4.2.x) ──
+        # Single frozen snapshot owned by the Qt main thread.  Mutation
+        # is exclusively via ``set_mox`` / ``set_ps_armed`` /
+        # ``set_rx2_enabled`` / ``set_radio_family``, each of which
+        # produces a new instance via ``dataclasses.replace`` and emits
+        # ``dispatch_state_changed``.  Reader threads (RX loop, DSP
+        # worker) call ``snapshot_dispatch_state()`` which is a
+        # GIL-atomic reference read; no lock required.  See module
+        # docstring at ``lyra/radio_state.py``.
+        self._dispatch_state: DispatchState = DispatchState()
+
+        # ── Captured-profile bypass edge-detector flag (R5-2 / §4.2.x) ──
+        # Tracks "was the captured-profile pre-pass active on the
+        # PREVIOUS WDSP block?" so the bypass-detector in
+        # ``_do_demod_wdsp`` can flush the STFT overlap buffer on the
+        # rising edge of MOX+PS (entering bypass).  Without this flag
+        # initialized here, the first ``_do_demod_wdsp`` call hits
+        # ``AttributeError`` -- the edge detector reads this attribute
+        # unconditionally on every block.  Phase 1 wires the actual
+        # bypass logic; Phase 0 just ships the attribute.
+        self._captured_profile_was_active: bool = False
         # FFT size used for new captures and engine init.
         # Operator-configurable via Settings → DSP → Captured
         # Profile → FFT size dropdown (Phase 5c).  Persisted via
@@ -1599,6 +1633,152 @@ class Radio(QObject):
             self._apply_bcd_for_current_freq()
 
     # ── Setters (mutate + emit) ───────────────────────────────────────
+
+    # ── Dispatch state contract (v0.1 Phase 0, consensus-plan §4.2.x) ───
+    #
+    # Reader (snapshot) + four setters + a Qt signal.  This is the full
+    # read/write surface; Phase 0 has NO live consumers wired (Phase 1
+    # adds protocol-layer dispatch + UI subscriptions).  The point of
+    # landing the whole surface in Phase 0 is so the Phase 0 → Phase 1
+    # hand-off has a testable contract (§4.4 verification step 7
+    # programmatically toggles ``set_mox`` and verifies ``ddc_map(state)``
+    # returns the expected per-DDC routing).
+    #
+    # Threading: only the Qt main thread may call the setters.  Reader
+    # threads (RX loop, DSP worker) call ``snapshot_dispatch_state()``
+    # which is GIL-atomic.  See ``lyra/radio_state.py`` for the rationale.
+
+    def snapshot_dispatch_state(self) -> DispatchState:
+        """Return the current DispatchState as a frozen snapshot.
+
+        Safe to call from any thread (RX loop, DSP worker, UI).  The
+        return value is a reference to the same frozen dataclass
+        instance shared with other readers; ``frozen=True`` plus the
+        single-writer-on-main-thread discipline means concurrent
+        readers cannot observe a torn state.
+
+        Callers should snapshot ONCE per work-unit (one UDP datagram
+        for ``HL2Stream._rx_loop``, one WDSP block for
+        ``_do_demod_wdsp``) and use that single reference for all
+        decisions within that work-unit.  This avoids "mox flipped
+        mid-datagram and now half the DDCs route to TX and half to
+        RX" pathologies.
+        """
+        return self._dispatch_state
+
+    def set_mox(self, mox: bool) -> None:
+        """Set the MOX axis of DispatchState.  Call from Qt main thread.
+
+        Wired by PTT state machine (v0.1.x onward) on every PTT /
+        MOX-button / CW-key / TUN-button edge.  Phase 0 has no live
+        consumer of the resulting state change; Phase 1 routes the
+        DDC enable mask + captured-profile pre-pass bypass off
+        ``state.mox AND state.ps_armed``.
+
+        Idempotent: setting MOX to its current value is a no-op (no
+        signal emission, no replace).  This matters because some PTT
+        callers fire on every poll cycle, not just edges.
+        """
+        new = bool(mox)
+        if self._dispatch_state.mox == new:
+            return
+        from dataclasses import replace
+        self._dispatch_state = replace(self._dispatch_state, mox=new)
+        self.dispatch_state_changed.emit(self._dispatch_state)
+
+    def set_ps_armed(self, ps_armed: bool) -> None:
+        """Set the PS-armed axis of DispatchState.  Call from Qt main thread.
+
+        Wired by PSDialog's FSM (v0.3) when entering/leaving the
+        ARMED state.  When ``mox AND ps_armed`` both hold, HL2
+        gateware re-routes DDC0/DDC1 to the PA-coupler via
+        ``cntrl1=4`` (see ``CLAUDE.md`` §3.8 "PS feedback DDC
+        routing" corrected entry); the dispatch table reroutes those
+        DDC slots to ``PS_FEEDBACK_I`` / ``PS_FEEDBACK_Q`` consumers
+        and the captured-profile pre-pass bypasses (per §4.2.x
+        captured-profile bypass call site).
+        """
+        new = bool(ps_armed)
+        if self._dispatch_state.ps_armed == new:
+            return
+        from dataclasses import replace
+        self._dispatch_state = replace(self._dispatch_state, ps_armed=new)
+        self.dispatch_state_changed.emit(self._dispatch_state)
+
+    def set_rx2_enabled(self, rx2_enabled: bool) -> None:
+        """Set the RX2-enabled axis of DispatchState.  Call from Qt main thread.
+
+        Wired by the RX2 toggle (v0.1 Phase 3 UI) when the operator
+        turns the second receiver on/off.  Reader consumers:
+        ``AudioMixer.set_state(...)`` (stereo split routing),
+        protocol layer (DDC1 host-channel-2 dispatch on RX-only state).
+
+        Independent of MOX -- valid to have rx2_enabled=True during
+        MOX (single-receiver TX with RX2 muted at the AAmixer per
+        §8.1 MuteRX*OnVFOBTX rule) AND during MOX+PS (RX2 is
+        gateware-disabled during HL2 PS+TX since DDC1 is sync-paired
+        to DDC0 for the PA coupler feedback).  The UI may show a
+        "PS-paused" badge in the latter case but the operator's
+        rx2_enabled INTENT persists across the transition.
+        """
+        new = bool(rx2_enabled)
+        if self._dispatch_state.rx2_enabled == new:
+            return
+        from dataclasses import replace
+        self._dispatch_state = replace(self._dispatch_state, rx2_enabled=new)
+        self.dispatch_state_changed.emit(self._dispatch_state)
+
+    @property
+    def capabilities(self) -> RadioCapabilities:
+        """Per-radio-family hardware capability struct.
+
+        v0.1 Phase 0 returns the HL2 capability instance
+        unconditionally -- v0.1 / v0.2 / v0.3 are HL2-only by
+        scope and HL2+ shares all HL2 capabilities (same protocol,
+        same audio path, same PS posture, different TCXO + PA).
+
+        v0.4 multi-radio work wires discovery-driven selection
+        here.  When that lands, this property reads from
+        ``self._dispatch_state.family`` and returns the matching
+        family's capability instance from the sibling modules
+        under ``lyra/protocol/`` (one per family).
+
+        Phase 0 consumers SHOULD read ONLY:
+          * ``nddc`` -- DDC count for EP6 parser stride.
+          * ``has_onboard_codec`` -- offer HL2-jack audio option?
+          * ``default_audio_path`` -- fresh-install default.
+
+        Reading other fields in Phase 0 code is harmless but the
+        plan reserves them for v0.2 / v0.3 / v0.4 consumers.
+        Smell test: any ``isinstance(radio.protocol, HL2)`` in
+        UI code is wrong (the audit gate in Phase 0 item 9
+        enforces this); use this property instead.
+        """
+        return HL2_CAPABILITIES
+
+    def set_radio_family(self, family: RadioFamily) -> None:
+        """Set the radio-family axis of DispatchState.  Call from Qt main thread.
+
+        Wired by stream-discovery / connection logic (one-shot at
+        connection time per §4.2.x lifecycle).  v0.1 hardcodes
+        ``RadioFamily.HL2`` at connection; v0.4 multi-radio work
+        populates this from the discovery response.
+
+        Family-specific behavior delta lives in
+        ``radio.protocol.ddc_map(state)`` (Phase 1 deliverable) and
+        ``RadioCapabilities`` (Phase 0 item 8) -- this enum is just
+        the routing-table selector key.  See CLAUDE.md §6.7
+        discipline #6 for the full per-family DDC mapping contract.
+        """
+        if not isinstance(family, RadioFamily):
+            raise TypeError(
+                f"family must be RadioFamily enum, got {type(family).__name__}")
+        if self._dispatch_state.family == family:
+            return
+        from dataclasses import replace
+        self._dispatch_state = replace(self._dispatch_state, family=family)
+        self.dispatch_state_changed.emit(self._dispatch_state)
+
     def set_ip(self, ip: str):
         if ip and ip != self._ip:
             self._ip = ip

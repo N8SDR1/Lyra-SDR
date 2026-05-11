@@ -1396,6 +1396,56 @@ class HL2Stream:
         if lna_gain_db is not None:
             self.set_lna_gain_db(lna_gain_db)
 
+    def _set_rx2_freq(self, hz: int):
+        """Write RX2 (DDC1) NCO frequency to the C&C register table.
+
+        Phase 0 v0.1 (2026-05-11) per consensus-plan §3.1.x item 5.
+        Sibling of ``_set_rx1_freq`` -- same packing, different C0
+        register slot.  Phase 0 leaves no live caller: Radio's RX2
+        VFO ("VFO B shadow freq" per plan §3.2) is operator-tunable
+        already but Phase 1 RX2 wires the call from
+        ``Radio._on_vfo_b_changed`` onward.
+
+        **Plan-text divergence (flagged Phase 0):** the consensus
+        plan §3.1.x item 5 literally said "writes
+        ``_cc_registers[0x03]``", but ``0x03`` is Thetis's
+        round-robin case-INDEX comment (``networkproto1.c:995``
+        ``case 3: //RX2 VFO (DDC1) 0x03``), NOT the C0 byte.  The
+        actual HPSDR P1 C0 byte the gateware decodes for RX2 NCO is
+        ``0x06`` (``C0 |= 6`` at ``networkproto1.c:996``), a sibling
+        of RX1 NCO's ``0x04`` (used by ``_set_rx1_freq`` above and
+        documented at HPSDR P1 reg map).  Lyra's ``_cc_registers``
+        dict is keyed by raw C0 byte (``0x00`` general settings,
+        ``0x04`` RX1 NCO, ``0x2e`` TX latency), so the correct key
+        for the RX2 NCO write is ``0x06``.  Writing to ``0x03``
+        would clobber the "TX NCO with PTT bit set" slot, which
+        would be wrong.  Plan defect slipped through all six review
+        rounds; we implement the byte that's correct against the
+        Thetis source-of-truth rather than the byte the plan
+        literally typed.
+        """
+        c0 = 0x06  # RX2 NCO freq (DDC1) -- HPSDR P1 standard, matches
+                   # Thetis networkproto1.c:996 (C0 |= 6 for case 3 RX2).
+        c1 = (hz >> 24) & 0xFF
+        c2 = (hz >> 16) & 0xFF
+        c3 = (hz >> 8) & 0xFF
+        c4 = hz & 0xFF
+        # Same Path C.2 audio-pop discipline as _set_rx1_freq: no
+        # direct _send_cc; let the EP2 writer thread re-emit the
+        # updated register on its next round-robin tick.  (Phase 0
+        # has no live caller for this method, but the discipline is
+        # baked in upfront so Phase 1 RX2 callers don't have to
+        # rediscover it.)
+        with self._cc_lock:
+            self._cc_registers[c0] = (c1, c2, c3, c4)
+        # Note: NOT updating ``_keepalive_cc`` here.  Keepalive is
+        # the most-recent-RX1-tune fallback path (legacy single-RX
+        # behavior); leaving it alone preserves the v0.0.9.x
+        # invariant that RX1 freq changes drive keepalive cadence.
+        # Phase 1 RX2 may need to revisit this if RX2-only operation
+        # ever becomes a thing, but for v0.1's "RX1 always live,
+        # RX2 layered on top" model this is correct.
+
     def _set_rx1_freq(self, hz: int):
         # NOTE: this method is called on EVERY frequency change —
         # click-to-tune, wheel-zoom, drag-pan, band button, mode

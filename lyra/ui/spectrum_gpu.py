@@ -80,6 +80,8 @@ from PySide6.QtOpenGL import (
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
+from .spectrum_common import SpectrumSourceMixin
+
 
 # Background color for the panadapter (RGB normalized 0..1) — matches
 # the QPainter widget's `BG = QColor(12, 20, 32)` so visuals stay
@@ -162,8 +164,16 @@ def lyra_gl_format() -> QSurfaceFormat:
     return fmt
 
 
-class SpectrumGpuWidget(QOpenGLWidget):
+class SpectrumGpuWidget(SpectrumSourceMixin, QOpenGLWidget):
     """GPU-rendered spectrum + (eventually) waterfall panadapter.
+
+    MRO note (v0.1 Phase 0): ``SpectrumSourceMixin`` is listed first
+    so Python's C3 linearization places it ahead of ``QOpenGLWidget``
+    on method-resolution.  Mixin is plain Python (NOT QObject) -- see
+    ``lyra/ui/spectrum_common.py`` module docstring for why.  Phase 0
+    just adds the source-switch surface; the GLSL pipeline stays
+    unchanged for v0.0.x parity.
+
 
     Phase A.3 state: draws a self-generated synthetic sine-wave
     trace using one draw call per frame against a dynamic vertex

@@ -715,16 +715,24 @@ on every PR.
    (per audio_architecture.md §13.4) — NOT in `radio.py` or
    DSP modules.  Dispatch helpers (`twist`, per-DDC
    demultiplexer) consume the table from
-   `radio.protocol.ddc_map(mox, ps_armed)` at runtime.  Phase 1
-   `stream.py` MUST already be table-driven on MOX edges (per
-   v0.1 plan §9.5 architectural implication) — hard-coded
-   `if ddc==0: → RX1; if ddc==1: → RX2` is a smell.  Smell tests:
+   `radio.protocol.ddc_map(state)` at runtime, where `state` is a
+   `lyra.radio_state.DispatchState` snapshot (4 axes: mox,
+   ps_armed, rx2_enabled, family).  Signature pinned v0.1 Phase 0
+   2026-05-11 per consensus-plan §4.2.x R5-3 — the earlier draft
+   in this section used `ddc_map(mox, ps_armed)` but R3-3 added
+   the rx2_enabled + family axes so the function now takes the
+   full state snapshot for forward-compatibility with v0.4
+   multi-radio.  Phase 1 `stream.py` MUST already be
+   table-driven on MOX edges (per v0.1 plan §9.5 architectural
+   implication) — hard-coded `if ddc==0: → RX1; if ddc==1: → RX2`
+   is a smell.  Smell tests:
    - Any `if ddc_idx == N:` in non-protocol code is wrong.
    - Any `isinstance(radio.protocol, HL2)` in non-protocol code
      is wrong — use capabilities struct.
-   - Any DDC→host-channel mapping that doesn't account for
-     `(mox, ps_armed)` state product is wrong — the same wire
-     dispatch routes to different consumers depending on state.
+   - Any DDC→host-channel mapping that doesn't account for the
+     full `DispatchState` (mox, ps_armed, rx2_enabled, family)
+     is wrong — the same wire dispatch routes to different
+     consumers depending on state.
 
 When v0.4 starts, the protocol module gets split:
 

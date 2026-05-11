@@ -14,6 +14,27 @@
 | **F3**       | (In User Guide) Jump to next search match  |
 | **Esc**      | (In User Guide) Close the guide window     |
 
+### Reserved for v0.1 RX2 (Phase 3 — focus model)
+
+The following shortcuts are **reserved** for the RX1/RX2 focus model
+landing in v0.1 Phase 3.  They are not wired yet but the keys are
+held off-limits so no v0.0.9.x patch picks them for an unrelated
+binding:
+
+| Key          | Action (Phase 3)                           |
+|--------------|--------------------------------------------|
+| **Ctrl + 1** | Focus RX1 (VFO A becomes the "active" receiver — MODE+FILTER and DSP+AUDIO panels operate on it) |
+| **Ctrl + 2** | Focus RX2 (VFO B becomes the "active" receiver — only relevant when RX2 is enabled) |
+
+Hotkey audit (v0.1 Phase 0 item 11, 2026-05-11):
+
+* Re-grepped `lyra/ui/app.py` and the entire `lyra/ui/` tree for
+  any existing binding to `Ctrl+1` / `Ctrl+2` — none found.
+* Re-grepped this file (`docs/help/shortcuts.md`) for the same —
+  none found.
+* Path is clear; consensus-plan §3.1.x item 11's fallback to
+  `Alt+1` / `Alt+2` is not needed.
+
 ## User Guide navigation
 
 - **Search box** (top of the guide) — filters topics by content; the

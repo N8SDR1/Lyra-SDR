@@ -12,6 +12,7 @@ from PySide6.QtGui import (
 # same QPainter code on either backend; OpenGL just moves rasterization
 # to the GPU so resize/fullscreen doesn't stall the demod thread.
 from .gfx import ACCELERATED_BASE as _PaintedWidget
+from .spectrum_common import SpectrumSourceMixin
 
 BG = QColor(0, 0, 0)         # panadapter background — pure black to match the waterfall
 GRID = QColor(40, 60, 80)
@@ -20,8 +21,16 @@ TRACE = QColor(94, 200, 255)
 TRACE_FILL = QColor(94, 200, 255, 60)
 
 
-class SpectrumWidget(_PaintedWidget):
-    """FFT magnitude line (dBFS/Hz) with filled gradient beneath."""
+class SpectrumWidget(SpectrumSourceMixin, _PaintedWidget):
+    """FFT magnitude line (dBFS/Hz) with filled gradient beneath.
+
+    MRO note (v0.1 Phase 0): ``SpectrumSourceMixin`` is listed first
+    so Python's C3 linearization places it ahead of the Qt base on
+    method-resolution.  See ``lyra/ui/spectrum_common.py`` module
+    docstring for why the mixin is plain Python (not QObject).
+    Phase 0 just adds the source-switch surface; the FFT routing
+    itself stays unchanged for v0.0.x parity.
+    """
 
     clicked_freq = Signal(float)
     # Payload: (abs_freq_hz, shift_held, global_position). The globalPos

@@ -334,9 +334,18 @@ class DspChannel(ABC):
 
     AUDIO_RATE = 48000
 
-    def __init__(self, in_rate: int):
+    def __init__(self, in_rate: int, channel_id: int = 0):
+        """Phase 0 v0.1 (2026-05-11) added the ``channel_id`` parameter
+        per consensus-plan §3.1.x item 4.  Defaults to 0 for backward
+        compatibility with existing single-channel call sites
+        (Radio's ``self._rx_channel = PythonRxChannel(in_rate=...)``
+        construction at radio.py:791).  Phase 1 RX2 instantiates a
+        second channel with ``channel_id=2`` (DDC2 in the HL2 4-DDC
+        topology, host channel ID 2 per CLAUDE.md §6.7 discipline #6).
+        """
         self.in_rate: int = int(in_rate)
         self.audio_rate: int = self.AUDIO_RATE
+        self.channel_id: int = int(channel_id)
 
     # ── Configuration setters (called by Radio when state changes) ─
 
@@ -417,8 +426,21 @@ class PythonRxChannel(DspChannel):
     no longer called.  Phase 6 replaces them with dataclasses.
     """
 
-    def __init__(self, in_rate: int):
-        super().__init__(in_rate)
+    def __init__(self, in_rate: int, channel_id: int = 0):
+        """Phase 0 v0.1 added ``channel_id`` per consensus-plan
+        §3.1.x item 4; the default of ``0`` preserves the existing
+        single-channel call site at ``radio.py:791``
+        (``PythonRxChannel(in_rate=self._rate)``) unchanged.
+
+        Phase 1 RX2 will instantiate ``channel_id=2`` for the RX2
+        DSP chain (host channel 2 per CLAUDE.md §6.7 discipline #6
+        DDC mapping).  The constructor stores the id on
+        ``self.channel_id`` via the ABC; nothing in this class is
+        currently keyed off it (all DSP state mirrors are
+        single-channel), but a future per-channel-keyed dispatch
+        layer can read it.
+        """
+        super().__init__(in_rate, channel_id=channel_id)
         self._mode: str = "USB"
         self._cw_pitch_hz: float = 650.0
 
