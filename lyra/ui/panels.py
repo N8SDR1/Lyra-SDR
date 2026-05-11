@@ -4880,6 +4880,31 @@ class SpectrumPanel(GlassPanel):
         # (with SSB → USB/LSB/SSB auto-expansion) and applies during render.
         self.widget.set_spot_mode_filter(radio.spot_mode_filter_csv)
         radio.spot_mode_filter_changed.connect(self.widget.set_spot_mode_filter)
+        # ── EiBi SW broadcaster overlay (v0.0.9 Step 4c) ──────────
+        # MIRROR of the GPU panadapter wiring at line ~4729.  This
+        # block was missing from the QPainter setup until v0.0.9.9.1
+        # — Brent reported "EiBi only works in GPU option, not in
+        # qpainter or OpenGL".  Same dispatch on both Software AND
+        # OpenGL backends since they share this code path (only
+        # the widget's base class differs — see gfx.py).
+        #
+        # The panel watches freq + zoom + store-changes and pushes
+        # the visible-range entry list into the widget.  Auto-
+        # detection (no overlay inside ham bands) lives in the
+        # ``_refresh_eibi_overlay`` method.
+        radio.freq_changed.connect(
+            lambda *_: self._refresh_eibi_overlay())
+        radio.rate_changed.connect(
+            lambda *_: self._refresh_eibi_overlay())
+        radio.zoom_changed.connect(
+            lambda *_: self._refresh_eibi_overlay())
+        radio.eibi_store_changed.connect(
+            self._refresh_eibi_overlay)
+        # Initial pass — fires _refresh_eibi_overlay which calls
+        # widget.set_eibi_entries(...) so the overlay shows up
+        # immediately on launch (subject to the master-enable
+        # + auto-detect gates).
+        self._refresh_eibi_overlay()
         # Spectrum dB-range — live control from Visuals settings.
         lo, hi = radio.spectrum_db_range
         self.widget.set_db_range(lo, hi)
