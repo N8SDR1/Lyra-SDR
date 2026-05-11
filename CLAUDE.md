@@ -590,6 +590,29 @@ on every PR.
    quirks belong in `lyra/protocol/p1_hl2.py` (today) and
    `lyra/protocol/p2_anan.py` (v0.4).
 
+6. **DDC-index → host-channel mapping is family-specific
+   (Amendment A3, 2026-05-11).**  The mapping between wire-protocol
+   DDC indices (0..N-1) and Lyra's host-side DSP channel IDs is
+   NOT identity and varies per radio family.  Per
+   `docs/architecture/v0.1_rx2_consensus_plan.md` §2, HL2 (4-DDC)
+   maps DDC0→ch0 (RX1), DDC1→ch2 (RX2), DDC2+DDC3 twist-paired
+   → ch3 (PS feedback); ANAN 5-DDC maps DDC0→ch0, DDC1→ch2,
+   DDC2→ch5 + DDC3→ch6 (PS A/B), DDC4→ch3 (RX2-sub or
+   diversity).  **Implementation discipline:** the mapping table
+   lives in `lyra/protocol/<family>.py` next to the capability
+   struct (per §13.4 audio architecture) — NOT in `radio.py`
+   or DSP modules.  Dispatch helpers (`twist`, per-DDC
+   demultiplexer) consume the table from `radio.protocol.ddc_map`
+   at runtime.  Hard-coding `DDC0→ch0, DDC1→ch1` anywhere in
+   Lyra is a sign the abstraction has been violated and must be
+   refactored before merging.  Smell test: any `if ddc_idx == 2:`
+   in non-protocol code is wrong; the protocol layer should have
+   already routed it.  Also recall that DDC-to-channel routing
+   is **state-product dependent** (MOX, ps_armed, rx2_enabled,
+   family) per v0.1 plan §9.5 panadapter source matrix — same
+   physical DDC stream can route to different host channels
+   depending on state.
+
 When v0.4 starts, the protocol module gets split:
 
 ```

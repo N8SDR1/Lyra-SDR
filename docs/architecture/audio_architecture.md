@@ -93,6 +93,57 @@ virtual cable so WSJT-X / FT8 / fldigi listen there. VAC is not
 the operator's "speaker" output. The operator's speaker output in
 HermesLite mode is always the HERMES path.
 
+### 2.4 Thetis runs BOTH sinks simultaneously — Lyra deliberately does NOT (Amendment A4, Round 3 2026-05-11)
+
+A subtlety worth pinning down before v0.1 RX2 work begins: in
+Thetis's HermesLite configuration, the HERMES codec path
+(Path A above) AND the IVAC virtual-audio-cable / ASIO path
+(Path B) can both run **at the same time** — the operator's
+ears get the HERMES jack output, while digital-mode software
+(WSJT-X / FT8 / fldigi) gets a parallel feed via IVAC.  This is
+why Thetis exposes both `audioCodecId = HERMES` for the codec
+and a complete IVAC config block for the virtual cable.
+
+**Lyra deliberately makes these mutually exclusive.**  The
+"Out" combo on the DSP+Audio panel is a single selector — HL2
+audio jack OR PC Soundcard, not both.  The reasoning, all
+operator-decision-grade:
+
+1. **Simpler operator mental model.**  "Which sink is hearing
+   audio right now?" has a single answer at any moment.  Ham
+   operators who switch between modes don't need a sub-config
+   panel deciding which path each consumer reads from.
+2. **No double-resampler CPU cost.**  Path B's `rmatch+varsamp`
+   PI loop runs only when the operator has actually selected it.
+   On Path A operators (~95% of HL2 users), the entire `rmatch`
+   stage is idle.
+3. **Digital-mode users use TCI instead of audio loopback.**
+   Lyra has first-class TCI support (see `docs/help/tci.md`);
+   SDRLogger+, JTDX, and N1MM+ consume audio through TCI's
+   audio-over-network protocol rather than via VAC.  TCI is
+   sample-accurate, latency-known, and doesn't require a
+   virtual-audio-cable driver install.  The dual-sink Thetis
+   pattern was a workaround for a problem TCI solves cleanly.
+4. **AAmixer routing matrix simpler.**  With one active sink,
+   the AAmixer's state machine is a clean function of (RX1_on,
+   RX2_on, PS_on, MOX); with two parallel sinks, it doubles in
+   width (each route has to know "to which sink").
+
+**v0.4 ANAN impact:** ANAN family has no onboard codec, so
+"HL2 audio jack" is unavailable.  PC Soundcard becomes the
+only option there — no behavior change to the mutual-exclusion
+contract.  When digital-mode operators ask "how do I run
+WSJT-X on Lyra + ANAN simultaneously," the answer remains
+TCI, not dual sinks.
+
+**Operator-override escape hatch:** if a future tester reports
+a legitimate need for parallel sinks (e.g. running the HL2
+jack for the operator's headphones AND piping audio to a
+recorder app that can't speak TCI), the AudioMixer abstraction
+in `lyra/dsp/mix.py` supports it — add a second route, second
+sink object.  But this stays out of v0.1-v0.3 by design.
+Document the architectural choice; don't paint into a corner.
+
 ## 3. WDSP's `rmatch` adaptive resampler
 
 Used by both VAC and ASIO paths. Built from two layers:
