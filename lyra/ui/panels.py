@@ -344,8 +344,10 @@ class TuningPanel(GlassPanel):
         row1.addLayout(logo_container, 3)
 
         # RX2 — placeholder. Shown as a dimmed disabled FrequencyDisplay
-        # with an "RX2 — DISABLED" banner. Ready for activation when
-        # the second receiver comes online.
+        # with a banner pointing to the Phase 1 bench-test dialog.
+        # Phase 3 of v0.1 wires this for the full focus-model UI;
+        # until then RX2 is operator-controllable via Help → RX2
+        # Bench Test (consensus plan §4.4 step 2).
         rx2_col = QVBoxLayout()
         rx2_col.setSpacing(2)
         rx2_label = QLabel("RX2")
@@ -360,7 +362,32 @@ class TuningPanel(GlassPanel):
         self.freq_display_rx2.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.freq_display_rx2.set_freq_hz(0)
-        self.freq_display_rx2.set_vfo_enabled(False, "RX2 — not yet wired")
+        self.freq_display_rx2.set_vfo_enabled(
+            False, "RX2 — Phase 1 (click for bench test)",
+        )
+        # Operator-discoverability tooltip — operators are conditioned
+        # to type into LED displays; the Phase 1 RX2 surface lives
+        # behind Help → RX2 Bench Test instead.  Tooltip + click-to-
+        # open keep them from getting stuck trying to type here.
+        self.freq_display_rx2.setToolTip(
+            "Phase 1 v0.1: RX2 is wired at the protocol layer but the "
+            "dual-VFO focus model (typing into this display, Ctrl+1/"
+            "Ctrl+2 focus switch, A↔B/Swap/Lock buttons) lands in "
+            "Phase 3.  Until then, tune VFO B from Help → RX2 Bench "
+            "Test… (or click this display to open it directly)."
+        )
+        # Click-to-open: the FrequencyDisplay is disabled (won't
+        # accept inline edits) so we install a child-of-window event
+        # filter to catch the click and open the bench-test dialog.
+        def _open_rx2_bench(_ev=None):
+            try:
+                win = self.window()
+                if hasattr(win, "_open_rx2_bench"):
+                    win._open_rx2_bench()
+            except Exception:
+                pass
+            return True
+        self.freq_display_rx2.mousePressEvent = _open_rx2_bench  # type: ignore[assignment]
         rx2_col.addWidget(self.freq_display_rx2)
         row1.addLayout(rx2_col, 5)
         outer.addLayout(row1)

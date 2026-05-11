@@ -13,14 +13,35 @@ IQ data frame (1032 bytes, radio -> host on the port the host sent from):
     Two "USB" frames (512 bytes each):
         sync: 0x7F 0x7F 0x7F
         C&C:  5 bytes (C0 .. C4) — radio->host telemetry/feedback
-        data: 504 bytes = 63 samples, each 8 bytes:
-            I: 3 bytes big-endian signed (24-bit)
-            Q: 3 bytes big-endian signed (24-bit)
-            mic: 2 bytes big-endian signed (16-bit)
+        data: 504 bytes payload (see Phase 1 layout below)
+
+Phase 1 (v0.1, 2026-05-11) — nddc=4 sample-set layout per
+CLAUDE.md §3.3:
+    504 bytes = 19 sample-slots × 26 bytes/slot (10 trailing
+    bytes unused).  Per 26-byte slot:
+        bytes 0..2:   DDC0 I (BE 24-bit signed)
+        bytes 3..5:   DDC0 Q
+        bytes 6..8:   DDC1 I
+        bytes 9..11:  DDC1 Q
+        bytes 12..14: DDC2 I (gateware-disabled on HL2: zeros)
+        bytes 15..17: DDC2 Q (gateware-disabled on HL2: zeros)
+        bytes 18..20: DDC3 I (gateware-disabled on HL2: zeros)
+        bytes 21..23: DDC3 Q (gateware-disabled on HL2: zeros)
+        bytes 24..25: mic sample (BE 16-bit signed)
+
+Pre-Phase-1 v0.0.9.x ran at nddc=1 with a 504 / 8 = 63-slot
+single-DDC layout (I=3, Q=3, mic=2).  The wire flip is governed
+by ``_config_c4`` bit-field per CLAUDE.md §3.2: 0x04 = duplex +
+nddc=1, 0x1C = duplex + nddc=4.  See ``_decode_iq_samples`` and
+the ``HL2Stream.__init__`` C4 setup comment for the rationale.
 
 C&C write register selectors (host -> radio in EP2, for later use):
     C0=0x00: speed/config (bit 1:0 of C1 = sample rate index)
-    C0=0x02: TX NCO freq, C0=0x04..0x0E: RX1..RX6 NCO freq (32-bit Hz BE)
+    C0=0x02: TX NCO freq, C0=0x04: RX1 NCO freq, C0=0x06: RX2 NCO
+    freq (DDC1, Phase 1; verified against Thetis ``networkproto1.c:996``
+    ``C0 |= 6`` for case-3 RX2 -- the Thetis ``case 3`` comment
+    ``//RX2 VFO (DDC1) 0x03`` is the round-robin case-INDEX,
+    not the C0 byte; see ``_set_rx2_freq`` for full rationale).
 """
 from __future__ import annotations
 
@@ -31,9 +52,11 @@ import struct
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 import numpy as np
+
+from lyra.radio_state import ConsumerID, DispatchState
 
 _log = logging.getLogger(__name__)
 
@@ -101,35 +124,223 @@ def _build_start_stop_packet(flags: int) -> bytes:
     return bytes(pkt)
 
 
-def _decode_iq_samples(block_data: bytes) -> np.ndarray:
-    """Decode 504 bytes into 63 complex64 I/Q samples (mic discarded for now)."""
-    # Interpret as 63 groups of 8 bytes. Use uint8 and bit-assemble 24-bit ints.
-    arr = np.frombuffer(block_data, dtype=np.uint8).reshape(63, 8)
-    i_raw = (
-        (arr[:, 0].astype(np.int32) << 16)
-        | (arr[:, 1].astype(np.int32) << 8)
-        | arr[:, 2].astype(np.int32)
+# ── EP6 sample-set decoder (nddc=4 layout, Phase 1) ───────────────
+#
+# Per CLAUDE.md §3.3 EP6 receive frame layout at nddc=4:
+#
+#   Per UDP datagram: 2 × 512-byte USB frames.
+#   Per USB frame:
+#     bytes [0:3] = 0x7F 0x7F 0x7F sync
+#     bytes [3:8] = C0..C4 (radio→host C&C: PTT, ADC overload,
+#                   telemetry rotation, optional I2C readback)
+#     bytes [8:512] = 504 bytes sample-set payload
+#
+# Per 26-byte slot (504 / 26 = 19 slots; trailing 10 bytes unused):
+#   bytes 0..2:   DDC0 I (BE 24-bit signed)
+#   bytes 3..5:   DDC0 Q
+#   bytes 6..8:   DDC1 I
+#   bytes 9..11:  DDC1 Q
+#   bytes 12..14: DDC2 I
+#   bytes 15..17: DDC2 Q
+#   bytes 18..20: DDC3 I
+#   bytes 21..23: DDC3 Q
+#   bytes 24..25: mic sample (BE 16-bit signed)
+#
+# Each DDC therefore receives 19 samples per USB block × 2 blocks
+# per UDP datagram = 38 complex samples per UDP per DDC.  This is
+# ~3.3× fewer than the pre-Phase-1 nddc=1 path (which delivered
+# 126 per datagram per DDC), so at a fixed wire IQ rate the
+# datagram rate goes up correspondingly -- 5053 datagrams/sec at
+# 192 kHz nddc=4 vs 1524 at 192 kHz nddc=1.  Downstream consumers
+# in radio.py accumulate samples into batches, so the smaller
+# per-callback chunks are transparent to them.
+
+_NDDC = 4
+_SLOTS_PER_BLOCK = 19
+_SLOT_STRIDE = 26    # bytes per slot at nddc=4 (= 6 * nddc + 2)
+_MIC_OFFSET = 24     # byte offset of mic sample within slot (= 8 * nddc - 8)
+_USED_SLOT_BYTES = _SLOTS_PER_BLOCK * _SLOT_STRIDE  # = 494 of the 504 payload bytes
+_IQ_SCALE = np.float32(1.0 / (1 << 23))
+
+
+def _decode_iq_samples(block_data: bytes) -> Dict[int, np.ndarray]:
+    """Decode one 504-byte EP6 sample-set block into per-DDC IQ + mic.
+
+    Phase 1 (v0.1) — nddc=4 layout per CLAUDE.md §3.3 and plan §4.2.
+
+    Returns a dict shaped::
+
+        {
+            0: ndarray((19,), dtype=complex64),    # DDC0 IQ
+            1: ndarray((19,), dtype=complex64),    # DDC1 IQ
+            2: ndarray((19,), dtype=complex64),    # DDC2 IQ (gateware-disabled on HL2 -> zeros)
+            3: ndarray((19,), dtype=complex64),    # DDC3 IQ (gateware-disabled on HL2 -> zeros)
+            "mic": ndarray((19,), dtype=int16),    # mic samples (sign-extended)
+        }
+
+    Performance: fully vectorized across all 4 DDCs and both I/Q
+    streams in a single shot.  Per-UDP nddc=4 EP6 cadence at 192
+    kHz wire rate is ~5053 datagrams/sec (vs ~1524 at nddc=1), so
+    each per-datagram microsecond matters -- the initial Phase 1
+    parser iterated per-DDC and triggered audio underruns from
+    per-numpy-op overhead on (19,)-shape arrays.  The optimized
+    path uses ~6 numpy ops total instead of ~28 (~4× speedup on
+    small arrays where per-op overhead dominates), eliminating
+    that bottleneck.
+
+    Memory layout the optimization exploits: each 26-byte slot is
+    8 consecutive 3-byte BE triplets (DDC0_I, DDC0_Q, DDC1_I,
+    DDC1_Q, DDC2_I, DDC2_Q, DDC3_I, DDC3_Q) followed by 2 mic
+    bytes.  Reshaping the 19×24 IQ bytes as ``(19, 8, 3)`` lets
+    one bitshift+OR sequence build all 152 24-bit raw integers
+    at once, then a single ``np.where`` sign-extends, a single
+    multiply scales, and slicing splits into per-DDC views.
+
+    Note ``block_data`` is the 504-byte payload AFTER the 8-byte
+    USB-block header (sync + C0..C4).  Caller is responsible for
+    stripping the header before calling this decoder.
+
+    Args:
+        block_data: 504-byte payload of one USB block within an
+            EP6 UDP datagram.  Must be exactly 504 bytes or longer
+            (only the first 494 = 19*26 are read; trailing 10
+            unused bytes are ignored to match the wire format).
+
+    Returns:
+        Dict mapping DDC index (0..3) to a (19,) complex64 ndarray
+        with samples normalized to [-1, 1), plus ``"mic"`` -> (19,)
+        int16 mic samples (sign-extended from BE 16-bit on the wire).
+
+    Raises:
+        ValueError: If ``block_data`` is shorter than 494 bytes.
+    """
+    if len(block_data) < _USED_SLOT_BYTES:
+        raise ValueError(
+            f"_decode_iq_samples needs >= {_USED_SLOT_BYTES} bytes "
+            f"(19 slots * 26 bytes/slot at nddc=4); got {len(block_data)}"
+        )
+    arr = np.frombuffer(
+        block_data[:_USED_SLOT_BYTES], dtype=np.uint8
+    ).reshape(_SLOTS_PER_BLOCK, _SLOT_STRIDE)
+
+    # ── Vectorized 24-bit BE decode across all 8 IQ triplets ──
+    # Bytes [0:24] of each slot are 8 × 3-byte triplets, one per
+    # DDC I/Q channel in order (D0I, D0Q, D1I, D1Q, D2I, D2Q, D3I,
+    # D3Q).  Reshape to (slots, 8, 3) so each axis-2 triple is one
+    # BE 24-bit sample.
+    iq_bytes = arr[:, :_NDDC * 6].reshape(
+        _SLOTS_PER_BLOCK, _NDDC * 2, 3,
     )
-    q_raw = (
-        (arr[:, 3].astype(np.int32) << 16)
-        | (arr[:, 4].astype(np.int32) << 8)
-        | arr[:, 5].astype(np.int32)
+    # Build 24-bit unsigned ints via 3 bitshifts + ORs.  One op per
+    # byte position covers all 152 samples in the block at once.
+    raw = (
+        (iq_bytes[:, :, 0].astype(np.int32) << 16)
+        | (iq_bytes[:, :, 1].astype(np.int32) << 8)
+        | iq_bytes[:, :, 2].astype(np.int32)
     )
-    # sign-extend 24-bit to 32-bit
-    i_raw = np.where(i_raw & 0x800000, i_raw - 0x1000000, i_raw)
-    q_raw = np.where(q_raw & 0x800000, q_raw - 0x1000000, q_raw)
-    # normalize to [-1, 1)
-    scale = 1.0 / (1 << 23)
-    return (i_raw.astype(np.float32) * scale) + 1j * (q_raw.astype(np.float32) * scale)
+    # Sign-extend 24-bit → 32-bit signed.  ``raw`` shape (19, 8).
+    raw = np.where(raw & 0x800000, raw - 0x1000000, raw)
+    # Scale to float [-1, 1).  Single multiply across (19, 8).
+    scaled = raw.astype(np.float32) * _IQ_SCALE
+
+    # Split into per-DDC complex arrays.  ``scaled[:, 2*ddc]`` is
+    # the DDC's I channel and ``scaled[:, 2*ddc + 1]`` is Q.
+    # Building complex64 directly via empty + view is slightly
+    # faster than ``i + 1j*q`` (which allocates an intermediate
+    # complex128 from the Python ``1j`` scalar then downcasts).
+    out: Dict[int, np.ndarray] = {}
+    for ddc in range(_NDDC):
+        complex_arr = np.empty(_SLOTS_PER_BLOCK, dtype=np.complex64)
+        complex_view = complex_arr.view(np.float32).reshape(
+            _SLOTS_PER_BLOCK, 2,
+        )
+        complex_view[:, 0] = scaled[:, ddc * 2]      # I
+        complex_view[:, 1] = scaled[:, ddc * 2 + 1]  # Q
+        out[ddc] = complex_arr
+
+    # Mic: bytes 24..25 of each slot, BE int16 signed.  View as
+    # big-endian int16 via dtype reinterpretation, then cast to
+    # native int16 so downstream consumers don't have to deal with
+    # byte-order metadata on a tiny (19,) array.
+    mic_slice = arr[:, _MIC_OFFSET:_MIC_OFFSET + 2].tobytes()
+    mic_be = np.frombuffer(mic_slice, dtype=">i2")  # signed, big-endian
+    out["mic"] = mic_be.astype(np.int16)
+
+    return out
 
 
-def _parse_iq_frame(data: bytes) -> Optional[tuple[int, np.ndarray, bytes, bytes]]:
-    """Return (seq, samples, cc_block0, cc_block1) or None if invalid.
+def twist(samples_a: np.ndarray, samples_b: np.ndarray) -> np.ndarray:
+    """Interleave two per-DDC complex streams into a 4-channel
+    real-valued buffer.
 
-    Samples are a concatenation of both USB-block halves (126 complex samples).
-    cc_block is a 5-byte slice (C0..C4); C0 carries the telemetry
-    address in bits[7:3] and live state flags in bits[2:0] for HPSDR
-    Protocol 1 EP6 frames.
+    Phase 1 helper matching Thetis ``twist()`` semantics at
+    ``ChannelMaster\\networkproto1.c:263-274``.  Used by the
+    dispatcher when a host channel consumes a *pair* of DDCs as
+    one logical 4-channel I/Q stream — diversity reception on
+    ANAN, or PS feedback on ANAN P1 5-DDC (HL2 PS feedback uses
+    DDC0/DDC1 sync-paired and does NOT route through twist per
+    CLAUDE.md §3.8 corrected entry; the gateware delivers I on
+    DDC0 and Q on DDC1 directly with cntrl1=4 routing).
+
+    On HL2 RX-only and HL2 MOX-no-PS states the dispatch table in
+    ``ddc_map(state)`` doesn't reference any twist target (DDC2/
+    DDC3 carry zeros and are always DISCARD), so this helper is
+    inert for HL2 v0.1.  It's defined now to match the plan §4.2
+    Phase 1 deliverable surface and to be ready for v0.4 ANAN
+    multi-radio work without another protocol-layer edit.
+
+    Output shape ``(N, 4)`` float32 with column layout
+    ``[I_a, Q_a, I_b, Q_b]`` -- matches Thetis xrouter source
+    semantics for 4-channel destinations.
+
+    Args:
+        samples_a: First DDC's complex samples, shape ``(N,)``.
+        samples_b: Second DDC's complex samples, shape ``(N,)``.
+            Must match ``samples_a`` length.
+
+    Returns:
+        ``(N, 4)`` float32 ndarray with columns
+        ``[I_a, Q_a, I_b, Q_b]``.
+
+    Raises:
+        ValueError: If sample-array lengths differ.
+    """
+    if samples_a.shape[0] != samples_b.shape[0]:
+        raise ValueError(
+            f"twist: length mismatch a={samples_a.shape[0]} "
+            f"b={samples_b.shape[0]}"
+        )
+    n = samples_a.shape[0]
+    out = np.empty((n, 4), dtype=np.float32)
+    out[:, 0] = samples_a.real
+    out[:, 1] = samples_a.imag
+    out[:, 2] = samples_b.real
+    out[:, 3] = samples_b.imag
+    return out
+
+
+def _parse_iq_frame(
+    data: bytes,
+) -> Optional[tuple[int, Dict[int, np.ndarray], np.ndarray, bytes, bytes]]:
+    """Parse one EP6 UDP datagram into per-DDC IQ + mic + telemetry.
+
+    Phase 1 (v0.1) — nddc=4 layout.
+
+    Returns:
+        ``(seq, per_ddc, mic, cc_block0, cc_block1)`` or ``None``
+        if the datagram is malformed.
+
+        * ``seq``: 32-bit sequence number from the HPSDR P1 frame
+          header.
+        * ``per_ddc``: Dict mapping DDC index (0..3) to a (38,)
+          complex64 ndarray (= 19 samples per USB block × 2
+          blocks per UDP datagram, concatenated).
+        * ``mic``: (38,) int16 mic samples (concatenated from the
+          two USB blocks).
+        * ``cc_block0`` / ``cc_block1``: 5-byte slices (C0..C4)
+          for each USB block.  C0 carries the telemetry address
+          in bits[7:3] and live state flags in bits[2:0] for
+          HPSDR P1 EP6 frames.
     """
     if len(data) != 1032:
         return None
@@ -138,16 +349,23 @@ def _parse_iq_frame(data: bytes) -> Optional[tuple[int, np.ndarray, bytes, bytes
     seq = struct.unpack(">I", data[4:8])[0]
 
     blocks = (data[8:520], data[520:1032])
-    cc_parts = []
-    sample_parts = []
+    cc_parts: list[bytes] = []
+    per_ddc_parts: Dict[int, list[np.ndarray]] = {0: [], 1: [], 2: [], 3: []}
+    mic_parts: list[np.ndarray] = []
     for b in blocks:
         if b[0] != 0x7F or b[1] != 0x7F or b[2] != 0x7F:
             return None
         cc_parts.append(bytes(b[3:8]))
-        sample_parts.append(_decode_iq_samples(b[8:]))
+        decoded = _decode_iq_samples(b[8:])
+        for ddc in range(_NDDC):
+            per_ddc_parts[ddc].append(decoded[ddc])
+        mic_parts.append(decoded["mic"])
 
-    samples = np.concatenate(sample_parts)
-    return seq, samples, cc_parts[0], cc_parts[1]
+    per_ddc: Dict[int, np.ndarray] = {
+        ddc: np.concatenate(per_ddc_parts[ddc]) for ddc in range(_NDDC)
+    }
+    mic = np.concatenate(mic_parts)
+    return seq, per_ddc, mic, cc_parts[0], cc_parts[1]
 
 
 def _decode_hl2_telemetry(cc: bytes, stats: "FrameStats") -> None:
@@ -285,9 +503,39 @@ class HL2Stream:
         # C4 bit 2 = duplex. Without it, HL2 runs simplex and ignores RX1
         # frequency writes (RX1 freq gets slaved to TX freq). The duplex
         # bit is required by HPSDR Protocol 1 for any client that wants
-        # independent RX/TX frequency control. C4[5:3] = NDDC - 1
-        # (0 = 1 receiver).
-        self._config_c4 = 0x04  # duplex=1, NDDC=1
+        # independent RX/TX frequency control. C4[6:3] = NDDC - 1 (4-bit
+        # field per CLAUDE.md §3.2 / IM-1, nddc-1 ranges 0..15).
+        #
+        # Phase 1 v0.1 (2026-05-11) — nddc=4 flip per consensus plan §4.1:
+        #
+        # * Main-loop value 0x1C = (nddc-1)<<3 | duplex = 0x18 | 0x04.
+        #   Used in the C&C register table (``_cc_registers[0x00]``)
+        #   so the EP2 writer's round-robin emits 0x1C on every
+        #   general-settings frame.  Per CLAUDE.md §3.2: "the duplex
+        #   bit is added in the main-loop case-0 path (``C4 |= 0x04``
+        #   at networkproto1.c:967) AFTER priming completes."
+        #
+        # * Priming value 0x18 = (nddc-1)<<3, NO duplex bit.  Used
+        #   only by ``_send_config`` for the initial one-shot UDP
+        #   emission that triggers gateware to begin streaming EP6
+        #   at the requested rate + DDC count.  Per CLAUDE.md §3.2
+        #   "the priming function ``ForceCandCFrames``... emits
+        #   priming with the hard-coded layout C4 = (nddc-1) << 3 =
+        #   0x18 (no duplex bit)."  Gateware accepts priming VFO
+        #   writes regardless of the duplex bit, but matching
+        #   Thetis exactly is what plan §4.4 step 6 wireshark
+        #   bench-test gate checks.
+        #
+        # Pre-Phase-1 (v0.0.9.x) value was 0x04 (NDDC=1 + duplex).
+        # Switching to nddc=4 changes the EP6 sample-set stride
+        # from 8 bytes/slot (single DDC) to 26 bytes/slot (four
+        # DDCs interleaved + mic) — see ``_decode_iq_samples`` and
+        # CLAUDE.md §3.3 for the new layout.  Datagram rate at the
+        # same wire IQ rate goes up ~3.3x (each datagram carries 38
+        # samples per DDC instead of 126); the EP6 parser handles
+        # the higher cadence transparently.
+        self._priming_c4 = 0x18  # priming: nddc=4, no duplex bit
+        self._config_c4 = 0x1C   # main-loop: nddc=4 + duplex bit
         # ── Round-robin C&C register table (Thetis-mirror) ──────────
         # Mirrors Thetis ChannelMaster\\networkproto1.c::WriteMainLoop_HL2
         # case 0..18 verbatim.  Each USB block in an EP2 frame carries
@@ -368,6 +616,38 @@ class HL2Stream:
             0x00, SAMPLE_RATES[sample_rate], 0x00, 0x00, self._config_c4
         )
         self._send_lock = threading.Lock()
+
+        # ── Phase 1: per-DDC consumer registration (v0.1) ───────────
+        #
+        # Each EP6 datagram parsed by ``_decode_iq_samples`` produces
+        # per-DDC IQ ndarrays (DDC0..DDC3 + mic).  The dispatcher
+        # ``dispatch_ddc_samples`` reads a ``DispatchState`` snapshot
+        # via ``_dispatch_state_provider``, calls
+        # ``lyra.protocol.ddc_map(state)`` to get the per-DDC →
+        # ``ConsumerID`` routing for the current state, and fans out
+        # to the consumer callback registered at each ``ConsumerID``
+        # slot.
+        #
+        # Consumers are registered via ``HL2Stream.register_consumer``
+        # (one-shot, before ``start()``) or via the ``on_samples`` /
+        # ``on_rx2_samples`` kwargs to ``start()`` (Phase 1 back-compat:
+        # they map to ``RX_AUDIO_CH0`` and ``RX_AUDIO_CH2`` slots).
+        # Per CLAUDE.md §6.7 discipline #6: this routing table is the
+        # ONE place ``if ddc_idx == N:`` logic is correct.  All other
+        # call sites read ``radio.protocol.ddc_map(state)`` so the
+        # family-specific routing is a single source of truth.
+        #
+        # The ``DISCARD`` slot has no live callback in Phase 1; the
+        # dispatcher skips it (treats as no-op).  Same for any slot
+        # with ``None`` callback -- a "drop on the floor" sentinel
+        # that's deliberately legal for Phase 1's "wire dispatched
+        # but consumer not yet implemented" state.
+        self._consumers: Dict[ConsumerID, Optional[Callable[..., None]]] = {
+            cid: None for cid in ConsumerID
+        }
+        self._dispatch_state_provider: Optional[
+            Callable[[], DispatchState]
+        ] = None
 
         # TX audio queue. Demod pipeline pushes float samples [-1, 1] at
         # 48 kHz. The AK4951 codec on the HL2+ is hard-locked at 48 kHz
@@ -1309,19 +1589,201 @@ class HL2Stream:
         return out_arr.tobytes()
 
     def _send_config(self):
+        """Priming send: one-shot UDP emission with the priming C4.
+
+        Per CLAUDE.md §3.2 (Phase 1 + Round 1 IM-1 entry) + plan
+        §4.4 step 6 fail-mode (a): the priming general-settings
+        frame matches Thetis ``ForceCandCFrames`` semantics --
+        ``C4 = (nddc-1) << 3 = 0x18`` (NO duplex bit).  The duplex
+        bit is added only in the main-loop case-0 path emitted by
+        the EP2 writer's round-robin from ``_cc_registers[0x00]``
+        (which was seeded with ``_config_c4 = 0x1C`` in
+        ``__init__``).
+
+        Pre-Phase-1 v0.0.9.x logic called ``_send_cc(... self._config_c4)``
+        which both (a) updated ``_cc_registers[0x00]`` to the
+        priming value AND (b) emitted one UDP frame.  Both legs
+        carried the same value (0x04 = NDDC=1 + duplex), so there
+        was no priming/main-loop distinction to make.  Phase 1
+        nddc=4 introduces the distinction (priming 0x18 vs
+        main-loop 0x1C), so this method now does an explicit
+        direct UDP emit with ``_priming_c4`` and leaves the
+        register table alone -- the writer's round-robin continues
+        to emit ``_config_c4`` from the table seeded in __init__.
+        """
+        if self._sock is None:
+            return
         rate_code = SAMPLE_RATES[self.sample_rate]
-        # C4 bit 2 = duplex (required; otherwise RX1 freq is slaved to TX).
-        self._send_cc(0x00, rate_code, 0x00, 0x00, self._config_c4)
+        with self._send_lock:
+            frame = self._build_ep2_frame(
+                0x00, rate_code, 0x00, 0x00, self._priming_c4,
+            )
+            self._sock.sendto(frame, (self.radio_ip, DISCOVERY_PORT))
 
     # -- public API ---------------------------------------------------------
+    def register_consumer(
+        self,
+        consumer_id: ConsumerID,
+        callback: Optional[Callable[[np.ndarray, "FrameStats"], None]],
+    ) -> None:
+        """Register (or clear) the consumer callback for one ConsumerID.
+
+        Phase 1 (v0.1) — plan §4.2 deliverable 3.  Per-DDC samples
+        are routed by ``dispatch_ddc_samples`` based on the result
+        of ``lyra.protocol.ddc_map(state)``; the routing maps each
+        DDC index to a ``ConsumerID``, and this dict carries the
+        actual callback to invoke for that ConsumerID.
+
+        Pass ``callback=None`` to clear a slot (== DISCARD
+        semantics: dispatched samples are silently dropped).
+
+        Threading: writes to ``self._consumers`` are not locked;
+        callers MUST register before ``start()`` or accept that an
+        in-flight datagram may still see the previous callback.
+        The dict slot read in the dispatcher is GIL-atomic under
+        CPython, so the worst case is one extra datagram landing on
+        the old callback during a hot-swap -- never a torn read or
+        crash.
+        """
+        if consumer_id not in self._consumers:
+            raise KeyError(
+                f"unknown ConsumerID {consumer_id!r}; valid keys are "
+                f"{list(self._consumers.keys())!r}"
+            )
+        self._consumers[consumer_id] = callback
+
+    def set_dispatch_state_provider(
+        self,
+        provider: Optional[Callable[[], DispatchState]],
+    ) -> None:
+        """Configure the function the RX loop calls per datagram to
+        get the current ``DispatchState``.
+
+        Plan §4.2.x threading-model summary:
+        * Qt main thread is sole writer of ``Radio._dispatch_state``.
+        * ``HL2Stream._rx_loop`` reads once per UDP datagram via
+          this provider.
+        * No locking required -- CPython GIL makes the reference
+          read atomic.
+
+        When ``provider`` is ``None`` (or not configured), the
+        dispatcher synthesizes a default ``DispatchState()``
+        (mox=False, ps_armed=False, rx2_enabled=False, family=HL2)
+        on every datagram.  This is the back-compat path for
+        callers that haven't wired a real Radio-side state source
+        yet.
+        """
+        self._dispatch_state_provider = provider
+
+    def dispatch_ddc_samples(
+        self,
+        state: DispatchState,
+        decoded: Dict[int, np.ndarray],
+        stats: "FrameStats",
+    ) -> None:
+        """Route per-DDC samples to registered consumers per
+        ``ddc_map(state)``.
+
+        Phase 1 (v0.1) — plan §4.2 deliverable 3.  Pure dispatcher:
+        looks up the family + state-product specific routing table,
+        then for each DDC index fans out to the consumer callback
+        registered at the resolved ``ConsumerID``.  No DSP, no I/O.
+
+        Per CLAUDE.md §6.7 discipline #6 ("any ``if ddc_idx == N:``
+        in non-protocol code is wrong"): this method IS the
+        protocol layer's per-DDC fan-out, so the per-DDC iteration
+        is correct here.  Callers downstream MUST NOT branch on
+        DDC index -- they consume the resolved ``ConsumerID`` slot
+        only.
+
+        Errors in a single consumer callback are caught + logged
+        so one buggy consumer doesn't take down the whole RX loop
+        (Phase 1 deliberately tolerates per-DDC consumer failures
+        rather than dropping the whole datagram; a crash in one
+        DDC's pipeline should not silence the other DDCs).
+
+        Args:
+            state: Snapshot from the dispatch-state provider (or
+                a default ``DispatchState()`` if no provider is
+                configured).
+            decoded: Output of ``_parse_iq_frame`` -- dict of
+                ``{ddc_idx: ndarray}`` for DDCs 0..3.
+            stats: Live ``FrameStats`` reference passed to each
+                consumer (back-compat with the v0.0.9.x
+                ``on_samples(samples, stats)`` signature).
+        """
+        # Local import to avoid module-load cycle: lyra.protocol's
+        # __init__ imports radio_state, which has no dependency on
+        # stream.py, but stream.py wants ddc_map at runtime only.
+        from lyra.protocol import ddc_map as _ddc_map
+
+        try:
+            routing = _ddc_map(state)
+        except NotImplementedError:
+            # Defensive: an unknown family snapshot should not crash
+            # the RX loop.  Treat as RX-only HL2.  Logged at WARN.
+            _log.warning(
+                "ddc_map raised NotImplementedError for family "
+                "%s; falling back to HL2 RX-only routing.",
+                state.family,
+            )
+            from lyra.radio_state import RadioFamily
+            from dataclasses import replace as _dc_replace
+            state = _dc_replace(state, family=RadioFamily.HL2)
+            routing = _ddc_map(state)
+
+        for ddc_idx in range(_NDDC):
+            consumer_id = routing.get(ddc_idx, ConsumerID.DISCARD)
+            cb = self._consumers.get(consumer_id)
+            if cb is None:
+                continue
+            try:
+                cb(decoded[ddc_idx], stats)
+            except Exception:
+                _log.exception(
+                    "Consumer %s raised on DDC%d samples; other "
+                    "DDCs continue.",
+                    consumer_id, ddc_idx,
+                )
+
     def start(
         self,
-        on_samples: Callable[[np.ndarray, FrameStats], None],
+        on_samples: Optional[Callable[[np.ndarray, "FrameStats"], None]] = None,
         rx_freq_hz: Optional[int] = None,
         lna_gain_db: Optional[int] = None,
+        *,
+        on_rx2_samples: Optional[
+            Callable[[np.ndarray, "FrameStats"], None]
+        ] = None,
+        dispatch_state_provider: Optional[
+            Callable[[], DispatchState]
+        ] = None,
     ):
+        """Start the EP6 RX loop + EP2 writer thread.
+
+        Phase 1 v0.1 (2026-05-11): added keyword-only
+        ``on_rx2_samples`` (DDC1 consumer) and
+        ``dispatch_state_provider`` (per-datagram DispatchState
+        source).  Back-compat: passing only ``on_samples`` keeps
+        v0.0.9.x behavior -- DDC0 samples flow to the legacy
+        callback, DDC1/2/3 are dispatched but with no consumer
+        registered (== silently discarded).
+
+        ``on_samples`` registers as the ``RX_AUDIO_CH0`` consumer
+        (RX1 audio chain).  ``on_rx2_samples`` registers as
+        ``RX_AUDIO_CH2`` (RX2 audio chain).  Both go through the
+        dispatcher exactly the same way -- ``ddc_map(state)``
+        decides which DDC's samples end up in each slot.
+        """
         if self._thread and self._thread.is_alive():
             raise RuntimeError("stream already running")
+        # Register the back-compat consumers BEFORE the RX loop
+        # starts so the very first datagram sees them.
+        if on_samples is not None:
+            self.register_consumer(ConsumerID.RX_AUDIO_CH0, on_samples)
+        if on_rx2_samples is not None:
+            self.register_consumer(ConsumerID.RX_AUDIO_CH2, on_rx2_samples)
+        self.set_dispatch_state_provider(dispatch_state_provider)
 
         self._stop_event.clear()
         self.stats = FrameStats()
@@ -1369,7 +1831,7 @@ class HL2Stream:
         self._first_ep6_event.clear()
 
         self._thread = threading.Thread(
-            target=self._rx_loop, args=(on_samples,), daemon=True,
+            target=self._rx_loop, args=(), daemon=True,
             name="hl2-rx-loop",
         )
         self._thread.start()
@@ -1554,17 +2016,35 @@ class HL2Stream:
             self._sock = None
 
     # -- internal -----------------------------------------------------------
-    def _rx_loop(self, on_samples: Callable[[np.ndarray, FrameStats], None]):
-        """Pure RX loop (v0.0.9.2 Commit 4).
+    def _rx_loop(self) -> None:
+        """Pure RX loop (Phase 1 v0.1, nddc=4).
 
-        Reads EP6 datagrams, parses, decodes telemetry, dispatches
-        samples.  Does NOT send EP2 frames -- that work moved to
-        ``_ep2_writer_loop`` on its own thread to decouple EP2 send
-        cadence from bursty UDP arrival timing.
+        Reads EP6 datagrams, parses (nddc=4 26-byte slot stride),
+        decodes telemetry, dispatches per-DDC samples to registered
+        consumers via ``dispatch_ddc_samples``.  Does NOT send EP2
+        frames -- that work lives on the dedicated EP2 writer
+        thread to decouple EP2 send cadence from bursty UDP arrival
+        timing.
 
         Sets ``_first_ep6_event`` on the first valid EP6 datagram
         so the writer thread knows the gateware has finished its
         initialization and is streaming.
+
+        Phase 1 changes from v0.0.9.x ``_rx_loop``:
+
+        * No ``on_samples`` argument -- consumers are registered
+          via ``register_consumer`` / ``start()`` kwargs and looked
+          up in ``self._consumers`` keyed by ``ConsumerID``.
+        * Per-datagram ``DispatchState`` snapshot via
+          ``self._dispatch_state_provider``; defaults to
+          ``DispatchState()`` (RX-only HL2) when no provider is
+          configured.
+        * ``_parse_iq_frame`` now returns per-DDC dicts instead of
+          a single concatenated samples array (see CLAUDE.md §3.3
+          for the new 26-byte slot layout).
+        * Stats ``samples`` counter tracks DDC0 sample count
+          (back-compat with the legacy single-DDC counter that
+          downstream UI reads).
         """
         assert self._sock is not None
         while not self._stop_event.is_set():
@@ -1578,7 +2058,7 @@ class HL2Stream:
             parsed = _parse_iq_frame(data)
             if parsed is None:
                 continue
-            seq, samples, cc0, cc1 = parsed
+            seq, per_ddc, _mic, cc0, cc1 = parsed
 
             # First valid EP6 received -- release the writer thread
             # to enter its cadence loop.  Idempotent (Event.set on
@@ -1594,7 +2074,10 @@ class HL2Stream:
                 self.stats.seq_expected = (seq + 1) & 0xFFFFFFFF
 
             self.stats.frames += 1
-            self.stats.samples += samples.shape[0]
+            # Sample counter tracks DDC0 sample count for back-compat
+            # with v0.0.9.x consumers; at nddc=4 each DDC carries 38
+            # samples per datagram (vs 126 at nddc=1).
+            self.stats.samples += per_ddc[0].shape[0]
             self.stats.last_c1_c4 = cc1
 
             # Fold both C&C blocks into the rolling telemetry slots.
@@ -1605,4 +2088,11 @@ class HL2Stream:
             _decode_hl2_telemetry(cc0, self.stats)
             _decode_hl2_telemetry(cc1, self.stats)
 
-            on_samples(samples, self.stats)
+            # Snapshot the dispatch state ONCE per datagram per the
+            # plan §4.2.x "Reader semantics" contract.  Mid-datagram
+            # MOX edges are coalesced to the next datagram boundary
+            # (~1 ms at 192 kHz).
+            provider = self._dispatch_state_provider
+            state = provider() if provider is not None else DispatchState()
+
+            self.dispatch_ddc_samples(state, per_ddc, self.stats)

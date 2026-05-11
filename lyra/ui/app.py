@@ -792,6 +792,22 @@ class MainWindow(QMainWindow):
         telem_probe_act.triggered.connect(self._open_telem_probe)
         help_menu.addAction(telem_probe_act)
 
+        # Phase 1 v0.1 RX2 bench-test surface (consensus plan §4.4 step 2).
+        # Phase 3 will replace this with a real dual-VFO focus model UI,
+        # but until then the bench-test dialog is the only way to tune
+        # VFO B / DDC1 and verify dispatch is wired correctly against a
+        # WWV carrier.
+        rx2_bench_act = QAction("&RX2 Bench Test (Phase 1)…", self)
+        rx2_bench_act.setToolTip(
+            "Tune VFO B (DDC1) to a known carrier (e.g., WWV 15 MHz) "
+            "and verify the Phase 1 RX2 dispatch path is delivering "
+            "DDC1 samples to host channel 2.  Shows live counters + "
+            "FFT peak of recent DDC1 IQ.  Phase 3 lands the full UI; "
+            "until then this is the operator surface for RX2."
+        )
+        rx2_bench_act.triggered.connect(self._open_rx2_bench)
+        help_menu.addAction(rx2_bench_act)
+
         # Network Discovery Probe — diagnostic for "auto-discover
         # didn't find my HL2." Lists local IP interfaces, runs
         # broadcast / unicast discovery with full diagnostic logging,
@@ -2543,6 +2559,31 @@ class MainWindow(QMainWindow):
         firmware without guessing through public docs."""
         from lyra.ui.telem_probe import TelemetryProbeDialog
         TelemetryProbeDialog(self.radio, parent=self).exec()
+
+    def _open_rx2_bench(self):
+        """Help → RX2 Bench Test. Phase 1 v0.1 verification surface
+        per consensus plan §4.4 step 2: tune VFO B (DDC1) to a known
+        carrier (e.g., WWV 15 MHz) and verify DDC1 samples arrive at
+        the RX2 host channel with the carrier at the expected
+        baseband offset.  Non-modal so the operator can flip back to
+        the main window to tune RX1 while watching the RX2 readout."""
+        from lyra.ui.rx2_bench_dialog import Rx2BenchTestDialog
+        # Persistent reference so the non-modal dialog isn't GC'd
+        # the moment this method returns.  Re-uses one instance if
+        # re-opened.
+        if getattr(self, "_rx2_bench_dialog", None) is None:
+            self._rx2_bench_dialog = Rx2BenchTestDialog(
+                self.radio, parent=self,
+            )
+            # Drop the reference when the dialog closes so the next
+            # open builds a fresh one (and so the timer doesn't keep
+            # ticking after close).
+            self._rx2_bench_dialog.destroyed.connect(
+                lambda *_: setattr(self, "_rx2_bench_dialog", None)
+            )
+        self._rx2_bench_dialog.show()
+        self._rx2_bench_dialog.raise_()
+        self._rx2_bench_dialog.activateWindow()
 
     def _open_settings(self, tab: str | None = None):
         dlg = SettingsDialog(self.radio, self.pnl_tci.server, parent=self)

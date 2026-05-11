@@ -110,6 +110,12 @@ class Radio(QObject):
     # captured-profile pre-pass for MOX+PS bypass.  See
     # ``lyra/radio_state.py`` for the dataclass + ConsumerID enum.
     dispatch_state_changed = Signal(object)        # DispatchState
+    # Phase 1 v0.1 RX2 freq change (bench-test surface; Phase 3 wires
+    # the full focus-model UI).  Payload is the new VFO B frequency
+    # in Hz.  ``Radio.set_rx2_freq_hz(hz)`` writes the C&C register
+    # (via HL2Stream._set_rx2_freq) AND emits this signal so any
+    # bench-test dialog can mirror its readout.
+    rx2_freq_changed = Signal(int)
     # ── TCI streaming taps (v0.0.9.1+) ─────────────────────────────────
     # These signals fire whenever the audio / IQ data is finalised so
     # the TciServer can broadcast binary frames to subscribed clients.
@@ -709,12 +715,29 @@ class Radio(QObject):
         # C1: sample rate bits[1:0]
         # C2: OC-output pattern bits[7:1] + CW-eer bit[0]
         # C3: preamp / ADC config (unused for now)
-        # C4: duplex bit[2] + NDDC bits[5:3] + antenna selection
+        # C4: duplex bit[2] + NDDC bits[6:3] (4-bit field per IM-1) +
+        #     antenna selection
         # Keep composed so any single-bit change can recompose + resend.
+        #
+        # Phase 1 v0.1 (2026-05-11) bug-fix: ``_config_c4`` is the
+        # MAIN-LOOP C4 byte = ``(nddc-1)<<3 | duplex`` = 0x18 | 0x04
+        # = 0x1C for HL2 nddc=4 + duplex.  Earlier value 0x04 here
+        # was a v0.0.9.x leftover (nddc=1).  When Phase 1 flipped
+        # ``HL2Stream._config_c4`` to 0x1C, this duplicate at the
+        # Radio layer was missed -- so any band change that fired
+        # ``_send_full_config`` (filter board enabled → OC bit
+        # change → recompose register 0x00) wrote 0x04 to the
+        # wire, telling the gateware to drop back to nddc=1.  The
+        # parser still expected 26-byte slots → garbage IQ →
+        # blood-red waterfall + S9+72 meter + pulsing audio.
+        # Single-source-of-truth fix: read C4 from the stream's
+        # ``_config_c4`` at send time (``_send_full_config``),
+        # leaving this field only as the discovery-time fallback
+        # before the stream is constructed.
         self._config_c1 = SAMPLE_RATES[self._rate]
         self._config_c2 = 0x00
         self._config_c3 = 0x00
-        self._config_c4 = 0x04   # duplex=1, NDDC=1 (required for RX)
+        self._config_c4 = 0x1C   # nddc=4 + duplex (Phase 1 v0.1)
         self._keepalive_cc: tuple[int, int, int, int, int] = (
             0x00, self._config_c1, self._config_c2,
             self._config_c3, self._config_c4,
@@ -1543,6 +1566,57 @@ class Radio(QObject):
         self._rx_batch_lock = threading.Lock()
         self._bridge = _SampleBridge()
         self._bridge.samples_ready.connect(self._on_samples_main_thread)
+
+        # ── Phase 1 v0.1: RX2 stub-consumer diagnostic state ────────
+        #
+        # Phase 1 wires the protocol dispatch of DDC1 (RX2) samples
+        # but does NOT yet build a full RX2 DSP / audio chain.  Per
+        # consensus plan §4.2: "channel 2 has a stub DSP chain that
+        # produces zero audio (audio routing comes in phase 2)."
+        # ``_stream_cb_rx2`` is the registered consumer for the
+        # ``RX_AUDIO_CH2`` ConsumerID slot; in Phase 1 it just
+        # increments the diagnostic counters below so we can verify
+        # via the verification protocol §4.4 steps 1-5 (bench tests)
+        # that DDC1 samples are actually flowing to the right slot.
+        #
+        # When RX2 is disabled (default for v0.1 first launch) the
+        # bytes still flow over the wire and through the parser --
+        # they just arrive at this stub which discards them.  Phase
+        # 2's RX2 audio chain replaces this stub.
+        self._rx2_samples_received: int = 0
+        self._rx2_datagrams_received: int = 0
+
+        # Phase 1 RX2 frequency + IQ ring buffer for bench-test
+        # verification (consensus plan §4.4 step 2: tune VFO B to a
+        # known carrier and verify channel 2's input stream shows
+        # that carrier).
+        #
+        # The ring buffer is sized for ~85 ms at 192 kHz IQ rate
+        # (16384 complex samples) -- enough for an 8192-bin FFT with
+        # 50% overlap, which gives ~23 Hz bin resolution at 192k.
+        # That's plenty to read off WWV's 5 / 10 / 15 / 20 / 25 MHz
+        # carriers offset from the DDC1 NCO frequency.  Memory cost:
+        # 16384 * 8 bytes = 128 KB.
+        #
+        # Writers: ``_stream_cb_rx2`` on the RX-loop thread (one
+        # writer).  Readers: the Phase 1 bench-test dialog
+        # (Help -> RX2 Bench Test...) on the Qt main thread.  Lock
+        # is held only for the copy-out window, so the RX-loop
+        # thread waits at most a microsecond per fill.
+        self._rx2_freq_hz: int = 7250000  # operator-tunable default
+        self._rx2_iq_ring: np.ndarray = np.zeros(
+            16384, dtype=np.complex64
+        )
+        self._rx2_iq_ring_pos: int = 0
+        self._rx2_iq_ring_lock = threading.Lock()
+        # Bench-dialog activity gate -- when False the ring buffer
+        # fill in ``_stream_cb_rx2`` skips, saving ~10 ms/sec of
+        # CPU on the RX-loop thread at 192 kHz nddc=4 cadence.
+        # Phase 1 dialog (rx2_bench_dialog.py) flips this on open
+        # and back to False on close.  Phase 2 wiring of real RX2
+        # DSP will replace this with a "RX2 enabled" gate driven
+        # by the focus-model UI.
+        self._rx2_bench_active: bool = False
 
         # ── Periodic FFT tick ─────────────────────────────────────────
         self._fft_timer = QTimer(self)
@@ -5721,8 +5795,17 @@ class Radio(QObject):
             return
         try:
             c1 = SAMPLE_RATES[self._rate]
+            # Phase 1 v0.1 bug-fix: read C4 from HL2Stream so the
+            # nddc / duplex bit field stays in lockstep with the
+            # protocol layer's main-loop value.  If the Radio-side
+            # ``self._config_c4`` ever falls out of sync with the
+            # stream's value (as happened in the initial Phase 1
+            # patch), this defer-to-stream pattern catches the
+            # drift here instead of writing a stale byte to the
+            # wire and degrading the radio's DDC count mid-session.
+            c4 = getattr(self._stream, "_config_c4", self._config_c4)
             self._stream._send_cc(0x00, c1, self._config_c2,  # noqa: SLF001
-                                  self._config_c3, self._config_c4)
+                                  self._config_c3, c4)
         except Exception as e:
             self.status_message.emit(f"OC write failed: {e}", 3000)
 
@@ -7024,11 +7107,39 @@ class Radio(QObject):
             return
         try:
             self._stream = HL2Stream(self._ip, sample_rate=self._rate)
+            # Phase 1 v0.1 (2026-05-11): wire RX2 dispatch + the
+            # dispatch-state provider per consensus plan §4.2 + §4.2.x.
+            #
+            # * ``on_samples`` -> RX_AUDIO_CH0 (DDC0, RX1 audio chain;
+            #   v0.0.9.x-compatible).
+            # * ``on_rx2_samples`` -> RX_AUDIO_CH2 (DDC1, RX2 audio
+            #   chain; Phase 1 stub counts samples for §4.4 bench
+            #   verification, Phase 2 wires the real audio path).
+            # * ``dispatch_state_provider`` -> Radio.snapshot_dispatch_state
+            #   (Phase 0 surface).  HL2Stream._rx_loop reads this
+            #   once per UDP datagram per the §4.2.x threading
+            #   model (Qt main thread is sole writer; RX-loop +
+            #   DSP-worker threads are readers).
             self._stream.start(
                 on_samples=self._stream_cb,
                 rx_freq_hz=self._freq_hz,
                 lna_gain_db=self._gain_db,
+                on_rx2_samples=self._stream_cb_rx2,
+                dispatch_state_provider=self.snapshot_dispatch_state,
             )
+            # Phase 1 v0.1: push the cached RX2 freq so bench-test
+            # iterations across stream restarts don't lose the
+            # operator's last-set VFO B value.  Safe to call before
+            # any real "RX2 enabled" toggle exists -- the DDC1
+            # gateware accepts the write and just tunes a receiver
+            # whose audio isn't routed anywhere in Phase 1.
+            try:
+                self._stream._set_rx2_freq(self._rx2_freq_hz)  # noqa: SLF001
+            except Exception as e:
+                # Non-fatal: freq tunes on next set_rx2_freq_hz call.
+                self.status_message.emit(
+                    f"RX2 initial freq push failed: {e}", 3000,
+                )
         except Exception as e:
             self.status_message.emit(f"Start failed: {e}", 5000)
             self._stream = None
@@ -7445,6 +7556,144 @@ class Radio(QObject):
             self._dsp_worker.enqueue_iq(batch)
         else:
             self._bridge.samples_ready.emit(batch)
+
+    def _stream_cb_rx2(self, samples, _stats):
+        """RX2 stub consumer (Phase 1 v0.1).
+
+        Registered on ``HL2Stream`` as the ``RX_AUDIO_CH2`` consumer
+        via ``Radio.start()``.  Per consensus plan §4.2:
+
+          > In phase 1 ... host channel 2 (RX2) goes to channel 2's
+          > input.  Channel 2 has a stub DSP chain that produces
+          > zero audio (audio routing comes in phase 2).
+
+        This stub:
+        * Increments two diagnostic counters so the operator (and
+          the §4.4 bench-test gate) can verify DDC1 samples are
+          actually flowing through the dispatch path.
+        * Stashes the most-recent IQ samples in a ring buffer that
+          the RX2 Bench Test dialog reads to compute an FFT peak
+          for verification step 2 (tune VFO B to a known carrier,
+          verify carrier shows at expected baseband offset).
+
+        No DSP, no audio mixing, no UI signal beyond the diagnostic
+        readouts -- those land in Phase 2.
+
+        Called on the RX-loop thread (same thread as
+        ``_stream_cb``).  Counter writes are tolerable as
+        non-atomic int increments because the only readers are
+        diagnostic / test code; a missed +1 once in a blue moon
+        produces a counter that's off by 1, not a crash.
+        """
+        n = int(samples.shape[0])
+        self._rx2_datagrams_received += 1
+        self._rx2_samples_received += n
+
+        # Fill the bench-test ring buffer ONLY when the bench
+        # dialog is open.  At 192 kHz nddc=4 the RX-loop thread
+        # is hot (5053 datagrams/sec) and every avoided memcpy
+        # helps the audio sink stay underrun-free.  The flag is
+        # GIL-atomic for read; a transient flip between open and
+        # close costs at worst one datagram's worth of stale ring
+        # data, which is harmless for an FFT readout.
+        if n == 0 or not self._rx2_bench_active:
+            return
+        with self._rx2_iq_ring_lock:
+            ring = self._rx2_iq_ring
+            ring_size = ring.shape[0]
+            pos = self._rx2_iq_ring_pos
+            end = pos + n
+            if end <= ring_size:
+                ring[pos:end] = samples
+            else:
+                first = ring_size - pos
+                ring[pos:] = samples[:first]
+                ring[: n - first] = samples[first:]
+            self._rx2_iq_ring_pos = end % ring_size
+
+    # ── Phase 1 RX2 bench-test surface ────────────────────────────────
+    @property
+    def rx2_freq_hz(self) -> int:
+        """Current RX2 (DDC1 / VFO B) tuned frequency in Hz.
+
+        Phase 1 v0.1 -- the diagnostic surface for §4.4 step 2
+        bench testing.  Phase 3 replaces this with the dual-VFO
+        focus model + VFO B LED display.
+        """
+        return self._rx2_freq_hz
+
+    def set_rx2_freq_hz(self, hz: int) -> None:
+        """Set the RX2 (DDC1) NCO frequency.
+
+        Phase 1 v0.1 (2026-05-11) bench-test surface per consensus
+        plan §4.4 step 2.  Writes the C&C register via
+        ``HL2Stream._set_rx2_freq`` (which packs into the C0=0x06
+        register and lets the EP2 writer's round-robin propagate
+        the value).  Phase 3 wires the operator UI focus-model
+        equivalent (VFO B LED + ``set_freq_hz`` routing by focused
+        receiver).
+
+        Safe to call before ``start()``; freq is cached and pushed
+        to the stream on next start.  Safe to call mid-stream;
+        propagation is imperceptibly fast (a few EP2 round-robin
+        ticks, < 25 ms).
+
+        Args:
+            hz: VFO B frequency in Hz (0..30,000,000 reasonable for
+                HL2).  Out-of-range values are clamped by the HL2
+                gateware -- Lyra does not pre-validate.
+        """
+        new_hz = int(hz)
+        self._rx2_freq_hz = new_hz
+        if self._stream is not None:
+            try:
+                self._stream._set_rx2_freq(new_hz)  # noqa: SLF001
+            except Exception as e:
+                self.status_message.emit(
+                    f"RX2 freq write failed: {e}", 3000,
+                )
+        self.rx2_freq_changed.emit(new_hz)
+
+    def read_rx2_iq_snapshot(self) -> np.ndarray:
+        """Return a time-ordered copy of the most-recent RX2 IQ
+        samples (Phase 1 bench-test accessor).
+
+        Returns a ``(N,) complex64`` array, where N is the ring
+        buffer size (16384).  Samples are reordered so index 0 is
+        the OLDEST sample and index -1 is the NEWEST (i.e. the
+        wraparound is fixed up so an FFT sees a contiguous
+        time-domain window).
+
+        Returns an empty array if no RX2 samples have arrived yet.
+        Safe to call from the Qt main thread.
+        """
+        with self._rx2_iq_ring_lock:
+            pos = self._rx2_iq_ring_pos
+            ring = self._rx2_iq_ring
+            if self._rx2_samples_received == 0:
+                return np.zeros(0, dtype=np.complex64)
+            # Reorder so oldest sample is first.
+            return np.concatenate((ring[pos:], ring[:pos]))
+
+    def read_rx2_diagnostics(self) -> dict:
+        """Return a dict snapshot of Phase 1 RX2 bench-test counters.
+
+        Keys:
+            datagrams_total: int -- total UDP datagrams seen with
+                RX2 samples since stream start (or last reset).
+            samples_total: int -- total DDC1 complex samples seen.
+            current_freq_hz: int -- current RX2 NCO frequency.
+            iq_rate_hz: int -- current wire IQ rate (samples/sec
+                per DDC).  Per CLAUDE.md §3.6 HL2 P1 caveat, this
+                is shared across all DDCs; DDC1 streams at the
+                same rate as DDC0.
+        """
+        return {
+            "datagrams_total": int(self._rx2_datagrams_received),
+            "samples_total": int(self._rx2_samples_received),
+            "current_freq_hz": int(self._rx2_freq_hz),
+            "iq_rate_hz": int(self._rate),
+        }
 
     def _on_samples_main_thread(self, samples):
         if self._radio_debug:
