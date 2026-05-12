@@ -153,6 +153,16 @@ class Radio(QObject):
     af_gain_db_changed   = Signal(int)   # AF makeup gain, 0..+50 dB
     balance_changed      = Signal(float) # stereo pan, -1..0..+1
     rx_bw_changed        = Signal(str, int)       # mode, Hz
+    # Phase 3.C v0.1 (2026-05-12): per-RX2 sibling signals.  RX1's
+    # original signals stay -- panels listening for RX1-specific
+    # state (S-meter, band stack, mode-aware menu items) keep
+    # working unchanged.  Panels that want to follow the focused
+    # RX (MODE+FILTER, DSP+AUDIO, GainPanel) connect to BOTH the
+    # RX1 and RX2 signal pairs + ``focused_rx_changed``, and
+    # refresh their UI on whichever is currently focused.
+    mode_changed_rx2     = Signal(str)
+    af_gain_db_changed_rx2 = Signal(int)
+    rx_bw_changed_rx2    = Signal(str, int)
     tx_bw_changed        = Signal(str, int)
     bw_lock_changed      = Signal(bool)
     notches_changed      = Signal(list)           # list[Notch] (see dataclass above)
@@ -467,6 +477,10 @@ class Radio(QObject):
     agc_profile_changed  = Signal(str)    # off / fast / med / slow / long / auto / custom
     agc_action_db        = Signal(float)  # live gain reduction, dB
     agc_threshold_changed = Signal(float) # current threshold (target), dBFS-ish
+    # Phase 3.C per-RX2 siblings (see comment above on Phase 3.C
+    # per-RX2 signal pattern).
+    agc_profile_changed_rx2  = Signal(str)
+    agc_threshold_changed_rx2 = Signal(float)
 
     # AGC presets (industry-standard). Attack is always instant.
     # "auto" uses a medium release/hang and additionally tracks the noise
@@ -1901,6 +1915,38 @@ class Radio(QObject):
             f"(focused); got {target_rx}"
         )
 
+    # ── Phase 3.C per-RX query accessors ───────────────────────────
+    # Panels read these to populate themselves from the focused RX's
+    # state.  ``target_rx`` follows the same convention as the
+    # setters: 0 = RX1, 2 = RX2, None = focused.
+    def mode_for_rx(self, target_rx: Optional[int] = None) -> str:
+        rx_id, _ = self._resolve_rx_target(target_rx)
+        return self._mode if rx_id == 0 else self._mode_rx2
+
+    def rx_bw_for_rx(
+        self, mode: str, target_rx: Optional[int] = None,
+    ) -> int:
+        rx_id, _ = self._resolve_rx_target(target_rx)
+        bw_dict = (self._rx_bw_by_mode if rx_id == 0
+                   else self._rx_bw_by_mode_rx2)
+        return bw_dict.get(mode, 2400)
+
+    def af_gain_db_for_rx(self, target_rx: Optional[int] = None) -> int:
+        rx_id, _ = self._resolve_rx_target(target_rx)
+        return self._af_gain_db if rx_id == 0 else self._af_gain_db_rx2
+
+    def agc_profile_for_rx(self, target_rx: Optional[int] = None) -> str:
+        rx_id, _ = self._resolve_rx_target(target_rx)
+        return (self._agc_profile if rx_id == 0
+                else self._agc_profile_rx2)
+
+    def agc_threshold_for_rx(
+        self, target_rx: Optional[int] = None,
+    ) -> float:
+        rx_id, _ = self._resolve_rx_target(target_rx)
+        return (self._agc_target if rx_id == 0
+                else self._agc_target_rx2)
+
     def set_mox(self, mox: bool) -> None:
         """Set the MOX axis of DispatchState.  Call from Qt main thread.
 
@@ -2220,13 +2266,58 @@ class Radio(QObject):
         if self._notch_enabled:
             self.notches_changed.emit(self.notch_details)
 
-    def set_mode(self, mode: str):
+    def set_mode(self, mode: str, target_rx: Optional[int] = None):
+        """Set mode for ``target_rx`` (default = focused RX).
+
+        Phase 3.C v0.1 (2026-05-12) introduced ``target_rx``
+        semantics per consensus plan §6.1 + §6.7.  Pre-Phase-3.C
+        behavior was to fan the mode change out to both channels.
+        Now the setter routes:
+
+        * ``target_rx == 0`` -> RX1 mode change with full
+          RX1-context side effects (band memory, S-meter reset,
+          panadapter passband + marker, CW Zero line, DDS re-push
+          for CW pitch).  Emits ``mode_changed(str)``.
+        * ``target_rx == 2`` -> RX2-only mode change.  No
+          RX1-context side effects (Phase 4 split panadapter may
+          add per-RX equivalents).  Emits ``mode_changed_rx2(str)``.
+        * ``target_rx is None`` -> use focused RX
+          (``self._focused_rx``).
+
+        Existing call sites pass ``target_rx=0`` when they're
+        explicitly RX1-context: band buttons, TIME button, band
+        memory recall, spot click-tune, panadapter click-tune.
+        The MODE+FILTER panel's mode picker passes
+        ``target_rx=self.radio.focused_rx`` so operators can
+        change RX2's mode when focused there.
+        """
         # Accept legacy aliases from old saved settings so a loaded value
         # like "CW" (before we split into CWL/CWU) doesn't leave the radio
         # in a state with no matching demod (→ silent audio).
         alias = {"CW": "CWU", "NFM": "FM", "WFM": "FM"}.get(mode, mode)
         if alias not in self.ALL_MODES:
             alias = "USB"
+
+        rx_id, _suffix = self._resolve_rx_target(target_rx)
+
+        if rx_id == 2:
+            # RX2-only mode change.  Skip RX1-context side effects
+            # (band memory, S-meter, panadapter passband, DDS re-push).
+            if alias == self._mode_rx2:
+                return
+            self._mode_rx2 = alias
+            if self._wdsp_rx2 is not None:
+                try:
+                    self._wdsp_rx2.reset()
+                    self._wdsp_rx2.set_mode(self._wdsp_mode_for(alias))
+                    low, high = self._wdsp_filter_for(alias, target_rx=2)
+                    self._wdsp_rx2.set_filter(low, high)
+                except Exception as exc:
+                    print(f"[Radio] WDSP rx2 mode-change error: {exc}")
+            self.mode_changed_rx2.emit(alias)
+            return
+
+        # RX1 mode change -- full original behavior.
         if alias == self._mode:
             return
         self._mode = alias
@@ -2255,25 +2346,6 @@ class Radio(QObject):
                 self._push_wdsp_squelch_state()
             except Exception as exc:
                 print(f"[Radio] WDSP rx mode-change error: {exc}")
-        # Phase 2 v0.1: mirror mode + filter onto RX2 so it tracks
-        # RX1 (no per-RX UI until Phase 3).  APF / squelch are
-        # left at WDSP defaults on RX2 in Phase 2 since their
-        # per-module state isn't pushed there.
-        #
-        # Phase 3.A (2026-05-12) addition: also update the per-RX
-        # state field ``_mode_rx2`` so the Phase 3.A invariant
-        # ("_mode_rx2 tracks _mode while we're still in fan-out
-        # mode") holds.  Phase 3.B removes this fan-out and
-        # routes mode changes via target_rx semantics.
-        self._mode_rx2 = alias
-        if self._wdsp_rx2 is not None:
-            try:
-                self._wdsp_rx2.reset()
-                self._wdsp_rx2.set_mode(self._wdsp_mode_for(alias))
-                low2, high2 = self._wdsp_filter_for(alias)
-                self._wdsp_rx2.set_filter(low2, high2)
-            except Exception as exc:
-                print(f"[Radio] WDSP rx2 mode-change error: {exc}")
         # Also reset S-meter state. Different demods produce very
         # different peak levels (AM envelope vs SSB sideband vs CW
         # pitched tone), so a peak captured under the old mode
@@ -2470,7 +2542,7 @@ class Radio(QObject):
     def af_gain_db(self) -> int:
         return self._af_gain_db
 
-    def set_af_gain_db(self, db: int):
+    def set_af_gain_db(self, db: int, target_rx: Optional[int] = None):
         """Integer dB, clamped 0..+80.  Pre-AGC makeup gain pushed
         into WDSP's PanelGain1 stage (matches Thetis's AF Gain
         semantics).
@@ -2496,6 +2568,24 @@ class Radio(QObject):
         +80 dB closes that gap; operators who don't need the upper
         range simply never visit it."""
         db = max(0, min(80, int(db)))
+        rx_id, _suffix = self._resolve_rx_target(target_rx)
+
+        if rx_id == 2:
+            # RX2 path: independent per-RX state, no fan-out.
+            if db == self._af_gain_db_rx2:
+                return
+            self._af_gain_db_rx2 = db
+            linear = 10.0 ** (db / 20.0)
+            wdsp2 = getattr(self, "_wdsp_rx2", None)
+            if wdsp2 is not None:
+                try:
+                    wdsp2.set_panel_gain(linear)
+                except Exception as exc:
+                    print(f"[Radio] AF Gain → WDSP rx2 push error: {exc}")
+            self.af_gain_db_changed_rx2.emit(db)
+            return
+
+        # RX1 path.
         if db == self._af_gain_db:
             return
         self._af_gain_db = db
@@ -2509,17 +2599,6 @@ class Radio(QObject):
                 wdsp.set_panel_gain(self.af_gain_linear)
             except Exception as exc:
                 print(f"[Radio] AF Gain → WDSP push error: {exc}")
-        # Phase 2 v0.1: mirror AF Gain onto RX2 so both receivers
-        # share the operator's makeup-gain setting.
-        # Phase 3.A (2026-05-12): also update per-RX state field
-        # so the lock-step invariant holds.
-        self._af_gain_db_rx2 = db
-        wdsp2 = getattr(self, "_wdsp_rx2", None)
-        if wdsp2 is not None:
-            try:
-                wdsp2.set_panel_gain(self.af_gain_linear)
-            except Exception as exc:
-                print(f"[Radio] AF Gain → WDSP rx2 push error: {exc}")
         self.af_gain_db_changed.emit(db)
 
     @property
@@ -5663,16 +5742,37 @@ class Radio(QObject):
         # Streak reset happens after the gain change in the caller.
         return step_db, "pull-up (band quiet)"
 
-    def set_rx_bw(self, mode: str, bw: int):
-        self._rx_bw_by_mode[mode] = int(bw)
-        # Phase 3.A v0.1 (2026-05-12): keep per-RX bandwidth dict
-        # in lock-step with RX1's during the Phase 3.A transition.
-        # Phase 3.B will introduce target_rx semantics so the
-        # operator can set independent per-mode BW for RX2.
-        self._rx_bw_by_mode_rx2[mode] = int(bw)
+    def set_rx_bw(self, mode: str, bw: int, target_rx: Optional[int] = None):
+        """Set the per-mode RX bandwidth for ``target_rx`` (default
+        = focused RX).
+
+        Phase 3.C v0.1: ``target_rx`` semantics replace Phase 2's
+        fan-out.  RX1 gets the BW saved to ``_rx_bw_by_mode`` and
+        the existing TX-BW-lock side effect.  RX2 gets BW saved to
+        ``_rx_bw_by_mode_rx2``; no TX BW interaction since TX is
+        v0.2 work and currently only mirrors RX1's BW.
+        """
+        rx_id, _suffix = self._resolve_rx_target(target_rx)
+        bw_int = int(bw)
+
+        if rx_id == 2:
+            self._rx_bw_by_mode_rx2[mode] = bw_int
+            # Push filter to RX2's WDSP channel only when this is
+            # RX2's active mode.
+            if self._wdsp_rx2 is not None and mode == self._mode_rx2:
+                try:
+                    low, high = self._wdsp_filter_for(mode, target_rx=2)
+                    self._wdsp_rx2.set_filter(low, high)
+                except Exception as exc:
+                    print(f"[Radio] WDSP rx2 bw-change error: {exc}")
+            self.rx_bw_changed_rx2.emit(mode, bw_int)
+            return
+
+        # RX1 path.
+        self._rx_bw_by_mode[mode] = bw_int
         # Always push to channel so the per-mode BW state stays in sync
         # — the demod for `mode` rebuilds inside the channel.
-        self._rx_channel.set_rx_bw(mode, int(bw))
+        self._rx_channel.set_rx_bw(mode, bw_int)
         # WDSP RX engine — only push filter when this matches the
         # currently active mode; per-mode BW is stored above and applied
         # on the next ``set_mode`` if the operator changes mode.
@@ -5682,29 +5782,25 @@ class Radio(QObject):
                 self._wdsp_rx.set_filter(low, high)
             except Exception as exc:
                 print(f"[Radio] WDSP rx bw-change error: {exc}")
-        # Phase 3.A: also push to RX2 when its active mode matches.
-        # In Phase 3.A both channels share state so this is identical
-        # to the RX1 push above; Phase 3.B will diverge.
-        if self._wdsp_rx2 is not None and mode == self._mode_rx2:
-            try:
-                low2, high2 = self._wdsp_filter_for(mode)
-                self._wdsp_rx2.set_filter(low2, high2)
-            except Exception as exc:
-                print(f"[Radio] WDSP rx2 bw-change error: {exc}")
         if mode == self._mode:
             self._emit_passband()
-        self.rx_bw_changed.emit(mode, int(bw))
-        if self._bw_locked and self._tx_bw_by_mode.get(mode) != int(bw):
-            self._tx_bw_by_mode[mode] = int(bw)
-            self.tx_bw_changed.emit(mode, int(bw))
+        self.rx_bw_changed.emit(mode, bw_int)
+        if self._bw_locked and self._tx_bw_by_mode.get(mode) != bw_int:
+            self._tx_bw_by_mode[mode] = bw_int
+            self.tx_bw_changed.emit(mode, bw_int)
 
     def set_tx_bw(self, mode: str, bw: int):
+        """Set the TX BW for a mode.  When BW lock is on, also
+        updates RX1's BW for the same mode (back-compat with the
+        v0.0.9.x BW-lock UX).  RX2's BW is NOT pulled along by
+        TX BW lock per Phase 3.C -- it's a per-RX independent
+        setting.  Operator wanting RX2 BW = TX BW should set it
+        explicitly via the focused-RX path.
+        """
         self._tx_bw_by_mode[mode] = int(bw)
         self.tx_bw_changed.emit(mode, int(bw))
         if self._bw_locked and self._rx_bw_by_mode.get(mode) != int(bw):
             self._rx_bw_by_mode[mode] = int(bw)
-            # Phase 3.A: keep RX2's per-mode BW dict in lock-step.
-            self._rx_bw_by_mode_rx2[mode] = int(bw)
             self._rx_channel.set_rx_bw(mode, int(bw))
             self.rx_bw_changed.emit(mode, int(bw))
 
@@ -8344,11 +8440,24 @@ class Radio(QObject):
         # 1:1 mapping today.
         return mode
 
-    def _wdsp_filter_for(self, mode: str) -> tuple[float, float]:
+    def _wdsp_filter_for(
+        self, mode: str, target_rx: Optional[int] = None,
+    ) -> tuple[float, float]:
         """Translate Lyra's per-mode RX bandwidth into WDSP bandpass
         edges (low_hz, high_hz).
+
+        Phase 3.C v0.1 (2026-05-12) added ``target_rx`` parameter:
+        when ``target_rx == 2`` the lookup reads from
+        ``self._rx_bw_by_mode_rx2`` (RX2's per-mode dict) so RX2's
+        filter can diverge from RX1's.  None or 0 reads RX1's dict
+        (default; preserves all existing call sites).  Resolves the
+        Phase 3.A TODO marker.
         """
-        bw = int(self._rx_bw_by_mode.get(mode, 2700))
+        if target_rx == 2:
+            bw_dict = self._rx_bw_by_mode_rx2
+        else:
+            bw_dict = self._rx_bw_by_mode
+        bw = int(bw_dict.get(mode, 2700))
         if mode in ("USB", "DIGU"):
             return (200.0, float(bw))
         if mode in ("LSB", "DIGL"):
@@ -8938,10 +9047,50 @@ class Radio(QObject):
     def agc_hang_blocks(self) -> int:
         return self._agc_hang_blocks
 
-    def set_agc_profile(self, name: str):
+    def set_agc_profile(self, name: str, target_rx: Optional[int] = None):
+        """Set the AGC profile (off / fast / med / slow / long /
+        auto / custom) for ``target_rx`` (default = focused RX).
+
+        Phase 3.C v0.1: ``target_rx`` semantics replace Phase 2's
+        fan-out.  Profile is independent per RX -- operator can
+        run RX1 on FAST while RX2 is on SLOW.
+
+        Auto-threshold timer fires regardless of which RX changed
+        profile; the timer's tracker pushes to BOTH channels (see
+        ``auto_set_agc_threshold``) because the single noise-floor
+        measurement covers both until Phase 4's split panadapter.
+        """
         name = name.lower().strip()
         if name not in (*self.AGC_PRESETS, "custom"):
             name = "med"
+
+        rx_id, _suffix = self._resolve_rx_target(target_rx)
+
+        if rx_id == 2:
+            if name == self._agc_profile_rx2:
+                # Idempotent on RX2 -- but still kick the auto-
+                # threshold timer in case operator wants a fresh
+                # tracker push (e.g., after band change).
+                self.auto_set_agc_threshold()
+                if not self._agc_auto_timer.isActive():
+                    self._agc_auto_timer.start()
+                return
+            self._agc_profile_rx2 = name
+            if self._wdsp_rx2 is not None:
+                try:
+                    self._wdsp_rx2.set_agc(self._wdsp_agc_for(name))
+                except Exception as exc:
+                    print(f"[Radio] WDSP rx2 agc-change error: {exc}")
+            # Auto-threshold push covers both channels via the
+            # auto-tracker; firing it here keeps RX2's threshold
+            # fresh after a profile change.
+            self.auto_set_agc_threshold()
+            if not self._agc_auto_timer.isActive():
+                self._agc_auto_timer.start()
+            self.agc_profile_changed_rx2.emit(name)
+            return
+
+        # RX1 path -- existing behavior.
         self._agc_profile = name
         # AGC_PRESETS is kept as a UI label set; WDSP has its own
         # internal preset table (mode-specific tau_decay / hangtime
@@ -8966,29 +9115,11 @@ class Radio(QObject):
                 self._wdsp_rx.set_agc(self._wdsp_agc_for(name))
             except Exception as exc:
                 print(f"[Radio] WDSP rx agc-change error: {exc}")
-        # Phase 2 v0.1: mirror AGC profile onto RX2.
-        # Phase 3.A (2026-05-12): also update per-RX state field.
-        self._agc_profile_rx2 = name
-        if self._wdsp_rx2 is not None:
-            try:
-                self._wdsp_rx2.set_agc(self._wdsp_agc_for(name))
-            except Exception as exc:
-                print(f"[Radio] WDSP rx2 agc-change error: {exc}")
-        # UNCOMMITTED EXPERIMENT (v0.1 Phase 1 follow-up, 2026-05-11):
-        # auto-track the threshold REGARDLESS of profile choice.
-        # Pre-fix behavior: only "auto" profile re-tracked threshold;
-        # all other profiles froze the threshold at whatever Auto
-        # last computed before the operator switched profiles.
-        # Operator symptom: threshold static at -130 dBFS for hours
-        # in MED / FAST / SLOW profiles, never adapting to band /
-        # antenna / sky-noise changes.  The fix runs the auto
-        # timer in all profiles; only the time-constant choice
-        # differs per profile name now.
-        #
-        # If a future UX needs operator-locked manual threshold,
-        # add a separate "auto threshold ON / OFF" toggle in
-        # Settings → DSP → AGC and gate the timer on THAT, not on
-        # the profile name.
+        # Phase 1 follow-up: auto-track the threshold REGARDLESS of
+        # profile choice (so operator-set profiles still get fresh
+        # threshold values).  Phase 3.C: auto-tracker now pushes
+        # to BOTH channels via the per-target setter, see
+        # auto_set_agc_threshold's implementation.
         self.auto_set_agc_threshold()
         if not self._agc_auto_timer.isActive():
             self._agc_auto_timer.start()
@@ -9101,8 +9232,12 @@ class Radio(QObject):
         """AGC threshold in dBFS — see ``set_agc_threshold``."""
         return self._agc_target
 
-    def set_agc_threshold(self, threshold_dbfs: float):
-        """Set the AGC threshold in dBFS.  This is WDSP's
+    def set_agc_threshold(
+        self, threshold_dbfs: float,
+        target_rx: Optional[int] = None,
+    ):
+        """Set the AGC threshold in dBFS for ``target_rx``
+        (default = focused RX).  This is WDSP's
         ``SetRXAAGCThresh`` parameter — the noise-floor reference
         used to compute ``max_gain`` (the AGC's gain ceiling).
 
@@ -9121,6 +9256,12 @@ class Radio(QObject):
         Range clamped to ``_AGC_THRESH_MIN_DBFS``..
         ``_AGC_THRESH_MAX_DBFS`` (-150..-40 dBFS).
 
+        Phase 3.C v0.1 (2026-05-12): ``target_rx`` semantics
+        replace Phase 2's fan-out.  ``auto_set_agc_threshold``
+        explicitly pushes to BOTH channels (single noise-floor
+        measurement covers both until Phase 4's split panadapter
+        adds per-RX NF).
+
         v0.0.9.8 fix history: this method previously took a
         legacy 0..1 linear "audio output target" value, never
         pushed to WDSP, and was responsible for the operator-
@@ -9134,24 +9275,28 @@ class Radio(QObject):
         v = max(self._AGC_THRESH_MIN_DBFS,
                 min(self._AGC_THRESH_MAX_DBFS,
                     float(threshold_dbfs)))
+
+        rx_id, _suffix = self._resolve_rx_target(target_rx)
+
+        if rx_id == 2:
+            self._agc_target_rx2 = v
+            if self._wdsp_rx2 is not None:
+                try:
+                    self._wdsp_rx2.set_agc_threshold(
+                        v, 4096, int(self._rate))
+                except Exception as exc:
+                    print(f"[Radio] WDSP AGC rx2 threshold push: {exc}")
+            self.agc_threshold_changed_rx2.emit(v)
+            return
+
+        # RX1 path.
         self._agc_target = v
-        # Push to WDSP so the slider movement reaches the engine.
         if self._wdsp_rx is not None:
             try:
                 self._wdsp_rx.set_agc_threshold(
                     v, 4096, int(self._rate))
             except Exception as exc:
                 print(f"[Radio] WDSP AGC threshold push: {exc}")
-        # Phase 2 v0.1: mirror AGC threshold onto RX2 so both
-        # receivers share the auto-tracker's output.
-        # Phase 3.A (2026-05-12): also update per-RX state field.
-        self._agc_target_rx2 = v
-        if self._wdsp_rx2 is not None:
-            try:
-                self._wdsp_rx2.set_agc_threshold(
-                    v, 4096, int(self._rate))
-            except Exception as exc:
-                print(f"[Radio] WDSP AGC rx2 threshold push: {exc}")
         self.agc_threshold_changed.emit(v)
 
     def auto_set_agc_threshold(self, margin_db: float = 18.0) -> float:
@@ -9200,7 +9345,14 @@ class Radio(QObject):
         target_dbfs = max(self._AGC_THRESH_MIN_DBFS,
                           min(self._AGC_THRESH_MAX_DBFS,
                               target_dbfs))
-        self.set_agc_threshold(target_dbfs)
+        # Phase 3.C v0.1: explicitly push to BOTH channels.  The
+        # single FFT-derived noise-floor estimate covers both
+        # receivers until Phase 4's split panadapter adds per-RX
+        # NF tracking.  Each per-target call emits its own
+        # ``agc_threshold_changed`` / ``agc_threshold_changed_rx2``
+        # signal so per-RX UI bindings stay in sync.
+        self.set_agc_threshold(target_dbfs, target_rx=0)
+        self.set_agc_threshold(target_dbfs, target_rx=2)
         self.status_message.emit(
             f"AGC auto-threshold: {target_dbfs:+.0f} dBFS "
             f"(noise floor {nf_db:+.0f} dBFS + {margin_db:.0f} dB margin)",

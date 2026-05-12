@@ -583,9 +583,15 @@ class ModeFilterPanel(GlassPanel):
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(Radio.ALL_MODES)
-        self.mode_combo.setCurrentText(radio.mode)
+        # Phase 3.C: read the focused RX's mode (default focus = RX1
+        # at construction time, so this is identical to the legacy
+        # ``radio.mode`` read in the typical case).
+        self.mode_combo.setCurrentText(radio.mode_for_rx())
         self.mode_combo.setFixedWidth(80)
-        self.mode_combo.currentTextChanged.connect(self.radio.set_mode)
+        # Phase 3.C: panel writes route to the focused RX
+        # (``target_rx=None``).
+        self.mode_combo.currentTextChanged.connect(
+            lambda m: self.radio.set_mode(m))
         h.addLayout(_pair("Mode", self.mode_combo))
 
         self.rx_bw_combo = QComboBox()
@@ -641,6 +647,11 @@ class ModeFilterPanel(GlassPanel):
         # Keep the spinner in sync if pitch changes elsewhere (e.g.
         # the Settings → DSP duplicate of the same control).
         radio.cw_pitch_changed.connect(self._on_radio_cw_pitch_changed)
+        # Phase 3.C v0.1: per-RX2 sibling signals + focus-change
+        # listener so the panel reflects whichever RX has focus.
+        radio.mode_changed_rx2.connect(self._on_mode_changed_rx2)
+        radio.rx_bw_changed_rx2.connect(self._on_radio_rx_bw_changed_rx2)
+        radio.focused_rx_changed.connect(self._on_focused_rx_changed)
 
     @staticmethod
     def _select_combo_data(combo: QComboBox, value):
@@ -678,10 +689,13 @@ class ModeFilterPanel(GlassPanel):
         combo.setCurrentIndex(0)
 
     def _refresh_bw_combos(self):
-        mode = self.radio.mode
+        # Phase 3.C: RX BW reads from the focused RX's per-mode dict;
+        # TX BW remains single-RX (always RX1's TX path until SPLIT
+        # TX swap support lands in a later sub-phase).
+        mode = self.radio.mode_for_rx()
         presets = Radio.BW_PRESETS.get(mode, [2400])
-        rx_bw = self.radio.rx_bw_for(mode)
-        tx_bw = self.radio.tx_bw_for(mode)
+        rx_bw = self.radio.rx_bw_for_rx(mode)
+        tx_bw = self.radio.tx_bw_for(self.radio.mode)
         for combo, val in ((self.rx_bw_combo, rx_bw), (self.tx_bw_combo, tx_bw)):
             combo.blockSignals(True)
             combo.clear()
@@ -697,14 +711,27 @@ class ModeFilterPanel(GlassPanel):
     def _on_rx_bw_changed(self, _idx):
         data = self.rx_bw_combo.currentData()
         if data is not None:
-            self.radio.set_rx_bw(self.radio.mode, int(data))
+            # Phase 3.C: write the focused RX's mode-specific BW.
+            mode = self.radio.mode_for_rx()
+            self.radio.set_rx_bw(mode, int(data))
 
     def _on_tx_bw_changed(self, _idx):
         data = self.tx_bw_combo.currentData()
         if data is not None:
+            # TX BW is single-RX (TX is always RX1's mode today;
+            # SPLIT TX swap-on-mode lands in a later sub-phase).
             self.radio.set_tx_bw(self.radio.mode, int(data))
 
     def _on_mode_changed(self, mode: str):
+        # Phase 3.C: ``mode_changed`` is RX1's signal; only refresh
+        # the displayed mode when RX1 has focus.  RX2 mode changes
+        # arrive via ``mode_changed_rx2`` and are handled in
+        # ``_on_mode_changed_rx2``.
+        if self.radio.focused_rx != 0:
+            # Still refresh BW combos because TX BW dict tracks RX1
+            # mode regardless of focus.
+            self._refresh_bw_combos()
+            return
         self.mode_combo.blockSignals(True)
         self.mode_combo.setCurrentText(mode)
         self.mode_combo.blockSignals(False)
@@ -712,7 +739,11 @@ class ModeFilterPanel(GlassPanel):
         self._update_cw_pitch_visibility()
 
     def _update_cw_pitch_visibility(self):
-        is_cw = self.radio.mode in ("CWU", "CWL")
+        # Phase 3.C: visibility tracks the focused RX's mode (CW
+        # pitch is a per-channel parameter conceptually -- but the
+        # protocol-side cw_pitch_hz is single-engine today, so the
+        # spinner controls only the focused RX's display affordance).
+        is_cw = self.radio.mode_for_rx() in ("CWU", "CWL")
         self.cw_pitch_label.setVisible(is_cw)
         self.cw_pitch_spin.setVisible(is_cw)
 
@@ -730,7 +761,11 @@ class ModeFilterPanel(GlassPanel):
         self.rate_combo.blockSignals(False)
 
     def _on_radio_rx_bw_changed(self, mode: str, bw: int):
-        if mode == self.radio.mode:
+        # Phase 3.C: RX1 BW change — only refresh combo if RX1 has
+        # focus AND the change is for the displayed mode.
+        if self.radio.focused_rx != 0:
+            return
+        if mode == self.radio.mode_for_rx():
             self.rx_bw_combo.blockSignals(True)
             self._ensure_bw_value(self.rx_bw_combo, bw)
             self.rx_bw_combo.blockSignals(False)
@@ -740,6 +775,41 @@ class ModeFilterPanel(GlassPanel):
             self.tx_bw_combo.blockSignals(True)
             self._ensure_bw_value(self.tx_bw_combo, bw)
             self.tx_bw_combo.blockSignals(False)
+
+    # ── Phase 3.C v0.1: focus + RX2 sibling slots ──────────────────
+    def _on_mode_changed_rx2(self, mode: str):
+        """RX2 mode change — only refresh the panel surface when RX2
+        currently holds focus."""
+        if self.radio.focused_rx != 2:
+            return
+        self.mode_combo.blockSignals(True)
+        self.mode_combo.setCurrentText(mode)
+        self.mode_combo.blockSignals(False)
+        self._refresh_bw_combos()
+        self._update_cw_pitch_visibility()
+
+    def _on_radio_rx_bw_changed_rx2(self, mode: str, bw: int):
+        """RX2 BW change — refresh the BW combo if RX2 has focus and
+        the change is for the currently displayed mode."""
+        if self.radio.focused_rx != 2:
+            return
+        if mode == self.radio.mode_for_rx():
+            self.rx_bw_combo.blockSignals(True)
+            self._ensure_bw_value(self.rx_bw_combo, bw)
+            self.rx_bw_combo.blockSignals(False)
+
+    def _on_focused_rx_changed(self, rx_id: int):
+        """Operator switched VFO focus -- re-bind the panel display
+        to the newly focused RX's state."""
+        # Update mode combo to focused RX's mode.
+        self.mode_combo.blockSignals(True)
+        self.mode_combo.setCurrentText(self.radio.mode_for_rx())
+        self.mode_combo.blockSignals(False)
+        # Refresh BW combos against the focused RX's mode + per-mode
+        # BW dict.
+        self._refresh_bw_combos()
+        # CW pitch visibility depends on the focused RX's mode.
+        self._update_cw_pitch_visibility()
 
 
 # ── View / Zoom / Rates ────────────────────────────────────────────────
@@ -1671,7 +1741,8 @@ class DspPanel(GlassPanel):
         self.af_gain_slider.setRange(0, 80)
         self.af_gain_slider.setSingleStep(1)
         self.af_gain_slider.setPageStep(5)
-        self.af_gain_slider.setValue(int(radio.af_gain_db))
+        # Phase 3.C v0.1: read from focused RX (default = RX1).
+        self.af_gain_slider.setValue(int(radio.af_gain_db_for_rx()))
         self.af_gain_slider.setFixedWidth(120)
         self.af_gain_slider.setToolTip(
             "AF Gain — post-demod makeup gain, 0 to +80 dB.\n\n"
@@ -1686,9 +1757,12 @@ class DspPanel(GlassPanel):
             "The tanh limiter after this stage prevents clipping "
             "at the sink, so you can't damage speakers with high "
             "AF Gain settings — the worst case is soft saturation.")
-        self.af_gain_slider.valueChanged.connect(self.radio.set_af_gain_db)
+        # Phase 3.C v0.1: write to focused RX (target_rx=None defaults
+        # to ``radio.focused_rx`` inside the setter).
+        self.af_gain_slider.valueChanged.connect(
+            lambda v: self.radio.set_af_gain_db(int(v)))
         levels.addWidget(self.af_gain_slider)
-        self.af_gain_label = QLabel(f"+{int(radio.af_gain_db)} dB")
+        self.af_gain_label = QLabel(f"+{int(radio.af_gain_db_for_rx())} dB")
         self.af_gain_label.setFixedWidth(50)
         levels.addWidget(self.af_gain_label)
 
@@ -2572,11 +2646,16 @@ class DspPanel(GlassPanel):
         # Initial paint.
         self._refresh_nr_source_badge()
 
-        # Wire the live readouts to radio signals
-        self._update_agc_profile(radio.agc_profile)
-        self._update_agc_threshold(radio.agc_threshold)
-        radio.agc_profile_changed.connect(self._update_agc_profile)
-        radio.agc_threshold_changed.connect(self._update_agc_threshold)
+        # Wire the live readouts to radio signals.  Phase 3.C v0.1:
+        # read from the focused RX's per-RX state so the panel
+        # reflects whichever VFO has focus.
+        self._update_agc_profile(radio.agc_profile_for_rx())
+        self._update_agc_threshold(radio.agc_threshold_for_rx())
+        radio.agc_profile_changed.connect(self._on_agc_profile_changed_rx1)
+        radio.agc_threshold_changed.connect(self._on_agc_threshold_changed_rx1)
+        radio.agc_profile_changed_rx2.connect(self._on_agc_profile_changed_rx2)
+        radio.agc_threshold_changed_rx2.connect(self._on_agc_threshold_changed_rx2)
+        radio.focused_rx_changed.connect(self._on_focused_rx_changed)
         # agc_action_db fires every demod block (~40+ Hz) which would flicker
         # the label unreadably. Track peak-since-last-paint and repaint on a
         # timer at ~6 Hz so the value is both legible and shows short bursts.
@@ -2605,8 +2684,11 @@ class DspPanel(GlassPanel):
         radio.gain_changed.connect(self._on_gain_changed)
         radio.volume_changed.connect(self._on_volume_changed)
         # AF Gain state sync — covers QSettings load and future TCI
-        # / CAT remote-control adjustments.
+        # / CAT remote-control adjustments.  Phase 3.C: also wire the
+        # per-RX2 sibling signal so RX2 AF-Gain edits propagate to
+        # the slider when RX2 has focus.
         radio.af_gain_db_changed.connect(self._on_af_gain_db_changed)
+        radio.af_gain_db_changed_rx2.connect(self._on_af_gain_db_changed_rx2)
         # Mute + Auto-LNA state sync (signals driven by Radio — covers
         # QSettings load + any future TCI / CAT mute command).
         radio.muted_changed.connect(self._on_muted_changed)
@@ -2763,7 +2845,59 @@ class DspPanel(GlassPanel):
 
     def _on_af_gain_db_changed(self, db: int):
         """Radio AF Gain changed elsewhere — keep slider + label in
-        sync (e.g. QSettings load, future TCI/CAT control)."""
+        sync (e.g. QSettings load, future TCI/CAT control).
+
+        Phase 3.C: this is RX1's ``af_gain_db_changed`` signal -- only
+        refresh the slider when RX1 has focus.
+        """
+        if self.radio.focused_rx != 0:
+            return
+        self.af_gain_label.setText(f"+{db} dB")
+        if self.af_gain_slider.value() != db:
+            self.af_gain_slider.blockSignals(True)
+            self.af_gain_slider.setValue(db)
+            self.af_gain_slider.blockSignals(False)
+
+    def _on_af_gain_db_changed_rx2(self, db: int):
+        """RX2 AF Gain changed -- refresh slider only when RX2 has
+        focus.  Phase 3.C v0.1."""
+        if self.radio.focused_rx != 2:
+            return
+        self.af_gain_label.setText(f"+{db} dB")
+        if self.af_gain_slider.value() != db:
+            self.af_gain_slider.blockSignals(True)
+            self.af_gain_slider.setValue(db)
+            self.af_gain_slider.blockSignals(False)
+
+    # ── Phase 3.C v0.1: per-RX AGC slots + focus rebinding ─────────
+    def _on_agc_profile_changed_rx1(self, profile: str):
+        if self.radio.focused_rx != 0:
+            return
+        self._update_agc_profile(profile)
+
+    def _on_agc_profile_changed_rx2(self, profile: str):
+        if self.radio.focused_rx != 2:
+            return
+        self._update_agc_profile(profile)
+
+    def _on_agc_threshold_changed_rx1(self, threshold_dbfs: float):
+        if self.radio.focused_rx != 0:
+            return
+        self._update_agc_threshold(threshold_dbfs)
+
+    def _on_agc_threshold_changed_rx2(self, threshold_dbfs: float):
+        if self.radio.focused_rx != 2:
+            return
+        self._update_agc_threshold(threshold_dbfs)
+
+    def _on_focused_rx_changed(self, rx_id: int):
+        """Operator switched focus — re-bind the AGC profile/threshold
+        readouts and the AF Gain slider to the newly focused RX."""
+        # AGC profile + threshold labels.
+        self._update_agc_profile(self.radio.agc_profile_for_rx())
+        self._update_agc_threshold(self.radio.agc_threshold_for_rx())
+        # AF Gain slider + label.
+        db = int(self.radio.af_gain_db_for_rx())
         self.af_gain_label.setText(f"+{db} dB")
         if self.af_gain_slider.value() != db:
             self.af_gain_slider.blockSignals(True)
@@ -4089,10 +4223,15 @@ class DspPanel(GlassPanel):
     }
 
     def _show_agc_menu(self, pos):
-        """Pop a context menu listing AGC profiles (checked = current)."""
+        """Pop a context menu listing AGC profiles (checked = current).
+
+        Phase 3.C v0.1: the "current" check and the selected-profile
+        write target both follow ``radio.focused_rx`` so the menu
+        reflects + edits the focused RX's profile.
+        """
         sender = self.sender()
         menu = QMenu(self)
-        current = self.radio.agc_profile
+        current = self.radio.agc_profile_for_rx()
         for name in self._AGC_PROFILES:
             label = self._AGC_PROFILE_LABELS[name]
             act = QAction(label, menu)

@@ -153,18 +153,36 @@ class FocusedRxStateTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.radio._resolve_rx_target(bad)
 
-    # ── Phase 2 fan-out preserves the lock-step invariant ───────────
+    # ── Phase 3.C: per-RX setters route to the requested channel ───
 
-    def test_set_mode_keeps_per_rx_state_in_lockstep(self) -> None:
-        """Phase 3.A invariant: ``_mode_rx2`` follows ``_mode``
-        when the existing (Phase 2) fan-out setters run.  Phase
-        3.B introduces target_rx semantics that let them diverge."""
-        original = self.radio._mode
-        # Pick a different mode that's in ALL_MODES.
-        candidate = "LSB" if original != "LSB" else "USB"
+    def test_set_mode_default_routes_to_focused_rx(self) -> None:
+        """Phase 3.C invariant: ``set_mode(...)`` with no ``target_rx``
+        targets the focused RX.  With default focus = RX1, only
+        ``_mode`` updates; ``_mode_rx2`` stays where it was.  This
+        replaces the Phase 3.A lock-step invariant (Phase 2 fan-out
+        retired by Phase 3.C)."""
+        original_rx1 = self.radio._mode
+        original_rx2 = self.radio._mode_rx2
+        candidate = "LSB" if original_rx1 != "LSB" else "USB"
+        # Default focus = RX1.
         self.radio.set_mode(candidate)
         self.assertEqual(self.radio._mode, candidate)
-        self.assertEqual(self.radio._mode_rx2, candidate)
+        self.assertEqual(self.radio._mode_rx2, original_rx2,
+                         "RX2 mode must NOT track RX1's set_mode call "
+                         "post Phase 3.C.")
+
+    def test_set_mode_target_rx2_routes_to_rx2_only(self) -> None:
+        original_rx1 = self.radio._mode
+        candidate = "AM" if original_rx1 != "AM" else "USB"
+        self.radio.set_mode(candidate, target_rx=2)
+        self.assertEqual(
+            self.radio._mode_rx2, candidate,
+            "RX2 mode must follow set_mode(target_rx=2).",
+        )
+        self.assertEqual(
+            self.radio._mode, original_rx1,
+            "RX1 mode must NOT change when target_rx=2.",
+        )
 
 
 if __name__ == "__main__":
