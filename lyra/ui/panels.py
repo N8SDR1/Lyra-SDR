@@ -2016,6 +2016,27 @@ class DspPanel(GlassPanel):
         self.vol_label.setFixedWidth(50)
         levels.addWidget(self.vol_label)
 
+        # ── MUTE-A — sits IMMEDIATELY after Vol-A so the operator's
+        # eye associates "this slider's mute is right next to it"
+        # (Phase 3.D UX request 2026-05-12).  Was originally placed
+        # after the Out combo; relocated here for direct adjacency.
+        self.mute_btn = QPushButton("MUTE")
+        self.mute_btn.setObjectName("dsp_btn")        # orange when checked
+        self.mute_btn.setCheckable(True)
+        # Phase 3.D hotfix v0.1: setMinimumWidth instead of fixed so
+        # the button grows to fit "MUTE-A" caption on systems where
+        # the QSS push-button font renders wider than expected.
+        self.mute_btn.setMinimumWidth(86)
+        self.mute_btn.setChecked(radio.muted)
+        self.mute_btn.setToolTip(
+            "Silence output without changing the Volume slider. "
+            "Click again to resume at the current volume setting.")
+        self.mute_btn.toggled.connect(
+            lambda on: self.radio.set_muted(bool(on), target_rx=0))
+        levels.addWidget(self.mute_btn)
+
+        levels.addSpacing(8)
+
         # Vol-B (RX2) -- hidden until SUB is enabled.
         self.vol_b_label_caption = QLabel("Vol-B")
         levels.addWidget(self.vol_b_label_caption)
@@ -2036,6 +2057,20 @@ class DspPanel(GlassPanel):
             f"{self._volume_to_slider(radio.volume_for_rx(2))}%")
         self.vol_b_label.setFixedWidth(50)
         levels.addWidget(self.vol_b_label)
+
+        # Mute-B sits adjacent to Vol-B for the same reason MUTE-A
+        # is adjacent to Vol-A.  Hidden when SUB is OFF (collapses
+        # via setVisible from ``_on_dispatch_state_changed``).
+        self.mute_b_btn = QPushButton("MUTE-B")
+        self.mute_b_btn.setObjectName("dsp_btn")
+        self.mute_b_btn.setCheckable(True)
+        self.mute_b_btn.setMinimumWidth(86)
+        self.mute_b_btn.setChecked(radio.muted_for_rx(2))
+        self.mute_b_btn.setToolTip(
+            "Silence RX2 (right channel) without changing Vol-B.")
+        self.mute_b_btn.toggled.connect(
+            lambda on: self.radio.set_muted(bool(on), target_rx=2))
+        levels.addWidget(self.mute_b_btn)
 
         levels.addSpacing(12)
 
@@ -2134,54 +2169,15 @@ class DspPanel(GlassPanel):
                 self.out_combo.currentData()))
         levels.addWidget(self.out_combo)
 
-        levels.addSpacing(12)
-
-        # Mute button — Radio-side state so it survives volume slider
-        # drags while muted (slider can be positioned for post-unmute
-        # without breaking silence). Muting multiplies final output by
-        # 0 but leaves AGC / metering untouched.
-        # Phase 3.D: MUTE always drives RX1.  When SUB is enabled,
-        # the label flips to "MUTE-A" and a sibling MUTE-B appears.
-        self.mute_btn = QPushButton("MUTE")
-        self.mute_btn.setObjectName("dsp_btn")        # orange when checked
-        self.mute_btn.setCheckable(True)
-        # Phase 3.D hotfix v0.1: setMinimumWidth instead of fixed so
-        # the button grows to fit "MUTE-A" caption on systems where
-        # the QSS push-button font renders wider than expected.
-        self.mute_btn.setMinimumWidth(86)
-        self.mute_btn.setChecked(radio.muted)
-        self.mute_btn.setToolTip(
-            "Silence output without changing the Volume slider. "
-            "Click again to resume at the current volume setting.")
-        self.mute_btn.toggled.connect(
-            lambda on: self.radio.set_muted(bool(on), target_rx=0))
-        levels.addWidget(self.mute_btn)
-
-        # Mute-B (RX2) -- hidden until SUB is enabled.
-        self.mute_b_btn = QPushButton("MUTE-B")
-        self.mute_b_btn.setObjectName("dsp_btn")
-        self.mute_b_btn.setCheckable(True)
-        # Phase 3.D hotfix v0.1: setMinimumWidth matches Mute-A so
-        # both grow consistently on systems with wider button fonts.
-        self.mute_b_btn.setMinimumWidth(86)
-        self.mute_b_btn.setChecked(radio.muted_for_rx(2))
-        self.mute_b_btn.setToolTip(
-            "Silence RX2 (right channel) without changing Vol-B.")
-        self.mute_b_btn.toggled.connect(
-            lambda on: self.radio.set_muted(bool(on), target_rx=2))
-        levels.addWidget(self.mute_b_btn)
-
-        # DSP Settings shortcut — moved here from the DSP buttons
-        # row below per operator UX request (more reachable spot
-        # next to the levels controls; the DSP row stays focused
-        # on actual DSP toggles).
-        levels.addSpacing(8)
-        self.dsp_settings_btn = QPushButton("DSP Settings…")
-        self.dsp_settings_btn.setFixedWidth(140)
-        self.dsp_settings_btn.setToolTip(
-            "Open DSP settings (AGC profile + threshold, NB/NR/EQ)")
-        self.dsp_settings_btn.clicked.connect(self._open_dsp_settings)
-        levels.addWidget(self.dsp_settings_btn)
+        # Phase 3.D UX move (2026-05-12): MUTE-A / MUTE-B used to live
+        # here after the Out combo, and the DSP Settings button after
+        # that.  Per operator feedback the levels row was over-crowded
+        # and the "MUTE-A" caption clipped on tight systems.  MUTE
+        # buttons relocated to sit directly after their corresponding
+        # Vol slider (above) for unambiguous association; DSP Settings
+        # button moved to the NR-status row (3rd row) where AEPF / NPE
+        # / Mode controls live -- a more natural sibling location for
+        # the dialog that opens the same family of advanced settings.
 
         levels.addStretch(1)
         self.content_layout().addLayout(levels)
@@ -2824,6 +2820,18 @@ class DspPanel(GlassPanel):
         nr_status_row.addSpacing(8)
         nr_status_row.addWidget(self.nr_cap_btn)
         nr_status_row.addWidget(self.nr_source_badge)
+        # Phase 3.D UX move (2026-05-12): DSP Settings button moved
+        # from the levels row to here -- it's a natural sibling of
+        # Mode / AEPF / NPE / Cap (all open or configure the same
+        # advanced-DSP scope) and freeing it from row 1 leaves room
+        # for MUTE-A / MUTE-B to sit adjacent to their Vol sliders.
+        nr_status_row.addSpacing(16)
+        self.dsp_settings_btn = QPushButton("DSP Settings…")
+        self.dsp_settings_btn.setMinimumWidth(140)
+        self.dsp_settings_btn.setToolTip(
+            "Open DSP settings (AGC profile + threshold, NB/NR/EQ)")
+        self.dsp_settings_btn.clicked.connect(self._open_dsp_settings)
+        nr_status_row.addWidget(self.dsp_settings_btn)
         nr_status_row.addSpacing(12)
         # LMS widgets — always added, visibility controlled by
         # the LMS enable state.  LMS is independent of NR1/NR2
