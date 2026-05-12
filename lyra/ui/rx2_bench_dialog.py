@@ -315,9 +315,24 @@ class Rx2BenchTestDialog(QDialog):
         Uses a Hann-windowed FFT of the most-recent FFT_SIZE samples
         to suppress the DC bin's spectral leakage (HL2's DC offset
         is real and would otherwise dominate the peak picker).  The
-        DC bin itself (±2 bins for safety) is masked from the
+        DC bin + its windowing leakage skirt (±5 bins -- about
+        ±117 Hz at 192 kHz / 8192 FFT bins) is masked from the
         peak-search range so it never wins -- we want the carrier
         peak, not the DC peak.
+
+        Widened from the original ±2 bins (±47 Hz) after
+        operator-verified bench testing on 2026-05-11: WWV's 500
+        / 600 / 1000 Hz audio modulation tones snuck through as
+        the "peak" when the operator tuned VFO B exactly on a
+        WWV carrier.  The HL2 oscillator on N8SDR's rig is rock-
+        steady (24/7 powered, no thermal drift) so the carrier
+        sat in the ±2-bin DC mask and the picker returned the
+        next-strongest unmasked bin -- which happened to be the
+        broadcast audio tone.  Widening the mask to ±5 bins
+        covers DC + the windowing leakage skirt without intruding
+        on legitimate signal peaks at sub-kHz offsets from the
+        NCO (the closest interesting offset operators actually
+        care about is in the hundreds-of-Hz range minimum).
         """
         n = self.FFT_SIZE
         if iq.shape[0] < n:
@@ -333,10 +348,12 @@ class Rx2BenchTestDialog(QDialog):
         mag = np.abs(spectrum)
         mag_db = 20.0 * np.log10(np.maximum(mag, 1e-12)) - 20.0 * np.log10(n / 2.0)
 
-        # Mask out ±2 bins around DC (the centre of the shifted FFT).
+        # Mask out ±5 bins around DC (the centre of the shifted FFT).
+        # Slice is [center-5, center+6) -- exclusive upper -- so 11
+        # bins total: center-5 .. center+5 inclusive.
         center = n // 2
         mag_search = mag.copy()
-        mag_search[center - 2: center + 3] = 0.0
+        mag_search[center - 5: center + 6] = 0.0
         peak_idx = int(np.argmax(mag_search))
 
         # fftshift maps bin 0 -> -rate/2, bin n-1 -> +rate/2 - bin
