@@ -925,12 +925,16 @@ class Phase3e1DualVolSlidersAlwaysVisibleTest(unittest.TestCase):
         self.assertFalse(self.panel.vol_b_slider.isHidden())
         self.assertFalse(self.panel.mute_b_btn.isHidden())
 
-    def test_vol_a_label_says_vol_a(self) -> None:
-        """Label is "Vol-A" always (no more "Vol" -> "Vol-A"
-        relabel based on SUB state)."""
-        self.assertEqual(self.panel.vol_label_caption.text(), "Vol-A")
+    def test_vol_a_label_says_vol_rx1(self) -> None:
+        """Phase 3.E.1 hotfix v0.17 (2026-05-12): caption uses
+        the canonical "RX1 / RX2" naming (matches VFO LED
+        captions, dispatch state, focused_rx convention).  No
+        relabel based on SUB state."""
+        self.assertEqual(self.panel.vol_label_caption.text(), "Vol RX1")
         self.radio.set_rx2_enabled(True)
-        self.assertEqual(self.panel.vol_label_caption.text(), "Vol-A")
+        self.assertEqual(self.panel.vol_label_caption.text(), "Vol RX1")
+        self.assertEqual(
+            self.panel.vol_b_label_caption.text(), "Vol RX2")
 
     def test_vol_a_slider_writes_rx1_always(self) -> None:
         """Vol-A always targets RX1, even when SUB is off and

@@ -356,14 +356,14 @@ class Phase3dDspPanelConditionalUITest(unittest.TestCase):
         self.radio.set_rx2_enabled(False)
         self.assertFalse(self.panel.vol_b_slider.isHidden())
         self.assertFalse(self.panel.mute_b_btn.isHidden())
-        self.assertEqual(self.panel.vol_label_caption.text(), "Vol-A")
+        self.assertEqual(self.panel.vol_label_caption.text(), "Vol RX1")
         self.assertEqual(self.panel.mute_btn.text(), "MUTE")
 
     def test_vol_b_visible_when_sub_on(self) -> None:
         self.radio.set_rx2_enabled(True)
         self.assertFalse(self.panel.vol_b_slider.isHidden())
         self.assertFalse(self.panel.mute_b_btn.isHidden())
-        self.assertEqual(self.panel.vol_label_caption.text(), "Vol-A")
+        self.assertEqual(self.panel.vol_label_caption.text(), "Vol RX1")
         # MUTE button text stays "MUTE" in both SUB states --
         # position (right of each Vol slider) carries the
         # per-RX meaning, no -A / -B suffix needed.

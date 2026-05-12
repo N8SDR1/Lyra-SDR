@@ -2051,7 +2051,7 @@ class DspPanel(GlassPanel):
         # flip with SUB off" -- the mirror keeps Vol-A and Vol-B
         # tracking each other across focus flips so the audible
         # level stays put.
-        self.vol_label_caption = QLabel("Vol-A")
+        self.vol_label_caption = QLabel("Vol RX1")
         levels.addWidget(self.vol_label_caption)
         self.vol_slider = QSlider(Qt.Horizontal)
         self.vol_slider.setObjectName("vol_slider")
@@ -2093,10 +2093,12 @@ class DspPanel(GlassPanel):
 
         levels.addSpacing(8)
 
-        # Vol-B (RX2) -- always visible per Phase 3.E.1 hotfix v0.16
+        # Vol RX2 -- always visible per Phase 3.E.1 hotfix v0.16
         # (operator UX 2026-05-12 -- "two volume sliders and mutes
-        # always visible").  Wired directly to RX2.
-        self.vol_b_label_caption = QLabel("Vol-B")
+        # always visible").  Wired directly to RX2.  Caption uses
+        # the canonical "RX1 / RX2" naming (matches VFO LED
+        # captions, dispatch state, focused_rx) per v0.17.
+        self.vol_b_label_caption = QLabel("Vol RX2")
         levels.addWidget(self.vol_b_label_caption)
         self.vol_b_slider = QSlider(Qt.Horizontal)
         self.vol_b_slider.setObjectName("vol_slider")
