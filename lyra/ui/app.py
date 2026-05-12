@@ -55,6 +55,28 @@ def _enable_faulthandler() -> None:
             os.path.join(crash_dir, "crash.log"),
             "a", buffering=1, encoding="utf-8", errors="replace")
         faulthandler.enable(file=_CRASH_LOG_FILE)
+        # Phase 3.E.1 hotfix v0.20 (2026-05-12): on the
+        # PyInstaller --windowed build (sys.stdout/sys.stderr are
+        # both None), redirect Python's print() output to the
+        # same crash.log file so [Radio] / [PropagationPanel] /
+        # [HamQslSolarCache] diagnostic prints don't vanish.
+        # Operator-reported 2026-05-12: tester "Timmy"'s
+        # crash.log was 0 KB because faulthandler only writes
+        # there on FATAL crashes -- ordinary logging from the
+        # propagation fetch failure (v0.18) was silently dropped
+        # because sys.stderr is None in the windowed build.
+        #
+        # Source-tree runs keep their real sys.stdout/stderr
+        # (console output) -- we only redirect when stdout/stderr
+        # are missing.
+        from datetime import datetime as _dt
+        _CRASH_LOG_FILE.write(
+            f"\n=== Lyra session start {_dt.now().isoformat()} ===\n")
+        _CRASH_LOG_FILE.flush()
+        if sys.stdout is None:
+            sys.stdout = _CRASH_LOG_FILE
+        if sys.stderr is None:
+            sys.stderr = _CRASH_LOG_FILE
         return
     except (OSError, ValueError, RuntimeError):
         pass
