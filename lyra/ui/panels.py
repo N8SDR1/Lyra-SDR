@@ -574,6 +574,43 @@ class TuningPanel(GlassPanel):
         h.addLayout(rx2_ctrls, 5)
 
         outer.addLayout(h)
+
+        # ── Row 4: CW pitch (Phase 3.E.1 hotfix v0.9, 2026-05-12) ──
+        # Operator UX (Rick 2026-05-12): "what if we moved the CW
+        # pitch control to the Tuning panel."  CW pitch is a tuning-
+        # adjacent control (you zero-beat against it), shared across
+        # both RXes (single ear-preference), and its strip is hidden
+        # whenever neither VFO is on CW so the panel doesn't waste
+        # vertical space outside CW operation.
+        self.cw_pitch_row = QWidget()
+        cw_h = QHBoxLayout(self.cw_pitch_row)
+        cw_h.setContentsMargins(0, 4, 0, 0)
+        cw_h.setSpacing(6)
+        cw_h.addStretch(1)
+        self.cw_pitch_label = QLabel("CW Pitch")
+        self.cw_pitch_label.setStyleSheet(
+            "color: #00e5ff; font-weight: 600; "
+            "letter-spacing: 0.5px; font-size: 10px;")
+        self.cw_pitch_spin = QSpinBox()
+        self.cw_pitch_spin.setRange(200, 1500)
+        self.cw_pitch_spin.setSingleStep(10)
+        self.cw_pitch_spin.setSuffix(" Hz")
+        self.cw_pitch_spin.setFixedWidth(95)
+        self.cw_pitch_spin.setValue(int(radio.cw_pitch_hz))
+        self.cw_pitch_spin.setKeyboardTracking(False)
+        self.cw_pitch_spin.setToolTip(
+            "Audio tone heard for tuned CW signals (CWU/CWL on either "
+            "VFO). Shared across RX1 and RX2 -- single ear-preference. "
+            "Click-to-tune places the marker this many Hz away from "
+            "the signal so it lands inside the filter at this pitch."
+        )
+        self.cw_pitch_spin.valueChanged.connect(
+            self.radio.set_cw_pitch_hz)
+        cw_h.addWidget(self.cw_pitch_label)
+        cw_h.addWidget(self.cw_pitch_spin)
+        cw_h.addStretch(1)
+        outer.addWidget(self.cw_pitch_row)
+
         # Final vertical stretch — without this, the panel's outer
         # layout has a fixed sizeHint (logo + freq row + MHz row +
         # spacing) and Qt's QMainWindow dock-area layout treats the
@@ -598,6 +635,22 @@ class TuningPanel(GlassPanel):
             radio.mode_changed_rx2.connect(self._on_radio_mode_changed_rx2)
         except Exception:
             pass
+        # Phase 3.E.1 hotfix v0.9 (2026-05-12): CW pitch row sync.
+        # Visibility tracks BOTH RXes' modes (strip shows when
+        # EITHER is on CW).  Radio-side pitch changes from other
+        # surfaces (Settings → DSP, future CAT) keep the spin
+        # mirrored.
+        try:
+            radio.cw_pitch_changed.connect(self._on_radio_cw_pitch_changed)
+        except Exception:
+            pass
+        try:
+            radio.mode_changed.connect(self._update_cw_pitch_visibility)
+            radio.mode_changed_rx2.connect(
+                self._update_cw_pitch_visibility)
+        except Exception:
+            pass
+        self._update_cw_pitch_visibility()
 
     def _on_freq_changed(self, mhz: float):
         self.radio.set_freq_hz(int(round(mhz * 1e6)))
@@ -647,6 +700,36 @@ class TuningPanel(GlassPanel):
         self.vfo_mode_combo_rx2.blockSignals(True)
         self.vfo_mode_combo_rx2.setCurrentText(mode)
         self.vfo_mode_combo_rx2.blockSignals(False)
+
+    # ── Phase 3.E.1 hotfix v0.9 (2026-05-12): CW pitch row ────────
+    def _update_cw_pitch_visibility(self, *_unused) -> None:
+        """Show the CW pitch row when EITHER VFO is on CW; hide it
+        otherwise.  Accepts and discards the mode-str arg so it can
+        be wired directly to ``mode_changed`` / ``mode_changed_rx2``
+        signals."""
+        try:
+            rx1_mode = str(self.radio.mode_for_rx(0))
+        except Exception:
+            rx1_mode = ""
+        try:
+            rx2_mode = str(self.radio.mode_for_rx(2))
+        except Exception:
+            rx2_mode = ""
+        either_cw = (
+            rx1_mode in ("CWU", "CWL") or rx2_mode in ("CWU", "CWL"))
+        if hasattr(self, "cw_pitch_row"):
+            self.cw_pitch_row.setVisible(either_cw)
+
+    def _on_radio_cw_pitch_changed(self, pitch_hz: int) -> None:
+        """Mirror radio-side pitch changes (Settings → DSP, future
+        CAT) into the spin without retriggering our handler."""
+        if not hasattr(self, "cw_pitch_spin"):
+            return
+        if self.cw_pitch_spin.value() == int(pitch_hz):
+            return
+        self.cw_pitch_spin.blockSignals(True)
+        self.cw_pitch_spin.setValue(int(pitch_hz))
+        self.cw_pitch_spin.blockSignals(False)
 
     def _on_radio_freq_changed(self, hz: int):
         # Sync both the LED display and the backup spinbox
@@ -747,25 +830,11 @@ class ModeFilterPanel(GlassPanel):
         self.tx_bw_combo.currentIndexChanged.connect(self._on_tx_bw_changed)
         h.addLayout(_pair("TX BW", self.tx_bw_combo))
 
-        # CW pitch — operator-adjustable audio tone for CW modes.
-        # Hidden outside CWU/CWL since it has no meaning there. Range
-        # 200..1500 Hz covers operator preference (low-pitch fans tune
-        # ~400, contesters often run 600-700, some prefer 800+).
-        self.cw_pitch_label = QLabel("CW Pitch")
-        self.cw_pitch_spin = QSpinBox()
-        self.cw_pitch_spin.setRange(200, 1500)
-        self.cw_pitch_spin.setSingleStep(10)
-        self.cw_pitch_spin.setSuffix(" Hz")
-        self.cw_pitch_spin.setFixedWidth(95)
-        self.cw_pitch_spin.setValue(int(radio.cw_pitch_hz))
-        self.cw_pitch_spin.setToolTip(
-            "Audio tone heard for tuned CW signals. Click-to-tune places "
-            "the marker this many Hz away from the signal so it lands "
-            "inside the filter at the chosen pitch."
-        )
-        self.cw_pitch_spin.valueChanged.connect(self.radio.set_cw_pitch_hz)
-        h.addWidget(self.cw_pitch_label)
-        h.addWidget(self.cw_pitch_spin)
+        # CW pitch control moved to TuningPanel (Phase 3.E.1 hotfix
+        # v0.9, 2026-05-12) per operator UX call -- pitch is a
+        # tuning-adjacent control (you zero-beat against it) and
+        # lives more naturally near the VFOs.  Shared across both
+        # RXes (single ear-preference).
 
         # ── Phase 3.D v0.1: RX2 enable + VFO transfer cluster ──────
         # Per consensus plan §6.7/§6.8 working-group decisions:
@@ -831,16 +900,14 @@ class ModeFilterPanel(GlassPanel):
         self.content_layout().addLayout(h)
 
         self._refresh_bw_combos()
-        self._update_cw_pitch_visibility()
 
         radio.mode_changed.connect(self._on_mode_changed)
         radio.rate_changed.connect(self._on_rate_changed)
         radio.rx_bw_changed.connect(self._on_radio_rx_bw_changed)
         radio.tx_bw_changed.connect(self._on_radio_tx_bw_changed)
         radio.bw_lock_changed.connect(self.lock_btn.setChecked)
-        # Keep the spinner in sync if pitch changes elsewhere (e.g.
-        # the Settings → DSP duplicate of the same control).
-        radio.cw_pitch_changed.connect(self._on_radio_cw_pitch_changed)
+        # Phase 3.E.1 hotfix v0.9 (2026-05-12): CW pitch control
+        # moved to TuningPanel.  Listener removed here.
         # Phase 3.C v0.1: per-RX2 sibling signals + focus-change
         # listener so the panel reflects whichever RX has focus.
         radio.mode_changed_rx2.connect(self._on_mode_changed_rx2)
@@ -934,24 +1001,9 @@ class ModeFilterPanel(GlassPanel):
         self.mode_combo.setCurrentText(mode)
         self.mode_combo.blockSignals(False)
         self._refresh_bw_combos()
-        self._update_cw_pitch_visibility()
 
-    def _update_cw_pitch_visibility(self):
-        # Phase 3.C: visibility tracks the focused RX's mode (CW
-        # pitch is a per-channel parameter conceptually -- but the
-        # protocol-side cw_pitch_hz is single-engine today, so the
-        # spinner controls only the focused RX's display affordance).
-        is_cw = self.radio.mode_for_rx() in ("CWU", "CWL")
-        self.cw_pitch_label.setVisible(is_cw)
-        self.cw_pitch_spin.setVisible(is_cw)
-
-    def _on_radio_cw_pitch_changed(self, pitch_hz: int):
-        # Keep our spinner in sync when the pitch is changed from
-        # another UI surface (Settings → DSP). Block signals to avoid
-        # a feedback loop back into radio.set_cw_pitch_hz.
-        self.cw_pitch_spin.blockSignals(True)
-        self.cw_pitch_spin.setValue(int(pitch_hz))
-        self.cw_pitch_spin.blockSignals(False)
+    # CW pitch widgets + their handlers moved to TuningPanel
+    # (Phase 3.E.1 hotfix v0.9, 2026-05-12).
 
     def _on_rate_changed(self, rate: int):
         self.rate_combo.blockSignals(True)
@@ -984,7 +1036,6 @@ class ModeFilterPanel(GlassPanel):
         self.mode_combo.setCurrentText(mode)
         self.mode_combo.blockSignals(False)
         self._refresh_bw_combos()
-        self._update_cw_pitch_visibility()
 
     def _on_radio_rx_bw_changed_rx2(self, mode: str, bw: int):
         """RX2 BW change — refresh the BW combo if RX2 has focus and
@@ -1020,8 +1071,10 @@ class ModeFilterPanel(GlassPanel):
         # Refresh BW combos against the focused RX's mode + per-mode
         # BW dict.
         self._refresh_bw_combos()
-        # CW pitch visibility depends on the focused RX's mode.
-        self._update_cw_pitch_visibility()
+        # CW pitch widget now lives on TuningPanel (Phase 3.E.1
+        # hotfix v0.9, 2026-05-12).  Its visibility tracks BOTH
+        # RXes' modes independently of focus -- no action needed
+        # here.
 
 
 # ── View / Zoom / Rates ────────────────────────────────────────────────

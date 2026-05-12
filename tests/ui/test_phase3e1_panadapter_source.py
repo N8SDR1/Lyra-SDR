@@ -663,5 +663,83 @@ class Phase3e1Rx2CwPitchTest(unittest.TestCase):
         self.assertIn(7_030_000 - 800, rx2_writes)
 
 
+class Phase3e1CwPitchOnTuningPanelTest(unittest.TestCase):
+    """Phase 3.E.1 hotfix v0.9 (2026-05-12) -- CW Pitch control was
+    moved from ModeFilterPanel to TuningPanel per operator UX call.
+    Pitch is tuning-adjacent (you zero-beat against it) and shared
+    across both VFOs.  Row hides when neither RX is on CW.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        from lyra.ui.panels import TuningPanel, ModeFilterPanel
+        self.radio = Radio()
+        self.tuning = TuningPanel(self.radio)
+        self.mode_filter = ModeFilterPanel(self.radio)
+
+    def test_tuning_panel_has_cw_pitch_widget(self) -> None:
+        self.assertTrue(hasattr(self.tuning, "cw_pitch_spin"))
+        self.assertTrue(hasattr(self.tuning, "cw_pitch_row"))
+
+    def test_mode_filter_panel_no_longer_has_cw_pitch_widget(self) -> None:
+        """Regression marker: the widget should NOT exist on
+        ModeFilterPanel after the move.  If a future refactor
+        adds it back, this test catches the dup."""
+        self.assertFalse(hasattr(self.mode_filter, "cw_pitch_spin"))
+
+    def test_cw_pitch_row_hidden_when_neither_rx_on_cw(self) -> None:
+        # Default modes are non-CW (USB).  Both RXes start there.
+        self.radio.set_mode("USB", target_rx=0)
+        self.radio.set_mode("USB", target_rx=2)
+        self.tuning._update_cw_pitch_visibility()
+        self.assertFalse(self.tuning.cw_pitch_row.isVisible()
+                         and self.tuning.isVisible())
+        # Direct check on the row's setVisible state regardless of
+        # parent visibility (test panel isn't shown).
+        self.assertFalse(self.tuning.cw_pitch_row.isVisibleTo(None)
+                         or self.tuning.cw_pitch_row.isHidden() is False)
+        # Strictest: the widget's own visibility hint should be off.
+        # (Qt only reports True when an actual paint has happened, so
+        # we check the property the way isVisible-aware code does.)
+        # Easier: just confirm the helper toggled the property.
+        # We rely on setVisible(False).
+
+    def test_cw_pitch_row_visible_when_rx1_on_cw(self) -> None:
+        self.radio.set_mode("CWU", target_rx=0)
+        self.tuning._update_cw_pitch_visibility()
+        # Row's visibility flag should be True (parent not shown so
+        # isVisible() returns False; isVisibleTo for hidden parent
+        # also returns False -- inspect the hidden state directly).
+        self.assertFalse(self.tuning.cw_pitch_row.isHidden())
+
+    def test_cw_pitch_row_visible_when_rx2_on_cw(self) -> None:
+        # RX1 stays non-CW, RX2 flips to CWL.
+        self.radio.set_mode("USB", target_rx=0)
+        self.radio.set_mode("CWL", target_rx=2)
+        self.tuning._update_cw_pitch_visibility()
+        self.assertFalse(self.tuning.cw_pitch_row.isHidden())
+
+    def test_cw_pitch_row_hides_again_when_both_leave_cw(self) -> None:
+        self.radio.set_mode("CWU", target_rx=0)
+        self.tuning._update_cw_pitch_visibility()
+        self.assertFalse(self.tuning.cw_pitch_row.isHidden())
+        self.radio.set_mode("USB", target_rx=0)
+        self.tuning._update_cw_pitch_visibility()
+        self.assertTrue(self.tuning.cw_pitch_row.isHidden())
+
+    def test_spin_change_writes_radio_cw_pitch(self) -> None:
+        self.tuning.cw_pitch_spin.setValue(720)
+        self.assertEqual(self.radio.cw_pitch_hz, 720)
+
+    def test_radio_pitch_change_updates_spin(self) -> None:
+        self.radio.set_cw_pitch_hz(880)
+        self.assertEqual(self.tuning.cw_pitch_spin.value(), 880)
+
+
 if __name__ == "__main__":
     unittest.main()
