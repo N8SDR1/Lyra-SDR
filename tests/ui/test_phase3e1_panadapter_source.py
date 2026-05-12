@@ -721,5 +721,88 @@ class Phase3e1CwPitchOnTuningPanelTest(unittest.TestCase):
         self.assertEqual(self.tuning.cw_pitch_spin.value(), 880)
 
 
+class Phase3e1Rx2PanadapterCwCenterTest(unittest.TestCase):
+    """Phase 3.E.1 hotfix v0.12 (2026-05-12) -- RX2 click-to-tune
+    on CW panadapter peaks must land on the carrier (not off by
+    one pitch).  Operator report 2026-05-12: "RX2 clicking on CW
+    in panadapter doesn't tune the same way RX1 does, RX2 seems
+    off (almost like not accounting for the CW pitch perhaps?)".
+
+    Root cause: the spectrum_ready emit was using
+    ``self._rx2_freq_hz`` as center_hz for RX2 panes, but since
+    hotfix v0.8 RX2's DDS is offset by ±pitch in CW.  The bins
+    were centered on DDS_RX2 = VFO_RX2 ∓ pitch, but the widget
+    thought they were centered on VFO_RX2 -- click-to-tune
+    produced a freq off by exactly one pitch.
+
+    Fix: use ``_compute_dds_freq_hz(target_rx=2)`` for the spec
+    center, plus make ``marker_offset_hz`` source-RX-aware so
+    the visible marker still draws at the operator's tuned
+    carrier (same trick RX1 uses).
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        self.radio = Radio()
+
+    def test_marker_offset_for_rx2_cwu(self) -> None:
+        """Panadapter source = RX2, RX2 on CWU -> marker_offset
+        should be +pitch (marker drawn to the right of DDS-centered
+        bins, at the operator's tuned carrier)."""
+        self.radio._mode_rx2 = "CWU"
+        self.radio._rx2_freq_hz = 7_030_000
+        self.radio._cw_pitch_hz = 650
+        self.radio._panadapter_source_rx = 2
+        self.assertEqual(self.radio.marker_offset_hz, 650)
+
+    def test_marker_offset_for_rx2_cwl(self) -> None:
+        self.radio._mode_rx2 = "CWL"
+        self.radio._rx2_freq_hz = 3_530_000
+        self.radio._cw_pitch_hz = 700
+        self.radio._panadapter_source_rx = 2
+        self.assertEqual(self.radio.marker_offset_hz, -700)
+
+    def test_marker_offset_for_rx2_non_cw_is_zero(self) -> None:
+        self.radio._mode_rx2 = "USB"
+        self.radio._rx2_freq_hz = 14_205_000
+        self.radio._panadapter_source_rx = 2
+        self.assertEqual(self.radio.marker_offset_hz, 0)
+
+    def test_marker_offset_switches_on_panadapter_source_flip(
+        self,
+    ) -> None:
+        """RX1 on DIGU (offset=0), RX2 on CWU (offset=+pitch).
+        Flipping panadapter source should flip the offset."""
+        self.radio._mode = "DIGU"
+        self.radio._freq_hz = 14_074_000
+        self.radio._mode_rx2 = "CWU"
+        self.radio._rx2_freq_hz = 7_030_000
+        self.radio._cw_pitch_hz = 600
+        # Source=RX1: marker is at the carrier (offset 0 for DIGU).
+        self.radio._panadapter_source_rx = 0
+        self.assertEqual(self.radio.marker_offset_hz, 0)
+        # Source=RX2: marker shifts to +pitch.
+        self.radio._panadapter_source_rx = 2
+        self.assertEqual(self.radio.marker_offset_hz, 600)
+
+    def test_marker_offset_re_emits_on_panadapter_source_change(
+        self,
+    ) -> None:
+        seen: list[int] = []
+        self.radio.marker_offset_changed.connect(seen.append)
+        self.radio._mode_rx2 = "CWU"
+        self.radio._rx2_freq_hz = 7_030_000
+        self.radio._cw_pitch_hz = 650
+        self.radio.set_panadapter_source_rx(2)
+        # Should have fired the marker_offset_changed signal at
+        # least once during the source switch.
+        self.assertIn(650, seen)
+
+
 if __name__ == "__main__":
     unittest.main()

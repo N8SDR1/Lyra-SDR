@@ -2003,6 +2003,17 @@ class Radio(QObject):
             self.panadapter_source_changed.emit(new_src)
         except Exception:
             pass
+        # Phase 3.E.1 hotfix v0.12 (2026-05-12): marker offset is
+        # source-RX-aware (VFO − DDS computed for whichever RX
+        # owns the pane), so source flip needs a re-emit to move
+        # the marker.  Without this, switching focus from RX1
+        # (DIGU) to RX2 (CWU) leaves the marker drawn at RX1's
+        # offset (0) until the operator triggers another state
+        # change.
+        try:
+            self._emit_marker_offset()
+        except Exception:
+            pass
 
     def _resolve_rx_target(
         self, target_rx: Optional[int],
@@ -2336,13 +2347,23 @@ class Radio(QObject):
         Hz.  = (VFO − DDS).  0 in non-CW modes; +cw_pitch in CWU
         (marker right of center); -cw_pitch in CWL.  Drives the
         spectrum widget's marker positioning under v0.0.9.8's
-        carrier-freq VFO convention."""
+        carrier-freq VFO convention.
+
+        Phase 3.E.1 hotfix v0.12 (2026-05-12): tracks the
+        panadapter-source RX so the marker reflects whichever
+        VFO the operator is currently looking at on the spectrum.
+        When ``panadapter_source_rx == 2``, returns
+        (VFO_RX2 − DDS_RX2); otherwise (VFO_RX1 − DDS_RX1).
+        """
+        if self._panadapter_source_rx == 2:
+            return (int(self._rx2_freq_hz)
+                    - self._compute_dds_freq_hz(target_rx=2))
         return int(self._freq_hz) - self._compute_dds_freq_hz()
 
     def _emit_marker_offset(self) -> None:
         """Re-emit the marker offset.  Call from any state change
-        that shifts the DDS-vs-VFO relationship — freq, mode, or
-        CW pitch."""
+        that shifts the DDS-vs-VFO relationship — freq, mode,
+        CW pitch, or panadapter source switch."""
         self.marker_offset_changed.emit(int(self.marker_offset_hz))
 
     def set_freq_hz(self, hz: int):
@@ -2556,6 +2577,13 @@ class Radio(QObject):
                     print(f"[Radio] WDSP rx2 mode-change DDS re-push: "
                           f"{exc}")
             self.mode_changed_rx2.emit(alias)
+            # Phase 3.E.1 hotfix v0.12 (2026-05-12): if the
+            # panadapter is currently sourced from RX2, the
+            # marker offset shifts on RX2 mode change (CW
+            # adds/removes the pitch offset).  Re-emit so the
+            # spectrum widget repositions the marker.
+            if self._panadapter_source_rx == 2:
+                self._emit_marker_offset()
             return
 
         # RX1 mode change -- full original behavior.
@@ -8377,6 +8405,12 @@ class Radio(QObject):
                     f"RX2 freq write failed: {e}", 3000,
                 )
         self.rx2_freq_changed.emit(new_hz)
+        # Phase 3.E.1 hotfix v0.12 (2026-05-12): when the
+        # panadapter is sourced from RX2, the marker tracks
+        # RX2's VFO.  Re-emit so the spectrum widget repositions
+        # the marker for the new freq.
+        if self._panadapter_source_rx == 2:
+            self._emit_marker_offset()
 
     # ── Phase 3.D v0.1: VFO transfer helpers (A->B / B->A / Swap) ─
     # Per consensus plan §6.8 working-group decision: when RX2 is
@@ -10474,14 +10508,25 @@ class Radio(QObject):
         #
         # Phase 3.E.1 v0.1 (2026-05-12): when panadapter source is
         # RX2, emit RX2's DDS freq as the spectrum center so the
-        # widget retunes to the new band.  RX2 doesn't apply the
-        # CW-pitch offset today (its set_rx2_freq_hz writes the
-        # operator's input directly to the gateware), so we use
-        # ``_rx2_freq_hz`` straight -- a Phase 3.E follow-up may
-        # add CW-aware DDS computation for RX2 if anyone routinely
-        # tunes RX2 to CW mode.
+        # widget retunes to the new band.
+        #
+        # Phase 3.E.1 hotfix v0.12 (2026-05-12): use
+        # ``_compute_dds_freq_hz(target_rx=2)`` instead of raw
+        # ``_rx2_freq_hz``.  Since hotfix v0.8 (commit ccfc76e)
+        # the RX2 DDS is offset by ±pitch in CWU/CWL the same way
+        # RX1's is, so the spectrum bins are centered on
+        # DDS_RX2 = VFO_RX2 ∓ pitch -- NOT on VFO_RX2 itself.
+        # Pre-fix, the widget thought bins were centered on
+        # VFO_RX2, so click-to-tune on a CW peak landed off by
+        # exactly one pitch (~650 Hz at default).  Operator
+        # report 2026-05-12: "RX2 clicking on CW in panadapter
+        # doesn't tune the same way RX1 does, RX2 seems off
+        # (almost like not accounting for the CW pitch perhaps?)".
+        # The widget's ``marker_offset_hz`` mechanic shifts the
+        # visible marker back to the operator's tuned carrier --
+        # same way RX1's path already works.
         if self._panadapter_source_rx == 2:
-            center_hz = float(self._rx2_freq_hz)
+            center_hz = float(self._compute_dds_freq_hz(target_rx=2))
         else:
             center_hz = float(self._compute_dds_freq_hz())
         self.spectrum_ready.emit(spec_out, center_hz, eff_rate)
