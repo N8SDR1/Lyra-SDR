@@ -2058,13 +2058,17 @@ class DspPanel(GlassPanel):
         self.vol_b_label.setFixedWidth(50)
         levels.addWidget(self.vol_b_label)
 
-        # Mute-B sits adjacent to Vol-B for the same reason MUTE-A
-        # is adjacent to Vol-A.  Hidden when SUB is OFF (collapses
-        # via setVisible from ``_on_dispatch_state_changed``).
-        self.mute_b_btn = QPushButton("MUTE-B")
+        # Mute-B sits adjacent to Vol-B; same naming as the RX1
+        # MUTE since position (immediately right of its Vol slider)
+        # carries the per-RX association unambiguously -- no need
+        # for "-A" / "-B" suffix on the button text (operator UX
+        # call 2026-05-12).  Hidden when SUB is OFF (collapses via
+        # setVisible from ``_on_dispatch_state_changed``).
+        self.mute_b_btn = QPushButton("MUTE")
         self.mute_b_btn.setObjectName("dsp_btn")
         self.mute_b_btn.setCheckable(True)
-        self.mute_b_btn.setMinimumWidth(86)
+        # Tighter width now that "MUTE-B" caption isn't needed.
+        self.mute_b_btn.setMinimumWidth(64)
         self.mute_b_btn.setChecked(radio.muted_for_rx(2))
         self.mute_b_btn.setToolTip(
             "Silence RX2 (right channel) without changing Vol-B.")
@@ -3108,14 +3112,16 @@ class DspPanel(GlassPanel):
 
     def _on_dispatch_state_changed(self, state) -> None:
         """Phase 3.D v0.1: toggle per-RX Vol/Mute UI visibility based
-        on ``state.rx2_enabled``.  Re-labels Vol-A/Mute-A when SUB
-        is ON; collapses back to plain Vol/MUTE when OFF."""
+        on ``state.rx2_enabled``.  Re-labels the Vol-A caption when
+        SUB is on (Vol → Vol-A) so it pairs with the visible Vol-B
+        slider.  MUTE buttons keep plain "MUTE" text in both states
+        -- position (immediately right of each Vol slider) carries
+        the per-RX meaning unambiguously (operator UX call
+        2026-05-12)."""
         on = bool(state.rx2_enabled)
-        # Vol-A vs Vol caption.
+        # Vol-A vs Vol caption (Vol-B is a separate widget with a
+        # static "Vol-B" label).
         self.vol_label_caption.setText("Vol-A" if on else "Vol")
-        # Mute button label change is purely cosmetic; the button
-        # text is the affordance label.
-        self.mute_btn.setText("MUTE-A" if on else "MUTE")
         # RX2 sibling widgets.
         self.vol_b_label_caption.setVisible(on)
         self.vol_b_slider.setVisible(on)

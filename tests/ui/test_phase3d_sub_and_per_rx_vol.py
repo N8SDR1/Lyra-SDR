@@ -340,7 +340,11 @@ class Phase3dDspPanelConditionalUITest(unittest.TestCase):
             self.assertTrue(self.panel.vol_b_slider.isVisible())
             self.assertTrue(self.panel.mute_b_btn.isVisible())
             self.assertEqual(self.panel.vol_label_caption.text(), "Vol-A")
-            self.assertEqual(self.panel.mute_btn.text(), "MUTE-A")
+            # MUTE button text stays "MUTE" in both SUB states --
+            # position (right of each Vol slider) carries the
+            # per-RX meaning, no -A / -B suffix needed.
+            self.assertEqual(self.panel.mute_btn.text(), "MUTE")
+            self.assertEqual(self.panel.mute_b_btn.text(), "MUTE")
         finally:
             self.panel.hide()
 
