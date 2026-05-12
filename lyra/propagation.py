@@ -24,6 +24,7 @@ isolation.
 from __future__ import annotations
 
 import math
+import ssl
 import threading
 import time
 import urllib.request
@@ -147,12 +148,45 @@ class HamQslSolarCache:
             return data
 
     def _fetch(self) -> dict:
-        """Hit hamqsl.com, parse the XML, return the normalized dict."""
+        """Hit hamqsl.com, parse the XML, return the normalized dict.
+
+        Phase 3.E.1 hotfix v0.21 (2026-05-12): SSL cert verification
+        disabled to match SDRLogger+'s posture for this same feed
+        (``requests.get(..., verify=False)`` at hamlog/main.py:4983).
+
+        Rationale: this is a read-only fetch of public solar data
+        from a fixed URL.  No credentials, no PII, no operator
+        action triggered by the response (just numeric display).
+        Cert verification was providing zero practical security
+        for this specific call -- a MITM could only inject wrong
+        sunspot numbers, which the operator would notice
+        immediately (it's a known band).  Meanwhile cert
+        verification was the root cause of tester "Timmy"'s
+        blank propagation panel (Rick 2026-05-12): same machine
+        where SDRLogger+ fetches the same URL fine, Lyra's
+        urllib stdlib-default verification was rejecting
+        hamqsl.com's cert chain (likely an intermediate-CA
+        mismatch between Python's bundled certifi and what
+        hamqsl.com served).
+
+        If we ever extend this fetcher to APIs with operator
+        credentials or actionable side effects, switch back to
+        verified context AND add a ``truststore``-based fallback
+        for cert-chain issues.
+        """
         req = urllib.request.Request(
             self.URL,
             headers={"User-Agent": "Lyra-SDR/1.0"},
         )
-        with urllib.request.urlopen(req, timeout=self.FETCH_TIMEOUT_SEC) as resp:
+        # Unverified SSL context -- see method docstring for the
+        # security rationale (read-only public solar data feed).
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(
+                req,
+                timeout=self.FETCH_TIMEOUT_SEC,
+                context=ctx) as resp:
             xml_bytes = resp.read()
 
         root = ET.fromstring(xml_bytes)
