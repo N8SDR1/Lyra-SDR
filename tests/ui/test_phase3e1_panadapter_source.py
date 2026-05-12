@@ -539,5 +539,129 @@ class Phase3e1PanadapterMarkerClickRoutesToFocusTest(unittest.TestCase):
             seen, [("K1ABC", "USB", 14_205_000)])
 
 
+class Phase3e1Rx2CwPitchTest(unittest.TestCase):
+    """Phase 3.E.1 hotfix v0.8 (2026-05-12) -- CW pitch offset must
+    apply to RX2's DDS (DDC1) the same way it does for RX1's DDC0
+    under v0.0.9.8's carrier-freq VFO convention.
+
+    Operator-reported bug (Rick 2026-05-12): "CW no pitch on RX2
+    -- if I was on RX1 say DIGU and click RX2 and go to CWL or
+    CWU".  Pre-fix, ``set_rx2_freq_hz`` wrote raw VFO Hz to the
+    wire and the RX2 mode-change path skipped the DDS re-push,
+    so the WDSP CW filter (correctly centered on ±pitch) had no
+    signal in its passband.
+
+    Pitch is a single global setting (operator-ear preference,
+    not a per-receiver state).  Both RXes use the same value.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        self.radio = Radio()
+
+    def test_compute_dds_for_rx2_cwu_subtracts_pitch(self) -> None:
+        self.radio._mode_rx2 = "CWU"
+        self.radio._rx2_freq_hz = 7_030_000
+        self.radio._cw_pitch_hz = 650
+        self.assertEqual(
+            self.radio._compute_dds_freq_hz(target_rx=2),
+            7_030_000 - 650,
+        )
+
+    def test_compute_dds_for_rx2_cwl_adds_pitch(self) -> None:
+        self.radio._mode_rx2 = "CWL"
+        self.radio._rx2_freq_hz = 3_530_000
+        self.radio._cw_pitch_hz = 700
+        self.assertEqual(
+            self.radio._compute_dds_freq_hz(target_rx=2),
+            3_530_000 + 700,
+        )
+
+    def test_compute_dds_for_rx2_non_cw_is_identity(self) -> None:
+        self.radio._mode_rx2 = "USB"
+        self.radio._rx2_freq_hz = 14_205_000
+        self.assertEqual(
+            self.radio._compute_dds_freq_hz(target_rx=2),
+            14_205_000,
+        )
+
+    def test_compute_dds_target_rx_does_not_disturb_rx1(self) -> None:
+        """Asking for RX2's DDS must not read RX1's mode/freq."""
+        self.radio._mode = "USB"
+        self.radio._freq_hz = 14_205_000
+        self.radio._mode_rx2 = "CWU"
+        self.radio._rx2_freq_hz = 7_030_000
+        self.radio._cw_pitch_hz = 600
+        self.assertEqual(
+            self.radio._compute_dds_freq_hz(target_rx=0), 14_205_000)
+        self.assertEqual(
+            self.radio._compute_dds_freq_hz(target_rx=2),
+            7_030_000 - 600)
+
+    def test_set_rx2_freq_hz_applies_pitch_offset_via_stream(self) -> None:
+        """``set_rx2_freq_hz`` writes the DDS-offset value to the
+        protocol layer, not the raw VFO Hz."""
+        seen: list[int] = []
+
+        class _MockStream:
+            def _set_rx2_freq(self, hz):
+                seen.append(int(hz))
+
+            def _set_rx1_freq(self, hz):
+                pass
+
+        self.radio._stream = _MockStream()
+        self.radio._mode_rx2 = "CWU"
+        self.radio._cw_pitch_hz = 650
+        self.radio.set_rx2_freq_hz(7_030_000)
+        self.assertEqual(seen, [7_030_000 - 650])
+
+    def test_rx2_mode_change_to_cw_repushes_dds_with_pitch(self) -> None:
+        """Changing RX2 from DIGU to CWU re-pushes DDC1 freq with
+        the pitch offset.  Pre-fix this step was missing and the
+        operator heard silence."""
+        seen: list[int] = []
+
+        class _MockStream:
+            def _set_rx2_freq(self, hz):
+                seen.append(int(hz))
+
+            def _set_rx1_freq(self, hz):
+                pass
+
+        self.radio._stream = _MockStream()
+        self.radio._cw_pitch_hz = 600
+        self.radio._mode_rx2 = "DIGU"
+        self.radio._rx2_freq_hz = 7_074_000
+        # Now flip to CWU.
+        self.radio.set_mode("CWU", target_rx=2)
+        self.assertIn(7_074_000 - 600, seen)
+
+    def test_cw_pitch_change_repushes_rx2_dds_when_on_cw(self) -> None:
+        """Dialing the pitch dial mid-session must update RX2's
+        DDS when RX2 is on CW (mirror of the existing RX1
+        behavior at line ~9733)."""
+        rx2_writes: list[int] = []
+
+        class _MockStream:
+            def _set_rx2_freq(self, hz):
+                rx2_writes.append(int(hz))
+
+            def _set_rx1_freq(self, hz):
+                pass
+
+        self.radio._stream = _MockStream()
+        self.radio._mode_rx2 = "CWU"
+        self.radio._rx2_freq_hz = 7_030_000
+        self.radio._cw_pitch_hz = 600
+        self.radio.set_cw_pitch_hz(800)
+        self.assertIn(7_030_000 - 800, rx2_writes)
+
+
 if __name__ == "__main__":
     unittest.main()

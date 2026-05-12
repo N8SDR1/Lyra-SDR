@@ -2289,14 +2289,32 @@ class Radio(QObject):
     # or pitch change re-pushes the corrected DDS freq).  All
     # per-call-site offsets in the tuning surfaces are reverted so we
     # don't double-offset.
-    def _compute_dds_freq_hz(self, vfo_hz: Optional[int] = None) -> int:
-        """Compute the actual HL2 DDC0 freq for the given (or current)
+    def _compute_dds_freq_hz(
+        self, vfo_hz: Optional[int] = None,
+        target_rx: Optional[int] = None,
+    ) -> int:
+        """Compute the actual HL2 DDC freq for the given (or current)
         operator-displayed VFO freq.  Mode-aware: subtracts the CW
         pitch in CWU, adds it in CWL, identity for every other mode.
+
+        ``target_rx`` (Phase 3.E.1 hotfix v0.8 2026-05-12): which
+        RX's mode + default freq to read.  ``0`` (or ``None`` =
+        legacy default) -> RX1's ``_mode`` + ``_freq_hz``.  ``2``
+        -> RX2's ``_mode_rx2`` + ``_rx2_freq_hz``.  CW pitch is
+        shared (single operator-ear preference, not per-RX).
+        Caller can override ``vfo_hz`` regardless of target.
+
+        Fixes operator-reported bug (Rick 2026-05-12): "CW no
+        pitch on RX2 -- if I was on RX1 say DIGU and click RX2
+        and go to CWL or CWU".  Pre-fix, ``set_rx2_freq_hz``
+        wrote raw VFO to the wire without applying the pitch
+        offset, so WDSP's CW filter (correctly centered on
+        ±pitch in baseband) had no signal in its passband.
         """
+        rx_id = 2 if target_rx == 2 else 0
         if vfo_hz is None:
-            vfo_hz = self._freq_hz
-        m = self._mode
+            vfo_hz = self._rx2_freq_hz if rx_id == 2 else self._freq_hz
+        m = self._mode_rx2 if rx_id == 2 else self._mode
         if m == "CWU":
             return int(vfo_hz) - int(self._cw_pitch_hz)
         if m == "CWL":
@@ -2504,8 +2522,15 @@ class Radio(QObject):
         rx_id, _suffix = self._resolve_rx_target(target_rx)
 
         if rx_id == 2:
-            # RX2-only mode change.  Skip RX1-context side effects
-            # (band memory, S-meter, panadapter passband, DDS re-push).
+            # RX2-only mode change.  Skip the RX1-context side
+            # effects that don't apply (band memory, S-meter,
+            # panadapter passband for the focused-RX1 case), but
+            # DO re-push the DDS with the CW pitch offset so the
+            # carrier lands in WDSP's CW passband when the new
+            # mode is CWU/CWL.  Pre-fix omission caused operator-
+            # reported "CW no pitch on RX2" (Rick 2026-05-12) --
+            # switching RX2 from DIGU to CWL/CWU left the DDS at
+            # raw VFO instead of VFO ± pitch.
             if alias == self._mode_rx2:
                 return
             self._mode_rx2 = alias
@@ -2517,6 +2542,19 @@ class Radio(QObject):
                     self._wdsp_rx2.set_filter(low, high)
                 except Exception as exc:
                     print(f"[Radio] WDSP rx2 mode-change error: {exc}")
+            # Phase 3.E.1 hotfix v0.8 (2026-05-12): DDS re-push
+            # for RX2 mirrors the RX1 path at line ~2583 that
+            # re-pushes ``_compute_dds_freq_hz()`` after every
+            # mode change.  Without this, the gateware DDC1 stays
+            # at the old offset and the new mode's WDSP filter
+            # produces silence.
+            if self._stream is not None:
+                try:
+                    self._stream._set_rx2_freq(  # noqa: SLF001
+                        self._compute_dds_freq_hz(target_rx=2))
+                except Exception as exc:
+                    print(f"[Radio] WDSP rx2 mode-change DDS re-push: "
+                          f"{exc}")
             self.mode_changed_rx2.emit(alias)
             return
 
@@ -8325,7 +8363,15 @@ class Radio(QObject):
         self._rx2_freq_hz = new_hz
         if self._stream is not None:
             try:
-                self._stream._set_rx2_freq(new_hz)  # noqa: SLF001
+                # Phase 3.E.1 hotfix v0.8 (2026-05-12): apply CW
+                # pitch offset to the DDS write so the carrier
+                # lands in WDSP RX2's filter passband when mode is
+                # CWU/CWL.  Mirrors the RX1 ``set_freq_hz`` path
+                # (line ~2340) that has done this since v0.0.9.8's
+                # carrier-freq VFO convention switch.
+                dds_hz = self._compute_dds_freq_hz(
+                    new_hz, target_rx=2)
+                self._stream._set_rx2_freq(dds_hz)  # noqa: SLF001
             except Exception as e:
                 self.status_message.emit(
                     f"RX2 freq write failed: {e}", 3000,
@@ -9721,6 +9767,19 @@ class Radio(QObject):
                 self._wdsp_rx.set_apf_freq(float(new_pitch))
             except Exception as exc:
                 print(f"[Radio] WDSP rx cw-pitch error: {exc}")
+        # Phase 3.E.1 hotfix v0.8 (2026-05-12): same filter +
+        # APF re-push for RX2 when it's on CW.  Pitch is shared
+        # (single operator-ear preference) so both RXes track
+        # the same value.
+        if (self._wdsp_rx2 is not None
+                and self._mode_rx2 in ("CWU", "CWL")):
+            try:
+                low, high = self._wdsp_filter_for(
+                    self._mode_rx2, target_rx=2)
+                self._wdsp_rx2.set_filter(low, high)
+                self._wdsp_rx2.set_apf_freq(float(new_pitch))
+            except Exception as exc:
+                print(f"[Radio] WDSP rx2 cw-pitch error: {exc}")
         # Re-push DDS freq when in CW mode — pitch change shifts the
         # DDS-vs-VFO offset (DDS = VFO ± pitch), so the actual hardware
         # tuning needs to follow.  Without this, dialing pitch from
@@ -9733,6 +9792,15 @@ class Radio(QObject):
                 self._stream._set_rx1_freq(self._compute_dds_freq_hz())  # noqa: SLF001
             except Exception as exc:
                 print(f"[Radio] cw-pitch DDS re-push error: {exc}")
+        # Phase 3.E.1 hotfix v0.8 (2026-05-12): mirror DDS re-push
+        # for RX2 -- pitch dial affects DDC1's DDS-vs-VFO offset
+        # too whenever RX2 is on CW.
+        if self._stream and self._mode_rx2 in ("CWU", "CWL"):
+            try:
+                self._stream._set_rx2_freq(  # noqa: SLF001
+                    self._compute_dds_freq_hz(target_rx=2))
+            except Exception as exc:
+                print(f"[Radio] cw-pitch RX2 DDS re-push error: {exc}")
         # Recompute + re-emit passband so the panadapter overlay
         # shifts to the new CW position immediately.
         self._emit_passband()
