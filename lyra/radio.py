@@ -125,6 +125,13 @@ class Radio(QObject):
     # focused RX's state.  Phase 3.A introduces the field and the
     # signal; Phase 3.B+ wires actual UI consumers.
     focused_rx_changed = Signal(int)
+    # Phase 3.E.1 v0.1 (2026-05-12): panadapter source RX changed.
+    # Payload is the new source RX id (0 = RX1, 2 = RX2).  Worker
+    # listens to this so it can flush its FFT sample ring on source
+    # change (otherwise the next FFT frame would be a mix of the
+    # old and new RX's IQ).  UI panels (notch overlay, EiBi labels,
+    # click-to-tune target) listen so they bind to the right RX.
+    panadapter_source_changed = Signal(int)
     # ── TCI streaming taps (v0.0.9.1+) ─────────────────────────────────
     # These signals fire whenever the audio / IQ data is finalised so
     # the TciServer can broadcast binary frames to subscribed clients.
@@ -1004,6 +1011,14 @@ class Radio(QObject):
         self._agc_profile_rx2: str = self._agc_profile
         self._agc_target_rx2: float = self._agc_target
         self._af_gain_db_rx2: int = self._af_gain_db
+        # Phase 3.E.1 v0.1 (2026-05-12): panadapter source RX.
+        # Controls which RX's IQ stream feeds the FFT + waterfall.
+        # Default = 0 (RX1).  Auto-tracks ``_focused_rx`` so when
+        # the operator clicks VFO B's LED the panadapter retunes
+        # to RX2's band; Phase 3.E.2 TX integration decouples this
+        # to allow a "TX override" path (panadapter shows the TX
+        # VFO regardless of focus, then returns on PTT release).
+        self._panadapter_source_rx: int = 0
         # Phase 3.D v0.1 (2026-05-12): per-RX volume + mute state.
         # The UI only surfaces Vol-A / Vol-B / Mute-A / Mute-B when
         # ``dispatch_state.rx2_enabled`` is True (per consensus plan
@@ -1898,6 +1913,43 @@ class Radio(QObject):
         self._focused_rx = new_focus
         try:
             self.focused_rx_changed.emit(new_focus)
+        except Exception:
+            pass
+        # Phase 3.E.1 v0.1 (2026-05-12): focus change auto-updates
+        # the panadapter source RX so the panadapter retunes to
+        # whatever VFO the operator just focused.  Phase 3.E.2 TX
+        # work may decouple this when MOX is active (panadapter
+        # stays on TX VFO regardless of focus until PTT release).
+        try:
+            self.set_panadapter_source_rx(new_focus)
+        except Exception:
+            pass
+
+    # ── Phase 3.E.1 v0.1: panadapter source RX ──────────────────────
+    @property
+    def panadapter_source_rx(self) -> int:
+        """Which RX's IQ stream currently feeds the FFT + waterfall.
+        0 = RX1 (DDC0), 2 = RX2 (DDC1).  Default auto-tracks
+        ``focused_rx``; Phase 3.E.2 TX work will add an override
+        path for the MOX-active state product."""
+        return self._panadapter_source_rx
+
+    def set_panadapter_source_rx(self, rx_id: int) -> None:
+        """Set the panadapter source RX.  Idempotent; emits
+        ``panadapter_source_changed(int)`` only on transitions.
+        Worker flushes its FFT sample ring on the signal so the
+        next emitted frame is clean (no mixed-source bins)."""
+        new_src = int(rx_id)
+        if new_src not in (0, 2):
+            raise ValueError(
+                f"panadapter_source_rx must be 0 (RX1) or 2 (RX2); "
+                f"got {new_src}"
+            )
+        if new_src == self._panadapter_source_rx:
+            return
+        self._panadapter_source_rx = new_src
+        try:
+            self.panadapter_source_changed.emit(new_src)
         except Exception:
             pass
 
@@ -7186,9 +7238,20 @@ class Radio(QObject):
         derives a freq from panadapter pixel position; direct entry
         / band buttons / memory recall / CAT all bypass rounding by
         calling ``set_freq_hz`` straight.
+
+        Phase 3.E.1 v0.1 (2026-05-12): routes the write to the RX
+        that currently owns the panadapter (``panadapter_source_rx``).
+        When the operator clicks on a peak in a panadapter that's
+        showing RX2's band, the click tunes RX2 -- not RX1 -- so
+        the visual feedback matches the operator's mental model
+        ("I clicked the signal on the panadapter, that's what I'm
+        listening to").
         """
         rounded = self.round_panadapter_freq(int(hz))
-        self.set_freq_hz(rounded)
+        if self._panadapter_source_rx == 2:
+            self.set_rx2_freq_hz(rounded)
+        else:
+            self.set_freq_hz(rounded)
 
     def autoload_panadapter_scroll_step(self) -> None:
         """Restore the operator's persisted scroll step on startup."""
@@ -7795,6 +7858,12 @@ class Radio(QObject):
             self._dsp_worker.set_bin_enabled, _qc)
         self.bin_depth_changed.connect(
             self._dsp_worker.set_bin_depth, _qc)
+        # Phase 3.E.1 v0.1: flush the worker's FFT sample ring when
+        # panadapter source switches RX1 <-> RX2.  Without this, the
+        # first FFT after the switch would be a mix of old + new
+        # source samples and render as a garbage frame.
+        self.panadapter_source_changed.connect(
+            self._dsp_worker.flush_fft_ring, _qc)
         # B.5 — sink swap channel.  When Radio rebuilds the audio
         # sink (start/stop, set_audio_output, PC device change), the
         # worker swaps its local reference between blocks AND closes
@@ -10108,8 +10177,20 @@ class Radio(QObject):
         # placement separately via marker_offset_hz so the
         # operator's tuned freq lands on the carrier visually
         # under v0.0.9.8's carrier-freq VFO convention.
-        self.spectrum_ready.emit(
-            spec_out, float(self._compute_dds_freq_hz()), eff_rate)
+        #
+        # Phase 3.E.1 v0.1 (2026-05-12): when panadapter source is
+        # RX2, emit RX2's DDS freq as the spectrum center so the
+        # widget retunes to the new band.  RX2 doesn't apply the
+        # CW-pitch offset today (its set_rx2_freq_hz writes the
+        # operator's input directly to the gateware), so we use
+        # ``_rx2_freq_hz`` straight -- a Phase 3.E follow-up may
+        # add CW-aware DDS computation for RX2 if anyone routinely
+        # tunes RX2 to CW mode.
+        if self._panadapter_source_rx == 2:
+            center_hz = float(self._rx2_freq_hz)
+        else:
+            center_hz = float(self._compute_dds_freq_hz())
+        self.spectrum_ready.emit(spec_out, center_hz, eff_rate)
         if self._radio_debug:
             self._dbg_fft_emits += 1
 

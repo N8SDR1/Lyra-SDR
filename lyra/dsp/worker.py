@@ -307,6 +307,19 @@ class DspWorker(QObject):
         legitimate audio discontinuity."""
         self._reset_requested = True
 
+    def flush_fft_ring(self) -> None:
+        """Phase 3.E.1 v0.1 (2026-05-12): flush the FFT sample ring
+        so the next emitted spec_db is clean (no mixed-source bins).
+        Called by the main thread when ``panadapter_source_rx``
+        changes -- the ring currently holds samples from the
+        previous source RX, and FFT-ing across a mix produces a
+        single garbage frame.  Cheap operation (ring is a deque,
+        clear is O(1) amortized)."""
+        ring = self._sample_ring
+        if ring is not None:
+            ring.clear()
+        self._fft_block_counter = 0
+
     def request_stop(self) -> None:
         """Request the worker to exit ``run_loop`` cleanly.  Called
         from the main thread on radio stop or Lyra shutdown."""
@@ -637,8 +650,20 @@ class DspWorker(QObject):
         # ring; every N blocks compute one FFT and emit raw spec_db.
         # Errors NEVER stop audio — at worst the panadapter freezes
         # for a frame.
+        #
+        # Phase 3.E.1 v0.1 (2026-05-12): pick samples based on
+        # ``radio.panadapter_source_rx`` so the FFT follows whatever
+        # VFO the operator focused.  Falls back to RX1 samples when
+        # source = RX2 but rx2_samples aren't paired this batch
+        # (startup race, rate-change transient) -- one stale frame
+        # is better than a frozen panadapter.
         try:
-            self._maybe_run_fft(samples)
+            src = getattr(radio, "panadapter_source_rx", 0)
+            if (src == 2 and rx2_samples is not None
+                    and getattr(radio, "_wdsp_rx2", None) is not None):
+                self._maybe_run_fft(rx2_samples)
+            else:
+                self._maybe_run_fft(samples)
         except Exception as exc:
             print(f"[DspWorker] fft error: {exc}")
 
