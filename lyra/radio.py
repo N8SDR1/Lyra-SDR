@@ -1030,6 +1030,16 @@ class Radio(QObject):
         self._volume_rx2: float = self._volume
         self._muted_rx2: bool = self._muted
 
+        # Phase 4 (v0.1.0) RX2 persistence: when restoring from
+        # QSettings on startup, the SUB-rising-edge mirror in
+        # ``set_rx2_enabled`` would clobber the persisted RX2
+        # vol/mute/AF gain with RX1's values.  ``autoload_rx2_state``
+        # flips this flag to True around the dispatch-state restore
+        # so persisted RX2 state survives.  Always False in normal
+        # operator-driven SUB toggles so the bench-test speaker-blast
+        # safety net stays armed.
+        self._suppress_sub_mirror: bool = False
+
         # Captured-profile IQ-domain engine (§14.6, v0.0.9.9).
         # Created/recreated alongside the WDSP channel so the
         # engine's IQ rate always matches the radio's.  None until
@@ -2173,7 +2183,11 @@ class Radio(QObject):
         # SUB click (and was a contributing factor to the bench-test
         # speaker damage on 2026-05-12).  Operator can independently
         # adjust Vol-B / AF Gain RX2 / Mute-B afterwards.
-        if new:
+        #
+        # Phase 4 v0.1 (2026-05-12): suppressed during autoload from
+        # QSettings so persisted RX2 vol/mute/AF gain survive across
+        # restarts.  See ``autoload_rx2_state``.
+        if new and not self._suppress_sub_mirror:
             self._volume_rx2 = self._volume
             self._muted_rx2 = self._muted
             # AF Gain RX2 mirror -- push through the setter so
@@ -7675,6 +7689,115 @@ class Radio(QObject):
             return
         if call:
             self.set_ncdxf_follow_station(call)
+
+    # ── Phase 4 v0.1 (2026-05-12) RX2 state persistence ────────────
+    def autoload_rx2_state(self) -> None:
+        """Restore persisted RX2 state from QSettings on startup.
+
+        Loads (in order):
+          * RX2 per-mode RX BW dict (``rx2/rx_bw_by_mode``)
+          * RX2 mode (``rx2/mode``) -- via ``set_mode(target_rx=2)``
+          * RX2 freq (``rx2/freq_hz``) -- via ``set_rx2_freq_hz``;
+            applies CW pitch offset via the per-target DDS path
+          * RX2 AF gain (``rx2/af_gain_db``)
+          * RX2 volume (``rx2/volume``)
+          * RX2 muted (``rx2/muted``)
+          * RX2 AGC profile (``rx2/agc_profile``)
+          * RX2 AGC threshold dBFS (``rx2/agc_threshold``)
+          * Focused RX (``radio/focused_rx``)
+          * SUB / dispatch.rx2_enabled (``dispatch/rx2_enabled``)
+
+        SUB state is restored LAST under ``_suppress_sub_mirror=True``
+        so the rising-edge mirror in ``set_rx2_enabled`` doesn't
+        clobber the just-loaded RX2 vol/mute/AF gain.
+
+        All steps are individually wrapped in try/except so a
+        single bad value doesn't blank the whole restore.  The
+        defaults the constructor populated stay in place for any
+        missing key.
+        """
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+        except Exception:
+            return
+        # Per-mode RX BW dict — JSON since QSettings doesn't
+        # natively round-trip a dict.  Restore BEFORE mode so the
+        # set_mode call sees the correct per-mode BW.
+        if s.contains("rx2/rx_bw_by_mode"):
+            import json
+            try:
+                _bw_dict = json.loads(str(s.value("rx2/rx_bw_by_mode")))
+                if isinstance(_bw_dict, dict):
+                    for _m, _bw in _bw_dict.items():
+                        try:
+                            self.set_rx_bw(str(_m), int(_bw), target_rx=2)
+                        except (TypeError, ValueError):
+                            pass
+            except (ValueError, TypeError):
+                pass
+        if s.contains("rx2/mode"):
+            try:
+                self.set_mode(str(s.value("rx2/mode")), target_rx=2)
+            except Exception as exc:
+                print(f"[Radio] autoload rx2/mode: {exc}")
+        if s.contains("rx2/freq_hz"):
+            try:
+                self.set_rx2_freq_hz(int(s.value("rx2/freq_hz")))
+            except (TypeError, ValueError):
+                pass
+        if s.contains("rx2/af_gain_db"):
+            try:
+                self.set_af_gain_db(
+                    int(s.value("rx2/af_gain_db")), target_rx=2)
+            except (TypeError, ValueError):
+                pass
+        if s.contains("rx2/volume"):
+            try:
+                self.set_volume(
+                    float(s.value("rx2/volume")), target_rx=2)
+            except (TypeError, ValueError):
+                pass
+        if s.contains("rx2/muted"):
+            try:
+                self.set_muted(
+                    s.value("rx2/muted", False, type=bool),
+                    target_rx=2)
+            except Exception:
+                pass
+        if s.contains("rx2/agc_profile"):
+            try:
+                self.set_agc_profile(
+                    str(s.value("rx2/agc_profile")), target_rx=2)
+            except Exception:
+                pass
+        if s.contains("rx2/agc_threshold"):
+            try:
+                v = float(s.value("rx2/agc_threshold"))
+                # Same dBFS-vs-legacy-linear guard as RX1's load.
+                if not (-1.0 < v < 1.0):
+                    self.set_agc_threshold(v, target_rx=2)
+            except (TypeError, ValueError):
+                pass
+        if s.contains("radio/focused_rx"):
+            try:
+                self.set_focused_rx(int(s.value("radio/focused_rx")))
+            except (TypeError, ValueError):
+                pass
+        # SUB state LAST + mirror suppressed so persisted RX2
+        # vol/mute/AF gain don't get smashed by the rising-edge
+        # mirror in ``set_rx2_enabled``.
+        if s.contains("dispatch/rx2_enabled"):
+            try:
+                want = s.value(
+                    "dispatch/rx2_enabled", False, type=bool)
+                self._suppress_sub_mirror = True
+                try:
+                    self.set_rx2_enabled(bool(want))
+                finally:
+                    self._suppress_sub_mirror = False
+            except Exception as exc:
+                print(f"[Radio] autoload SUB: {exc}")
 
     # ── Spectrum FPS ─────────────────────────────────────────────────
     @property

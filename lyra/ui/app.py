@@ -352,6 +352,18 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             print(f"[app] NCDXF follow autoload error: {exc}")
 
+        # Phase 4 v0.1 RX2 state autoload (freq / mode / BW dict /
+        # AF gain / volume / mute / AGC profile / AGC threshold /
+        # focused RX / SUB dispatch).  Runs AFTER ``_load_settings``
+        # populates RX1 state so the focused-RX restore doesn't
+        # see a half-initialized panel surface.  Suppresses the
+        # SUB rising-edge mirror so persisted RX2 vol/mute/AF gain
+        # survive the dispatch-state restore.
+        try:
+            self.radio.autoload_rx2_state()
+        except Exception as exc:
+            print(f"[app] RX2 state autoload error: {exc}")
+
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.
         # Start/Stop lives on the toolbar below for one-click access.
@@ -3428,6 +3440,24 @@ class MainWindow(QMainWindow):
         r = self.radio
         s.setValue("ip", r.ip)
         s.setValue("freq_hz", r.freq_hz)
+        # Phase 4 v0.1 RX2 state persistence.  Sibling-of-RX1
+        # keys under ``rx2/...`` + the cross-RX dispatch/focus
+        # state.  Restored at startup by ``Radio.autoload_rx2_state``
+        # which is called from app.py after ``_load_settings``.
+        s.setValue("rx2/freq_hz", r.rx2_freq_hz)
+        s.setValue("rx2/mode", r._mode_rx2)  # noqa: SLF001
+        s.setValue("rx2/af_gain_db", int(r._af_gain_db_rx2))  # noqa: SLF001
+        s.setValue("rx2/volume", float(r._volume_rx2))  # noqa: SLF001
+        s.setValue("rx2/muted", bool(r._muted_rx2))  # noqa: SLF001
+        s.setValue("rx2/agc_profile", r._agc_profile_rx2)  # noqa: SLF001
+        s.setValue("rx2/agc_threshold",
+                   float(r._agc_target_rx2))  # noqa: SLF001
+        import json as _json_rx2_bw
+        s.setValue("rx2/rx_bw_by_mode",
+                   _json_rx2_bw.dumps(dict(r._rx_bw_by_mode_rx2)))  # noqa: SLF001
+        s.setValue("dispatch/rx2_enabled",
+                   bool(r.dispatch_state.rx2_enabled))
+        s.setValue("radio/focused_rx", int(r.focused_rx))
         s.setValue("rate", r.rate)
         s.setValue("mode", r.mode)
         s.setValue("gain", r.gain_db)
