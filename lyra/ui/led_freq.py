@@ -114,7 +114,21 @@ class FrequencyDisplay(QWidget):
         # the LED fillRect and never appears).  TuningPanel calls
         # ``set_focus_active(bool)`` on every focused_rx_changed
         # edge.
+        #
+        # Color scheme (operator UX 2026-05-12):
+        #   * Focused RX (operator is listening here): GREEN
+        #     (#00E676 -- bright "alive / listening" cue).
+        #   * TX-active VFO (operator will transmit here): RED
+        #     (#FF1744 -- universal radio TX convention; takes
+        #     precedence over focus color when both apply, so the
+        #     operator never confuses "I'm focused here" with
+        #     "I'm about to transmit here").
+        #
+        # ``set_tx_active(bool)`` wires the RED override; today it
+        # has no live caller (Phase 3.E TX integration will hook
+        # this up to the MOX state machine when TX ships).
         self._focus_active: bool = False
+        self._tx_active: bool = False
         # Inline text editor for direct frequency entry. Created lazy
         # on first double-click. Hidden when not editing — the LED
         # painting still happens normally underneath.
@@ -151,14 +165,33 @@ class FrequencyDisplay(QWidget):
         self._selected = max(0, min(self.N_DIGITS - 1, int(idx)))
 
     def set_focus_active(self, active: bool) -> None:
-        """Phase 3.B/3.D v0.1 -- toggle the orange focus border that
+        """Phase 3.B/3.D v0.1 -- toggle the GREEN focus border that
         marks this LED as the currently-focused VFO.  Painted in
         our own paintEvent (a QSS border would be overdrawn by the
-        widget's background fillRect)."""
+        widget's background fillRect).  Color changed orange ->
+        green per operator UX call 2026-05-12; red is reserved for
+        the TX-active state (see ``set_tx_active``)."""
         new = bool(active)
         if new == self._focus_active:
             return
         self._focus_active = new
+        self.update()
+
+    def set_tx_active(self, active: bool) -> None:
+        """Phase 3.E hook (Lyra TX integration) -- toggle the RED
+        border that marks this VFO as the active TX path.  RED
+        takes precedence over GREEN focus color in paintEvent, so
+        when both ``_tx_active`` and ``_focus_active`` are True the
+        border renders red ("this is where I'm transmitting from"
+        outranks "this is where I'm focused for tuning").
+
+        No live caller today; wired by the MOX state machine when
+        Phase 3.E / v0.2 TX ships.  Method added now so the
+        FrequencyDisplay API surface is stable through TX work."""
+        new = bool(active)
+        if new == self._tx_active:
+            return
+        self._tx_active = new
         self.update()
 
     def set_external_step_hz(self, hz: int):
@@ -276,12 +309,24 @@ class FrequencyDisplay(QWidget):
             p.drawText(QPointF((w - bw) // 2, h // 2 + 4),
                        self._disabled_banner)
 
-        # Phase 3.B/3.D v0.1 focus-border (painted LAST so it sits on
-        # top of the LED background and digit overdraw).  Drawn just
-        # inside the widget's rect so the 2 px stroke doesn't get
-        # clipped at the edges.
-        if self._focus_active:
-            p.setPen(QPen(QColor(0xC2, 0x70, 0x2A), 2))
+        # Phase 3.B/3.D/3.E v0.1 focus + TX border (painted LAST so
+        # it sits on top of the LED background and digit overdraw).
+        # Drawn just inside the widget's rect so the 2 px stroke
+        # doesn't get clipped at the edges.
+        #
+        # Color precedence: TX active (red) > focus active (green) >
+        # no border.  RED outranks GREEN so the operator never
+        # mistakes "focused" for "transmitting" -- when SPLIT auto-
+        # moves TX to VFO B during Phase 3.E, the operator sees
+        # GREEN on the still-listening VFO and RED on the
+        # transmitting one at a glance.
+        if self._tx_active:
+            p.setPen(QPen(QColor(0xFF, 0x17, 0x44), 2))   # red
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(
+                QRectF(1.0, 1.0, w - 2.0, h - 2.0), 4.0, 4.0)
+        elif self._focus_active:
+            p.setPen(QPen(QColor(0x00, 0xE6, 0x76), 2))   # green
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(
                 QRectF(1.0, 1.0, w - 2.0, h - 2.0), 4.0, 4.0)

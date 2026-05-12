@@ -75,12 +75,14 @@ class Phase3bDualVfoTest(unittest.TestCase):
     # ── Focus model + visual border ─────────────────────────────────
 
     def test_initial_focus_indicator_on_rx1(self) -> None:
-        """Phase 3.A default focus = RX1.  RX1's LED has the orange
-        active border; RX2's has the transparent inactive border."""
+        """Phase 3.A default focus = RX1.  RX1's LED has the GREEN
+        active border; RX2's has the transparent inactive border.
+        Color changed orange -> green per operator UX 2026-05-12;
+        red is reserved for TX (see led_freq.set_tx_active)."""
         rx1_style = self.panel.freq_display.styleSheet()
         rx2_style = self.panel.freq_display_rx2.styleSheet()
-        # Active border style contains the orange hex.
-        self.assertIn("#c2702a", rx1_style)
+        # Active border style contains the green hex.
+        self.assertIn("#00e676", rx1_style)
         # Inactive border is transparent.
         self.assertIn("transparent", rx2_style)
 
@@ -89,14 +91,14 @@ class Phase3bDualVfoTest(unittest.TestCase):
         rx1_style = self.panel.freq_display.styleSheet()
         rx2_style = self.panel.freq_display_rx2.styleSheet()
         self.assertIn("transparent", rx1_style)
-        self.assertIn("#c2702a", rx2_style)
+        self.assertIn("#00e676", rx2_style)
 
     def test_focus_change_back_to_rx1_restores_border(self) -> None:
         self.radio.set_focused_rx(2)
         self.radio.set_focused_rx(0)
         rx1_style = self.panel.freq_display.styleSheet()
         rx2_style = self.panel.freq_display_rx2.styleSheet()
-        self.assertIn("#c2702a", rx1_style)
+        self.assertIn("#00e676", rx1_style)
         self.assertIn("transparent", rx2_style)
 
     # ── Click-to-focus ──────────────────────────────────────────────
@@ -134,6 +136,49 @@ class Phase3bDualVfoTest(unittest.TestCase):
         )
         self.panel.freq_display.mousePressEvent(evt)
         self.assertEqual(self.radio.focused_rx, 0)
+
+
+class Phase3eFocusAndTxColorTest(unittest.TestCase):
+    """Phase 3.E hook (2026-05-12) -- ``FrequencyDisplay.set_tx_active
+    (bool)`` is wired now so the API surface is stable through
+    Phase 3.E TX integration.  The MOX state machine will hook this
+    when TX work begins; today the method is callable but no live
+    caller invokes it."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.ui.led_freq import FrequencyDisplay
+        self.led = FrequencyDisplay()
+
+    def test_tx_active_default_false(self) -> None:
+        self.assertFalse(self.led._tx_active)
+
+    def test_set_tx_active_toggles_flag(self) -> None:
+        self.led.set_tx_active(True)
+        self.assertTrue(self.led._tx_active)
+        self.led.set_tx_active(False)
+        self.assertFalse(self.led._tx_active)
+
+    def test_set_tx_active_idempotent(self) -> None:
+        """Repeat True call doesn't no-op-reset state."""
+        self.led.set_tx_active(True)
+        self.led.set_tx_active(True)
+        self.assertTrue(self.led._tx_active)
+
+    def test_focus_independent_of_tx(self) -> None:
+        """Focus + TX are independent state flags so the paintEvent
+        can pick precedence (red TX > green focus)."""
+        self.led.set_focus_active(True)
+        self.led.set_tx_active(True)
+        self.assertTrue(self.led._focus_active)
+        self.assertTrue(self.led._tx_active)
+        self.led.set_tx_active(False)
+        self.assertTrue(self.led._focus_active)
+        self.assertFalse(self.led._tx_active)
 
 
 class Phase3dPerVfoControlsTest(unittest.TestCase):

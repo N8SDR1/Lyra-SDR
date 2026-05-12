@@ -424,13 +424,16 @@ class TuningPanel(GlassPanel):
         row1.addLayout(rx2_col, 5)
 
         # ── Focus-border visual indicator (Phase 3.B v0.1) ──────────
-        # Orange border around the focused VFO LED so operator
+        # GREEN border around the focused VFO LED so operator
         # always knows which RX the wheel / keyboard / MODE+FILTER
         # panel currently controls.  Reacts to
         # ``Radio.focused_rx_changed`` signal.  Initial state:
-        # focused_rx = 0 (RX1) per Phase 3.A default.
+        # focused_rx = 0 (RX1) per Phase 3.A default.  Color changed
+        # orange -> green per operator UX call 2026-05-12; RED
+        # is reserved for the TX-active state (Phase 3.E future,
+        # see ``FrequencyDisplay.set_tx_active``).
         self._focus_border_active = (
-            "border: 2px solid #c2702a; border-radius: 4px;"
+            "border: 2px solid #00e676; border-radius: 4px;"
         )
         self._focus_border_inactive = (
             "border: 2px solid transparent; border-radius: 4px;"
