@@ -116,6 +116,15 @@ class Radio(QObject):
     # (via HL2Stream._set_rx2_freq) AND emits this signal so any
     # bench-test dialog can mirror its readout.
     rx2_freq_changed = Signal(int)
+    # Phase 3.A v0.1 (2026-05-12) -- focused-RX state for the hybrid
+    # focus model per consensus plan §6.1 + §6.7.  Payload is the
+    # canonical host-channel ID (0 = RX1, 2 = RX2 -- matches the
+    # ConsumerID enum + wdsp_engine.RxChannel.channel convention).
+    # UI binds to this signal to move the orange focus border and
+    # re-source the MODE+FILTER / DSP+AUDIO panels to the new
+    # focused RX's state.  Phase 3.A introduces the field and the
+    # signal; Phase 3.B+ wires actual UI consumers.
+    focused_rx_changed = Signal(int)
     # ── TCI streaming taps (v0.0.9.1+) ─────────────────────────────────
     # These signals fire whenever the audio / IQ data is finalised so
     # the TciServer can broadcast binary frames to subscribed clients.
@@ -935,6 +944,48 @@ class Radio(QObject):
         # the RX2 freq (operator-config-dependent).
         # See CLAUDE.md §6.7 disciplines + Phase 3 UI note.
         self._wdsp_rx2 = None
+
+        # ── Phase 3.A v0.1 (2026-05-12) per-RX state scaffolding ─────
+        #
+        # Consensus plan §6.1 (hybrid focus model) + §6.7 (active-VFO
+        # indicators + swap controls) + §6.8 (per-RX volume + mute).
+        # Phase 3.A introduces the per-RX state fields + focus state
+        # field; Phase 3.B+ introduces target_rx semantics on setters
+        # + UI consumers that let RX2 state diverge from RX1.
+        #
+        # Initialization invariant for Phase 3.A: per-RX state mirrors
+        # RX1 state at construction time AND stays in lock-step with
+        # RX1 state through the Phase 2 fan-out path in the existing
+        # setters.  That keeps Phase 3.A operator-visible behavior
+        # identical to Phase 2 (RX2 follows RX1).  Phase 3.B switches
+        # the setters to ``target_rx`` semantics that respect the
+        # focused RX, at which point the per-RX state starts
+        # genuinely diverging.
+        #
+        # Field naming convention: ``_<base>`` is RX1's state; the
+        # corresponding RX2 mirror is ``_<base>_rx2``.  The
+        # ``_resolve_rx_target`` helper (added below) maps a
+        # ``target_rx`` parameter (0 / 2 / None) to the right state
+        # access pattern + WDSP channel.
+
+        # Focused RX -- canonical host channel ID per §1.1.  0 = RX1,
+        # 2 = RX2.  Default 0 preserves single-RX UI semantics
+        # before Phase 3.B's UI changes land.  Persisted to QSettings
+        # so the operator's last-focused RX is restored on launch.
+        self._focused_rx: int = 0
+
+        # Per-RX operator state mirrors.  At init these are exact
+        # copies of RX1's state -- Phase 2 fan-out in set_mode /
+        # set_agc_profile / set_af_gain_db / set_agc_threshold keeps
+        # them in sync.  Phase 3.B replaces fan-out with target_rx
+        # dispatch and these start tracking RX2-specific operator
+        # changes independently.
+        self._mode_rx2: str = self._mode
+        self._rx_bw_by_mode_rx2: dict = dict(self._rx_bw_by_mode)
+        self._agc_profile_rx2: str = self._agc_profile
+        self._agc_target_rx2: float = self._agc_target
+        self._af_gain_db_rx2: int = self._af_gain_db
+
         # Captured-profile IQ-domain engine (§14.6, v0.0.9.9).
         # Created/recreated alongside the WDSP channel so the
         # engine's IQ rate always matches the radio's.  None until
@@ -1777,6 +1828,79 @@ class Radio(QObject):
         """
         return self._dispatch_state
 
+    # ── Phase 3.A v0.1: focused-RX surface ──────────────────────────
+    @property
+    def focused_rx(self) -> int:
+        """Current focused RX (host channel ID per §1.1).
+
+        Returns 0 for RX1 or 2 for RX2.  Phase 3.B+ UI components
+        (MODE+FILTER panel, DSP+AUDIO panel) read this to bind
+        their displays + setters to the focused receiver's state.
+        """
+        return int(self._focused_rx)
+
+    def set_focused_rx(self, rx_id: int) -> None:
+        """Switch focus to ``rx_id`` (0 = RX1, 2 = RX2).
+
+        Called by Phase 3.B+ UI on Ctrl+1 / Ctrl+2 hotkey, click on
+        a VFO LED, or middle-click on the panadapter.  Idempotent
+        (no-op when rx_id already equals current focus).  Emits
+        ``focused_rx_changed(int)`` only on actual transitions.
+
+        Raises ``ValueError`` for unknown ``rx_id`` to catch
+        propagated bugs in UI dispatch -- callers should only
+        pass 0 or 2.
+        """
+        new_focus = int(rx_id)
+        if new_focus not in (0, 2):
+            raise ValueError(
+                f"focused_rx must be 0 (RX1) or 2 (RX2); got {new_focus}"
+            )
+        if new_focus == self._focused_rx:
+            return
+        self._focused_rx = new_focus
+        try:
+            self.focused_rx_changed.emit(new_focus)
+        except Exception:
+            pass
+
+    def _resolve_rx_target(
+        self, target_rx: Optional[int],
+    ) -> tuple[int, str]:
+        """Map a ``target_rx`` parameter to its canonical RX id +
+        state-field suffix.
+
+        Phase 3.B+ setters use this to route writes to the right
+        per-RX state fields.  Phase 3.A's existing setters still
+        fan out to both channels for back-compat, but the helper
+        is here so Phase 3.B can drop in without further plumbing.
+
+        Args:
+            target_rx: 0 = RX1, 2 = RX2, None = focused RX.
+
+        Returns:
+            ``(rx_id, suffix)`` where ``rx_id`` is the canonical
+            channel ID (0 or 2) and ``suffix`` is the per-RX
+            state-field suffix: ``""`` for RX1 (e.g., ``_mode``)
+            or ``"_rx2"`` for RX2 (e.g., ``_mode_rx2``).  Callers
+            use ``getattr(self, f"_mode{suffix}")`` patterns.
+
+        Raises:
+            ValueError: For target_rx values other than 0 / 2 /
+                None.
+        """
+        if target_rx is None:
+            target_rx = self._focused_rx
+        target_rx = int(target_rx)
+        if target_rx == 0:
+            return (0, "")
+        if target_rx == 2:
+            return (2, "_rx2")
+        raise ValueError(
+            f"target_rx must be 0 (RX1), 2 (RX2), or None "
+            f"(focused); got {target_rx}"
+        )
+
     def set_mox(self, mox: bool) -> None:
         """Set the MOX axis of DispatchState.  Call from Qt main thread.
 
@@ -2135,6 +2259,13 @@ class Radio(QObject):
         # RX1 (no per-RX UI until Phase 3).  APF / squelch are
         # left at WDSP defaults on RX2 in Phase 2 since their
         # per-module state isn't pushed there.
+        #
+        # Phase 3.A (2026-05-12) addition: also update the per-RX
+        # state field ``_mode_rx2`` so the Phase 3.A invariant
+        # ("_mode_rx2 tracks _mode while we're still in fan-out
+        # mode") holds.  Phase 3.B removes this fan-out and
+        # routes mode changes via target_rx semantics.
+        self._mode_rx2 = alias
         if self._wdsp_rx2 is not None:
             try:
                 self._wdsp_rx2.reset()
@@ -2380,6 +2511,9 @@ class Radio(QObject):
                 print(f"[Radio] AF Gain → WDSP push error: {exc}")
         # Phase 2 v0.1: mirror AF Gain onto RX2 so both receivers
         # share the operator's makeup-gain setting.
+        # Phase 3.A (2026-05-12): also update per-RX state field
+        # so the lock-step invariant holds.
+        self._af_gain_db_rx2 = db
         wdsp2 = getattr(self, "_wdsp_rx2", None)
         if wdsp2 is not None:
             try:
@@ -5531,6 +5665,11 @@ class Radio(QObject):
 
     def set_rx_bw(self, mode: str, bw: int):
         self._rx_bw_by_mode[mode] = int(bw)
+        # Phase 3.A v0.1 (2026-05-12): keep per-RX bandwidth dict
+        # in lock-step with RX1's during the Phase 3.A transition.
+        # Phase 3.B will introduce target_rx semantics so the
+        # operator can set independent per-mode BW for RX2.
+        self._rx_bw_by_mode_rx2[mode] = int(bw)
         # Always push to channel so the per-mode BW state stays in sync
         # — the demod for `mode` rebuilds inside the channel.
         self._rx_channel.set_rx_bw(mode, int(bw))
@@ -5543,6 +5682,15 @@ class Radio(QObject):
                 self._wdsp_rx.set_filter(low, high)
             except Exception as exc:
                 print(f"[Radio] WDSP rx bw-change error: {exc}")
+        # Phase 3.A: also push to RX2 when its active mode matches.
+        # In Phase 3.A both channels share state so this is identical
+        # to the RX1 push above; Phase 3.B will diverge.
+        if self._wdsp_rx2 is not None and mode == self._mode_rx2:
+            try:
+                low2, high2 = self._wdsp_filter_for(mode)
+                self._wdsp_rx2.set_filter(low2, high2)
+            except Exception as exc:
+                print(f"[Radio] WDSP rx2 bw-change error: {exc}")
         if mode == self._mode:
             self._emit_passband()
         self.rx_bw_changed.emit(mode, int(bw))
@@ -5555,6 +5703,8 @@ class Radio(QObject):
         self.tx_bw_changed.emit(mode, int(bw))
         if self._bw_locked and self._rx_bw_by_mode.get(mode) != int(bw):
             self._rx_bw_by_mode[mode] = int(bw)
+            # Phase 3.A: keep RX2's per-mode BW dict in lock-step.
+            self._rx_bw_by_mode_rx2[mode] = int(bw)
             self._rx_channel.set_rx_bw(mode, int(bw))
             self.rx_bw_changed.emit(mode, int(bw))
 
@@ -8145,18 +8295,33 @@ class Radio(QObject):
         # ``# Phase 2: also push to RX2`` lines).  Until Phase 3
         # gives RX2 its own UI surface, RX2 is functionally a clone
         # of RX1 with a different NCO frequency.
+        #
+        # Phase 3.A (2026-05-12): read the RX2 state from the per-RX
+        # state fields (``_mode_rx2``, ``_agc_profile_rx2``, etc.)
+        # rather than from RX1's fields directly.  In Phase 3.A the
+        # values are identical (the fan-out setters keep them in
+        # lock-step), but reading from the per-RX fields makes the
+        # state-routing explicit + sets up Phase 3.B to swap the
+        # fan-out for target_rx semantics.
+        #
+        # TODO Phase 3.B: ``_wdsp_filter_for`` currently reads
+        # ``self._rx_bw_by_mode`` (RX1's dict).  When per-RX BW
+        # divergence lands, refactor it to take a target_rx
+        # parameter so RX2's push reads ``_rx_bw_by_mode_rx2``.
+        # Safe in Phase 3.A because the dicts are kept identical.
         try:
-            self._wdsp_rx2.set_mode(self._wdsp_mode_for(self._mode))
-            low, high = self._wdsp_filter_for(self._mode)
+            af_gain_rx2_linear = 10.0 ** (self._af_gain_db_rx2 / 20.0)
+            self._wdsp_rx2.set_mode(self._wdsp_mode_for(self._mode_rx2))
+            low, high = self._wdsp_filter_for(self._mode_rx2)
             self._wdsp_rx2.set_filter(low, high)
-            self._wdsp_rx2.set_agc(self._wdsp_agc_for(self._agc_profile))
+            self._wdsp_rx2.set_agc(self._wdsp_agc_for(self._agc_profile_rx2))
             try:
                 self._wdsp_rx2.set_agc_slope(35)
                 self._wdsp_rx2.set_agc_threshold(
-                    float(self._agc_target), 4096, in_rate)
+                    float(self._agc_target_rx2), 4096, in_rate)
             except Exception as exc:
                 print(f"[Radio] WDSP RX2 AGC init-state push: {exc}")
-            self._wdsp_rx2.set_panel_gain(self.af_gain_linear)
+            self._wdsp_rx2.set_panel_gain(af_gain_rx2_linear)
             self._wdsp_rx2.set_panel_binaural(False)
             # RX2 hard-right pan — completes the stereo split.
             self._wdsp_rx2.set_panel_pan(1.0)
@@ -8802,6 +8967,8 @@ class Radio(QObject):
             except Exception as exc:
                 print(f"[Radio] WDSP rx agc-change error: {exc}")
         # Phase 2 v0.1: mirror AGC profile onto RX2.
+        # Phase 3.A (2026-05-12): also update per-RX state field.
+        self._agc_profile_rx2 = name
         if self._wdsp_rx2 is not None:
             try:
                 self._wdsp_rx2.set_agc(self._wdsp_agc_for(name))
@@ -8977,6 +9144,8 @@ class Radio(QObject):
                 print(f"[Radio] WDSP AGC threshold push: {exc}")
         # Phase 2 v0.1: mirror AGC threshold onto RX2 so both
         # receivers share the auto-tracker's output.
+        # Phase 3.A (2026-05-12): also update per-RX state field.
+        self._agc_target_rx2 = v
         if self._wdsp_rx2 is not None:
             try:
                 self._wdsp_rx2.set_agc_threshold(
