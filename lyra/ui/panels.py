@@ -773,7 +773,12 @@ class ModeFilterPanel(GlassPanel):
         h.addSpacing(8)
         self.sub_btn = QPushButton("SUB")
         self.sub_btn.setCheckable(True)
-        self.sub_btn.setFixedWidth(56)
+        # Phase 3.D hotfix: setMinimumWidth instead of setFixedWidth
+        # so the button can grow if the system font renders wider
+        # than expected.  The QSS push-button padding adds ~16px on
+        # top of text width; 72px gives "SUB" (3 chars ~24px) a
+        # comfortable margin on every system Lyra runs on.
+        self.sub_btn.setMinimumWidth(72)
         self.sub_btn.setToolTip(
             "Enable RX2 (VFO B) for dual-receiver operation. "
             "When ON, RX1 audio routes hard-left, RX2 hard-right, "
@@ -784,8 +789,14 @@ class ModeFilterPanel(GlassPanel):
         self.sub_btn.toggled.connect(self._on_sub_toggled)
         h.addWidget(self.sub_btn)
 
-        self.ab_btn = QPushButton("A▸B")
-        self.ab_btn.setFixedWidth(52)
+        self.ab_btn = QPushButton("A→B")
+        # Phase 3.D hotfix: setMinimumWidth + → (U+2192, RIGHTWARDS
+        # ARROW) instead of ▸ (U+25B8) because → is in every
+        # default Windows / macOS / Linux font and renders at a
+        # predictable narrow width.  ▸ triggers font fallback to a
+        # wider face on some systems and clipped on the operator's
+        # bench pass.
+        self.ab_btn.setMinimumWidth(66)
         self.ab_btn.setToolTip(
             "Copy VFO A to VFO B.  Full state copy (freq + mode + "
             "RX BW) when SUB is ON; freq-only otherwise."
@@ -793,8 +804,8 @@ class ModeFilterPanel(GlassPanel):
         self.ab_btn.clicked.connect(lambda: self.radio.vfo_a_to_b())
         h.addWidget(self.ab_btn)
 
-        self.ba_btn = QPushButton("B▸A")
-        self.ba_btn.setFixedWidth(52)
+        self.ba_btn = QPushButton("B→A")
+        self.ba_btn.setMinimumWidth(66)
         self.ba_btn.setToolTip(
             "Copy VFO B to VFO A.  Full state copy (freq + mode + "
             "RX BW) when SUB is ON; freq-only otherwise."
@@ -803,7 +814,9 @@ class ModeFilterPanel(GlassPanel):
         h.addWidget(self.ba_btn)
 
         self.swap_btn = QPushButton("⇄")
-        self.swap_btn.setFixedWidth(44)
+        # Phase 3.D hotfix: setMinimumWidth + larger size for the
+        # wide ⇄ unicode glyph.
+        self.swap_btn.setMinimumWidth(54)
         self.swap_btn.setToolTip(
             "Swap VFO A and VFO B.  Full state swap when SUB is "
             "ON; freq-only otherwise."
@@ -2132,10 +2145,10 @@ class DspPanel(GlassPanel):
         self.mute_btn = QPushButton("MUTE")
         self.mute_btn.setObjectName("dsp_btn")        # orange when checked
         self.mute_btn.setCheckable(True)
-        # Phase 3.D hotfix v0.1: width sized for "MUTE-A" caption
-        # change when SUB is on (was 54px for "MUTE", clipped the
-        # extra "-A" suffix).
-        self.mute_btn.setFixedWidth(82)
+        # Phase 3.D hotfix v0.1: setMinimumWidth instead of fixed so
+        # the button grows to fit "MUTE-A" caption on systems where
+        # the QSS push-button font renders wider than expected.
+        self.mute_btn.setMinimumWidth(86)
         self.mute_btn.setChecked(radio.muted)
         self.mute_btn.setToolTip(
             "Silence output without changing the Volume slider. "
@@ -2148,10 +2161,9 @@ class DspPanel(GlassPanel):
         self.mute_b_btn = QPushButton("MUTE-B")
         self.mute_b_btn.setObjectName("dsp_btn")
         self.mute_b_btn.setCheckable(True)
-        # Phase 3.D hotfix v0.1: 70px was clipping the "-B" suffix
-        # depending on system font metrics; 82px matches Mute-A's
-        # new width for visual consistency.
-        self.mute_b_btn.setFixedWidth(82)
+        # Phase 3.D hotfix v0.1: setMinimumWidth matches Mute-A so
+        # both grow consistently on systems with wider button fonts.
+        self.mute_b_btn.setMinimumWidth(86)
         self.mute_b_btn.setChecked(radio.muted_for_rx(2))
         self.mute_b_btn.setToolTip(
             "Silence RX2 (right channel) without changing Vol-B.")
