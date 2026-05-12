@@ -106,6 +106,62 @@ class Phase3e1PanadapterSourceTest(unittest.TestCase):
         self.assertEqual(self.radio.rx2_freq_hz, orig_rx2)
 
 
+class Phase3e1Rx2EnqueueGateRegressionTest(unittest.TestCase):
+    """Regression for the 2026-05-12 SUB-off-blocks-RX2-FFT bug.
+
+    Phase 3.D safety belt (f6470ae) gated RX2 enqueue on
+    ``rx2_enabled``.  When Phase 3.E.1 added "panadapter follows
+    focus", clicking RX2's LED with SUB off updated the center
+    freq label but the FFT pipeline kept feeding RX1 samples
+    because RX2 IQ never reached the worker queue.
+
+    Fix: removed the enqueue gate.  The worker's audio dispatch
+    (7923b94) is the real safety belt for "SUB off = no RX2
+    audio"; sample queueing is independent of audio routing.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        self.radio = Radio()
+
+    def test_rx2_enqueue_runs_when_sub_off(self) -> None:
+        """``_stream_cb_rx2`` must enqueue RX2 samples to the worker
+        regardless of SUB state, so the FFT pipeline can read them
+        when ``panadapter_source_rx == 2``."""
+        import numpy as np
+        # Force-build a mock worker that records enqueue calls.
+        calls = []
+
+        class _MockWorker:
+            def enqueue_iq_rx2(self, samples):
+                calls.append(len(samples))
+
+        self.radio._dsp_worker = _MockWorker()
+        # Mimic worker-mode startup so the threading-mode gate
+        # passes.
+        self.radio._dsp_threading_mode_at_startup = (
+            self.radio.DSP_THREADING_WORKER)
+        # SUB explicitly OFF -- the bug case.
+        self.radio.set_rx2_enabled(False)
+        # Feed enough RX2 IQ samples to exceed the batch size and
+        # trigger an enqueue (mirrors the EP6 parser dispatching
+        # ``_stream_cb_rx2`` per UDP datagram).
+        batch_size = int(self.radio._rx_batch_size)
+        n = batch_size + 16
+        samples = np.zeros(n, dtype=np.complex64)
+        self.radio._stream_cb_rx2(samples, None)
+        self.assertTrue(
+            calls,
+            "RX2 samples must be enqueued even with SUB off so the "
+            "panadapter FFT can use them when source = RX2.",
+        )
+
+
 class Phase3e1WorkerFlushTest(unittest.TestCase):
     """Worker has a ``flush_fft_ring`` method that the source-change
     signal triggers so the next FFT frame is clean."""

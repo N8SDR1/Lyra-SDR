@@ -8126,15 +8126,20 @@ class Radio(QObject):
         # thread + a stereo combiner there; that path isn't wired
         # in Phase 2 (operator default is worker mode).
         #
-        # Phase 3.D hotfix v0.1 (2026-05-12): also gate on
-        # ``rx2_enabled`` so RX2 IQ samples don't even reach the
-        # worker queue when SUB is off.  Defense in depth: the
-        # worker's audio dispatch is the primary gate, this is a
-        # belt-and-suspenders save on CPU + memory churn for
-        # operators who never enable SUB.  Bench-test ring buffer
-        # above is independent and still fills regardless.
-        if not self._dispatch_state.rx2_enabled:
-            return
+        # Phase 3.E.1 hotfix v0.1 (2026-05-12): the f6470ae enqueue
+        # gate (skip when ``rx2_enabled`` is False) blocked RX2
+        # samples from reaching the FFT pipeline when SUB was off,
+        # which broke the Phase 3.E.1 "panadapter follows focus"
+        # behavior -- operator focused RX2 with SUB off, panadapter
+        # center freq updated but spectrum data stayed on RX1's
+        # band (RX2 samples never made it to the worker).  Gate
+        # removed: the worker's audio dispatch (7923b94) is the
+        # real safety belt -- it gates RX2 audio dual-demod on
+        # ``rx2_enabled``, so silence is guaranteed when SUB is off
+        # regardless of whether samples are queued.  The cost of
+        # always queuing is negligible (drop-oldest policy + small
+        # numpy arrays); the benefit is that the FFT pipeline can
+        # pull RX2 IQ on demand for panadapter-source switches.
         if (self._dsp_threading_mode_at_startup ==
                 self.DSP_THREADING_WORKER
                 and self._dsp_worker is not None):
