@@ -2047,6 +2047,34 @@ class Radio(QObject):
             self._apply_rx2_routing()
         except Exception as exc:
             print(f"[Radio] _apply_rx2_routing error: {exc}")
+        # Phase 3.D hotfix v0.1 (2026-05-12): on SUB rising edge,
+        # MIRROR RX1's current volume + AF gain + mute onto RX2 so
+        # the operator's existing level calibration carries over to
+        # the right channel.  Without this, RX2 starts at the
+        # construction-time defaults regardless of how the operator
+        # has dialed RX1 -- producing a startling level mismatch on
+        # SUB click (and was a contributing factor to the bench-test
+        # speaker damage on 2026-05-12).  Operator can independently
+        # adjust Vol-B / AF Gain RX2 / Mute-B afterwards.
+        if new:
+            self._volume_rx2 = self._volume
+            self._muted_rx2 = self._muted
+            # AF Gain RX2 mirror -- push through the setter so
+            # WDSP's RX2 PanelGain1 actually gets updated, not just
+            # the Python-side state field.
+            try:
+                self.set_af_gain_db(self._af_gain_db, target_rx=2)
+            except Exception as exc:
+                print(f"[Radio] AF Gain RX2 mirror on SUB: {exc}")
+            # Volume + mute don't have a WDSP push -- they're
+            # applied in ``_do_demod_wdsp_dual`` pre-sum.  Emit the
+            # sibling signals so any UI binding (Vol-B slider,
+            # Mute-B button) refreshes to the mirrored value.
+            try:
+                self.volume_changed_rx2.emit(self._volume_rx2)
+                self.muted_changed_rx2.emit(self._muted_rx2)
+            except Exception as exc:
+                print(f"[Radio] Vol/Mute RX2 mirror signal: {exc}")
         self.dispatch_state_changed.emit(self._dispatch_state)
 
     def _apply_rx2_routing(self) -> None:

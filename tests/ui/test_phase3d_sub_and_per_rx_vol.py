@@ -210,6 +210,66 @@ class Phase3dModeFilterPanelTest(unittest.TestCase):
         self.assertEqual(self.radio.rx2_freq_hz, 7_000_000)
 
 
+class Phase3dSubMirrorTest(unittest.TestCase):
+    """Phase 3.D hotfix (2026-05-12) -- on SUB rising edge,
+    RX2 mirrors RX1's current volume + AF gain + mute so the
+    operator's level calibration carries over.  Prevents the
+    "click SUB → speaker blast" failure mode from the original
+    Phase 3.D bench pass."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        self.radio = Radio()
+
+    def test_sub_on_mirrors_volume(self) -> None:
+        self.radio.set_volume(0.10, target_rx=0)  # very quiet
+        # RX2 default = 0.5, deliberately different.
+        self.radio._volume_rx2 = 0.5
+        self.radio.set_rx2_enabled(True)
+        self.assertAlmostEqual(self.radio._volume_rx2, 0.10,
+                               msg="SUB should mirror Vol-A to Vol-B")
+
+    def test_sub_on_mirrors_af_gain(self) -> None:
+        self.radio.set_af_gain_db(5, target_rx=0)
+        self.radio._af_gain_db_rx2 = 25
+        self.radio.set_rx2_enabled(True)
+        self.assertEqual(self.radio._af_gain_db_rx2, 5,
+                         "SUB should mirror AF Gain RX1 to RX2")
+
+    def test_sub_on_mirrors_mute(self) -> None:
+        self.radio.set_muted(True, target_rx=0)
+        self.radio._muted_rx2 = False
+        self.radio.set_rx2_enabled(True)
+        self.assertTrue(self.radio._muted_rx2)
+
+    def test_sub_on_emits_rx2_signals(self) -> None:
+        """SUB-on must emit volume + mute rx2 signals so UI binds
+        update to the mirrored values."""
+        self.radio.set_volume(0.20, target_rx=0)
+        vol_seen: list[float] = []
+        muted_seen: list[bool] = []
+        self.radio.volume_changed_rx2.connect(vol_seen.append)
+        self.radio.muted_changed_rx2.connect(muted_seen.append)
+        self.radio.set_rx2_enabled(True)
+        self.assertTrue(vol_seen, "Vol-B sibling signal must fire")
+        self.assertTrue(any(abs(v - 0.20) < 1e-6 for v in vol_seen))
+
+    def test_sub_off_does_not_mirror(self) -> None:
+        """SUB rising edge mirrors; SUB falling edge leaves state
+        alone so RX2's independent values persist for the next
+        SUB-on."""
+        self.radio.set_rx2_enabled(True)
+        self.radio.set_volume(0.7, target_rx=2)
+        self.radio.set_rx2_enabled(False)
+        # Vol-B must NOT have been clobbered by SUB-off.
+        self.assertAlmostEqual(self.radio._volume_rx2, 0.7)
+
+
 class Phase3dHotfixPanRoutingTest(unittest.TestCase):
     """Phase 3.D hotfix (2026-05-12) -- the WDSP pan routing
     follows ``rx2_enabled`` rather than being unconditionally
