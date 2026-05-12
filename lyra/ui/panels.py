@@ -290,6 +290,17 @@ class TuningPanel(GlassPanel):
 
         # RX1 — the live VFO. Small "RX1" label above it so its
         # identity is explicit once RX2 and TX split come online.
+        #
+        # Phase 3.E.1 hotfix v0.10 (2026-05-12): vertical centering
+        # via flanking stretches so the LED floats in the middle of
+        # its column rather than jamming to the top.  Per operator
+        # call: "Dead black space above each of the RX1 and RX2
+        # frequency boxes" -- with the logo column ~150 px tall and
+        # the freq_display ~66 px, the ~85 px gap below the LED was
+        # visible as empty black space.  Adding addStretch(1) above
+        # and below the LED parks it on the column's vertical
+        # midpoint, matching the logo's centered position.
+        # LED digit style/font intentionally unchanged.
         rx1_col = QVBoxLayout()
         rx1_col.setSpacing(2)
         rx1_label = QLabel("RX1")
@@ -297,18 +308,17 @@ class TuningPanel(GlassPanel):
             "color: #00e5ff; font-weight: 800; "
             "letter-spacing: 1.5px; font-size: 9px;")
         rx1_col.addWidget(rx1_label)
+        rx1_col.addStretch(1)
         self.freq_display = FrequencyDisplay()
-        # Override the class-level QSizePolicy.Fixed → Preferred so
-        # the freq column cooperates when the row is asked to grow
-        # (see panel-level note above on Tuning vertical resize).
-        # Also drop the maximum-height cap: it was 46 but the class
-        # minimum is 66, so it was a no-op constraint anyway, and
-        # the LED renderer scales gracefully when given more room.
+        # Vertical policy stays Preferred so the LED renderer keeps
+        # its current digit size; the addStretch above/below does
+        # the centering work.
         self.freq_display.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.freq_display.set_freq_hz(radio.freq_hz)
         self.freq_display.freq_changed.connect(self.radio.set_freq_hz)
         rx1_col.addWidget(self.freq_display)
+        rx1_col.addStretch(1)
         row1.addLayout(rx1_col, 5)      # stretch weight
 
         # Logo — center column. 130 px scaled from the 256 source
@@ -351,6 +361,8 @@ class TuningPanel(GlassPanel):
         # MODE+FILTER + DSP+AUDIO panels operate on RX2; Phase 3.C
         # wires the panel-binding refresh).  Ctrl+2 hotkey in
         # ``app.py`` does the same focus shift from the keyboard.
+        # Phase 3.E.1 hotfix v0.10 (2026-05-12): same vertical
+        # centering treatment as the RX1 column above.
         rx2_col = QVBoxLayout()
         rx2_col.setSpacing(2)
         rx2_label = QLabel("RX2")
@@ -358,6 +370,7 @@ class TuningPanel(GlassPanel):
             "color: #6a7a8c; font-weight: 800; "
             "letter-spacing: 1.5px; font-size: 9px;")
         rx2_col.addWidget(rx2_label)
+        rx2_col.addStretch(1)
         self.freq_display_rx2 = FrequencyDisplay()
         # Same vertical policy override as the RX1 freq display —
         # without it, this column also reports Fixed vertical and
@@ -421,6 +434,7 @@ class TuningPanel(GlassPanel):
         self.freq_display_rx2.mousePressEvent = _rx2_press  # type: ignore[assignment]
 
         rx2_col.addWidget(self.freq_display_rx2)
+        rx2_col.addStretch(1)
         row1.addLayout(rx2_col, 5)
 
         # ── Focus-border visual indicator (Phase 3.B v0.1) ──────────
@@ -482,13 +496,20 @@ class TuningPanel(GlassPanel):
         # noticeable without pushing the rest of the panel down too far.
         outer.addSpacing(10)
 
-        # ── Row 3: Per-VFO controls (MHz + Step + Mode) ──────────
-        # Phase 3.D v0.1: symmetric per-VFO controls -- each LED gets
-        # its own MHz spinner, Step combo, and Mode combo so the
-        # operator can dial RX1 and RX2 independently at a glance.
-        # The MODE+FILTER panel's mode combo still follows focus
-        # (Phase 3.C); these per-VFO mode combos are direct-target
-        # affordances that don't move when focus changes.
+        # ── Row 2: Per-VFO Step + Mode (Phase 3.E.1 hotfix v0.10) ──
+        # Operator UX (Rick 2026-05-12): "since you can manually
+        # enter the frequency now we don't need the MHz: and input
+        # box, you just use the bigger readout LED area and double
+        # click that, allows the Step and modes to move more
+        # centered under each LED".
+        #
+        # MHz spinners removed.  Step + Mode combos center
+        # horizontally under each VFO LED.  Tuning options
+        # operator already has: double-click LED + type, wheel on
+        # LED digits (uses Step combo's value), click-to-tune on
+        # panadapter (Phase 3.E.1 routes to focused VFO), band /
+        # GEN / Memory / TIME buttons (Phase 3.E.1 routes to
+        # focused VFO).
         h = QHBoxLayout()
 
         def _step_items() -> list[tuple[str, int]]:
@@ -496,19 +517,10 @@ class TuningPanel(GlassPanel):
                     ("100 Hz", 100), ("500 Hz", 500), ("1 kHz", 1000),
                     ("5 kHz", 5000), ("10 kHz", 10000)]
 
-        # RX1 column controls (left half).
+        # RX1 column controls (left half), centered horizontally.
         rx1_ctrls = QHBoxLayout()
         rx1_ctrls.setSpacing(4)
-        rx1_ctrls.addWidget(QLabel("MHz"))
-        self.freq_spin = QDoubleSpinBox()
-        self.freq_spin.setDecimals(6)
-        self.freq_spin.setRange(0.0, 55.0)
-        self.freq_spin.setValue(radio.freq_hz / 1e6)
-        self.freq_spin.setFixedWidth(120)
-        self.freq_spin.setKeyboardTracking(False)
-        self.freq_spin.valueChanged.connect(self._on_freq_changed)
-        rx1_ctrls.addWidget(self.freq_spin)
-
+        rx1_ctrls.addStretch(1)
         rx1_ctrls.addWidget(QLabel("Step"))
         self.step_combo = QComboBox()
         for label, hz in _step_items():
@@ -533,24 +545,10 @@ class TuningPanel(GlassPanel):
         # Spacer to match the logo column width.
         h.addStretch(3)
 
-        # RX2 column controls (right half).
+        # RX2 column controls (right half), centered horizontally.
         rx2_ctrls = QHBoxLayout()
         rx2_ctrls.setSpacing(4)
         rx2_ctrls.addStretch(1)
-        rx2_ctrls.addWidget(QLabel("MHz"))
-        self.freq_spin_rx2 = QDoubleSpinBox()
-        self.freq_spin_rx2.setDecimals(6)
-        self.freq_spin_rx2.setRange(0.0, 55.0)
-        try:
-            self.freq_spin_rx2.setValue(float(radio.rx2_freq_hz) / 1e6)
-        except Exception:
-            self.freq_spin_rx2.setValue(0.0)
-        self.freq_spin_rx2.setFixedWidth(120)
-        self.freq_spin_rx2.setKeyboardTracking(False)
-        self.freq_spin_rx2.valueChanged.connect(
-            lambda mhz: self.radio.set_rx2_freq_hz(int(round(mhz * 1e6))))
-        rx2_ctrls.addWidget(self.freq_spin_rx2)
-
         rx2_ctrls.addWidget(QLabel("Step"))
         self.step_combo_rx2 = QComboBox()
         for label, hz in _step_items():
@@ -571,22 +569,32 @@ class TuningPanel(GlassPanel):
         self.vfo_mode_combo_rx2.currentTextChanged.connect(
             lambda m: self.radio.set_mode(m, target_rx=2))
         rx2_ctrls.addWidget(self.vfo_mode_combo_rx2)
+        rx2_ctrls.addStretch(1)
         h.addLayout(rx2_ctrls, 5)
 
         outer.addLayout(h)
 
-        # ── Row 4: CW pitch (Phase 3.E.1 hotfix v0.9, 2026-05-12) ──
-        # Operator UX (Rick 2026-05-12): "what if we moved the CW
-        # pitch control to the Tuning panel."  CW pitch is a tuning-
-        # adjacent control (you zero-beat against it), shared across
-        # both RXes (single ear-preference), and its strip is hidden
-        # whenever neither VFO is on CW so the panel doesn't waste
-        # vertical space outside CW operation.
+        # ── Row 3: VFO-bridge controls (Phase 3.E.1 hotfix v0.10) ──
+        # Centered horizontally under the LOGO column, single
+        # horizontal line.  Holds the cluster of controls that
+        # operate ACROSS both VFOs:
+        #   * CW Pitch (label + spin) -- shared ear-preference,
+        #     widgets hide when neither VFO is on CW.
+        #   * SUB -- enable RX2 (dual-RX mode).
+        #   * 1->2 -- copy RX1 to RX2.
+        #   * 2->1 -- copy RX2 to RX1.
+        #   * Sync -- swap RX1 and RX2 (renamed from ⇄ glyph per
+        #     operator UX; tooltip still references "swap").
+        # SUB / 1->2 / 2->1 / Sync used to live on ModeFilterPanel;
+        # moved here so all tuning + VFO-bridge controls share one
+        # panel.
         self.cw_pitch_row = QWidget()
         cw_h = QHBoxLayout(self.cw_pitch_row)
         cw_h.setContentsMargins(0, 4, 0, 0)
-        cw_h.setSpacing(6)
+        cw_h.setSpacing(8)
         cw_h.addStretch(1)
+
+        # CW Pitch (conditional visibility).
         self.cw_pitch_label = QLabel("CW Pitch")
         self.cw_pitch_label.setStyleSheet(
             "color: #00e5ff; font-weight: 600; "
@@ -608,6 +616,52 @@ class TuningPanel(GlassPanel):
             self.radio.set_cw_pitch_hz)
         cw_h.addWidget(self.cw_pitch_label)
         cw_h.addWidget(self.cw_pitch_spin)
+
+        # SUB button.
+        self.sub_btn = QPushButton("SUB")
+        self.sub_btn.setCheckable(True)
+        self.sub_btn.setMinimumWidth(72)
+        self.sub_btn.setToolTip(
+            "Enable RX2 for dual-receiver operation. "
+            "When ON, RX1 audio routes hard-left, RX2 hard-right, "
+            "and per-RX Vol-A / Vol-B sliders plus MUTE buttons "
+            "appear on the DSP+Audio panel."
+        )
+        self.sub_btn.setChecked(bool(radio.dispatch_state.rx2_enabled))
+        self.sub_btn.toggled.connect(self._on_sub_toggled)
+        cw_h.addWidget(self.sub_btn)
+
+        # 1->2 (copy RX1 onto RX2).
+        self.ab_btn = QPushButton("1→2")
+        self.ab_btn.setMinimumWidth(66)
+        self.ab_btn.setToolTip(
+            "Copy RX1 to RX2.  Full state copy (freq + mode + "
+            "RX BW) when SUB is ON; freq-only otherwise."
+        )
+        self.ab_btn.clicked.connect(lambda: self.radio.vfo_a_to_b())
+        cw_h.addWidget(self.ab_btn)
+
+        # 2->1 (copy RX2 onto RX1).
+        self.ba_btn = QPushButton("2→1")
+        self.ba_btn.setMinimumWidth(66)
+        self.ba_btn.setToolTip(
+            "Copy RX2 to RX1.  Full state copy (freq + mode + "
+            "RX BW) when SUB is ON; freq-only otherwise."
+        )
+        self.ba_btn.clicked.connect(lambda: self.radio.vfo_b_to_a())
+        cw_h.addWidget(self.ba_btn)
+
+        # Sync (renamed from ⇄ per operator UX call 2026-05-12).
+        # Semantically: synchronize VFOs to swapped state.
+        self.swap_btn = QPushButton("Sync")
+        self.swap_btn.setMinimumWidth(66)
+        self.swap_btn.setToolTip(
+            "Sync (swap) RX1 and RX2.  Full state swap when SUB "
+            "is ON; freq-only otherwise."
+        )
+        self.swap_btn.clicked.connect(lambda: self.radio.vfo_swap())
+        cw_h.addWidget(self.swap_btn)
+
         cw_h.addStretch(1)
         outer.addWidget(self.cw_pitch_row)
 
@@ -623,13 +677,11 @@ class TuningPanel(GlassPanel):
         self.content_layout().addLayout(outer)
 
         radio.freq_changed.connect(self._on_radio_freq_changed)
-        # Phase 3.D v0.1: per-VFO sync hooks so the right column's
-        # spinner + Mode combo follow radio-side updates (bench
-        # dialog edits, A->B / B->A / SWAP, QSettings restore).
-        try:
-            radio.rx2_freq_changed.connect(self._on_radio_rx2_freq_changed)
-        except Exception:
-            pass
+        # Phase 3.D v0.1 / Phase 3.E.1 hotfix v0.10: per-VFO sync
+        # hooks.  Without the dropped MHz spinner the only widgets
+        # that need radio->panel sync are the per-VFO Mode combos
+        # (and the LEDs, handled above and via their own
+        # ``rx2_freq_changed`` connection in Row 1).
         try:
             radio.mode_changed.connect(self._on_radio_mode_changed_rx1)
             radio.mode_changed_rx2.connect(self._on_radio_mode_changed_rx2)
@@ -650,14 +702,23 @@ class TuningPanel(GlassPanel):
                 self._update_cw_pitch_visibility)
         except Exception:
             pass
+        # Phase 3.E.1 hotfix v0.10 (2026-05-12): SUB mirror.
+        try:
+            radio.dispatch_state_changed.connect(
+                self._on_dispatch_state_changed)
+        except Exception:
+            pass
         self._update_cw_pitch_visibility()
 
-    def _on_freq_changed(self, mhz: float):
-        self.radio.set_freq_hz(int(round(mhz * 1e6)))
+    # Phase 3.E.1 hotfix v0.10 (2026-05-12): per-VFO MHz spinners
+    # were dropped (operator UX -- LED double-click + type covers
+    # direct freq entry, and Phase 3.E.1 panadapter / band-panel
+    # routing handles every other tuning surface).  The
+    # ``_on_freq_changed`` MHz-spinner valueChanged handler is
+    # gone with them.
 
     def _on_step_changed(self, _idx):
         step = int(self.step_combo.currentData())
-        self.freq_spin.setSingleStep(step / 1e6)
         # Push the step to the LED display so its mouse wheel uses
         # this Hz value instead of per-digit 10^N stepping. Operators
         # expect "I picked 100 Hz step → wheeling tunes 100 Hz per
@@ -667,25 +728,11 @@ class TuningPanel(GlassPanel):
 
     def _on_step_changed_rx2(self, _idx):
         """Phase 3.D v0.1: RX2 step picker mirrors RX1's behavior --
-        sets the spinner singleStep and pushes the external step
-        into the RX2 LED widget."""
+        pushes the external step into the RX2 LED widget so its
+        wheel/digit step matches operator's selection."""
         step = int(self.step_combo_rx2.currentData())
-        self.freq_spin_rx2.setSingleStep(step / 1e6)
         if hasattr(self, "freq_display_rx2"):
             self.freq_display_rx2.set_external_step_hz(step)
-
-    def _on_radio_rx2_freq_changed(self, hz: int) -> None:
-        """Mirror radio-side RX2 freq updates into the per-VFO
-        spinner without retriggering our valueChanged handler."""
-        try:
-            mhz = float(int(hz)) / 1e6
-        except (TypeError, ValueError):
-            return
-        if abs(self.freq_spin_rx2.value() - mhz) < 1e-9:
-            return
-        self.freq_spin_rx2.blockSignals(True)
-        self.freq_spin_rx2.setValue(mhz)
-        self.freq_spin_rx2.blockSignals(False)
 
     def _on_radio_mode_changed_rx1(self, mode: str) -> None:
         if self.vfo_mode_combo.currentText() == mode:
@@ -701,12 +748,17 @@ class TuningPanel(GlassPanel):
         self.vfo_mode_combo_rx2.setCurrentText(mode)
         self.vfo_mode_combo_rx2.blockSignals(False)
 
-    # ── Phase 3.E.1 hotfix v0.9 (2026-05-12): CW pitch row ────────
+    # ── Phase 3.E.1 hotfix v0.10 (2026-05-12) ─────────────────────
     def _update_cw_pitch_visibility(self, *_unused) -> None:
-        """Show the CW pitch row when EITHER VFO is on CW; hide it
-        otherwise.  Accepts and discards the mode-str arg so it can
-        be wired directly to ``mode_changed`` / ``mode_changed_rx2``
-        signals."""
+        """Show the CW Pitch label + spin when EITHER VFO is on CW;
+        hide them otherwise.  Only the Pitch widgets toggle -- the
+        rest of the Row 3 cluster (SUB / 1->2 / 2->1 / Sync) is
+        always visible since those are inter-VFO operations
+        independent of mode.  When Pitch hides, the surrounding
+        flanking stretches re-center the four buttons tighter.
+        Accepts and discards the mode-str arg so it can be wired
+        directly to ``mode_changed`` / ``mode_changed_rx2`` signals.
+        """
         try:
             rx1_mode = str(self.radio.mode_for_rx(0))
         except Exception:
@@ -717,8 +769,10 @@ class TuningPanel(GlassPanel):
             rx2_mode = ""
         either_cw = (
             rx1_mode in ("CWU", "CWL") or rx2_mode in ("CWU", "CWL"))
-        if hasattr(self, "cw_pitch_row"):
-            self.cw_pitch_row.setVisible(either_cw)
+        if hasattr(self, "cw_pitch_label"):
+            self.cw_pitch_label.setVisible(either_cw)
+        if hasattr(self, "cw_pitch_spin"):
+            self.cw_pitch_spin.setVisible(either_cw)
 
     def _on_radio_cw_pitch_changed(self, pitch_hz: int) -> None:
         """Mirror radio-side pitch changes (Settings → DSP, future
@@ -731,14 +785,28 @@ class TuningPanel(GlassPanel):
         self.cw_pitch_spin.setValue(int(pitch_hz))
         self.cw_pitch_spin.blockSignals(False)
 
+    # ── SUB toggle + dispatch state mirror (moved from ModeFilterPanel
+    #    in Phase 3.E.1 hotfix v0.10, 2026-05-12) ──────────────────
+    def _on_sub_toggled(self, on: bool) -> None:
+        """SUB button toggled — flip the rx2_enabled dispatch axis."""
+        self.radio.set_rx2_enabled(bool(on))
+
+    def _on_dispatch_state_changed(self, state) -> None:
+        """Dispatch state changed elsewhere (bench dialog, future
+        CAT/TCI) -- mirror SUB button state without re-firing."""
+        if not hasattr(self, "sub_btn"):
+            return
+        target = bool(state.rx2_enabled)
+        if self.sub_btn.isChecked() != target:
+            self.sub_btn.blockSignals(True)
+            self.sub_btn.setChecked(target)
+            self.sub_btn.blockSignals(False)
+
     def _on_radio_freq_changed(self, hz: int):
-        # Sync both the LED display and the backup spinbox
+        # Sync the LED display.  Phase 3.E.1 hotfix v0.10 dropped
+        # the backup MHz spinbox, so this handler is now just an
+        # LED refresh.
         self.freq_display.set_freq_hz(hz)
-        mhz = hz / 1e6
-        if abs(self.freq_spin.value() - mhz) > 0.0000005:
-            self.freq_spin.blockSignals(True)
-            self.freq_spin.setValue(mhz)
-            self.freq_spin.blockSignals(False)
 
     def _on_focused_rx_changed(self, rx_id: int) -> None:
         """Update the orange focus border on the VFO LEDs when
@@ -836,65 +904,11 @@ class ModeFilterPanel(GlassPanel):
         # lives more naturally near the VFOs.  Shared across both
         # RXes (single ear-preference).
 
-        # ── Phase 3.D v0.1: RX2 enable + VFO transfer cluster ──────
-        # Per consensus plan §6.7/§6.8 working-group decisions:
-        # SUB = RX2 enable toggle, sibling of SPLIT (when SPLIT
-        # button lands in a later sub-phase).  A->B / B->A / SWAP
-        # copy state between VFOs -- full state when RX2 enabled,
-        # freq-only otherwise.
-        h.addSpacing(8)
-        self.sub_btn = QPushButton("SUB")
-        self.sub_btn.setCheckable(True)
-        # Phase 3.D hotfix: setMinimumWidth instead of setFixedWidth
-        # so the button can grow if the system font renders wider
-        # than expected.  The QSS push-button padding adds ~16px on
-        # top of text width; 72px gives "SUB" (3 chars ~24px) a
-        # comfortable margin on every system Lyra runs on.
-        self.sub_btn.setMinimumWidth(72)
-        self.sub_btn.setToolTip(
-            "Enable RX2 for dual-receiver operation. "
-            "When ON, RX1 audio routes hard-left, RX2 hard-right, "
-            "and per-RX Vol-A / Vol-B sliders plus MUTE buttons "
-            "appear on the DSP+Audio panel."
-        )
-        self.sub_btn.setChecked(bool(radio.dispatch_state.rx2_enabled))
-        self.sub_btn.toggled.connect(self._on_sub_toggled)
-        h.addWidget(self.sub_btn)
-
-        # Phase 3.D UX cleanup (2026-05-12): button labels and
-        # tooltips standardized on the RX1 / RX2 naming used by the
-        # Tuning Panel VFO LED captions, instead of the legacy "VFO
-        # A / VFO B" terminology.  Internal Radio methods keep
-        # ``vfo_a_to_b`` / ``vfo_b_to_a`` / ``vfo_swap`` names since
-        # those describe the canonical SDR operation pattern.
-        self.ab_btn = QPushButton("1→2")
-        # setMinimumWidth + → (U+2192) so the button text doesn't
-        # clip on systems with wider button fonts.
-        self.ab_btn.setMinimumWidth(66)
-        self.ab_btn.setToolTip(
-            "Copy RX1 to RX2.  Full state copy (freq + mode + "
-            "RX BW) when SUB is ON; freq-only otherwise."
-        )
-        self.ab_btn.clicked.connect(lambda: self.radio.vfo_a_to_b())
-        h.addWidget(self.ab_btn)
-
-        self.ba_btn = QPushButton("2→1")
-        self.ba_btn.setMinimumWidth(66)
-        self.ba_btn.setToolTip(
-            "Copy RX2 to RX1.  Full state copy (freq + mode + "
-            "RX BW) when SUB is ON; freq-only otherwise."
-        )
-        self.ba_btn.clicked.connect(lambda: self.radio.vfo_b_to_a())
-        h.addWidget(self.ba_btn)
-
-        self.swap_btn = QPushButton("⇄")
-        self.swap_btn.setMinimumWidth(54)
-        self.swap_btn.setToolTip(
-            "Swap RX1 and RX2.  Full state swap when SUB is ON; "
-            "freq-only otherwise."
-        )
-        self.swap_btn.clicked.connect(lambda: self.radio.vfo_swap())
-        h.addWidget(self.swap_btn)
+        # Phase 3.E.1 hotfix v0.10 (2026-05-12): SUB + 1->2 / 2->1
+        # / Sync buttons moved to TuningPanel's Row 3 alongside CW
+        # Pitch.  All inter-VFO operations now live in one cluster
+        # under the logo column.  ModeFilterPanel becomes a purer
+        # filter/rate panel.
 
         h.addStretch(1)
         self.content_layout().addLayout(h)
@@ -913,10 +927,9 @@ class ModeFilterPanel(GlassPanel):
         radio.mode_changed_rx2.connect(self._on_mode_changed_rx2)
         radio.rx_bw_changed_rx2.connect(self._on_radio_rx_bw_changed_rx2)
         radio.focused_rx_changed.connect(self._on_focused_rx_changed)
-        # Phase 3.D v0.1: SUB button reflects external rx2_enabled
-        # changes (bench dialog, future TCI / CAT, programmatic).
-        radio.dispatch_state_changed.connect(
-            self._on_dispatch_state_changed)
+        # Phase 3.E.1 hotfix v0.10 (2026-05-12): SUB button +
+        # dispatch_state mirror moved to TuningPanel along with
+        # the widget itself.
 
     @staticmethod
     def _select_combo_data(combo: QComboBox, value):
@@ -1047,19 +1060,9 @@ class ModeFilterPanel(GlassPanel):
             self._ensure_bw_value(self.rx_bw_combo, bw)
             self.rx_bw_combo.blockSignals(False)
 
-    # ── Phase 3.D v0.1: SUB toggle + dispatch_state sync ────────────
-    def _on_sub_toggled(self, on: bool):
-        """SUB button toggled — flip the rx2_enabled dispatch axis."""
-        self.radio.set_rx2_enabled(bool(on))
-
-    def _on_dispatch_state_changed(self, state) -> None:
-        """Dispatch state changed elsewhere (bench dialog, future
-        CAT/TCI) -- mirror SUB button state without re-firing."""
-        target = bool(state.rx2_enabled)
-        if self.sub_btn.isChecked() != target:
-            self.sub_btn.blockSignals(True)
-            self.sub_btn.setChecked(target)
-            self.sub_btn.blockSignals(False)
+    # SUB toggle + dispatch_state sync handlers moved to TuningPanel
+    # (Phase 3.E.1 hotfix v0.10, 2026-05-12) along with the widgets
+    # they drive.
 
     def _on_focused_rx_changed(self, rx_id: int):
         """Operator switched VFO focus -- re-bind the panel display

@@ -160,7 +160,13 @@ class Phase3dVfoTransferTest(unittest.TestCase):
 
 
 class Phase3dModeFilterPanelTest(unittest.TestCase):
-    """SUB button + A/B / B/A / Swap buttons on ModeFilterPanel."""
+    """SUB + 1->2 / 2->1 / Sync buttons.
+
+    Phase 3.E.1 hotfix v0.10 (2026-05-12): widgets moved from
+    ModeFilterPanel to TuningPanel's Row 3 alongside CW Pitch.
+    Class name kept for git-history continuity; ``setUp`` now
+    instantiates TuningPanel.  Swap button renamed "⇄" -> "Sync".
+    """
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -169,9 +175,9 @@ class Phase3dModeFilterPanelTest(unittest.TestCase):
 
     def setUp(self) -> None:
         from lyra.radio import Radio
-        from lyra.ui.panels import ModeFilterPanel
+        from lyra.ui.panels import TuningPanel
         self.radio = Radio()
-        self.panel = ModeFilterPanel(self.radio)
+        self.panel = TuningPanel(self.radio)
 
     def test_sub_button_present(self) -> None:
         self.assertTrue(hasattr(self.panel, "sub_btn"))
@@ -196,6 +202,12 @@ class Phase3dModeFilterPanelTest(unittest.TestCase):
         self.assertTrue(hasattr(self.panel, "ba_btn"))
         self.assertTrue(hasattr(self.panel, "swap_btn"))
 
+    def test_swap_button_labeled_sync(self) -> None:
+        """Phase 3.E.1 hotfix v0.10 (2026-05-12): renamed from
+        the ``⇄`` glyph to the word "Sync" per operator UX call
+        ("CW Pitch Sub 1-2 2-1 Sync")."""
+        self.assertEqual(self.panel.swap_btn.text(), "Sync")
+
     def test_ab_button_click_invokes_radio_helper(self) -> None:
         self.radio.set_rx2_enabled(True)
         self.radio.set_freq_hz(14_205_000)
@@ -208,6 +220,17 @@ class Phase3dModeFilterPanelTest(unittest.TestCase):
         self.panel.swap_btn.click()
         self.assertEqual(self.radio.freq_hz, 14_000_000)
         self.assertEqual(self.radio.rx2_freq_hz, 7_000_000)
+
+    def test_mode_filter_panel_no_longer_has_cluster_widgets(self) -> None:
+        """Regression marker -- if a refactor accidentally
+        re-introduces SUB / transfer buttons on ModeFilterPanel,
+        flag the duplication."""
+        from lyra.ui.panels import ModeFilterPanel
+        mf = ModeFilterPanel(self.radio)
+        self.assertFalse(hasattr(mf, "sub_btn"))
+        self.assertFalse(hasattr(mf, "ab_btn"))
+        self.assertFalse(hasattr(mf, "ba_btn"))
+        self.assertFalse(hasattr(mf, "swap_btn"))
 
 
 class Phase3dSubMirrorTest(unittest.TestCase):

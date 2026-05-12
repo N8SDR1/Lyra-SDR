@@ -197,21 +197,19 @@ class Phase3dPerVfoControlsTest(unittest.TestCase):
         self.panel = TuningPanel(self.radio)
 
     def test_per_vfo_widgets_present(self) -> None:
+        """Phase 3.E.1 hotfix v0.10 (2026-05-12): per-VFO MHz
+        spinners removed -- the LED's double-click-to-edit covers
+        direct freq entry.  Step + Mode combos remain under each
+        LED."""
         # RX1 side.
-        self.assertTrue(hasattr(self.panel, "freq_spin"))
         self.assertTrue(hasattr(self.panel, "step_combo"))
         self.assertTrue(hasattr(self.panel, "vfo_mode_combo"))
         # RX2 side.
-        self.assertTrue(hasattr(self.panel, "freq_spin_rx2"))
         self.assertTrue(hasattr(self.panel, "step_combo_rx2"))
         self.assertTrue(hasattr(self.panel, "vfo_mode_combo_rx2"))
-
-    def test_rx2_mhz_spinner_writes_rx2(self) -> None:
-        orig_rx1 = self.radio.freq_hz
-        self.panel.freq_spin_rx2.setValue(7.074)
-        # Spinner edit fires radio.set_rx2_freq_hz with int(round(mhz*1e6))
-        self.assertEqual(self.radio.rx2_freq_hz, 7_074_000)
-        self.assertEqual(self.radio.freq_hz, orig_rx1)
+        # Per the v0.10 cleanup, the MHz spinners should NOT exist.
+        self.assertFalse(hasattr(self.panel, "freq_spin"))
+        self.assertFalse(hasattr(self.panel, "freq_spin_rx2"))
 
     def test_rx2_mode_combo_writes_rx2(self) -> None:
         orig_rx1 = self.radio._mode
@@ -224,11 +222,6 @@ class Phase3dPerVfoControlsTest(unittest.TestCase):
         self.panel.vfo_mode_combo.setCurrentText("LSB")
         self.assertEqual(self.radio._mode, "LSB")
         self.assertEqual(self.radio._mode_rx2, orig_rx2)
-
-    def test_rx2_freq_change_updates_spinner(self) -> None:
-        self.radio.set_rx2_freq_hz(10_000_000)
-        self.assertAlmostEqual(
-            self.panel.freq_spin_rx2.value(), 10.0, places=6)
 
 
 if __name__ == "__main__":
