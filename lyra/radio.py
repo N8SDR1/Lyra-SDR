@@ -2038,7 +2038,48 @@ class Radio(QObject):
             return
         from dataclasses import replace
         self._dispatch_state = replace(self._dispatch_state, rx2_enabled=new)
+        # Phase 3.D hotfix v0.1 (2026-05-12): re-pan both WDSP
+        # channels on SUB-edge so the audio routing flips between
+        # "center mono on RX1" (SUB off) and "RX1-left, RX2-right
+        # stereo split" (SUB on).  Worker also gates the dual demod
+        # path on this same flag.
+        try:
+            self._apply_rx2_routing()
+        except Exception as exc:
+            print(f"[Radio] _apply_rx2_routing error: {exc}")
         self.dispatch_state_changed.emit(self._dispatch_state)
+
+    def _apply_rx2_routing(self) -> None:
+        """Re-apply WDSP RX1+RX2 pan based on the current
+        ``rx2_enabled`` dispatch axis.  Phase 3.D hotfix v0.1.
+
+        When ``rx2_enabled`` is False:
+          * RX1 pan = 0.5 (center) -- audio routes to BOTH L and R
+            at unity per WDSP's sin-π curve, so the operator hears
+            mono in both ears as expected for single-RX listening.
+          * RX2 pan = 0.5 (center) -- harmless because the worker
+            also gates the dual demod path off and RX2 audio is
+            never summed into the sink.
+
+        When ``rx2_enabled`` is True:
+          * RX1 pan = 0.0 (hard-left)
+          * RX2 pan = 1.0 (hard-right)
+        Combined sum in ``_do_demod_wdsp_dual`` produces RX1-left
+        + RX2-right stereo split as planned in §6.1.
+        """
+        enabled = bool(self._dispatch_state.rx2_enabled)
+        rx1_pan = 0.0 if enabled else 0.5
+        rx2_pan = 1.0 if enabled else 0.5
+        if self._wdsp_rx is not None:
+            try:
+                self._wdsp_rx.set_panel_pan(rx1_pan)
+            except Exception as exc:
+                print(f"[Radio] WDSP RX1 pan apply: {exc}")
+        if self._wdsp_rx2 is not None:
+            try:
+                self._wdsp_rx2.set_panel_pan(rx2_pan)
+            except Exception as exc:
+                print(f"[Radio] WDSP RX2 pan apply: {exc}")
 
     @property
     def capabilities(self) -> RadioCapabilities:
@@ -8481,16 +8522,17 @@ class Radio(QObject):
             except Exception as exc:
                 print(f"[Radio] WDSP AM SQ tail init: {exc}")
 
-            # Phase 2 v0.1 (2026-05-11) — RX1 hard-left pan default.
-            # WDSP applies the sin-π equal-power pan curve internally
-            # (patchpanel.c::SetRXAPanelPan).  At pan=0.0, L=signal
-            # and R=0.  Combined with RX2's pan=1.0 (set below in
-            # the RX2 init-state block), the stereo combine in
-            # ``_do_demod_wdsp_dual`` produces RX1-left + RX2-right.
+            # Phase 3.D hotfix v0.1 (2026-05-12) — initial RX1 pan
+            # tracks current SUB state.  When SUB is OFF, pan=0.5
+            # (center, full output on both L+R channels per WDSP's
+            # sin-π pan curve).  When SUB is ON, pan=0.0 (hard-left
+            # for the stereo split with RX2 at pan=1.0 hard-right).
+            # Live updates from operator SUB toggles flow through
+            # ``_apply_rx2_routing`` -- see ``set_rx2_enabled``.
             try:
-                self._wdsp_rx.set_panel_pan(0.0)
+                self._apply_rx2_routing()
             except Exception as exc:
-                print(f"[Radio] WDSP RX1 pan init: {exc}")
+                print(f"[Radio] WDSP pan init: {exc}")
         except Exception as exc:
             print(f"[Radio] WDSP rx initial-state push error: {exc}")
 
@@ -8534,8 +8576,10 @@ class Radio(QObject):
                 print(f"[Radio] WDSP RX2 AGC init-state push: {exc}")
             self._wdsp_rx2.set_panel_gain(af_gain_rx2_linear)
             self._wdsp_rx2.set_panel_binaural(False)
-            # RX2 hard-right pan — completes the stereo split.
-            self._wdsp_rx2.set_panel_pan(1.0)
+            # RX2 pan tracks SUB state -- see ``_apply_rx2_routing``.
+            # Phase 3.D hotfix v0.1 (2026-05-12): conditional on
+            # rx2_enabled rather than always hard-right.
+            self._apply_rx2_routing()
         except Exception as exc:
             print(f"[Radio] WDSP RX2 initial-state push error: {exc}")
 

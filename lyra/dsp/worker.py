@@ -613,8 +613,20 @@ class DspWorker(QObject):
             # Both paths write the final audio to ``radio._audio_sink``
             # internally; the dual path sums RX1+RX2 outputs for the
             # stereo split first.
+            #
+            # Phase 3.D hotfix v0.1 (2026-05-12): gate the dual path
+            # on ``dispatch_state.rx2_enabled``.  ``_wdsp_rx2`` is
+            # opened unconditionally at stream start (Phase 2 bench-
+            # test legacy), so without this gate the worker would
+            # always dump RX2 audio into the right channel even when
+            # SUB is off -- operator hears whatever DDC1 happens to
+            # be receiving (often a strong broadcaster or RFI) and
+            # the Vol-A slider has no effect on it.  See
+            # ``CLAUDE.md`` §6.2 / §6.8 SUB semantics.
             try:
-                if (rx2_samples is not None
+                state = radio.snapshot_dispatch_state()
+                if (state.rx2_enabled
+                        and rx2_samples is not None
                         and getattr(radio, "_wdsp_rx2", None) is not None):
                     radio._do_demod_wdsp_dual(samples, rx2_samples)
                 else:

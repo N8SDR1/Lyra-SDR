@@ -210,6 +210,41 @@ class Phase3dModeFilterPanelTest(unittest.TestCase):
         self.assertEqual(self.radio.rx2_freq_hz, 7_000_000)
 
 
+class Phase3dHotfixPanRoutingTest(unittest.TestCase):
+    """Phase 3.D hotfix (2026-05-12) -- the WDSP pan routing
+    follows ``rx2_enabled`` rather than being unconditionally
+    hard-left/right from Phase 2 stream-open."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        self.radio = Radio()
+
+    def test_apply_rx2_routing_no_wdsp_channels_safe(self) -> None:
+        """``_apply_rx2_routing`` is safe to call before WDSP
+        channels exist (stream not started)."""
+        # _wdsp_rx / _wdsp_rx2 are None pre-start; method must not
+        # raise.
+        self.radio._apply_rx2_routing()  # noqa: SLF001
+
+    def test_set_rx2_enabled_invokes_routing(self) -> None:
+        """Toggling SUB calls ``_apply_rx2_routing``."""
+        called = {"n": 0}
+        orig = self.radio._apply_rx2_routing
+        def spy():
+            called["n"] += 1
+            orig()
+        self.radio._apply_rx2_routing = spy
+        self.radio.set_rx2_enabled(True)
+        self.assertGreaterEqual(called["n"], 1)
+        self.radio.set_rx2_enabled(False)
+        self.assertGreaterEqual(called["n"], 2)
+
+
 class Phase3dDspPanelConditionalUITest(unittest.TestCase):
     """DspPanel per-RX Vol/Mute UI visibility tracks SUB state."""
 
