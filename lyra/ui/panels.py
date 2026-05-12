@@ -5794,6 +5794,14 @@ class BandPanel(GlassPanel):
         from lyra.memory import MemoryStore
         self._memory = MemoryStore()
         self._active_gen: str | None = None   # when freq is outside all bands
+        # Phase 3.E.1 hotfix v0.6 (2026-05-12): which RX is the
+        # "owner" of the currently-highlighted GEN slot.  Set when
+        # operator clicks a GEN slot (tracks the focused RX at
+        # click time); cleared when ``_active_gen`` is cleared.
+        # Lets freq tweaks on the OWNER RX auto-save into the GEN
+        # slot (e.g. operator recalls GEN1 onto RX2 then nudges
+        # RX2 freq -> GEN1 follows RX2, not RX1).
+        self._active_gen_rx: int | None = None
 
         v = QVBoxLayout()
         v.setSpacing(4)
@@ -5803,9 +5811,26 @@ class BandPanel(GlassPanel):
         v.addLayout(self._make_gen_row())
         self.content_layout().addLayout(v)
 
-        radio.freq_changed.connect(self._on_freq_changed)
-        radio.mode_changed.connect(self._on_mode_changed)
-        self._on_freq_changed(radio.freq_hz)
+        # Phase 3.E.1 hotfix v0.6 (2026-05-12): track BOTH RXes for
+        # freq+mode changes, AND focus transitions, so the
+        # highlighted band button + active GEN slot follow the
+        # focused VFO instead of being permanently tied to RX1.
+        radio.freq_changed.connect(self._on_radio_freq_changed)
+        radio.mode_changed.connect(self._on_radio_mode_changed)
+        try:
+            radio.rx2_freq_changed.connect(self._on_radio_rx2_freq_changed)
+        except AttributeError:
+            pass
+        try:
+            radio.mode_changed_rx2.connect(self._on_radio_rx2_mode_changed)
+        except AttributeError:
+            pass
+        try:
+            radio.focused_rx_changed.connect(self._on_focused_rx_changed)
+        except AttributeError:
+            pass
+        # Seed the highlight from whichever RX is currently focused.
+        self._refresh_band_highlight()
 
     def _make_row(self, bands, label_text: str) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -6527,37 +6552,112 @@ class BandPanel(GlassPanel):
         # Per-band memory: restore if previously visited, else use the
         # band's coded default. recall_band handles both cases.
         self._active_gen = None
+        self._active_gen_rx = None
         self.radio.recall_band(band.name, band.default_hz, band.default_mode)
 
     def _on_gen_clicked(self, slot_name: str):
         freq, mode = self._gen_memory[slot_name]
         self._active_gen = slot_name
+        # Phase 3.E.1 hotfix v0.6 (2026-05-12): record which RX
+        # "owns" this GEN slot so subsequent freq tweaks on that
+        # RX (and ONLY that RX) auto-save into the slot.
+        try:
+            self._active_gen_rx = int(self.radio.focused_rx)
+        except AttributeError:
+            self._active_gen_rx = 0
         # Phase 3.E.1 hotfix v0.5 (2026-05-12): route through
         # tune_preset so GEN slots follow focused VFO -- click
         # GEN1 with RX2 focused -> RX2 retunes, not RX1.
         self.radio.tune_preset(freq, mode)
 
-    def _on_freq_changed(self, hz: int):
-        current = band_for_freq(hz)
-        # Structured band match takes priority over GEN slot highlight.
+    # ── Phase 3.E.1 hotfix v0.6 (2026-05-12) ──────────────────────
+    # Split the legacy ``_on_freq_changed`` / ``_on_mode_changed``
+    # into per-RX handlers so the band-button highlight + GEN
+    # auto-save can track whichever VFO actually moved.  The shared
+    # ``_refresh_band_highlight`` re-runs the highlight logic
+    # against whichever RX is currently focused (called from focus
+    # transitions too).
+
+    def _focused_freq_and_mode(self) -> tuple[int, str]:
+        """Return ``(freq_hz, mode)`` for the focused RX.  Falls
+        back to RX1 if focused_rx isn't available (pre-Phase-3.A
+        Radio in tests, etc.)."""
+        try:
+            focused = int(self.radio.focused_rx)
+        except AttributeError:
+            focused = 0
+        if focused == 2:
+            return (int(self.radio.rx2_freq_hz),
+                    str(self.radio._mode_rx2))
+        return (int(self.radio.freq_hz), str(self.radio.mode))
+
+    def _refresh_band_highlight(self) -> None:
+        """Sync the band-button + GEN-button checked state to
+        whichever band+slot the FOCUSED RX is on.  Idempotent --
+        safe to call on every freq / mode / focus event."""
+        freq_hz, _mode = self._focused_freq_and_mode()
+        current = band_for_freq(freq_hz)
         for name, btn in self._buttons.items():
             btn.blockSignals(True)
             btn.setChecked(current is not None and current.name == name)
             btn.blockSignals(False)
-        # GEN button highlight + auto-save to active slot's memory.
-        if current is None and self._active_gen is not None:
-            self._gen_memory[self._active_gen] = (hz, self.radio.mode)
-        elif current is not None:
+        # GEN slot stays "active" only while the focused RX is
+        # outside any structured band -- the moment focus lands
+        # inside a band the band-button highlight wins.
+        if current is not None:
             self._active_gen = None
+            self._active_gen_rx = None
         for name, btn in self._gen_buttons.items():
             btn.blockSignals(True)
             btn.setChecked(self._active_gen == name)
             btn.blockSignals(False)
 
-    def _on_mode_changed(self, mode: str):
-        if self._active_gen is not None:
-            freq, _ = self._gen_memory[self._active_gen]
-            self._gen_memory[self._active_gen] = (self.radio.freq_hz, mode)
+    def _maybe_save_to_active_gen(self, rx_id: int,
+                                  freq_hz: int, mode: str) -> None:
+        """Auto-save freq+mode into the active GEN slot when the
+        signaling RX is the GEN slot's owner.  No-op when no slot
+        is active, when ownership doesn't match, or when the freq
+        falls inside a structured band (band-button highlight
+        wins)."""
+        if self._active_gen is None or self._active_gen_rx is None:
+            return
+        if int(rx_id) != int(self._active_gen_rx):
+            return
+        if band_for_freq(freq_hz) is not None:
+            return
+        self._gen_memory[self._active_gen] = (freq_hz, mode)
+
+    def _on_radio_freq_changed(self, hz: int) -> None:
+        self._maybe_save_to_active_gen(0, int(hz), self.radio.mode)
+        self._refresh_band_highlight()
+
+    def _on_radio_mode_changed(self, mode: str) -> None:
+        self._maybe_save_to_active_gen(
+            0, int(self.radio.freq_hz), str(mode))
+        self._refresh_band_highlight()
+
+    def _on_radio_rx2_freq_changed(self, hz: int) -> None:
+        try:
+            mode_rx2 = str(self.radio._mode_rx2)
+        except AttributeError:
+            mode_rx2 = self.radio.mode
+        self._maybe_save_to_active_gen(2, int(hz), mode_rx2)
+        self._refresh_band_highlight()
+
+    def _on_radio_rx2_mode_changed(self, mode: str) -> None:
+        try:
+            rx2_freq = int(self.radio.rx2_freq_hz)
+        except AttributeError:
+            rx2_freq = int(self.radio.freq_hz)
+        self._maybe_save_to_active_gen(2, rx2_freq, str(mode))
+        self._refresh_band_highlight()
+
+    def _on_focused_rx_changed(self, _focused: int) -> None:
+        # Focus flip -- update visual highlight to reflect the
+        # newly-focused RX's band/slot.  GEN slot ownership is
+        # not transferred by focus flip alone (it follows the
+        # operator's deliberate GEN-click action).
+        self._refresh_band_highlight()
 
 
 # ── TCI server status + control ────────────────────────────────────────

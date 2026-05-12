@@ -380,5 +380,94 @@ class Phase3e1TunePresetRoutesToFocusTest(unittest.TestCase):
         self.assertEqual(self.radio.rx2_freq_hz, orig_rx2)
 
 
+class Phase3e1BandPanelHighlightTracksFocusTest(unittest.TestCase):
+    """Phase 3.E.1 hotfix v0.6 (2026-05-12) -- BandPanel's
+    band-button highlight + GEN-slot auto-save follow the focused
+    VFO instead of being permanently tied to RX1.
+
+    Three sub-behaviors:
+
+    * Focus flip refreshes the highlighted band button to match
+      the newly-focused RX's frequency.
+    * GEN slots remember which RX "owns" them (set at click
+      time); freq tweaks on that RX auto-save into the slot,
+      tweaks on the OTHER RX do not.
+    * Tuning into a structured band clears the active GEN slot.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        from lyra.ui.panels import BandPanel
+        self.radio = Radio()
+        self.panel = BandPanel(self.radio)
+
+    def _checked_band_names(self) -> list[str]:
+        return [
+            name for name, btn in self.panel._buttons.items()
+            if btn.isChecked()
+        ]
+
+    def test_band_highlight_follows_focus_to_rx2(self) -> None:
+        # RX1 tuned inside 20m default; RX2 inside 40m default.
+        self.radio.set_freq_hz(14_205_000)
+        self.radio.set_rx2_freq_hz(7_074_000)
+        # On default focus (RX1) the 20m button should highlight.
+        self.assertIn("20m", self._checked_band_names())
+        self.radio.set_focused_rx(2)
+        self.assertIn("40m", self._checked_band_names())
+        self.assertNotIn("20m", self._checked_band_names())
+
+    def test_band_highlight_returns_on_focus_back_to_rx1(self) -> None:
+        self.radio.set_freq_hz(14_205_000)
+        self.radio.set_rx2_freq_hz(7_074_000)
+        self.radio.set_focused_rx(2)
+        self.radio.set_focused_rx(0)
+        self.assertIn("20m", self._checked_band_names())
+
+    def test_gen_slot_owner_recorded_on_click(self) -> None:
+        self.radio.set_focused_rx(2)
+        # Pick the first GEN slot and point it at an out-of-band
+        # freq so the band-button-takes-priority logic doesn't
+        # clear ``_active_gen_rx`` immediately on tune.
+        slot = next(iter(self.panel._gen_memory.keys()))
+        self.panel._gen_memory[slot] = (5_500_000, "USB")
+        self.panel._on_gen_clicked(slot)
+        self.assertEqual(self.panel._active_gen_rx, 2)
+
+    def test_gen_auto_save_follows_owner_rx(self) -> None:
+        """Operator: focus RX2, click GEN1, then nudge RX2 freq.
+        GEN1 must follow RX2.  Nudging RX1 must NOT change
+        GEN1."""
+        slot = next(iter(self.panel._gen_memory.keys()))
+        # First, point the GEN slot's stored freq into a freq that
+        # is OUTSIDE all structured bands so the auto-save path
+        # isn't shadowed by band-button-takes-priority logic.  Pick
+        # a quiet HF gap (say 5.5 MHz).
+        self.panel._gen_memory[slot] = (5_500_000, "USB")
+        self.radio.set_focused_rx(2)
+        self.panel._on_gen_clicked(slot)  # tunes RX2 to 5_500_000
+        # Nudge RX2 to a different out-of-band freq.
+        self.radio.set_rx2_freq_hz(5_600_000)
+        self.assertEqual(self.panel._gen_memory[slot][0], 5_600_000)
+        # Nudge RX1 to yet another out-of-band freq -- must NOT
+        # affect the slot (RX1 isn't the owner).
+        self.radio.set_freq_hz(5_700_000)
+        self.assertEqual(self.panel._gen_memory[slot][0], 5_600_000)
+
+    def test_tuning_into_band_clears_active_gen(self) -> None:
+        slot = next(iter(self.panel._gen_memory.keys()))
+        self.panel._gen_memory[slot] = (5_500_000, "USB")
+        self.panel._on_gen_clicked(slot)
+        # Now tune RX1 (focused) into 20m -- band button wins.
+        self.radio.set_freq_hz(14_205_000)
+        self.assertIsNone(self.panel._active_gen)
+        self.assertIsNone(self.panel._active_gen_rx)
+
+
 if __name__ == "__main__":
     unittest.main()
