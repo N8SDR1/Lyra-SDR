@@ -82,12 +82,40 @@ class HamQslSolarCache:
         self._data: Optional[dict] = None
         self._timestamp: float = 0.0
         self._lock = threading.Lock()
+        # Last fetch exception captured for diagnostics.  Operator-
+        # visible via the PropagationPanel's tooltip + status bar
+        # when present.  Cleared on a successful fetch.  See
+        # `last_error` property.
+        self._last_error: Optional[str] = None
+
+    @property
+    def last_error(self) -> Optional[str]:
+        """Most recent fetch error text (short form), or None.
+
+        Surfaced by the propagation panel so operators behind a
+        firewall / SSL block / DNS issue see WHY the panel is
+        blank instead of staring at endless "—" placeholders.
+        Cleared once a fetch succeeds.
+        """
+        with self._lock:
+            return self._last_error
 
     def get(self, force_refresh: bool = False) -> Optional[dict]:
         """Return cached solar data, refreshing if stale or forced.
 
         Returns None only if no fetch has ever succeeded — once a
         fetch lands the cache holds onto it across network errors.
+
+        Phase 3.E.1 hotfix v0.18 (2026-05-12): captures the last
+        fetch exception in ``_last_error`` so it can be surfaced
+        to the operator via the panel tooltip.  Operator-reported
+        2026-05-12: tester "Timmy"'s propagation panel was blank
+        even with callsign/grid set + different video drivers
+        tried (since the EiBi backend-mix-up that Brent hit was
+        ruled out).  Most likely cause: synchronous HTTPS fetch
+        to hamqsl.com failing silently (firewall / SSL / DNS /
+        antivirus interception).  Now the exception is logged AND
+        readable from the UI so the operator can pin it down.
         """
         now = time.time()
         with self._lock:
@@ -100,15 +128,22 @@ class HamQslSolarCache:
 
         try:
             data = self._fetch()
-        except Exception:
+        except Exception as exc:
             # Network glitch or HamQSL hiccup — serve stale cache
-            # rather than blanking the operator's display.
+            # rather than blanking the operator's display.  Capture
+            # the exception text + log to console (crash.log on the
+            # PyInstaller build) so operators have something to
+            # report when the panel is silently stuck.
+            err = f"{type(exc).__name__}: {exc}"
+            print(f"[HamQslSolarCache] fetch failed: {err}")
             with self._lock:
+                self._last_error = err
                 return self._data
 
         with self._lock:
             self._data = data
             self._timestamp = now
+            self._last_error = None
             return data
 
     def _fetch(self) -> dict:

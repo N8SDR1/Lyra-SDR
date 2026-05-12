@@ -97,6 +97,10 @@ class PropagationPanel(GlassPanel):
         self.radio = radio
         self._solar_cache = HamQslSolarCache()
         self._last_data: Optional[dict] = None
+        # One-shot guard so we only emit the "feed unreachable"
+        # status-bar toast once per session, not every 60 sec.
+        # Reset to False on a successful fetch.
+        self._fetch_error_announced: bool = False
 
         # ── Layout — single horizontal row, three groups ──────────────
         h = QHBoxLayout()
@@ -268,16 +272,34 @@ class PropagationPanel(GlassPanel):
         Sunrise/sunset re-evaluation is the main reason this fires
         every 60 sec — bands flip Day↔Night exactly when the sun
         crosses the horizon at the operator's QTH.
+
+        Phase 3.E.1 hotfix v0.18 (2026-05-12): surfaces fetch
+        errors from ``HamQslSolarCache.last_error`` into the
+        panel tooltip + (one-shot per session) status bar, so
+        operators behind a firewall / SSL block / DNS issue see
+        WHY the panel is blank.  Operator-reported -- tester
+        "Timmy" had a dead panel with no diagnostic to point at.
         """
         try:
             data = self._solar_cache.get()
         except Exception as exc:
             print(f"[PropagationPanel] solar fetch error: {exc}")
             data = self._last_data
+        # Render the cache's last-error state regardless of whether
+        # we have stale data to fall back on.
+        err = self._solar_cache.last_error
+        if err is not None:
+            self._render_fetch_error(err)
         if data is None:
-            # No cache yet and the fetch errored — leave placeholders.
+            # No cache yet and the fetch errored — placeholders
+            # remain "—" but at least the tooltip explains why
+            # (rendered by ``_render_fetch_error`` above).
             return
         self._last_data = data
+        # Successful fetch -- reset the announce flag so a future
+        # outage produces a fresh toast.
+        if err is None:
+            self._fetch_error_announced = False
 
         # Solar numbers — convert defensively, color via thresholds.
         self._update_value(self._sfi_label, "SFI", data.get("sfi"),
@@ -327,6 +349,45 @@ class PropagationPanel(GlassPanel):
                 f"<b>{b}m</b> — {tip_rating} ({tip_period})<br>"
                 "<i>HamQSL prediction based on current solar/geomag</i>"
             )
+
+    def _render_fetch_error(self, err: str) -> None:
+        """Surface the HamQslSolarCache fetch error to the operator.
+
+        Phase 3.E.1 hotfix v0.18 (2026-05-12): set a diagnostic
+        tooltip on the panel + emit a one-shot status-bar toast
+        the first time the error appears in this session.  The
+        cache also keeps stale data on the panel when a fetch
+        fails after at least one prior success, so the operator
+        only sees the placeholders in the cold-start failure
+        case (= what Timmy is seeing).
+        """
+        self.setToolTip(
+            "<b>Propagation feed unreachable</b><br>"
+            "Lyra couldn't fetch solar/band conditions from "
+            "<i>hamqsl.com</i>.<br><br>"
+            f"<b>Last error:</b> {err}<br><br>"
+            "Common causes:<br>"
+            "• Windows Firewall or antivirus blocking Lyra's "
+            "outbound HTTPS<br>"
+            "• Corporate / VPN proxy intercepting the request<br>"
+            "• DNS resolution failure for www.hamqsl.com<br>"
+            "• SSL/TLS handshake failure (rare; check Windows "
+            "Update for root CA bundle)<br>"
+            "• hamqsl.com temporarily down (rare)<br><br>"
+            "Quick test: open https://www.hamqsl.com/solarxml.php "
+            "in a browser on the same machine.  If that doesn't "
+            "show XML, the network path itself is the issue.<br><br>"
+            "The panel will retry every 60 sec and clear this "
+            "tooltip automatically once a fetch succeeds."
+        )
+        if not self._fetch_error_announced:
+            self._fetch_error_announced = True
+            try:
+                self.radio.status_message.emit(
+                    "Propagation feed unreachable -- hover the "
+                    "PROP panel for details", 6000)
+            except Exception:
+                pass
 
     def _update_value(self, label_dict: dict, key: str,
                       raw_value: Optional[str],
