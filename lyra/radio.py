@@ -6082,8 +6082,25 @@ class Radio(QObject):
         "6m":   (-145.0, -55.0),
     }
 
-    def _save_current_band_memory(self):
-        band = band_for_freq(self._freq_hz)
+    def _save_current_band_memory(self, target_rx: int | None = None):
+        """Save current freq+mode+gain into the band memory keyed on
+        whichever band the resolved RX is tuned to.
+
+        ``target_rx`` (Phase 3.E.1 hotfix v0.4 2026-05-12): which RX
+        the band-band memory write follows.  ``None`` defaults to the
+        focused RX, so a band-button click while VFO B is highlighted
+        saves RX2's freq+mode into the shared band memory (instead
+        of clobbering it with RX1's unrelated freq).  LNA gain stays
+        shared regardless of target RX -- the HL2 has one ADC.
+        """
+        rx, _ = self._resolve_rx_target(target_rx)
+        if rx == 2:
+            freq_hz = int(self._rx2_freq_hz)
+            mode = self._mode_rx2
+        else:
+            freq_hz = int(self._freq_hz)
+            mode = self._mode
+        band = band_for_freq(freq_hz)
         if band is None:
             return
         # Preserve any existing band-specific range bounds; we only
@@ -6093,8 +6110,8 @@ class Radio(QObject):
         # avoid clobbering on every freq tweak.
         existing = self._band_memory.get(band.name, {})
         existing.update({
-            "freq_hz": self._freq_hz,
-            "mode":    self._mode,
+            "freq_hz": freq_hz,
+            "mode":    mode,
             "gain_db": self._gain_db,
         })
         self._band_memory[band.name] = existing
@@ -6180,7 +6197,7 @@ class Radio(QObject):
                     wf_lo, wf_hi, from_user=False)
 
     def recall_band(self, band_name: str, defaults_freq: int,
-                    defaults_mode: str):
+                    defaults_mode: str, target_rx: int | None = None):
         """Restore freq/mode/gain saved for `band_name` if present, else
         tune to the band's defaults. Also applies the band's saved
         spectrum range bounds (or factory defaults for that band group)
@@ -6189,17 +6206,41 @@ class Radio(QObject):
 
         Suppresses the auto-save during the apply so we don't
         immediately overwrite the memory we just loaded with
-        intermediate tuning steps."""
+        intermediate tuning steps.
+
+        ``target_rx`` (Phase 3.E.1 hotfix v0.4 2026-05-12): which RX
+        receives the freq + mode write.  ``None`` defaults to the
+        currently-focused RX so the operator's mental model holds:
+        "the highlighted VFO is the one my controls drive".  Pass
+        ``0`` / ``2`` explicitly to override (e.g. CAT command
+        forcing a particular RX).
+
+        LNA gain (``set_gain_db``) and per-band spectrum/waterfall
+        range stay shared across both RXes -- the HL2 has a single
+        ADC and front-end filter bank, and the spectrum widget is
+        single-pane (Phase 4 split-panadapter work may revisit the
+        range axis).  Band memory itself is keyed on band_name
+        only, so both RXes share the operator's saved per-band
+        defaults; per-RX band memory is a Phase 4+ concern.
+        """
+        rx, _ = self._resolve_rx_target(target_rx)
         memory = self._band_memory.get(band_name)
         self._suppress_band_save = True
         try:
             if memory:
-                self.set_freq_hz(memory["freq_hz"])
-                self.set_mode(memory["mode"])
+                if rx == 2:
+                    self.set_rx2_freq_hz(memory["freq_hz"])
+                else:
+                    self.set_freq_hz(memory["freq_hz"])
+                self.set_mode(memory["mode"], target_rx=rx)
+                # LNA gain stays shared (single HL2 ADC front-end).
                 self.set_gain_db(memory["gain_db"])
             else:
-                self.set_freq_hz(defaults_freq)
-                self.set_mode(defaults_mode)
+                if rx == 2:
+                    self.set_rx2_freq_hz(defaults_freq)
+                else:
+                    self.set_freq_hz(defaults_freq)
+                self.set_mode(defaults_mode, target_rx=rx)
             # Apply per-band range bounds AFTER freq/mode are set so
             # band_for_freq() returns the right band for the
             # downstream save.
@@ -6207,8 +6248,11 @@ class Radio(QObject):
         finally:
             self._suppress_band_save = False
         # Save (now that the dust has settled) so the next reactivation
-        # of this band brings back exactly this state.
-        self._save_current_band_memory()
+        # of this band brings back exactly this state.  Band memory is
+        # shared across RXes (see docstring); pass ``rx`` through so
+        # the save reads RX2's freq+mode when RX2 was the recall
+        # target, instead of clobbering with RX1's unrelated state.
+        self._save_current_band_memory(target_rx=rx)
 
     @property
     def band_memory_snapshot(self) -> dict:

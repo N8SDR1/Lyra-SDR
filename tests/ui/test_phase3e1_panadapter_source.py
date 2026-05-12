@@ -271,5 +271,70 @@ class Phase3e1SubOffFocusFlipMirrorTest(unittest.TestCase):
         self.assertEqual(self.radio._af_gain_db_rx2, 40)
 
 
+class Phase3e1BandRecallRoutesToFocusTest(unittest.TestCase):
+    """Phase 3.E.1 hotfix v0.4 (2026-05-12) -- band buttons follow
+    focused VFO.  Operator UX: "if on RX2 and I click the band
+    button shouldn't I be able to have that go to RX2.  Currently
+    if I click band button with RX2 highlighted GREEN active the
+    band changes go to RX1."
+
+    Fix: ``recall_band`` accepts ``target_rx`` (default = focused
+    RX) and dispatches freq + mode writes to the right channel.
+    LNA gain stays shared (single HL2 ADC); band memory key stays
+    shared (per-RX band memory is a Phase 4+ concern).
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        self.radio = Radio()
+
+    def test_recall_band_default_routes_to_rx1_on_default_focus(self) -> None:
+        orig_rx2 = self.radio.rx2_freq_hz
+        self.radio.recall_band("40m", 7_074_000, "USB")
+        self.assertEqual(self.radio.freq_hz, 7_074_000)
+        self.assertEqual(self.radio.rx2_freq_hz, orig_rx2)
+
+    def test_recall_band_routes_to_rx2_when_focused(self) -> None:
+        self.radio.set_focused_rx(2)
+        orig_rx1 = self.radio.freq_hz
+        self.radio.recall_band("20m", 14_205_000, "USB")
+        self.assertEqual(self.radio.rx2_freq_hz, 14_205_000)
+        self.assertEqual(self.radio.freq_hz, orig_rx1)
+
+    def test_recall_band_routes_mode_to_focused_rx(self) -> None:
+        self.radio.set_focused_rx(2)
+        orig_rx1_mode = self.radio._mode
+        self.radio.recall_band("40m", 7_074_000, "LSB")
+        self.assertEqual(self.radio._mode_rx2, "LSB")
+        self.assertEqual(self.radio._mode, orig_rx1_mode)
+
+    def test_recall_band_explicit_target_rx_overrides_focus(self) -> None:
+        self.radio.set_focused_rx(2)
+        orig_rx2 = self.radio.rx2_freq_hz
+        self.radio.recall_band(
+            "20m", 14_205_000, "USB", target_rx=0)
+        self.assertEqual(self.radio.freq_hz, 14_205_000)
+        self.assertEqual(self.radio.rx2_freq_hz, orig_rx2)
+
+    def test_band_memory_save_after_rx2_recall_records_rx2_freq(self) -> None:
+        """When the operator clicks a band button while focused on
+        RX2, the post-tune band-memory save must capture RX2's
+        freq+mode -- not clobber the band's memory slot with RX1's
+        unrelated state."""
+        self.radio.set_focused_rx(2)
+        self.radio.recall_band("40m", 7_074_000, "USB")
+        # Tune RX2 to a custom freq inside 40m (will auto-save? no,
+        # set_rx2_freq_hz doesn't auto-save; force the save path).
+        self.radio.set_rx2_freq_hz(7_200_000)
+        self.radio._save_current_band_memory(target_rx=2)
+        mem = self.radio._band_memory.get("40m", {})
+        self.assertEqual(mem.get("freq_hz"), 7_200_000)
+
+
 if __name__ == "__main__":
     unittest.main()
