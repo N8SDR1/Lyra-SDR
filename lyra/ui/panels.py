@@ -5704,9 +5704,17 @@ class SpectrumPanel(GlassPanel):
         ``set_freq_hz`` accepts directly — the DDS-vs-VFO offset
         for CW modes is applied centrally inside the radio.  No
         per-call-site CW pitch math here (the v0.0.9.7.1 fix that
-        added it was reverted with the convention switch)."""
-        self.radio.set_mode(mode)
-        self.radio.set_freq_hz(int(freq_hz))
+        added it was reverted with the convention switch).
+
+        Phase 3.E.1 hotfix v0.7 (2026-05-12): route through
+        ``tune_preset`` so landmark clicks follow the focused VFO
+        (panadapter-source RX, since that's what the operator just
+        clicked on).  Operator UX: "noticed clicking say FT8 marker
+        in panadapter also goes to RX1 even if RX2 highlighted".
+        """
+        target_rx = int(getattr(self.radio, "panadapter_source_rx", 0))
+        self.radio.tune_preset(
+            int(freq_hz), mode, target_rx=target_rx)
         self.radio.status_message.emit(
             f"Tuned to {freq_hz/1e6:.3f} MHz {mode}", 2000)
 

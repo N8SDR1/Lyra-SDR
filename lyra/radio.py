@@ -7641,13 +7641,29 @@ class Radio(QObject):
         CW spots is applied centrally inside the radio.  No
         per-call-site CW pitch math (the v0.0.9.7.2 fix that added
         it was reverted with the convention switch).
+
+        Phase 3.E.1 hotfix v0.7 (2026-05-12): routes the freq write
+        to the panadapter-source RX (= focused RX by default), so
+        a click on a cluster/RBN spot in the panadapter tunes the
+        same VFO the operator is looking at -- not always RX1.
+        Mode comes from the spot record (cluster/RBN reports it);
+        passes through ``tune_preset`` for atomic mode+freq write.
         """
         if not self._spots:
             return False
         best = min(self._spots.values(), key=lambda s: abs(s["freq_hz"] - freq_hz))
         if abs(best["freq_hz"] - freq_hz) > tolerance_hz:
             return False
-        self.set_freq_hz(int(best["freq_hz"]))
+        target_rx = int(self._panadapter_source_rx)
+        spot_mode = str(best.get("mode") or "USB")
+        try:
+            self.tune_preset(
+                int(best["freq_hz"]), spot_mode, target_rx=target_rx)
+        except Exception:
+            # Best-effort fallback to legacy RX1 path so a tune
+            # never silently no-ops -- the spot_activated signal
+            # must fire for the TCI round-trip.
+            self.set_freq_hz(int(best["freq_hz"]))
         self.spot_activated.emit(best["call"], best["mode"], best["freq_hz"])
         return True
 

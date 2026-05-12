@@ -469,5 +469,75 @@ class Phase3e1BandPanelHighlightTracksFocusTest(unittest.TestCase):
         self.assertIsNone(self.panel._active_gen_rx)
 
 
+class Phase3e1PanadapterMarkerClickRoutesToFocusTest(unittest.TestCase):
+    """Phase 3.E.1 hotfix v0.7 (2026-05-12) -- band-plan landmark
+    triangles (FT8 markers, NCDXF beacons, etc.) and cluster/RBN
+    spot markers must tune the panadapter-source RX, not always
+    RX1.  Operator UX: "clicking say FT8 marker in panadapter
+    also goes to RX1 (even if RX2 highlighted)".
+
+    Plain panadapter click (``set_freq_from_panadapter``) was
+    already fixed in Phase 3.E.1 v0.1; these are the marker-
+    specific click paths that lived outside that chokepoint.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        self.radio = Radio()
+
+    def test_activate_spot_near_routes_to_panadapter_source_rx2(self) -> None:
+        """When RX2 owns the panadapter, clicking a cluster spot
+        in that pane tunes RX2 -- not RX1."""
+        self.radio._spots = {
+            "K1ABC": {
+                "call": "K1ABC", "mode": "USB",
+                "freq_hz": 14_205_000,
+            },
+        }
+        self.radio.set_focused_rx(2)
+        orig_rx1 = self.radio.freq_hz
+        ok = self.radio.activate_spot_near(14_205_100)
+        self.assertTrue(ok)
+        self.assertEqual(self.radio.rx2_freq_hz, 14_205_000)
+        self.assertEqual(self.radio.freq_hz, orig_rx1)
+
+    def test_activate_spot_near_default_routes_to_rx1(self) -> None:
+        """When RX1 owns the panadapter (default), spots still tune
+        RX1 -- legacy behavior preserved."""
+        self.radio._spots = {
+            "K1ABC": {
+                "call": "K1ABC", "mode": "USB",
+                "freq_hz": 14_205_000,
+            },
+        }
+        orig_rx2 = self.radio.rx2_freq_hz
+        ok = self.radio.activate_spot_near(14_205_100)
+        self.assertTrue(ok)
+        self.assertEqual(self.radio.freq_hz, 14_205_000)
+        self.assertEqual(self.radio.rx2_freq_hz, orig_rx2)
+
+    def test_activate_spot_emits_signal_regardless_of_target_rx(self) -> None:
+        """``spot_activated`` must fire for TCI round-trip even
+        when the tune goes to RX2."""
+        self.radio._spots = {
+            "K1ABC": {
+                "call": "K1ABC", "mode": "USB",
+                "freq_hz": 14_205_000,
+            },
+        }
+        self.radio.set_focused_rx(2)
+        seen: list[tuple] = []
+        self.radio.spot_activated.connect(
+            lambda call, mode, hz: seen.append((call, mode, hz)))
+        self.radio.activate_spot_near(14_205_100)
+        self.assertEqual(
+            seen, [("K1ABC", "USB", 14_205_000)])
+
+
 if __name__ == "__main__":
     unittest.main()
