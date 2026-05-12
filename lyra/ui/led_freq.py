@@ -109,6 +109,12 @@ class FrequencyDisplay(QWidget):
         # wheel behavior, which matches how rigs and other SDR clients
         # work. When 0/None, falls back to per-digit 10^N stepping.
         self._external_step_hz: int = 0
+        # Phase 3.B/3.D v0.1: focus-border state.  Painted in our
+        # custom paintEvent (a setStyleSheet border is overdrawn by
+        # the LED fillRect and never appears).  TuningPanel calls
+        # ``set_focus_active(bool)`` on every focused_rx_changed
+        # edge.
+        self._focus_active: bool = False
         # Inline text editor for direct frequency entry. Created lazy
         # on first double-click. Hidden when not editing — the LED
         # painting still happens normally underneath.
@@ -143,6 +149,17 @@ class FrequencyDisplay(QWidget):
 
     def set_selected_digit(self, idx: int):
         self._selected = max(0, min(self.N_DIGITS - 1, int(idx)))
+
+    def set_focus_active(self, active: bool) -> None:
+        """Phase 3.B/3.D v0.1 -- toggle the orange focus border that
+        marks this LED as the currently-focused VFO.  Painted in
+        our own paintEvent (a QSS border would be overdrawn by the
+        widget's background fillRect)."""
+        new = bool(active)
+        if new == self._focus_active:
+            return
+        self._focus_active = new
+        self.update()
 
     def set_external_step_hz(self, hz: int):
         """Set an external step value in Hz that the mouse wheel will
@@ -258,6 +275,16 @@ class FrequencyDisplay(QWidget):
             p.setPen(QPen(QColor(0, 229, 255, 180), 1))
             p.drawText(QPointF((w - bw) // 2, h // 2 + 4),
                        self._disabled_banner)
+
+        # Phase 3.B/3.D v0.1 focus-border (painted LAST so it sits on
+        # top of the LED background and digit overdraw).  Drawn just
+        # inside the widget's rect so the 2 px stroke doesn't get
+        # clipped at the edges.
+        if self._focus_active:
+            p.setPen(QPen(QColor(0xC2, 0x70, 0x2A), 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(
+                QRectF(1.0, 1.0, w - 2.0, h - 2.0), 4.0, 4.0)
 
     # ── Direct frequency entry ────────────────────────────────────────
     def _enter_edit_mode(self):

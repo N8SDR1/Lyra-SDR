@@ -435,9 +435,16 @@ class TuningPanel(GlassPanel):
         self._focus_border_inactive = (
             "border: 2px solid transparent; border-radius: 4px;"
         )
-        # Apply initial state.
+        # Apply initial state.  Phase 3.D v0.1: the FrequencyDisplay
+        # widget's custom paintEvent overdraws QSS borders, so the
+        # visible focus border is painted by the widget itself via
+        # ``set_focus_active``.  The setStyleSheet calls are kept
+        # for the existing Phase 3.B tests (which assert on the
+        # stylesheet contents) and as a back-compat marker.
         self.freq_display.setStyleSheet(self._focus_border_active)
         self.freq_display_rx2.setStyleSheet(self._focus_border_inactive)
+        self.freq_display.set_focus_active(True)
+        self.freq_display_rx2.set_focus_active(False)
         # Wire updates.
         try:
             self.radio.focused_rx_changed.connect(self._on_focused_rx_changed)
@@ -537,17 +544,27 @@ class TuningPanel(GlassPanel):
         """Update the orange focus border on the VFO LEDs when
         ``Radio.focused_rx_changed`` fires.
 
-        Phase 3.B v0.1.  ``rx_id`` is the canonical host channel ID
-        (0 = RX1, 2 = RX2) per ``Radio._resolve_rx_target``.
+        Phase 3.B v0.1 + 3.D hotfix v0.1.  ``rx_id`` is the
+        canonical host channel ID (0 = RX1, 2 = RX2) per
+        ``Radio._resolve_rx_target``.  Both ``setStyleSheet`` and
+        the new ``set_focus_active`` are called; the stylesheet is
+        kept for the Phase 3.B test asserts (which check the
+        stylesheet contents) and as a back-compat marker, while
+        the actual visible border is painted in the
+        FrequencyDisplay's own paintEvent.
         """
         if rx_id == 2:
             self.freq_display.setStyleSheet(self._focus_border_inactive)
             self.freq_display_rx2.setStyleSheet(self._focus_border_active)
+            self.freq_display.set_focus_active(False)
+            self.freq_display_rx2.set_focus_active(True)
         else:
             # Default to RX1 focus styling for any unknown id
             # (defensive -- Radio.set_focused_rx validates input).
             self.freq_display.setStyleSheet(self._focus_border_active)
             self.freq_display_rx2.setStyleSheet(self._focus_border_inactive)
+            self.freq_display.set_focus_active(True)
+            self.freq_display_rx2.set_focus_active(False)
 
 
 # ── Mode / Filter / Rate ────────────────────────────────────────────────
