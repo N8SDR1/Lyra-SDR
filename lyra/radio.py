@@ -8028,6 +8028,16 @@ class Radio(QObject):
         # Single-thread mode would need a Qt-signal hop to main
         # thread + a stereo combiner there; that path isn't wired
         # in Phase 2 (operator default is worker mode).
+        #
+        # Phase 3.D hotfix v0.1 (2026-05-12): also gate on
+        # ``rx2_enabled`` so RX2 IQ samples don't even reach the
+        # worker queue when SUB is off.  Defense in depth: the
+        # worker's audio dispatch is the primary gate, this is a
+        # belt-and-suspenders save on CPU + memory churn for
+        # operators who never enable SUB.  Bench-test ring buffer
+        # above is independent and still fills regardless.
+        if not self._dispatch_state.rx2_enabled:
+            return
         if (self._dsp_threading_mode_at_startup ==
                 self.DSP_THREADING_WORKER
                 and self._dsp_worker is not None):
@@ -8947,6 +8957,15 @@ class Radio(QObject):
             if v != 1.0:
                 audio = audio * np.float32(v)
 
+        # ── Phase 3.D safety clamp (2026-05-12) ─────────────────
+        # Hard-clamp the post-volume audio to [-1.0, +1.0] so any
+        # upstream gain anomaly (AGC misconfig, AF gain extreme,
+        # WDSP transient) cannot send unbounded floats to the
+        # codec.  This is purely a safety net to protect the
+        # operator's hardware; in normal operation the audio is
+        # already inside the unit range from WDSP's AGC.
+        np.clip(audio, -1.0, 1.0, out=audio)
+
         # ── §14.6 IQ-domain captured-profile path (LIVE) ─────────
         # Capture and apply both happen pre-WDSP in the IQ domain
         # at the top of this method (search for "Phase 3" /
@@ -9122,6 +9141,12 @@ class Radio(QObject):
                     audio = bin_out.astype(np.float32, copy=False)
             except Exception as exc:
                 print(f"[Radio] WDSP BIN error (dual): {exc}")
+
+        # Phase 3.D safety clamp (2026-05-12) -- protect codec from
+        # any upstream gain anomaly.  Same rationale as the
+        # single-RX path; see ``_do_demod_wdsp``.
+        if audio is not None and audio.size > 0:
+            np.clip(audio, -1.0, 1.0, out=audio)
 
         try:
             self._audio_sink.write(audio)
