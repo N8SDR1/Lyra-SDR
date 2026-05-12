@@ -343,11 +343,14 @@ class TuningPanel(GlassPanel):
         logo_container.addStretch(1)
         row1.addLayout(logo_container, 3)
 
-        # RX2 — placeholder. Shown as a dimmed disabled FrequencyDisplay
-        # with a banner pointing to the Phase 1 bench-test dialog.
-        # Phase 3 of v0.1 wires this for the full focus-model UI;
-        # until then RX2 is operator-controllable via Help → RX2
-        # Bench Test (consensus plan §4.4 step 2).
+        # RX2 — live VFO B frequency display (Phase 3.B v0.1, per
+        # consensus plan §6.1 + §6.7).  Reads ``radio.rx2_freq_hz``
+        # and stays in sync via the ``rx2_freq_changed`` signal.
+        # Operator edits commit through ``radio.set_rx2_freq_hz``.
+        # Click anywhere on the LED to focus RX2 (then the
+        # MODE+FILTER + DSP+AUDIO panels operate on RX2; Phase 3.C
+        # wires the panel-binding refresh).  Ctrl+2 hotkey in
+        # ``app.py`` does the same focus shift from the keyboard.
         rx2_col = QVBoxLayout()
         rx2_col.setSpacing(2)
         rx2_label = QLabel("RX2")
@@ -361,35 +364,85 @@ class TuningPanel(GlassPanel):
         # blocks row resizing.
         self.freq_display_rx2.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.freq_display_rx2.set_freq_hz(0)
-        self.freq_display_rx2.set_vfo_enabled(
-            False, "RX2 — Phase 1 (click for bench test)",
+        # Initialize from Radio's current RX2 freq.  Phase 3.A's
+        # QSettings restore happens later in app.py startup and
+        # the ``rx2_freq_changed`` connection below picks up the
+        # restored value when it lands.
+        try:
+            self.freq_display_rx2.set_freq_hz(int(self.radio.rx2_freq_hz))
+        except Exception:
+            self.freq_display_rx2.set_freq_hz(0)
+        self.freq_display_rx2.set_vfo_enabled(True, "")
+        # Operator edit (type freq + Enter) -> push to Radio
+        self.freq_display_rx2.freq_changed.connect(
+            self.radio.set_rx2_freq_hz,
         )
-        # Operator-discoverability tooltip — operators are conditioned
-        # to type into LED displays; the Phase 1 RX2 surface lives
-        # behind Help → RX2 Bench Test instead.  Tooltip + click-to-
-        # open keep them from getting stuck trying to type here.
+        # Radio-side freq change (Help -> RX2 Bench Test edits, A->B
+        # / B->A / SWAP buttons in Phase 3.D, settings restore) ->
+        # update LED.
+        try:
+            self.radio.rx2_freq_changed.connect(
+                self.freq_display_rx2.set_freq_hz,
+            )
+        except Exception:
+            # Older Radio without the signal -- safe to ignore.
+            pass
         self.freq_display_rx2.setToolTip(
-            "Phase 1 v0.1: RX2 is wired at the protocol layer but the "
-            "dual-VFO focus model (typing into this display, Ctrl+1/"
-            "Ctrl+2 focus switch, A↔B/Swap/Lock buttons) lands in "
-            "Phase 3.  Until then, tune VFO B from Help → RX2 Bench "
-            "Test… (or click this display to open it directly)."
+            "VFO B (RX2).  Click to focus RX2 -- the MODE+FILTER + "
+            "DSP+AUDIO panels then operate on RX2's state.  Double-"
+            "click to type a frequency.  Ctrl+2 does the same focus "
+            "shift from the keyboard."
         )
-        # Click-to-open: the FrequencyDisplay is disabled (won't
-        # accept inline edits) so we install a child-of-window event
-        # filter to catch the click and open the bench-test dialog.
-        def _open_rx2_bench(_ev=None):
+
+        # Click-to-focus wiring -- both VFO LEDs.  Click anywhere on
+        # the LED first sets focus to that RX, then falls through to
+        # the FrequencyDisplay's native press handler so digit
+        # selection / edit-mode entry still work.  Phase 3.B
+        # implements with bound-method wrappers (avoids modifying
+        # ``led_freq.py`` for a behavior that's strictly UI-binding).
+        _rx1_native_press = self.freq_display.mousePressEvent
+        _rx2_native_press = self.freq_display_rx2.mousePressEvent
+
+        def _rx1_press(event):
             try:
-                win = self.window()
-                if hasattr(win, "_open_rx2_bench"):
-                    win._open_rx2_bench()
+                self.radio.set_focused_rx(0)
             except Exception:
                 pass
-            return True
-        self.freq_display_rx2.mousePressEvent = _open_rx2_bench  # type: ignore[assignment]
+            _rx1_native_press(event)
+
+        def _rx2_press(event):
+            try:
+                self.radio.set_focused_rx(2)
+            except Exception:
+                pass
+            _rx2_native_press(event)
+
+        self.freq_display.mousePressEvent = _rx1_press  # type: ignore[assignment]
+        self.freq_display_rx2.mousePressEvent = _rx2_press  # type: ignore[assignment]
+
         rx2_col.addWidget(self.freq_display_rx2)
         row1.addLayout(rx2_col, 5)
+
+        # ── Focus-border visual indicator (Phase 3.B v0.1) ──────────
+        # Orange border around the focused VFO LED so operator
+        # always knows which RX the wheel / keyboard / MODE+FILTER
+        # panel currently controls.  Reacts to
+        # ``Radio.focused_rx_changed`` signal.  Initial state:
+        # focused_rx = 0 (RX1) per Phase 3.A default.
+        self._focus_border_active = (
+            "border: 2px solid #c2702a; border-radius: 4px;"
+        )
+        self._focus_border_inactive = (
+            "border: 2px solid transparent; border-radius: 4px;"
+        )
+        # Apply initial state.
+        self.freq_display.setStyleSheet(self._focus_border_active)
+        self.freq_display_rx2.setStyleSheet(self._focus_border_inactive)
+        # Wire updates.
+        try:
+            self.radio.focused_rx_changed.connect(self._on_focused_rx_changed)
+        except Exception:
+            pass
         outer.addLayout(row1)
 
         # ── Row 2: TX split strip (hidden until TX lands) ────────
@@ -479,6 +532,22 @@ class TuningPanel(GlassPanel):
             self.freq_spin.blockSignals(True)
             self.freq_spin.setValue(mhz)
             self.freq_spin.blockSignals(False)
+
+    def _on_focused_rx_changed(self, rx_id: int) -> None:
+        """Update the orange focus border on the VFO LEDs when
+        ``Radio.focused_rx_changed`` fires.
+
+        Phase 3.B v0.1.  ``rx_id`` is the canonical host channel ID
+        (0 = RX1, 2 = RX2) per ``Radio._resolve_rx_target``.
+        """
+        if rx_id == 2:
+            self.freq_display.setStyleSheet(self._focus_border_inactive)
+            self.freq_display_rx2.setStyleSheet(self._focus_border_active)
+        else:
+            # Default to RX1 focus styling for any unknown id
+            # (defensive -- Radio.set_focused_rx validates input).
+            self.freq_display.setStyleSheet(self._focus_border_active)
+            self.freq_display_rx2.setStyleSheet(self._focus_border_inactive)
 
 
 # ── Mode / Filter / Rate ────────────────────────────────────────────────

@@ -365,6 +365,22 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self._build_toolbar()
 
+        # Phase 3.B v0.1 (2026-05-12) -- dual-RX focus model hotkeys
+        # per consensus plan §6.1.  Window-scoped QShortcuts so they
+        # fire regardless of which child widget currently has Qt
+        # keyboard focus.  Ctrl+1 / Ctrl+2 were reserved in
+        # docs/help/shortcuts.md during Phase 0 audit; this is the
+        # wiring that activates them.
+        from PySide6.QtGui import QShortcut, QKeySequence as _QKS
+        self._focus_rx1_shortcut = QShortcut(_QKS("Ctrl+1"), self)
+        self._focus_rx1_shortcut.activated.connect(
+            lambda: self.radio.set_focused_rx(0)
+        )
+        self._focus_rx2_shortcut = QShortcut(_QKS("Ctrl+2"), self)
+        self._focus_rx2_shortcut.activated.connect(
+            lambda: self.radio.set_focused_rx(2)
+        )
+
         # Status bar driven by Radio signals
         self.radio.status_message.connect(
             lambda text, timeout: self.statusBar().showMessage(text, timeout))
