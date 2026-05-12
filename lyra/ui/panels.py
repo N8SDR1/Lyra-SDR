@@ -2590,7 +2590,12 @@ class DspPanel(GlassPanel):
         #   Mode 2 → Wiener simple (edgier, more raw subtraction)
         #   Mode 3 → MMSE-LSA (WDSP default, smoothest) ← default
         #   Mode 4 → Trained adaptive (newest, most aggressive)
-        self._nr1_label_widget = QLabel("Mode:")
+        # Phase 3.D UX (2026-05-12): label changed from "Mode:" to
+        # "NR Mode:" to disambiguate from the new per-VFO Mode combos
+        # in TuningPanel (which select demodulation mode: USB/LSB/AM/
+        # CW/etc).  This slider selects WDSP's EMNR gain-method
+        # variant -- a noise-reduction concept, not a demod mode.
+        self._nr1_label_widget = QLabel("NR Mode:")
         self._nr1_label_widget.setStyleSheet(
             "color: #cdd9e5; font-family: 'Segoe UI', sans-serif; "
             "font-size: 11px;")
