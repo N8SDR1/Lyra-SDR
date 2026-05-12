@@ -567,6 +567,39 @@ hard-left, RX2 hard-right.  Auto-applied when RX2 enables.
 - Focus indicator: colored border on focused freq display + matching
   control panel header tint.
 
+**Working-group round refinements (2026-05-12 — operationalize the
+focus model with explicit visual + interaction cues).** Full spec
+in `docs/architecture/v0.1_rx2_consensus_plan.md` §6.7 + §6.8.
+Summary:
+
+* **Two TX indicators per VFO LED** (red = active TX, gray =
+  inactive).  SPLIT auto-moves red → VFO B; click gray to manually
+  swap.  Operators never compute which VFO they're about to
+  transmit on from current state — display directly.
+* **Middle-click on the panadapter** swaps focused/active VFO
+  (verified unbound today; left/right/wheel are reserved for
+  tuning / notches / zoom).
+* **`TUNE A` / `TUNE B` tooltip** follows the cursor on the
+  panadapter so the operator never has to look up to confirm
+  which VFO the wheel currently tunes.
+* **Right-click the SPLIT button** (in the MODE+FILTER strip —
+  NOT the panadapter, whose right-click is reserved for notches)
+  = per-mode shift-offset menu (operator-set default for AM /
+  LSB / USB / CW each remembered).
+* **SUB button** is the primary RX2 enable toggle, sibling of
+  SPLIT in the MODE+FILTER strip.
+* **A→B / B→A / SWAP** buttons same strip — full state copy
+  when RX2 enabled, freq-only when disabled.
+* **Per-RX Vol-A / Vol-B + Mute-A / Mute-B sliders appear only
+  when SUB is enabled** (replacing the single Vol/Mute).
+  Balance + AF Gain stay single (combined-output and pre-AGC
+  reference respectively).  Rationale: ear-balance is the one
+  control that genuinely needs per-RX independence in real
+  dual-RX use — the two receivers produce wildly different
+  signal levels.  Phase 2's `_do_demod_wdsp_dual` already
+  supports per-channel volume; Phase 3 just adds the state +
+  conditional UI surface.
+
 ### 6.3 SPLIT semantics
 
 - VFO A = RX1 freq (always).
