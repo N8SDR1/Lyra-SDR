@@ -336,5 +336,49 @@ class Phase3e1BandRecallRoutesToFocusTest(unittest.TestCase):
         self.assertEqual(mem.get("freq_hz"), 7_200_000)
 
 
+class Phase3e1TunePresetRoutesToFocusTest(unittest.TestCase):
+    """Phase 3.E.1 hotfix v0.5 (2026-05-12) -- ``Radio.tune_preset``
+    is the band-panel atomic preset tune used by GEN slots, TIME
+    button, TIME menu picks, and Memory recall.  Routes freq +
+    mode + optional RX BW write to the focused RX (or explicit
+    ``target_rx``) so every band-panel button follows VFO focus.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        self.radio = Radio()
+
+    def test_tune_preset_default_routes_to_rx1_on_default_focus(self) -> None:
+        orig_rx2 = self.radio.rx2_freq_hz
+        self.radio.tune_preset(14_205_000, "USB")
+        self.assertEqual(self.radio.freq_hz, 14_205_000)
+        self.assertEqual(self.radio._mode, "USB")
+        self.assertEqual(self.radio.rx2_freq_hz, orig_rx2)
+
+    def test_tune_preset_routes_to_rx2_when_focused(self) -> None:
+        self.radio.set_focused_rx(2)
+        orig_rx1 = self.radio.freq_hz
+        self.radio.tune_preset(7_074_000, "LSB")
+        self.assertEqual(self.radio.rx2_freq_hz, 7_074_000)
+        self.assertEqual(self.radio._mode_rx2, "LSB")
+        self.assertEqual(self.radio.freq_hz, orig_rx1)
+
+    def test_tune_preset_with_rx_bw_pin(self) -> None:
+        self.radio.tune_preset(7_074_000, "USB", rx_bw_hz=1800)
+        self.assertEqual(self.radio._rx_bw_by_mode.get("USB"), 1800)
+
+    def test_tune_preset_explicit_target_overrides_focus(self) -> None:
+        self.radio.set_focused_rx(2)
+        orig_rx2 = self.radio.rx2_freq_hz
+        self.radio.tune_preset(14_205_000, "USB", target_rx=0)
+        self.assertEqual(self.radio.freq_hz, 14_205_000)
+        self.assertEqual(self.radio.rx2_freq_hz, orig_rx2)
+
+
 if __name__ == "__main__":
     unittest.main()

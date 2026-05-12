@@ -6196,6 +6196,39 @@ class Radio(QObject):
                 self.set_waterfall_db_range(
                     wf_lo, wf_hi, from_user=False)
 
+    def tune_preset(self, freq_hz: int, mode: str,
+                    target_rx: int | None = None,
+                    rx_bw_hz: int | None = None) -> None:
+        """Atomic preset tune for band-panel buttons (GEN, TIME, Mem).
+
+        Phase 3.E.1 hotfix v0.5 (2026-05-12): centralizes the
+        ``set_mode + set_freq_hz`` pattern used across
+        BandSelectorPanel handlers so they all follow the focused
+        VFO without each caller having to know about the per-RX
+        setter split (``set_freq_hz`` vs ``set_rx2_freq_hz``).
+
+        Order: mode FIRST so the demod is right when the freq
+        lands -- mirrors the existing TIME-button + memory-recall
+        ordering.  Then freq.  Then optional per-mode RX BW pin
+        (used by Mem entries that lock a custom passband width).
+
+        ``target_rx``: 0 (RX1), 2 (RX2), or None (focused).
+        """
+        rx, _ = self._resolve_rx_target(target_rx)
+        self.set_mode(mode, target_rx=rx)
+        if rx == 2:
+            self.set_rx2_freq_hz(int(freq_hz))
+        else:
+            self.set_freq_hz(int(freq_hz))
+        if rx_bw_hz is not None:
+            try:
+                self.set_rx_bw(mode, int(rx_bw_hz), target_rx=rx)
+            except Exception:
+                # Rare: mode might not have a settable BW path.
+                # Best-effort -- the freq + mode tune is the
+                # important part.
+                pass
+
     def recall_band(self, band_name: str, defaults_freq: int,
                     defaults_mode: str, target_rx: int | None = None):
         """Restore freq/mode/gain saved for `band_name` if present, else

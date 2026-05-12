@@ -5959,8 +5959,10 @@ class BandPanel(GlassPanel):
         # freq lands.  Country/country-distance not used here for
         # display reasons -- the simple status-bar message is
         # plenty.
-        self.radio.set_mode(station.mode)
-        self.radio.set_freq_hz(freq_khz * 1000)
+        #
+        # Phase 3.E.1 hotfix v0.5 (2026-05-12): tune_preset routes
+        # to focused RX (so TIME on RX2 retunes RX2, not RX1).
+        self.radio.tune_preset(freq_khz * 1000, station.mode)
         # Status-bar confirmation -- which station + freq.
         try:
             self.radio.status_message.emit(
@@ -6046,8 +6048,9 @@ class BandPanel(GlassPanel):
         qs = _QS("N8SDR", "Lyra")
         # Store CURRENT entry's index + 1 so next click advances past.
         qs.setValue("bands/time_cycle_idx", new_idx + 1)
-        self.radio.set_mode(station.mode)
-        self.radio.set_freq_hz(freq_khz * 1000)
+        # Phase 3.E.1 hotfix v0.5 (2026-05-12): TIME menu picks
+        # follow focused RX via tune_preset.
+        self.radio.tune_preset(freq_khz * 1000, station.mode)
         try:
             self.radio.status_message.emit(
                 f"TIME: {station.id} on {freq_khz/1000:.3f} MHz "
@@ -6397,16 +6400,11 @@ class BandPanel(GlassPanel):
         p = self._memory.get(idx)
         if p is None:
             return
-        self.radio.set_mode(p.mode)
-        self.radio.set_freq_hz(p.freq_hz)
-        if p.rx_bw_hz is not None:
-            try:
-                self.radio.set_rx_bw(p.mode, p.rx_bw_hz)
-            except Exception:
-                # Rare: mode might not have a settable BW path.
-                # Best-effort -- the freq + mode tune is the
-                # important part.
-                pass
+        # Phase 3.E.1 hotfix v0.5 (2026-05-12): memory recall
+        # follows focused RX -- click a Mem entry while RX2 is
+        # focused, RX2 retunes (mode + freq + optional BW pin all
+        # routed atomically via tune_preset).
+        self.radio.tune_preset(p.freq_hz, p.mode, rx_bw_hz=p.rx_bw_hz)
         self._active_gen = None
         try:
             notes = f' — {p.notes}' if p.notes else ""
@@ -6534,8 +6532,10 @@ class BandPanel(GlassPanel):
     def _on_gen_clicked(self, slot_name: str):
         freq, mode = self._gen_memory[slot_name]
         self._active_gen = slot_name
-        self.radio.set_freq_hz(freq)
-        self.radio.set_mode(mode)
+        # Phase 3.E.1 hotfix v0.5 (2026-05-12): route through
+        # tune_preset so GEN slots follow focused VFO -- click
+        # GEN1 with RX2 focused -> RX2 retunes, not RX1.
+        self.radio.tune_preset(freq, mode)
 
     def _on_freq_changed(self, hz: int):
         current = band_for_freq(hz)
