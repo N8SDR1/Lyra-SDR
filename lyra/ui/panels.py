@@ -596,21 +596,21 @@ class TuningPanel(GlassPanel):
 
         # CW Pitch -- always visible per operator UX call v0.11.
         self.cw_pitch_label = QLabel("CW Pitch")
-        # Phase 3.E.1 hotfix v0.12 (2026-05-12): bumped font from
-        # 10px -> 12px per operator feedback ("we can increase the
-        # font for CW Pitch").  Sits in the inter-VFO control row
-        # alongside SUB / 1->2 / 2->1 / ⇄ which use the system
-        # default ~12-13px button font; 12px aligns the label
-        # visually with the buttons it sits among.
+        # Phase 3.E.1 hotfix v0.13 (2026-05-12): no font-size
+        # override -- the label inherits the application default
+        # (same as SUB / 1->2 / 2->1 / ⇄ pushbuttons in this row)
+        # per operator UX call "bump 12px font to same font size
+        # used in the SUB button".  Keep the cyan color +
+        # weight/letter-spacing styling, drop only the size.
         self.cw_pitch_label.setStyleSheet(
             "color: #00e5ff; font-weight: 600; "
-            "letter-spacing: 0.5px; font-size: 12px;")
+            "letter-spacing: 0.5px;")
         self.cw_pitch_spin = QSpinBox()
         self.cw_pitch_spin.setRange(200, 1500)
         self.cw_pitch_spin.setSingleStep(10)
         self.cw_pitch_spin.setSuffix(" Hz")
-        self.cw_pitch_spin.setFixedWidth(110)
-        self.cw_pitch_spin.setStyleSheet("font-size: 12px;")
+        # Wider to accommodate the larger default-font digits.
+        self.cw_pitch_spin.setFixedWidth(120)
         self.cw_pitch_spin.setValue(int(radio.cw_pitch_hz))
         self.cw_pitch_spin.setKeyboardTracking(False)
         self.cw_pitch_spin.setToolTip(
