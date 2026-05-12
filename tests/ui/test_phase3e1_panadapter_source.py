@@ -985,5 +985,75 @@ class Phase3e1DualVolSlidersAlwaysVisibleTest(unittest.TestCase):
         self.assertEqual(self.panel.vol_b_slider.value(), sval)
 
 
+class Phase3e1WheelTuneFollowsPanadapterSourceTest(unittest.TestCase):
+    """Phase 3.E.1 hotfix v0.19 (2026-05-12) -- mouse-wheel
+    over the panadapter / waterfall must tune whichever RX
+    currently owns the pane.  Mirrors the click-to-tune
+    routing that ``set_freq_from_panadapter`` already does.
+
+    Operator report 2026-05-12: "RX2 highlighted and panadapter
+    waterfall follow [it].  The Mouse tuning does not follow
+    neither does Exact/100Hz option."  Pre-fix,
+    ``panadapter_scroll_tune`` read ``self._freq_hz`` and called
+    ``set_freq_hz`` -- both RX1 only -- so wheeling over an
+    RX2-sourced pane silently moved RX1 instead.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        self.radio = Radio()
+
+    def test_wheel_tune_default_routes_to_rx1(self) -> None:
+        orig_rx2 = self.radio.rx2_freq_hz
+        start = self.radio.freq_hz
+        self.radio.panadapter_scroll_tune(1)
+        # RX1 moved by one wheel step.
+        self.assertEqual(
+            self.radio.freq_hz,
+            start + self.radio.panadapter_scroll_step_hz)
+        # RX2 untouched.
+        self.assertEqual(self.radio.rx2_freq_hz, orig_rx2)
+
+    def test_wheel_tune_routes_to_rx2_when_source_is_rx2(self) -> None:
+        self.radio.set_focused_rx(2)  # also flips panadapter source
+        orig_rx1 = self.radio.freq_hz
+        start = self.radio.rx2_freq_hz
+        self.radio.panadapter_scroll_tune(1)
+        self.assertEqual(
+            self.radio.rx2_freq_hz,
+            start + self.radio.panadapter_scroll_step_hz)
+        # RX1 untouched.
+        self.assertEqual(self.radio.freq_hz, orig_rx1)
+
+    def test_wheel_tune_rx2_negative_delta(self) -> None:
+        self.radio.set_focused_rx(2)
+        start = self.radio.rx2_freq_hz
+        self.radio.panadapter_scroll_tune(-2)
+        self.assertEqual(
+            self.radio.rx2_freq_hz,
+            start - 2 * self.radio.panadapter_scroll_step_hz)
+
+    def test_wheel_tune_rx2_respects_round_100hz(self) -> None:
+        """Exact/100Hz quantization applies to RX2 wheel-tune
+        too -- operator-reported bug ("neither does Exact/100Hz
+        option")."""
+        self.radio.set_focused_rx(2)
+        self.radio.set_panadapter_round_to_100hz(True)
+        # Start RX2 at a non-round freq.
+        self.radio.set_rx2_freq_hz(7_074_123)
+        # Use a step that produces a non-100Hz target so we can
+        # see the rounding fire.
+        self.radio.set_panadapter_scroll_step_hz(50)
+        self.radio.panadapter_scroll_tune(1)
+        # 7_074_123 + 50 = 7_074_173 -> rounded to nearest 100 Hz
+        # = 7_074_200.
+        self.assertEqual(self.radio.rx2_freq_hz, 7_074_200)
+
+
 if __name__ == "__main__":
     unittest.main()

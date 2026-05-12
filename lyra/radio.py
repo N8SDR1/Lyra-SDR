@@ -7434,16 +7434,33 @@ class Radio(QObject):
         result freq is quantized to the nearest 100 Hz — first wheel
         tick after enabling Round snaps to grid, subsequent ticks
         step cleanly by the chosen step.
+
+        Phase 3.E.1 hotfix v0.19 (2026-05-12): routes to whichever
+        RX currently owns the panadapter, mirroring
+        ``set_freq_from_panadapter`` (Phase 3.E.1 v0.1).  Operator-
+        reported bug 2026-05-12: "RX is highlighted and panadapter
+        waterfall follow the Mouse tuning does not follow neither
+        does Exact/100Hz option" -- wheel-over-panadapter on the
+        RX2 pane still wrote RX1's VFO.  Pre-fix, the operator
+        could click-to-tune RX2 fine (that path already routed),
+        but wheeling did nothing useful when focused on RX2.
         """
         if delta_units == 0:
             return
         step = self.panadapter_scroll_step_hz
-        new_freq = int(self._freq_hz) + int(delta_units) * step
+        if self._panadapter_source_rx == 2:
+            base = int(self._rx2_freq_hz)
+        else:
+            base = int(self._freq_hz)
+        new_freq = base + int(delta_units) * step
         # Apply Exact / Round 100 Hz preference (no-op when off).
         new_freq = self.round_panadapter_freq(new_freq)
-        # Clamp to HL2's tunable range (~0..30 MHz on RX1).
+        # Clamp to HL2's tunable range (~0..30 MHz on either DDC).
         new_freq = max(0, min(30_000_000, new_freq))
-        self.set_freq_hz(new_freq)
+        if self._panadapter_source_rx == 2:
+            self.set_rx2_freq_hz(new_freq)
+        else:
+            self.set_freq_hz(new_freq)
 
     def set_freq_from_panadapter(self, hz: int) -> None:
         """Set the VFO frequency from a panadapter-driven gesture
