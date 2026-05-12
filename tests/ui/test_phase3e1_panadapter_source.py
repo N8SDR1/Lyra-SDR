@@ -804,5 +804,87 @@ class Phase3e1Rx2PanadapterCwCenterTest(unittest.TestCase):
         self.assertIn(650, seen)
 
 
+class Phase3e1PassbandFollowsPanadapterSourceTest(unittest.TestCase):
+    """Phase 3.E.1 hotfix v0.14 (2026-05-12) -- the passband
+    overlay (cyan rectangle on the spectrum) must follow the
+    panadapter-source RX's mode + BW, not RX1's hard-coded.
+
+    Operator report 2026-05-12: "look at CWL on the RX2 -- we
+    dropped that extra pitch line for both Lower and Upper CW.
+    RX1 is correct.  RX2 CWU (upper CW) is correct.  RX2 CWL has
+    that line."
+
+    Root cause: ``_compute_passband`` read ``self._mode`` only,
+    so on an RX2 panadapter the passband rectangle was drawn for
+    RX1's mode (e.g. RX1=CWU at +pitch overlay) even when RX2
+    was on CWL (rectangle should be at -pitch).  Visually
+    appeared as an extra cyan rectangle on the wrong side of
+    the marker.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        self.radio = Radio()
+
+    def test_passband_for_rx2_cwu_when_source_is_rx2(self) -> None:
+        self.radio._mode_rx2 = "CWU"
+        self.radio._rx_bw_by_mode_rx2["CWU"] = 250
+        self.radio._cw_pitch_hz = 650
+        self.radio._panadapter_source_rx = 2
+        lo, hi = self.radio._compute_passband()
+        # CWU @ pitch=650, bw=250 -> half=125 -> (525, 775).
+        self.assertEqual((lo, hi), (525, 775))
+
+    def test_passband_for_rx2_cwl_when_source_is_rx2(self) -> None:
+        self.radio._mode_rx2 = "CWL"
+        self.radio._rx_bw_by_mode_rx2["CWL"] = 250
+        self.radio._cw_pitch_hz = 700
+        self.radio._panadapter_source_rx = 2
+        lo, hi = self.radio._compute_passband()
+        # CWL @ pitch=700, bw=250 -> half=125 -> (-825, -575).
+        self.assertEqual((lo, hi), (-825, -575))
+
+    def test_passband_uses_rx1_mode_when_source_is_rx1(self) -> None:
+        """Default (source = RX1) behavior preserved -- the
+        passband reads RX1's mode + BW dict."""
+        self.radio._mode = "USB"
+        self.radio._rx_bw_by_mode["USB"] = 2400
+        self.radio._mode_rx2 = "CWL"  # different from RX1
+        self.radio._panadapter_source_rx = 0
+        lo, hi = self.radio._compute_passband()
+        self.assertEqual((lo, hi), (0, 2400))
+
+    def test_passband_switches_with_panadapter_source(self) -> None:
+        self.radio._mode = "USB"
+        self.radio._rx_bw_by_mode["USB"] = 2400
+        self.radio._mode_rx2 = "CWL"
+        self.radio._rx_bw_by_mode_rx2["CWL"] = 500
+        self.radio._cw_pitch_hz = 600
+        # Source = RX1 -> USB passband.
+        self.radio._panadapter_source_rx = 0
+        self.assertEqual(self.radio._compute_passband(), (0, 2400))
+        # Source = RX2 -> CWL passband centered on -pitch.
+        self.radio._panadapter_source_rx = 2
+        self.assertEqual(self.radio._compute_passband(), (-850, -350))
+
+    def test_passband_re_emits_on_source_switch(self) -> None:
+        seen: list[tuple[int, int]] = []
+        self.radio.passband_changed.connect(
+            lambda lo, hi: seen.append((lo, hi)))
+        self.radio._mode = "USB"
+        self.radio._rx_bw_by_mode["USB"] = 2400
+        self.radio._mode_rx2 = "CWU"
+        self.radio._rx_bw_by_mode_rx2["CWU"] = 250
+        self.radio._cw_pitch_hz = 650
+        self.radio.set_panadapter_source_rx(2)
+        # CWU @ pitch=650 bw=250 -> (525, 775).
+        self.assertIn((525, 775), seen)
+
+
 if __name__ == "__main__":
     unittest.main()

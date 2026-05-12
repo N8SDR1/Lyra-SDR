@@ -2003,15 +2003,18 @@ class Radio(QObject):
             self.panadapter_source_changed.emit(new_src)
         except Exception:
             pass
-        # Phase 3.E.1 hotfix v0.12 (2026-05-12): marker offset is
-        # source-RX-aware (VFO − DDS computed for whichever RX
-        # owns the pane), so source flip needs a re-emit to move
-        # the marker.  Without this, switching focus from RX1
-        # (DIGU) to RX2 (CWU) leaves the marker drawn at RX1's
-        # offset (0) until the operator triggers another state
-        # change.
+        # Phase 3.E.1 hotfix v0.12 / v0.14 (2026-05-12): both
+        # ``marker_offset_hz`` and ``_compute_passband`` are now
+        # source-RX-aware (they read RX2's state when source=RX2).
+        # Re-emit both on source switch so the spectrum widget
+        # repositions marker AND passband rectangle to match the
+        # new pane.
         try:
             self._emit_marker_offset()
+        except Exception:
+            pass
+        try:
+            self._emit_passband()
         except Exception:
             pass
 
@@ -2577,13 +2580,14 @@ class Radio(QObject):
                     print(f"[Radio] WDSP rx2 mode-change DDS re-push: "
                           f"{exc}")
             self.mode_changed_rx2.emit(alias)
-            # Phase 3.E.1 hotfix v0.12 (2026-05-12): if the
-            # panadapter is currently sourced from RX2, the
-            # marker offset shifts on RX2 mode change (CW
-            # adds/removes the pitch offset).  Re-emit so the
-            # spectrum widget repositions the marker.
+            # Phase 3.E.1 hotfix v0.12 / v0.14 (2026-05-12): when
+            # the panadapter is sourced from RX2, both the marker
+            # offset AND the passband overlay depend on RX2's
+            # mode.  Re-emit so the spectrum widget repositions
+            # the marker AND redraws the passband rectangle.
             if self._panadapter_source_rx == 2:
                 self._emit_marker_offset()
+                self._emit_passband()
             return
 
         # RX1 mode change -- full original behavior.
@@ -2676,9 +2680,21 @@ class Radio(QObject):
                                 you. Decoupled from BW so narrow
                                 contest filters stay usable.)
           AM / DSB / FM      : center - BW/2 .. center + BW/2
+
+        Phase 3.E.1 hotfix v0.14 (2026-05-12): when the panadapter
+        is sourced from RX2, read RX2's mode + per-mode BW instead
+        of RX1's.  Operator-reported "extra pitch line on RX2 CWL"
+        (Rick 2026-05-12) was the passband overlay drawing for
+        RX1's mode (e.g. CWU at +pitch) on the RX2 panadapter,
+        appearing as an extra cyan rectangle on the wrong side of
+        the marker.
         """
-        mode = self._mode
-        bw = int(self._rx_bw_by_mode.get(mode, 2400))
+        if self._panadapter_source_rx == 2:
+            mode = self._mode_rx2
+            bw = int(self._rx_bw_by_mode_rx2.get(mode, 2400))
+        else:
+            mode = self._mode
+            bw = int(self._rx_bw_by_mode.get(mode, 2400))
         if mode in ("USB", "DIGU"):
             return (0, bw)
         if mode in ("LSB", "DIGL"):
@@ -6063,6 +6079,13 @@ class Radio(QObject):
                     self._wdsp_rx2.set_filter(low, high)
                 except Exception as exc:
                     print(f"[Radio] WDSP rx2 bw-change error: {exc}")
+            # Phase 3.E.1 hotfix v0.14 (2026-05-12): when the
+            # panadapter is sourced from RX2 and the BW just
+            # changed for RX2's active mode, re-emit the passband
+            # so the cyan rectangle resizes/repositions on screen.
+            if (mode == self._mode_rx2
+                    and self._panadapter_source_rx == 2):
+                self._emit_passband()
             self.rx_bw_changed_rx2.emit(mode, bw_int)
             return
 
