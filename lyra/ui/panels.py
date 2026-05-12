@@ -651,13 +651,13 @@ class TuningPanel(GlassPanel):
         self.ba_btn.clicked.connect(lambda: self.radio.vfo_b_to_a())
         cw_h.addWidget(self.ba_btn)
 
-        # Sync (renamed from ⇄ per operator UX call 2026-05-12).
-        # Semantically: synchronize VFOs to swapped state.
-        self.swap_btn = QPushButton("Sync")
-        self.swap_btn.setMinimumWidth(66)
+        # Swap glyph stays as-is -- operator's earlier "Sync"
+        # phrasing was just describing the button in plain text.
+        self.swap_btn = QPushButton("⇄")
+        self.swap_btn.setMinimumWidth(54)
         self.swap_btn.setToolTip(
-            "Sync (swap) RX1 and RX2.  Full state swap when SUB "
-            "is ON; freq-only otherwise."
+            "Swap RX1 and RX2.  Full state swap when SUB is ON; "
+            "freq-only otherwise."
         )
         self.swap_btn.clicked.connect(lambda: self.radio.vfo_swap())
         cw_h.addWidget(self.swap_btn)
@@ -748,31 +748,18 @@ class TuningPanel(GlassPanel):
         self.vfo_mode_combo_rx2.setCurrentText(mode)
         self.vfo_mode_combo_rx2.blockSignals(False)
 
-    # ── Phase 3.E.1 hotfix v0.10 (2026-05-12) ─────────────────────
+    # ── Phase 3.E.1 hotfix v0.11 (2026-05-12) ─────────────────────
     def _update_cw_pitch_visibility(self, *_unused) -> None:
-        """Show the CW Pitch label + spin when EITHER VFO is on CW;
-        hide them otherwise.  Only the Pitch widgets toggle -- the
-        rest of the Row 3 cluster (SUB / 1->2 / 2->1 / Sync) is
-        always visible since those are inter-VFO operations
-        independent of mode.  When Pitch hides, the surrounding
-        flanking stretches re-center the four buttons tighter.
-        Accepts and discards the mode-str arg so it can be wired
-        directly to ``mode_changed`` / ``mode_changed_rx2`` signals.
+        """No-op placeholder.
+
+        Earlier v0.9/v0.10 iterations hid CW Pitch when neither
+        VFO was on CW.  Operator UX call 2026-05-12: "leave CW
+        pitch always visible" -- so the widget stays put even in
+        non-CW modes.  Method retained so signal connections
+        (``mode_changed`` / ``mode_changed_rx2``) still resolve;
+        emptied of behavior.
         """
-        try:
-            rx1_mode = str(self.radio.mode_for_rx(0))
-        except Exception:
-            rx1_mode = ""
-        try:
-            rx2_mode = str(self.radio.mode_for_rx(2))
-        except Exception:
-            rx2_mode = ""
-        either_cw = (
-            rx1_mode in ("CWU", "CWL") or rx2_mode in ("CWU", "CWL"))
-        if hasattr(self, "cw_pitch_label"):
-            self.cw_pitch_label.setVisible(either_cw)
-        if hasattr(self, "cw_pitch_spin"):
-            self.cw_pitch_spin.setVisible(either_cw)
+        return
 
     def _on_radio_cw_pitch_changed(self, pitch_hz: int) -> None:
         """Mirror radio-side pitch changes (Settings → DSP, future

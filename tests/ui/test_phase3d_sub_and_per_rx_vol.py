@@ -202,11 +202,12 @@ class Phase3dModeFilterPanelTest(unittest.TestCase):
         self.assertTrue(hasattr(self.panel, "ba_btn"))
         self.assertTrue(hasattr(self.panel, "swap_btn"))
 
-    def test_swap_button_labeled_sync(self) -> None:
-        """Phase 3.E.1 hotfix v0.10 (2026-05-12): renamed from
-        the ``⇄`` glyph to the word "Sync" per operator UX call
-        ("CW Pitch Sub 1-2 2-1 Sync")."""
-        self.assertEqual(self.panel.swap_btn.text(), "Sync")
+    def test_swap_button_keeps_arrow_glyph(self) -> None:
+        """Phase 3.E.1 hotfix v0.11 (2026-05-12): the operator's
+        "Sync" phrasing in their mockup was descriptive text only
+        ("CW Pitch Sub 1-2 2-1 Sync") -- the button keeps the
+        ``⇄`` glyph it has worn since Phase 3.D."""
+        self.assertEqual(self.panel.swap_btn.text(), "⇄")
 
     def test_ab_button_click_invokes_radio_helper(self) -> None:
         self.radio.set_rx2_enabled(True)

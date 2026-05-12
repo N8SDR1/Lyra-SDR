@@ -692,37 +692,25 @@ class Phase3e1CwPitchOnTuningPanelTest(unittest.TestCase):
         adds it back, this test catches the dup."""
         self.assertFalse(hasattr(self.mode_filter, "cw_pitch_spin"))
 
-    def test_cw_pitch_hidden_when_neither_rx_on_cw(self) -> None:
-        """Phase 3.E.1 hotfix v0.10: only the Pitch label + spin
-        toggle now (the whole row stays since it also hosts SUB /
-        1->2 / 2->1 / Sync, which are always visible)."""
+    def test_cw_pitch_always_visible_regardless_of_mode(self) -> None:
+        """Phase 3.E.1 hotfix v0.11 (2026-05-12): operator UX call --
+        leave CW Pitch visible in all modes, not hidden outside CW.
+        Pitch is an operator-tuned parameter that operators may
+        want to set/preview while ON other modes too."""
+        # Both VFOs non-CW: still visible.
         self.radio.set_mode("USB", target_rx=0)
         self.radio.set_mode("USB", target_rx=2)
         self.tuning._update_cw_pitch_visibility()
-        self.assertTrue(self.tuning.cw_pitch_label.isHidden())
-        self.assertTrue(self.tuning.cw_pitch_spin.isHidden())
-
-    def test_cw_pitch_visible_when_rx1_on_cw(self) -> None:
+        self.assertFalse(self.tuning.cw_pitch_label.isHidden())
+        self.assertFalse(self.tuning.cw_pitch_spin.isHidden())
+        # RX1 on CW: still visible.
         self.radio.set_mode("CWU", target_rx=0)
         self.tuning._update_cw_pitch_visibility()
         self.assertFalse(self.tuning.cw_pitch_label.isHidden())
-        self.assertFalse(self.tuning.cw_pitch_spin.isHidden())
-
-    def test_cw_pitch_visible_when_rx2_on_cw(self) -> None:
-        # RX1 stays non-CW, RX2 flips to CWL.
-        self.radio.set_mode("USB", target_rx=0)
-        self.radio.set_mode("CWL", target_rx=2)
-        self.tuning._update_cw_pitch_visibility()
-        self.assertFalse(self.tuning.cw_pitch_label.isHidden())
-        self.assertFalse(self.tuning.cw_pitch_spin.isHidden())
-
-    def test_cw_pitch_hides_again_when_both_leave_cw(self) -> None:
-        self.radio.set_mode("CWU", target_rx=0)
-        self.tuning._update_cw_pitch_visibility()
-        self.assertFalse(self.tuning.cw_pitch_label.isHidden())
+        # Flip back: still visible.
         self.radio.set_mode("USB", target_rx=0)
         self.tuning._update_cw_pitch_visibility()
-        self.assertTrue(self.tuning.cw_pitch_label.isHidden())
+        self.assertFalse(self.tuning.cw_pitch_label.isHidden())
 
     def test_spin_change_writes_radio_cw_pitch(self) -> None:
         self.tuning.cw_pitch_spin.setValue(720)
