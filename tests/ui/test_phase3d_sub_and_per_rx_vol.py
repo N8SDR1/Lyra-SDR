@@ -347,30 +347,28 @@ class Phase3dDspPanelConditionalUITest(unittest.TestCase):
         self.assertTrue(hasattr(self.panel, "vol_b_slider"))
         self.assertTrue(hasattr(self.panel, "mute_b_btn"))
 
-    def test_vol_b_hidden_when_sub_off(self) -> None:
+    def test_vol_b_visible_when_sub_off(self) -> None:
+        """Phase 3.E.1 hotfix v0.16 (2026-05-12): both Vol sliders +
+        MUTE buttons are now ALWAYS visible regardless of SUB
+        state.  Operator UX call: "two volume sliders and mutes
+        always visible".  Vol-A binds to RX1, Vol-B to RX2 --
+        direct addressing, no focus-based routing."""
         self.radio.set_rx2_enabled(False)
-        self.assertFalse(self.panel.vol_b_slider.isVisible())
-        self.assertFalse(self.panel.mute_b_btn.isVisible())
-        self.assertEqual(self.panel.vol_label_caption.text(), "Vol")
+        self.assertFalse(self.panel.vol_b_slider.isHidden())
+        self.assertFalse(self.panel.mute_b_btn.isHidden())
+        self.assertEqual(self.panel.vol_label_caption.text(), "Vol-A")
         self.assertEqual(self.panel.mute_btn.text(), "MUTE")
 
     def test_vol_b_visible_when_sub_on(self) -> None:
-        # Use show() so isVisible() returns sane values in headless
-        # Qt; isVisibleTo(parent) bypasses the QApplication show
-        # state.
-        self.panel.show()
         self.radio.set_rx2_enabled(True)
-        try:
-            self.assertTrue(self.panel.vol_b_slider.isVisible())
-            self.assertTrue(self.panel.mute_b_btn.isVisible())
-            self.assertEqual(self.panel.vol_label_caption.text(), "Vol-A")
-            # MUTE button text stays "MUTE" in both SUB states --
-            # position (right of each Vol slider) carries the
-            # per-RX meaning, no -A / -B suffix needed.
-            self.assertEqual(self.panel.mute_btn.text(), "MUTE")
-            self.assertEqual(self.panel.mute_b_btn.text(), "MUTE")
-        finally:
-            self.panel.hide()
+        self.assertFalse(self.panel.vol_b_slider.isHidden())
+        self.assertFalse(self.panel.mute_b_btn.isHidden())
+        self.assertEqual(self.panel.vol_label_caption.text(), "Vol-A")
+        # MUTE button text stays "MUTE" in both SUB states --
+        # position (right of each Vol slider) carries the
+        # per-RX meaning, no -A / -B suffix needed.
+        self.assertEqual(self.panel.mute_btn.text(), "MUTE")
+        self.assertEqual(self.panel.mute_b_btn.text(), "MUTE")
 
     def test_vol_a_slider_writes_rx1(self) -> None:
         # The Vol slider always targets RX1 (target_rx=0).

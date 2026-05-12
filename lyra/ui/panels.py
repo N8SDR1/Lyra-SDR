@@ -2037,13 +2037,21 @@ class DspPanel(GlassPanel):
         #   At slider= 50 → ×0.25  (−12 dB — traditional "half")
         #   At slider= 25 → ×0.0625(−24 dB — quiet listening)
         #   At slider= 10 → ×0.01  (−40 dB — background)
-        # Phase 3.D v0.1: the existing Vol slider always drives
-        # RX1's volume.  When SUB is enabled, a sibling "Vol-B"
-        # slider appears immediately after for RX2's volume; the
-        # label flips from "Vol" → "Vol-A" so the per-RX role is
-        # clear.  When SUB is OFF, the Vol-B widgets are hidden and
-        # the label is plain "Vol".
-        self.vol_label_caption = QLabel("Vol")
+        # Phase 3.E.1 hotfix v0.16 (2026-05-12): Vol-A + Vol-B are
+        # ALWAYS visible (operator UX call -- "do you think it
+        # would be better just have two volume sliders and mutes
+        # always visible?"  -> "A it is").  Vol-A is hard-wired
+        # to RX1, Vol-B to RX2 in both SUB-on and SUB-off modes
+        # -- direct addressing, no focus-routing indirection.
+        # When SUB is off only one RX is audible (the focused
+        # one), but the operator can still pre-set the
+        # non-audible RX's level for when they flip focus or
+        # enable SUB.  v0.15's focus-routing helpers and v0.3's
+        # mirror still cooperate for "no level jump on focus
+        # flip with SUB off" -- the mirror keeps Vol-A and Vol-B
+        # tracking each other across focus flips so the audible
+        # level stays put.
+        self.vol_label_caption = QLabel("Vol-A")
         levels.addWidget(self.vol_label_caption)
         self.vol_slider = QSlider(Qt.Horizontal)
         self.vol_slider.setObjectName("vol_slider")
@@ -2076,17 +2084,18 @@ class DspPanel(GlassPanel):
         self.mute_btn.setToolTip(
             "Silence output without changing the Volume slider. "
             "Click again to resume at the current volume setting.")
-        # Phase 3.E.1 hotfix v0.15 (2026-05-12): mute targets focused
-        # RX when SUB is off (same rationale as Vol-A); RX1 when SUB
-        # is on (Vol-A / Mute-A pair).
+        # Phase 3.E.1 hotfix v0.16 (2026-05-12): direct RX1 wiring.
+        # Vol-A / Mute-A pair always targets RX1 (matches the
+        # always-visible Vol-B / Mute-B that targets RX2).
         self.mute_btn.toggled.connect(
-            lambda on: self.radio.set_muted(
-                bool(on), target_rx=self._sub_off_focused_or_rx1()))
+            lambda on: self.radio.set_muted(bool(on), target_rx=0))
         levels.addWidget(self.mute_btn)
 
         levels.addSpacing(8)
 
-        # Vol-B (RX2) -- hidden until SUB is enabled.
+        # Vol-B (RX2) -- always visible per Phase 3.E.1 hotfix v0.16
+        # (operator UX 2026-05-12 -- "two volume sliders and mutes
+        # always visible").  Wired directly to RX2.
         self.vol_b_label_caption = QLabel("Vol-B")
         levels.addWidget(self.vol_b_label_caption)
         self.vol_b_slider = QSlider(Qt.Horizontal)
@@ -2111,8 +2120,8 @@ class DspPanel(GlassPanel):
         # MUTE since position (immediately right of its Vol slider)
         # carries the per-RX association unambiguously -- no need
         # for "-A" / "-B" suffix on the button text (operator UX
-        # call 2026-05-12).  Hidden when SUB is OFF (collapses via
-        # setVisible from ``_on_dispatch_state_changed``).
+        # call 2026-05-12).  Always visible per Phase 3.E.1 hotfix
+        # v0.16.
         self.mute_b_btn = QPushButton("MUTE")
         self.mute_b_btn.setObjectName("dsp_btn")
         self.mute_b_btn.setCheckable(True)
@@ -3019,22 +3028,17 @@ class DspPanel(GlassPanel):
         radio.muted_changed_rx2.connect(self._on_muted_changed_rx2)
         radio.dispatch_state_changed.connect(
             self._on_dispatch_state_changed)
-        # Initial paint of the SUB-conditional surface.
-        self._on_dispatch_state_changed(radio.dispatch_state)
-        # Phase 3.E.1 hotfix v0.15 (2026-05-12): when SUB is off and
-        # focus flips RX1↔RX2, the Vol slider's target follows the
-        # focused RX -- and we need to refresh the slider position
-        # to reflect the newly-focused RX's volume so the operator
-        # sees the level they're actually listening to.  The v0.3
-        # mirror in ``Radio.set_focused_rx`` keeps levels in sync
-        # so this is usually a no-op visually, but if anything
-        # diverges (rare race), the refresh keeps the slider
-        # honest.
-        try:
-            radio.focused_rx_changed.connect(
-                self._on_focused_rx_changed_for_vol)
-        except Exception:
-            pass
+        # Phase 3.E.1 hotfix v0.16 (2026-05-12): with both Vol
+        # sliders always visible and directly wired (Vol-A->RX1,
+        # Vol-B->RX2), no focus-based slider re-routing is needed
+        # -- the v0.15 ``_on_focused_rx_changed_for_vol`` helper
+        # is gone.  The v0.3 mirror in ``Radio.set_focused_rx``
+        # still cooperates: it copies the previously-audible
+        # RX's vol forward to the newly-focused RX on focus flip
+        # when SUB is off, so audible level doesn't jump.  Both
+        # Vol slider positions update via the standard
+        # ``volume_changed`` / ``volume_changed_rx2`` signals
+        # emitted by that mirror.
         # Mute + Auto-LNA state sync (signals driven by Radio — covers
         # QSettings load + any future TCI / CAT mute command).
         radio.muted_changed.connect(self._on_muted_changed)
@@ -3065,46 +3069,25 @@ class DspPanel(GlassPanel):
         return int(round(frac * 100))
 
     def _on_vol_slider(self, slider_val: int):
-        """User dragged the Vol slider → curve → volume.
+        """User dragged the Vol-A slider → curve → RX1 volume.
 
-        Phase 3.E.1 hotfix v0.15 (2026-05-12): when SUB is OFF the
-        slider targets the FOCUSED RX (whichever is audible per
-        the SUB-off focus-routing in commit ``21623d9``).  Without
-        this, focusing RX2 with SUB off left the operator unable
-        to control the audible RX's volume: Vol-B is hidden in
-        SUB-off mode, and Vol-A was hard-wired to RX1.  Operator
-        report 2026-05-12: "if you click RX2 and don't have SUB
-        enabled you have no way to control RX volume.. OOPSS".
-
-        When SUB is ON, Vol-A still targets RX1 explicitly (the
-        Vol-B sibling slider drives RX2 in stereo-split mode --
-        see ``_on_vol_b_slider``).
+        Phase 3.E.1 hotfix v0.16 (2026-05-12): direct RX1
+        addressing.  Vol-A is the RX1 volume control regardless of
+        SUB state -- under "two volume sliders always visible"
+        UX, no focus-based routing is needed.  Vol-B (sibling
+        slider, also always visible) drives RX2.
         """
         self.vol_label.setText(f"{slider_val}%")
-        target = self._sub_off_focused_or_rx1()
         self.radio.set_volume(
-            self._slider_to_volume(slider_val), target_rx=target)
+            self._slider_to_volume(slider_val), target_rx=0)
 
     def _on_vol_b_slider(self, slider_val: int):
-        """RX2 volume slider drag — perceptual curve → ``set_volume(
-        target_rx=2)``.  Phase 3.D v0.1."""
+        """User dragged the Vol-B slider → curve → RX2 volume.
+        Phase 3.D v0.1; Phase 3.E.1 hotfix v0.16 made the widget
+        always visible."""
         self.vol_b_label.setText(f"{slider_val}%")
         self.radio.set_volume(
             self._slider_to_volume(slider_val), target_rx=2)
-
-    def _sub_off_focused_or_rx1(self) -> int:
-        """Phase 3.E.1 hotfix v0.15 (2026-05-12): resolve which RX
-        the Vol-A slider / MUTE button should target.
-
-        SUB OFF -> focused RX (the audible one).
-        SUB ON  -> RX1 (Vol-A is RX1's per consensus plan §6.8).
-        """
-        try:
-            if self.radio.dispatch_state.rx2_enabled:
-                return 0
-            return int(getattr(self.radio, "focused_rx", 0))
-        except Exception:
-            return 0
 
     # ── LNA linearity zones ─────────────────────────────────────
     # AD9866 PGA linearity behaviour (HL2 community consensus):
@@ -3160,102 +3143,46 @@ class DspPanel(GlassPanel):
         self.lna_slider.setStyleSheet("")
 
     def _on_volume_changed(self, v: float):
-        """Radio RX1 volume changed elsewhere — update UI.
-
-        Phase 3.E.1 hotfix v0.15 (2026-05-12): defers slider
-        position to ``_refresh_vol_slider_for_focus`` so the
-        Vol-A slider reflects whichever RX is audible under the
-        current (SUB, focus) state product.  In SUB-on mode that's
-        always RX1 (= legacy behavior).  In SUB-off-focus-RX2 the
-        slider tracks RX2 instead -- so the slider that the
-        operator sees actually controls the audio they hear.
-        """
-        self._refresh_vol_slider_for_focus()
+        """Radio RX1 volume changed elsewhere (QSettings load,
+        future CAT/TCI) — convert multiplier back to slider
+        position via inverse curve and update Vol-A slider.
+        Phase 3.E.1 hotfix v0.16: direct RX1 binding regardless
+        of SUB state."""
+        target = self._volume_to_slider(v)
+        self.vol_label.setText(f"{target}%")
+        if self.vol_slider.value() != target:
+            self.vol_slider.blockSignals(True)
+            self.vol_slider.setValue(target)
+            self.vol_slider.blockSignals(False)
 
     def _on_volume_changed_rx2(self, v: float):
-        """RX2 volume changed elsewhere (QSettings load, future
-        CAT/TCI) — update Vol-B slider + label.  Also defers to
-        ``_refresh_vol_slider_for_focus`` so Vol-A reflects RX2
-        when SUB-off-focus-RX2."""
+        """Radio RX2 volume changed elsewhere — update Vol-B
+        slider + label.  Phase 3.E.1 hotfix v0.16: direct RX2
+        binding regardless of SUB state."""
         target = self._volume_to_slider(v)
         self.vol_b_label.setText(f"{target}%")
         if self.vol_b_slider.value() != target:
             self.vol_b_slider.blockSignals(True)
             self.vol_b_slider.setValue(target)
             self.vol_b_slider.blockSignals(False)
-        self._refresh_vol_slider_for_focus()
 
     def _on_muted_changed_rx2(self, muted: bool):
-        """RX2 mute changed elsewhere -- mirror Mute-B button state.
-        Also defers to ``_refresh_vol_slider_for_focus`` so the
-        Vol-A MUTE button reflects RX2's mute state when SUB-off-
-        focus-RX2."""
+        """Radio RX2 mute changed elsewhere -- mirror Mute-B
+        button state."""
         if self.mute_b_btn.isChecked() != muted:
             self.mute_b_btn.blockSignals(True)
             self.mute_b_btn.setChecked(muted)
             self.mute_b_btn.blockSignals(False)
-        self._refresh_vol_slider_for_focus()
 
     def _on_dispatch_state_changed(self, state) -> None:
-        """Phase 3.D v0.1: toggle per-RX Vol/Mute UI visibility based
-        on ``state.rx2_enabled``.  Re-labels the Vol-A caption when
-        SUB is on (Vol → Vol-A) so it pairs with the visible Vol-B
-        slider.  MUTE buttons keep plain "MUTE" text in both states
-        -- position (immediately right of each Vol slider) carries
-        the per-RX meaning unambiguously (operator UX call
-        2026-05-12)."""
-        on = bool(state.rx2_enabled)
-        # Vol-A vs Vol caption (Vol-B is a separate widget with a
-        # static "Vol-B" label).
-        self.vol_label_caption.setText("Vol-A" if on else "Vol")
-        # RX2 sibling widgets.
-        self.vol_b_label_caption.setVisible(on)
-        self.vol_b_slider.setVisible(on)
-        self.vol_b_label.setVisible(on)
-        self.mute_b_btn.setVisible(on)
-        # Phase 3.E.1 hotfix v0.15 (2026-05-12): when SUB just went
-        # off, the Vol-A slider now targets the focused RX -- so
-        # refresh its position + the mute checked state from
-        # whichever RX is currently focused.
-        if not on:
-            self._refresh_vol_slider_for_focus()
-
-    def _on_focused_rx_changed_for_vol(self, _rx_id: int) -> None:
-        """Phase 3.E.1 hotfix v0.15 (2026-05-12): focus flip with
-        SUB off shifts the Vol-A target.  Refresh slider + mute to
-        reflect the newly-focused RX's level."""
-        # Only act in SUB-off mode; under SUB Vol-A always reads RX1.
-        try:
-            if self.radio.dispatch_state.rx2_enabled:
-                return
-        except Exception:
-            return
-        self._refresh_vol_slider_for_focus()
-
-    def _refresh_vol_slider_for_focus(self) -> None:
-        """Read the active RX's vol/mute state and push it into the
-        Vol-A slider + MUTE button without retriggering their
-        change handlers.  ``_sub_off_focused_or_rx1`` picks RX1
-        when SUB is on, focused when SUB is off."""
-        rx = self._sub_off_focused_or_rx1()
-        try:
-            cur_vol = float(self.radio.volume_for_rx(rx))
-        except Exception:
-            cur_vol = float(self.radio.volume)
-        try:
-            cur_mute = bool(self.radio.muted_for_rx(rx))
-        except Exception:
-            cur_mute = bool(self.radio.muted)
-        sval = self._volume_to_slider(cur_vol)
-        if self.vol_slider.value() != sval:
-            self.vol_slider.blockSignals(True)
-            self.vol_slider.setValue(sval)
-            self.vol_slider.blockSignals(False)
-            self.vol_label.setText(f"{sval}%")
-        if self.mute_btn.isChecked() != cur_mute:
-            self.mute_btn.blockSignals(True)
-            self.mute_btn.setChecked(cur_mute)
-            self.mute_btn.blockSignals(False)
+        """Phase 3.E.1 hotfix v0.16 (2026-05-12): with the
+        "two-sliders-always-visible" UX, this handler is now
+        a no-op for the levels row.  Kept as the dispatch-state
+        listener anchor in case future SUB-driven UI changes
+        need a hook here (e.g. cosmetic dim of the non-audible
+        side in SUB-off mode -- operator deferred that to a
+        later iteration)."""
+        return
 
     # ── Balance slider (Phase 1: pan a single mono RX across L/R) ───
     # Future RX2 / Split expansion: when a second receiver lands, the
@@ -3368,10 +3295,13 @@ class DspPanel(GlassPanel):
 
     def _on_muted_changed(self, muted: bool):
         """Radio RX1 mute state changed (e.g., via TCI, QSettings
-        load).  Phase 3.E.1 hotfix v0.15: defers to
-        ``_refresh_vol_slider_for_focus`` so MUTE button tracks
-        the audible RX under the current (SUB, focus) state."""
-        self._refresh_vol_slider_for_focus()
+        load).  Phase 3.E.1 hotfix v0.16: direct RX1 binding --
+        keep the Mute-A button in sync without firing our own
+        clicked."""
+        if self.mute_btn.isChecked() != muted:
+            self.mute_btn.blockSignals(True)
+            self.mute_btn.setChecked(muted)
+            self.mute_btn.blockSignals(False)
 
     def _on_lna_auto_changed(self, on: bool):
         """Radio Auto-LNA state changed — keep the button in sync.

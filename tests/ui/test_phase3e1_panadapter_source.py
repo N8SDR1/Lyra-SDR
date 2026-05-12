@@ -886,18 +886,19 @@ class Phase3e1PassbandFollowsPanadapterSourceTest(unittest.TestCase):
         self.assertIn((525, 775), seen)
 
 
-class Phase3e1VolSliderFollowsFocusWhenSubOffTest(unittest.TestCase):
-    """Phase 3.E.1 hotfix v0.15 (2026-05-12) -- when SUB is OFF the
-    Vol-A slider + MUTE button target the FOCUSED RX, not always
-    RX1.  Operator report 2026-05-12: "if you click RX2 and don't
-    have SUB enabled you have no way to control RX volume.. OOPSS".
+class Phase3e1DualVolSlidersAlwaysVisibleTest(unittest.TestCase):
+    """Phase 3.E.1 hotfix v0.16 (2026-05-12) -- always-visible
+    Vol-A + Vol-B with direct addressing.
 
-    Vol-B / Mute-B are hidden when SUB is off (consensus plan
-    §6.8), so without this fix focusing RX2 with SUB off left
-    the operator with no working volume control for the audible
-    RX.  Fix: the single visible Vol-A slider routes to whatever
-    RX is currently audible (= focused RX when SUB is off, RX1
-    when SUB is on).
+    Operator UX call 2026-05-12: "do you think it would be better
+    just have two volume sliders and mutes always visible?" ->
+    "A it is".  Both volume sliders and both mute buttons are
+    now visible regardless of SUB state.  Vol-A is hard-wired to
+    RX1, Vol-B to RX2 in both modes.
+
+    The v0.3 mirror in ``Radio.set_focused_rx`` still keeps
+    levels in sync across focus flips when SUB is off so the
+    audible level doesn't jump.
     """
 
     @classmethod
@@ -911,69 +912,73 @@ class Phase3e1VolSliderFollowsFocusWhenSubOffTest(unittest.TestCase):
         self.radio = Radio()
         self.panel = DspPanel(self.radio)
 
-    def test_vol_slider_writes_to_rx1_when_sub_off_focus_rx1(self) -> None:
-        # SUB off, default focus RX1.
-        self.radio.set_volume(0.4, target_rx=2)  # RX2 starts at 0.4
-        self.panel.vol_slider.setValue(50)
-        # Slider should write to RX1.
-        self.assertAlmostEqual(self.radio.volume_for_rx(0),
-                                self.panel._slider_to_volume(50),
-                                places=6)
-        # RX2 untouched at 0.4.
-        self.assertAlmostEqual(self.radio.volume_for_rx(2), 0.4,
-                                places=6)
+    def test_vol_b_widgets_visible_with_sub_off(self) -> None:
+        """Both Vol-A/Vol-B + Mute-A/Mute-B widgets always exist
+        and aren't hidden when SUB is off."""
+        self.assertFalse(self.panel.vol_b_slider.isHidden())
+        self.assertFalse(self.panel.vol_b_label.isHidden())
+        self.assertFalse(self.panel.vol_b_label_caption.isHidden())
+        self.assertFalse(self.panel.mute_b_btn.isHidden())
 
-    def test_vol_slider_writes_to_rx2_when_sub_off_focus_rx2(self) -> None:
+    def test_vol_b_widgets_visible_with_sub_on(self) -> None:
+        self.radio.set_rx2_enabled(True)
+        self.assertFalse(self.panel.vol_b_slider.isHidden())
+        self.assertFalse(self.panel.mute_b_btn.isHidden())
+
+    def test_vol_a_label_says_vol_a(self) -> None:
+        """Label is "Vol-A" always (no more "Vol" -> "Vol-A"
+        relabel based on SUB state)."""
+        self.assertEqual(self.panel.vol_label_caption.text(), "Vol-A")
+        self.radio.set_rx2_enabled(True)
+        self.assertEqual(self.panel.vol_label_caption.text(), "Vol-A")
+
+    def test_vol_a_slider_writes_rx1_always(self) -> None:
+        """Vol-A always targets RX1, even when SUB is off and
+        focus is RX2.  The slider is just the RX1 control."""
+        # SUB off, focus RX2 (the v0.15 case that needed focus
+        # routing -- no longer needed with direct addressing).
         self.radio.set_focused_rx(2)
-        # Set RX1 vol so we can confirm it isn't written.
-        orig_rx1 = self.radio.volume_for_rx(0)
+        orig_rx2 = self.radio.volume_for_rx(2)
         self.panel.vol_slider.setValue(40)
-        self.assertAlmostEqual(self.radio.volume_for_rx(2),
-                                self.panel._slider_to_volume(40),
-                                places=6)
+        self.assertAlmostEqual(
+            self.radio.volume_for_rx(0),
+            self.panel._slider_to_volume(40), places=6)
+        # RX2 untouched.
+        self.assertAlmostEqual(
+            self.radio.volume_for_rx(2), orig_rx2, places=6)
+
+    def test_vol_b_slider_writes_rx2_always(self) -> None:
+        orig_rx1 = self.radio.volume_for_rx(0)
+        self.panel.vol_b_slider.setValue(75)
+        self.assertAlmostEqual(
+            self.radio.volume_for_rx(2),
+            self.panel._slider_to_volume(75), places=6)
         # RX1 untouched.
         self.assertAlmostEqual(self.radio.volume_for_rx(0),
                                 orig_rx1, places=6)
 
-    def test_vol_slider_writes_to_rx1_when_sub_on_regardless_of_focus(
-        self,
-    ) -> None:
-        """When SUB is on, Vol-A always = RX1 (consensus plan §6.8).
-        Vol-B (separate slider, visible) is for RX2."""
-        self.radio.set_rx2_enabled(True)
-        self.radio.set_focused_rx(2)
-        # Mark RX2 vol to be sure it isn't written.
-        self.radio.set_volume(0.7, target_rx=2)
-        self.panel.vol_slider.setValue(35)
-        self.assertAlmostEqual(self.radio.volume_for_rx(0),
-                                self.panel._slider_to_volume(35),
-                                places=6)
-        # RX2 still at 0.7.
-        self.assertAlmostEqual(self.radio.volume_for_rx(2), 0.7,
-                                places=6)
-
-    def test_mute_button_writes_to_focused_rx_when_sub_off(self) -> None:
-        self.radio.set_focused_rx(2)
-        # Programmatically check the button does the same routing
-        # as the slider.
+    def test_mute_a_writes_rx1_mute_b_writes_rx2(self) -> None:
         self.panel.mute_btn.setChecked(True)
+        self.assertTrue(self.radio.muted_for_rx(0))
+        self.assertFalse(self.radio.muted_for_rx(2))
+        self.panel.mute_b_btn.setChecked(True)
         self.assertTrue(self.radio.muted_for_rx(2))
-        # RX1 untouched.
-        self.assertFalse(self.radio.muted_for_rx(0))
 
-    def test_focus_flip_refreshes_vol_slider_position(self) -> None:
-        """SUB off, focus RX1 at vol=0.1, focus flips to RX2
-        which has its own vol -- slider should update to reflect
-        RX2's level (= 0.1 after the v0.3 mirror, but the
-        invariant is "slider matches focused RX")."""
-        self.radio.set_volume(0.1, target_rx=0)
-        # Diverge RX2 explicitly so we can see the slider follow.
+    def test_focus_flip_with_sub_off_still_mirrors_levels(self) -> None:
+        """The v0.3 mirror in ``Radio.set_focused_rx`` still
+        copies the previously-focused RX's vol -> the newly-
+        focused RX when SUB is off.  This avoids an audible
+        level jump when the operator flips focus."""
+        self.radio.set_volume(0.2, target_rx=0)
+        # Diverge RX2 to ensure mirror does something visible.
         self.radio.set_volume(0.8, target_rx=2)
         self.radio.set_focused_rx(2)
-        # The v0.3 mirror copies RX1 vol -> RX2 on focus flip, so
-        # RX2 is now at 0.1 too.  Slider should also be at 0.1.
-        sval = self.panel._volume_to_slider(self.radio.volume_for_rx(2))
-        self.assertEqual(self.panel.vol_slider.value(), sval)
+        # RX2's vol mirrored from RX1's 0.2.
+        self.assertAlmostEqual(self.radio.volume_for_rx(2), 0.2,
+                                places=6)
+        # Vol-B slider updated via volume_changed_rx2 signal.
+        sval = self.panel._volume_to_slider(0.2)
+        self.assertEqual(self.panel.vol_b_slider.value(), sval)
 
 
 if __name__ == "__main__":
