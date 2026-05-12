@@ -1910,7 +1910,58 @@ class Radio(QObject):
             )
         if new_focus == self._focused_rx:
             return
+        prev_focus = int(self._focused_rx)
         self._focused_rx = new_focus
+        # ── Phase 3.E.1 hotfix v0.3 (2026-05-12): SUB-off vol mirror ──
+        # Operator UX (Rick 2026-05-12): "if you had it turned up to
+        # hear something and switch over or restart and flip back,
+        # could be nasty -- yes that might be a good safety net."
+        #
+        # When SUB is off, only the focused RX is audible.  Carrying
+        # the previously-active volume/mute forward to the newly-
+        # focused RX ensures the operator's working level (whatever
+        # they last set) stays in force across the focus flip --
+        # there is no sudden level jump from a stale ``_volume_rx2``
+        # default (0.5) when they click VFO B with Vol-A trimmed
+        # down to 0.2, and no surprise blast when they click VFO A
+        # after running RX2 hot.
+        #
+        # When SUB is on, both RXes are audible simultaneously and
+        # the per-RX Vol-A / Vol-B sliders are operator-independent
+        # by design (consensus plan §6.8) -- skip the mirror.
+        # Scope: volume + mute ONLY.  AF gain is the pre-AGC makeup
+        # reference level (not an output stage gain), so a stale
+        # ``_af_gain_db_rx2`` does NOT produce the "surprise blast"
+        # the safety net targets -- the AGC compresses the result
+        # back to its target level regardless of AF Gain setting.
+        # Per-RX AF gain independence is the existing Phase 3.C
+        # contract; the mirror leaves it alone.
+        try:
+            if not self._dispatch_state.rx2_enabled:
+                if prev_focus == 0 and new_focus == 2:
+                    self._volume_rx2 = float(self._volume)
+                    self._muted_rx2 = bool(self._muted)
+                    try:
+                        self.volume_changed_rx2.emit(self._volume_rx2)
+                    except Exception:
+                        pass
+                    try:
+                        self.muted_changed_rx2.emit(self._muted_rx2)
+                    except Exception:
+                        pass
+                elif prev_focus == 2 and new_focus == 0:
+                    self._volume = float(self._volume_rx2)
+                    self._muted = bool(self._muted_rx2)
+                    try:
+                        self.volume_changed.emit(self._volume)
+                    except Exception:
+                        pass
+                    try:
+                        self.muted_changed.emit(self._muted)
+                    except Exception:
+                        pass
+        except Exception as exc:
+            print(f"[Radio] focus-flip vol mirror error: {exc}")
         try:
             self.focused_rx_changed.emit(new_focus)
         except Exception:
@@ -9113,6 +9164,83 @@ class Radio(QObject):
             if self._wdsp_agc_meter_skip >= 8:
                 self._wdsp_agc_meter_skip = 0
                 self.agc_action_db.emit(self._wdsp_rx.get_agc_gain_db())
+        except Exception:
+            pass
+
+    def _do_demod_wdsp_rx2_only(self, rx2_iq) -> None:
+        """Phase 3.E.1 hotfix v0.2 (2026-05-12) — RX2-only audio path.
+
+        Called when SUB (rx2_enabled) is OFF but the operator has
+        focused RX2 (clicked VFO B's LED, hit Ctrl+2, or middle-
+        clicked the panadapter onto VFO B).  The operator's mental
+        model: "SUB off = mono, focused VFO is what I hear."  So
+        focusing RX2 with SUB off should route RX2's demod audio
+        to the sink (center / mono), not RX1's.
+
+        RX2's WDSP pan is already 0.5 (center) when SUB is off
+        per ``_apply_rx2_routing`` -- so RX2's WDSP output is
+        already mono-on-stereo and this method just hands it
+        through the same output stage as ``_do_demod_wdsp`` does
+        for RX1.  No pan changes needed; the routing helper
+        already covered the (rx2_enabled=False) case.
+
+        Skips the §14.6 captured-profile IQ-domain pre-pass --
+        that engine lives on RX1 only in Phase 3 (operator UI for
+        a per-RX2 profile is a Phase 4 deliverable).  RX2 audio
+        runs clean through WDSP.
+
+        Uses RX2's own volume / mute state (``_volume_rx2`` /
+        ``_muted_rx2``) so the Vol-A slider doesn't surreptitiously
+        gate audio that's now sourced from RX2.  In the SUB-off
+        path, Vol-A on the panel actually represents "main audio
+        volume" -- whichever RX is focused -- so the per-RX state
+        mirror from Phase 3.D's SUB-rising-edge handler keeps the
+        two in sync until the operator enables SUB.
+        """
+        if self._wdsp_rx2 is None:
+            return
+        try:
+            audio = self._wdsp_rx2.process(rx2_iq)
+        except Exception as exc:
+            print(f"[Radio] WDSP rx2-only process error: {exc}")
+            return
+        if audio is None or audio.size == 0:
+            return
+        # Use RX2's volume/mute -- focused RX dictates which level
+        # state applies in the SUB-off single-source path.
+        if self._muted_rx2:
+            audio = audio * 0.0
+        else:
+            v = float(self._volume_rx2)
+            if v != 1.0:
+                audio = audio * np.float32(v)
+        # Safety clamp -- same rationale as ``_do_demod_wdsp``.
+        np.clip(audio, -1.0, 1.0, out=audio)
+        # BIN runs on the focused-RX audio path too.
+        if self._bin_enabled and self._binaural.enabled:
+            try:
+                mono_in = audio[:, 0] if audio.ndim == 2 else audio
+                bin_out = self._binaural.process(mono_in)
+                if bin_out.ndim == 2 and bin_out.shape[1] == 2:
+                    audio = bin_out.astype(np.float32, copy=False)
+            except Exception as exc:
+                print(f"[Radio] WDSP BIN error (rx2-only): {exc}")
+        try:
+            self._audio_sink.write(audio)
+        except Exception as exc:
+            print(f"[Radio] WDSP audio sink error (rx2-only): {exc}")
+        try:
+            self.audio_for_tci_emit.emit(audio)
+        except Exception:
+            pass
+        # AGC gain readout from the channel actually feeding the
+        # speakers, so the meter reflects what the operator hears.
+        try:
+            self._wdsp_agc_meter_skip = (
+                getattr(self, "_wdsp_agc_meter_skip", 0) + 1)
+            if self._wdsp_agc_meter_skip >= 8:
+                self._wdsp_agc_meter_skip = 0
+                self.agc_action_db.emit(self._wdsp_rx2.get_agc_gain_db())
         except Exception:
             pass
 

@@ -205,5 +205,71 @@ class Phase3e1WorkerFlushTest(unittest.TestCase):
                 pass
 
 
+class Phase3e1SubOffFocusFlipMirrorTest(unittest.TestCase):
+    """Phase 3.E.1 hotfix v0.3 (2026-05-12) -- when SUB is OFF, the
+    focused RX is the only audible source, so its Vol/Mute slider
+    IS the operative output control.  Flipping focus must carry
+    the previously-active level forward so the operator never gets
+    a surprise blast from a stale per-RX default.
+
+    Per-RX volume + mute independence is preserved when SUB is ON.
+    AF gain is NOT mirrored -- it's a pre-AGC reference and the
+    Phase 3.C per-RX-AF-gain contract still holds.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        self.radio = Radio()
+
+    def test_sub_off_focus_flip_rx1_to_rx2_mirrors_volume(self) -> None:
+        self.radio.set_volume(0.2)  # operator trims RX1 way down
+        self.radio.set_focused_rx(2)
+        self.assertAlmostEqual(self.radio._volume_rx2, 0.2, places=6)
+
+    def test_sub_off_focus_flip_rx2_to_rx1_mirrors_volume(self) -> None:
+        self.radio.set_focused_rx(2)
+        # Operator cranks RX2 hot while focused on it.
+        self.radio.set_volume(0.9, target_rx=2)
+        self.radio.set_focused_rx(0)
+        self.assertAlmostEqual(self.radio._volume, 0.9, places=6)
+
+    def test_sub_off_focus_flip_mirrors_mute(self) -> None:
+        self.radio.set_muted(True)
+        self.radio.set_focused_rx(2)
+        self.assertTrue(self.radio._muted_rx2)
+        # And unmuting on RX2 follows back to RX1.
+        self.radio.set_muted(False, target_rx=2)
+        self.radio.set_focused_rx(0)
+        self.assertFalse(self.radio._muted)
+
+    def test_sub_on_focus_flip_does_NOT_mirror_volume(self) -> None:
+        """Per consensus plan §6.8, with SUB enabled the operator
+        sees separate Vol-A / Vol-B sliders and they're independent
+        by design."""
+        self.radio.set_rx2_enabled(True)
+        # SUB-on rising edge already mirrored RX1->RX2; now diverge.
+        self.radio.set_volume(0.3, target_rx=0)
+        self.radio.set_volume(0.7, target_rx=2)
+        self.radio.set_focused_rx(2)
+        # Both values must be preserved.
+        self.assertAlmostEqual(self.radio._volume, 0.3, places=6)
+        self.assertAlmostEqual(self.radio._volume_rx2, 0.7, places=6)
+
+    def test_sub_off_focus_flip_does_NOT_mirror_af_gain(self) -> None:
+        """Phase 3.C per-RX AF gain independence holds even with
+        SUB off.  AF gain is pre-AGC reference, doesn't drive the
+        ``surprise blast`` safety concern that volume does."""
+        self.radio.set_af_gain_db(15, target_rx=0)
+        self.radio.set_af_gain_db(40, target_rx=2)
+        self.radio.set_focused_rx(2)
+        self.assertEqual(self.radio._af_gain_db, 15)
+        self.assertEqual(self.radio._af_gain_db_rx2, 40)
+
+
 if __name__ == "__main__":
     unittest.main()

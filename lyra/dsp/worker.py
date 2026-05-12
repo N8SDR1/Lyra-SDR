@@ -636,12 +636,28 @@ class DspWorker(QObject):
             # be receiving (often a strong broadcaster or RFI) and
             # the Vol-A slider has no effect on it.  See
             # ``CLAUDE.md`` §6.2 / §6.8 SUB semantics.
+            # Phase 3.E.1 hotfix v0.2 (2026-05-12): three-way
+            # dispatch based on (rx2_enabled, focused_rx):
+            #   SUB on              -> dual demod (L=RX1, R=RX2)
+            #   SUB off, focus RX1  -> RX1 mono-center (legacy)
+            #   SUB off, focus RX2  -> RX2 mono-center (NEW)
+            # Operator UX (Rick 2026-05-12): "if SUB is off and I
+            # click RX2 I expect to HEAR RX2, not still hear RX1."
+            # RX2's pan was set to 0.5 (center) by
+            # ``_apply_rx2_routing`` when SUB went off, so RX2's
+            # WDSP output is already mono-on-stereo -- the
+            # ``_do_demod_wdsp_rx2_only`` path just hands it
+            # through the same output stage RX1 uses.
             try:
                 state = radio.snapshot_dispatch_state()
-                if (state.rx2_enabled
-                        and rx2_samples is not None
-                        and getattr(radio, "_wdsp_rx2", None) is not None):
+                focused = int(getattr(radio, "focused_rx", 0))
+                rx2_chan_ready = (
+                    rx2_samples is not None
+                    and getattr(radio, "_wdsp_rx2", None) is not None)
+                if state.rx2_enabled and rx2_chan_ready:
                     radio._do_demod_wdsp_dual(samples, rx2_samples)
+                elif focused == 2 and rx2_chan_ready:
+                    radio._do_demod_wdsp_rx2_only(rx2_samples)
                 else:
                     radio._do_demod_wdsp(samples)
             except Exception as exc:
