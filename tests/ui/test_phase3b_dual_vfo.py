@@ -136,5 +136,55 @@ class Phase3bDualVfoTest(unittest.TestCase):
         self.assertEqual(self.radio.focused_rx, 0)
 
 
+class Phase3dPerVfoControlsTest(unittest.TestCase):
+    """Phase 3.D cleanup -- per-VFO MHz + Step + Mode controls
+    symmetric under each LED."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from lyra.radio import Radio
+        from lyra.ui.panels import TuningPanel
+        self.radio = Radio()
+        self.panel = TuningPanel(self.radio)
+
+    def test_per_vfo_widgets_present(self) -> None:
+        # RX1 side.
+        self.assertTrue(hasattr(self.panel, "freq_spin"))
+        self.assertTrue(hasattr(self.panel, "step_combo"))
+        self.assertTrue(hasattr(self.panel, "vfo_mode_combo"))
+        # RX2 side.
+        self.assertTrue(hasattr(self.panel, "freq_spin_rx2"))
+        self.assertTrue(hasattr(self.panel, "step_combo_rx2"))
+        self.assertTrue(hasattr(self.panel, "vfo_mode_combo_rx2"))
+
+    def test_rx2_mhz_spinner_writes_rx2(self) -> None:
+        orig_rx1 = self.radio.freq_hz
+        self.panel.freq_spin_rx2.setValue(7.074)
+        # Spinner edit fires radio.set_rx2_freq_hz with int(round(mhz*1e6))
+        self.assertEqual(self.radio.rx2_freq_hz, 7_074_000)
+        self.assertEqual(self.radio.freq_hz, orig_rx1)
+
+    def test_rx2_mode_combo_writes_rx2(self) -> None:
+        orig_rx1 = self.radio._mode
+        self.panel.vfo_mode_combo_rx2.setCurrentText("AM")
+        self.assertEqual(self.radio._mode_rx2, "AM")
+        self.assertEqual(self.radio._mode, orig_rx1)
+
+    def test_rx1_mode_combo_writes_rx1(self) -> None:
+        orig_rx2 = self.radio._mode_rx2
+        self.panel.vfo_mode_combo.setCurrentText("LSB")
+        self.assertEqual(self.radio._mode, "LSB")
+        self.assertEqual(self.radio._mode_rx2, orig_rx2)
+
+    def test_rx2_freq_change_updates_spinner(self) -> None:
+        self.radio.set_rx2_freq_hz(10_000_000)
+        self.assertAlmostEqual(
+            self.panel.freq_spin_rx2.value(), 10.0, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

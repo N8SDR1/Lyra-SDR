@@ -479,30 +479,96 @@ class TuningPanel(GlassPanel):
         # noticeable without pushing the rest of the panel down too far.
         outer.addSpacing(10)
 
-        # ── Row 3: MHz type-in + Step ────────────────────────────
+        # ── Row 3: Per-VFO controls (MHz + Step + Mode) ──────────
+        # Phase 3.D v0.1: symmetric per-VFO controls -- each LED gets
+        # its own MHz spinner, Step combo, and Mode combo so the
+        # operator can dial RX1 and RX2 independently at a glance.
+        # The MODE+FILTER panel's mode combo still follows focus
+        # (Phase 3.C); these per-VFO mode combos are direct-target
+        # affordances that don't move when focus changes.
         h = QHBoxLayout()
-        h.addWidget(QLabel("MHz"))
+
+        def _step_items() -> list[tuple[str, int]]:
+            return [("1 Hz", 1), ("10 Hz", 10), ("50 Hz", 50),
+                    ("100 Hz", 100), ("500 Hz", 500), ("1 kHz", 1000),
+                    ("5 kHz", 5000), ("10 kHz", 10000)]
+
+        # RX1 column controls (left half).
+        rx1_ctrls = QHBoxLayout()
+        rx1_ctrls.setSpacing(4)
+        rx1_ctrls.addWidget(QLabel("MHz"))
         self.freq_spin = QDoubleSpinBox()
         self.freq_spin.setDecimals(6)
         self.freq_spin.setRange(0.0, 55.0)
         self.freq_spin.setValue(radio.freq_hz / 1e6)
-        self.freq_spin.setFixedWidth(130)
+        self.freq_spin.setFixedWidth(120)
         self.freq_spin.setKeyboardTracking(False)
         self.freq_spin.valueChanged.connect(self._on_freq_changed)
-        h.addWidget(self.freq_spin)
+        rx1_ctrls.addWidget(self.freq_spin)
 
-        h.addWidget(QLabel("Step"))
+        rx1_ctrls.addWidget(QLabel("Step"))
         self.step_combo = QComboBox()
-        for label, hz in [("1 Hz", 1), ("10 Hz", 10), ("50 Hz", 50),
-                          ("100 Hz", 100), ("500 Hz", 500), ("1 kHz", 1000),
-                          ("5 kHz", 5000), ("10 kHz", 10000)]:
+        for label, hz in _step_items():
             self.step_combo.addItem(label, hz)
         self.step_combo.setCurrentText("1 kHz")
-        self.step_combo.setFixedWidth(80)
+        self.step_combo.setFixedWidth(78)
         self.step_combo.currentIndexChanged.connect(self._on_step_changed)
-        h.addWidget(self.step_combo)
+        rx1_ctrls.addWidget(self.step_combo)
         self._on_step_changed(self.step_combo.currentIndex())
-        h.addStretch(1)
+
+        rx1_ctrls.addWidget(QLabel("Mode"))
+        self.vfo_mode_combo = QComboBox()
+        self.vfo_mode_combo.addItems(Radio.ALL_MODES)
+        self.vfo_mode_combo.setCurrentText(radio.mode_for_rx(0))
+        self.vfo_mode_combo.setFixedWidth(78)
+        self.vfo_mode_combo.currentTextChanged.connect(
+            lambda m: self.radio.set_mode(m, target_rx=0))
+        rx1_ctrls.addWidget(self.vfo_mode_combo)
+        rx1_ctrls.addStretch(1)
+        h.addLayout(rx1_ctrls, 5)
+
+        # Spacer to match the logo column width.
+        h.addStretch(3)
+
+        # RX2 column controls (right half).
+        rx2_ctrls = QHBoxLayout()
+        rx2_ctrls.setSpacing(4)
+        rx2_ctrls.addStretch(1)
+        rx2_ctrls.addWidget(QLabel("MHz"))
+        self.freq_spin_rx2 = QDoubleSpinBox()
+        self.freq_spin_rx2.setDecimals(6)
+        self.freq_spin_rx2.setRange(0.0, 55.0)
+        try:
+            self.freq_spin_rx2.setValue(float(radio.rx2_freq_hz) / 1e6)
+        except Exception:
+            self.freq_spin_rx2.setValue(0.0)
+        self.freq_spin_rx2.setFixedWidth(120)
+        self.freq_spin_rx2.setKeyboardTracking(False)
+        self.freq_spin_rx2.valueChanged.connect(
+            lambda mhz: self.radio.set_rx2_freq_hz(int(round(mhz * 1e6))))
+        rx2_ctrls.addWidget(self.freq_spin_rx2)
+
+        rx2_ctrls.addWidget(QLabel("Step"))
+        self.step_combo_rx2 = QComboBox()
+        for label, hz in _step_items():
+            self.step_combo_rx2.addItem(label, hz)
+        self.step_combo_rx2.setCurrentText("1 kHz")
+        self.step_combo_rx2.setFixedWidth(78)
+        self.step_combo_rx2.currentIndexChanged.connect(
+            self._on_step_changed_rx2)
+        rx2_ctrls.addWidget(self.step_combo_rx2)
+        # Push initial step to RX2 LED.
+        self._on_step_changed_rx2(self.step_combo_rx2.currentIndex())
+
+        rx2_ctrls.addWidget(QLabel("Mode"))
+        self.vfo_mode_combo_rx2 = QComboBox()
+        self.vfo_mode_combo_rx2.addItems(Radio.ALL_MODES)
+        self.vfo_mode_combo_rx2.setCurrentText(radio.mode_for_rx(2))
+        self.vfo_mode_combo_rx2.setFixedWidth(78)
+        self.vfo_mode_combo_rx2.currentTextChanged.connect(
+            lambda m: self.radio.set_mode(m, target_rx=2))
+        rx2_ctrls.addWidget(self.vfo_mode_combo_rx2)
+        h.addLayout(rx2_ctrls, 5)
 
         outer.addLayout(h)
         # Final vertical stretch — without this, the panel's outer
@@ -517,6 +583,18 @@ class TuningPanel(GlassPanel):
         self.content_layout().addLayout(outer)
 
         radio.freq_changed.connect(self._on_radio_freq_changed)
+        # Phase 3.D v0.1: per-VFO sync hooks so the right column's
+        # spinner + Mode combo follow radio-side updates (bench
+        # dialog edits, A->B / B->A / SWAP, QSettings restore).
+        try:
+            radio.rx2_freq_changed.connect(self._on_radio_rx2_freq_changed)
+        except Exception:
+            pass
+        try:
+            radio.mode_changed.connect(self._on_radio_mode_changed_rx1)
+            radio.mode_changed_rx2.connect(self._on_radio_mode_changed_rx2)
+        except Exception:
+            pass
 
     def _on_freq_changed(self, mhz: float):
         self.radio.set_freq_hz(int(round(mhz * 1e6)))
@@ -530,6 +608,42 @@ class TuningPanel(GlassPanel):
         # click no matter where my cursor is on the digits".
         if hasattr(self, "freq_display"):
             self.freq_display.set_external_step_hz(step)
+
+    def _on_step_changed_rx2(self, _idx):
+        """Phase 3.D v0.1: RX2 step picker mirrors RX1's behavior --
+        sets the spinner singleStep and pushes the external step
+        into the RX2 LED widget."""
+        step = int(self.step_combo_rx2.currentData())
+        self.freq_spin_rx2.setSingleStep(step / 1e6)
+        if hasattr(self, "freq_display_rx2"):
+            self.freq_display_rx2.set_external_step_hz(step)
+
+    def _on_radio_rx2_freq_changed(self, hz: int) -> None:
+        """Mirror radio-side RX2 freq updates into the per-VFO
+        spinner without retriggering our valueChanged handler."""
+        try:
+            mhz = float(int(hz)) / 1e6
+        except (TypeError, ValueError):
+            return
+        if abs(self.freq_spin_rx2.value() - mhz) < 1e-9:
+            return
+        self.freq_spin_rx2.blockSignals(True)
+        self.freq_spin_rx2.setValue(mhz)
+        self.freq_spin_rx2.blockSignals(False)
+
+    def _on_radio_mode_changed_rx1(self, mode: str) -> None:
+        if self.vfo_mode_combo.currentText() == mode:
+            return
+        self.vfo_mode_combo.blockSignals(True)
+        self.vfo_mode_combo.setCurrentText(mode)
+        self.vfo_mode_combo.blockSignals(False)
+
+    def _on_radio_mode_changed_rx2(self, mode: str) -> None:
+        if self.vfo_mode_combo_rx2.currentText() == mode:
+            return
+        self.vfo_mode_combo_rx2.blockSignals(True)
+        self.vfo_mode_combo_rx2.setCurrentText(mode)
+        self.vfo_mode_combo_rx2.blockSignals(False)
 
     def _on_radio_freq_changed(self, hz: int):
         # Sync both the LED display and the backup spinbox
@@ -659,7 +773,7 @@ class ModeFilterPanel(GlassPanel):
         h.addSpacing(8)
         self.sub_btn = QPushButton("SUB")
         self.sub_btn.setCheckable(True)
-        self.sub_btn.setFixedWidth(46)
+        self.sub_btn.setFixedWidth(56)
         self.sub_btn.setToolTip(
             "Enable RX2 (VFO B) for dual-receiver operation. "
             "When ON, RX1 audio routes hard-left, RX2 hard-right, "
@@ -671,7 +785,7 @@ class ModeFilterPanel(GlassPanel):
         h.addWidget(self.sub_btn)
 
         self.ab_btn = QPushButton("A▸B")
-        self.ab_btn.setFixedWidth(38)
+        self.ab_btn.setFixedWidth(52)
         self.ab_btn.setToolTip(
             "Copy VFO A to VFO B.  Full state copy (freq + mode + "
             "RX BW) when SUB is ON; freq-only otherwise."
@@ -680,7 +794,7 @@ class ModeFilterPanel(GlassPanel):
         h.addWidget(self.ab_btn)
 
         self.ba_btn = QPushButton("B▸A")
-        self.ba_btn.setFixedWidth(38)
+        self.ba_btn.setFixedWidth(52)
         self.ba_btn.setToolTip(
             "Copy VFO B to VFO A.  Full state copy (freq + mode + "
             "RX BW) when SUB is ON; freq-only otherwise."
@@ -689,7 +803,7 @@ class ModeFilterPanel(GlassPanel):
         h.addWidget(self.ba_btn)
 
         self.swap_btn = QPushButton("⇄")
-        self.swap_btn.setFixedWidth(32)
+        self.swap_btn.setFixedWidth(44)
         self.swap_btn.setToolTip(
             "Swap VFO A and VFO B.  Full state swap when SUB is "
             "ON; freq-only otherwise."
@@ -2018,7 +2132,10 @@ class DspPanel(GlassPanel):
         self.mute_btn = QPushButton("MUTE")
         self.mute_btn.setObjectName("dsp_btn")        # orange when checked
         self.mute_btn.setCheckable(True)
-        self.mute_btn.setFixedWidth(54)
+        # Phase 3.D hotfix v0.1: width sized for "MUTE-A" caption
+        # change when SUB is on (was 54px for "MUTE", clipped the
+        # extra "-A" suffix).
+        self.mute_btn.setFixedWidth(82)
         self.mute_btn.setChecked(radio.muted)
         self.mute_btn.setToolTip(
             "Silence output without changing the Volume slider. "
@@ -2031,7 +2148,10 @@ class DspPanel(GlassPanel):
         self.mute_b_btn = QPushButton("MUTE-B")
         self.mute_b_btn.setObjectName("dsp_btn")
         self.mute_b_btn.setCheckable(True)
-        self.mute_b_btn.setFixedWidth(70)
+        # Phase 3.D hotfix v0.1: 70px was clipping the "-B" suffix
+        # depending on system font metrics; 82px matches Mute-A's
+        # new width for visual consistency.
+        self.mute_b_btn.setFixedWidth(82)
         self.mute_b_btn.setChecked(radio.muted_for_rx(2))
         self.mute_b_btn.setToolTip(
             "Silence RX2 (right channel) without changing Vol-B.")
