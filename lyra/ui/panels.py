@@ -633,6 +633,53 @@ class ModeFilterPanel(GlassPanel):
         h.addWidget(self.cw_pitch_label)
         h.addWidget(self.cw_pitch_spin)
 
+        # ── Phase 3.D v0.1: RX2 enable + VFO transfer cluster ──────
+        # Per consensus plan §6.7/§6.8 working-group decisions:
+        # SUB = RX2 enable toggle, sibling of SPLIT (when SPLIT
+        # button lands in a later sub-phase).  A->B / B->A / SWAP
+        # copy state between VFOs -- full state when RX2 enabled,
+        # freq-only otherwise.
+        h.addSpacing(8)
+        self.sub_btn = QPushButton("SUB")
+        self.sub_btn.setCheckable(True)
+        self.sub_btn.setFixedWidth(46)
+        self.sub_btn.setToolTip(
+            "Enable RX2 (VFO B) for dual-receiver operation. "
+            "When ON, RX1 audio routes hard-left, RX2 hard-right, "
+            "and per-RX Vol-A / Vol-B / Mute-A / Mute-B sliders "
+            "appear on the DSP+Audio panel."
+        )
+        self.sub_btn.setChecked(bool(radio.dispatch_state.rx2_enabled))
+        self.sub_btn.toggled.connect(self._on_sub_toggled)
+        h.addWidget(self.sub_btn)
+
+        self.ab_btn = QPushButton("A▸B")
+        self.ab_btn.setFixedWidth(38)
+        self.ab_btn.setToolTip(
+            "Copy VFO A to VFO B.  Full state copy (freq + mode + "
+            "RX BW) when SUB is ON; freq-only otherwise."
+        )
+        self.ab_btn.clicked.connect(lambda: self.radio.vfo_a_to_b())
+        h.addWidget(self.ab_btn)
+
+        self.ba_btn = QPushButton("B▸A")
+        self.ba_btn.setFixedWidth(38)
+        self.ba_btn.setToolTip(
+            "Copy VFO B to VFO A.  Full state copy (freq + mode + "
+            "RX BW) when SUB is ON; freq-only otherwise."
+        )
+        self.ba_btn.clicked.connect(lambda: self.radio.vfo_b_to_a())
+        h.addWidget(self.ba_btn)
+
+        self.swap_btn = QPushButton("⇄")
+        self.swap_btn.setFixedWidth(32)
+        self.swap_btn.setToolTip(
+            "Swap VFO A and VFO B.  Full state swap when SUB is "
+            "ON; freq-only otherwise."
+        )
+        self.swap_btn.clicked.connect(lambda: self.radio.vfo_swap())
+        h.addWidget(self.swap_btn)
+
         h.addStretch(1)
         self.content_layout().addLayout(h)
 
@@ -652,6 +699,10 @@ class ModeFilterPanel(GlassPanel):
         radio.mode_changed_rx2.connect(self._on_mode_changed_rx2)
         radio.rx_bw_changed_rx2.connect(self._on_radio_rx_bw_changed_rx2)
         radio.focused_rx_changed.connect(self._on_focused_rx_changed)
+        # Phase 3.D v0.1: SUB button reflects external rx2_enabled
+        # changes (bench dialog, future TCI / CAT, programmatic).
+        radio.dispatch_state_changed.connect(
+            self._on_dispatch_state_changed)
 
     @staticmethod
     def _select_combo_data(combo: QComboBox, value):
@@ -797,6 +848,20 @@ class ModeFilterPanel(GlassPanel):
             self.rx_bw_combo.blockSignals(True)
             self._ensure_bw_value(self.rx_bw_combo, bw)
             self.rx_bw_combo.blockSignals(False)
+
+    # ── Phase 3.D v0.1: SUB toggle + dispatch_state sync ────────────
+    def _on_sub_toggled(self, on: bool):
+        """SUB button toggled — flip the rx2_enabled dispatch axis."""
+        self.radio.set_rx2_enabled(bool(on))
+
+    def _on_dispatch_state_changed(self, state) -> None:
+        """Dispatch state changed elsewhere (bench dialog, future
+        CAT/TCI) -- mirror SUB button state without re-firing."""
+        target = bool(state.rx2_enabled)
+        if self.sub_btn.isChecked() != target:
+            self.sub_btn.blockSignals(True)
+            self.sub_btn.setChecked(target)
+            self.sub_btn.blockSignals(False)
 
     def _on_focused_rx_changed(self, rx_id: int):
         """Operator switched VFO focus -- re-bind the panel display
@@ -1783,7 +1848,14 @@ class DspPanel(GlassPanel):
         #   At slider= 50 → ×0.25  (−12 dB — traditional "half")
         #   At slider= 25 → ×0.0625(−24 dB — quiet listening)
         #   At slider= 10 → ×0.01  (−40 dB — background)
-        levels.addWidget(QLabel("Vol"))
+        # Phase 3.D v0.1: the existing Vol slider always drives
+        # RX1's volume.  When SUB is enabled, a sibling "Vol-B"
+        # slider appears immediately after for RX2's volume; the
+        # label flips from "Vol" → "Vol-A" so the per-RX role is
+        # clear.  When SUB is OFF, the Vol-B widgets are hidden and
+        # the label is plain "Vol".
+        self.vol_label_caption = QLabel("Vol")
+        levels.addWidget(self.vol_label_caption)
         self.vol_slider = QSlider(Qt.Horizontal)
         self.vol_slider.setObjectName("vol_slider")
         self.vol_slider.setRange(0, 100)
@@ -1799,6 +1871,27 @@ class DspPanel(GlassPanel):
         self.vol_label = QLabel(f"{self._volume_to_slider(radio.volume)}%")
         self.vol_label.setFixedWidth(50)
         levels.addWidget(self.vol_label)
+
+        # Vol-B (RX2) -- hidden until SUB is enabled.
+        self.vol_b_label_caption = QLabel("Vol-B")
+        levels.addWidget(self.vol_b_label_caption)
+        self.vol_b_slider = QSlider(Qt.Horizontal)
+        self.vol_b_slider.setObjectName("vol_slider")
+        self.vol_b_slider.setRange(0, 100)
+        self.vol_b_slider.setSingleStep(1)
+        self.vol_b_slider.setPageStep(5)
+        self.vol_b_slider.setToolTip(
+            "RX2 output volume (right channel of the stereo split). "
+            "Same perceptual curve as Vol-A.")
+        self.vol_b_slider.setValue(
+            self._volume_to_slider(radio.volume_for_rx(2)))
+        self.vol_b_slider.setFixedWidth(160)
+        self.vol_b_slider.valueChanged.connect(self._on_vol_b_slider)
+        levels.addWidget(self.vol_b_slider)
+        self.vol_b_label = QLabel(
+            f"{self._volume_to_slider(radio.volume_for_rx(2))}%")
+        self.vol_b_label.setFixedWidth(50)
+        levels.addWidget(self.vol_b_label)
 
         levels.addSpacing(12)
 
@@ -1903,6 +1996,8 @@ class DspPanel(GlassPanel):
         # drags while muted (slider can be positioned for post-unmute
         # without breaking silence). Muting multiplies final output by
         # 0 but leaves AGC / metering untouched.
+        # Phase 3.D: MUTE always drives RX1.  When SUB is enabled,
+        # the label flips to "MUTE-A" and a sibling MUTE-B appears.
         self.mute_btn = QPushButton("MUTE")
         self.mute_btn.setObjectName("dsp_btn")        # orange when checked
         self.mute_btn.setCheckable(True)
@@ -1911,8 +2006,21 @@ class DspPanel(GlassPanel):
         self.mute_btn.setToolTip(
             "Silence output without changing the Volume slider. "
             "Click again to resume at the current volume setting.")
-        self.mute_btn.toggled.connect(self.radio.set_muted)
+        self.mute_btn.toggled.connect(
+            lambda on: self.radio.set_muted(bool(on), target_rx=0))
         levels.addWidget(self.mute_btn)
+
+        # Mute-B (RX2) -- hidden until SUB is enabled.
+        self.mute_b_btn = QPushButton("MUTE-B")
+        self.mute_b_btn.setObjectName("dsp_btn")
+        self.mute_b_btn.setCheckable(True)
+        self.mute_b_btn.setFixedWidth(70)
+        self.mute_b_btn.setChecked(radio.muted_for_rx(2))
+        self.mute_b_btn.setToolTip(
+            "Silence RX2 (right channel) without changing Vol-B.")
+        self.mute_b_btn.toggled.connect(
+            lambda on: self.radio.set_muted(bool(on), target_rx=2))
+        levels.addWidget(self.mute_b_btn)
 
         # DSP Settings shortcut — moved here from the DSP buttons
         # row below per operator UX request (more reachable spot
@@ -2689,6 +2797,15 @@ class DspPanel(GlassPanel):
         # the slider when RX2 has focus.
         radio.af_gain_db_changed.connect(self._on_af_gain_db_changed)
         radio.af_gain_db_changed_rx2.connect(self._on_af_gain_db_changed_rx2)
+        # Phase 3.D v0.1: per-RX2 Vol + Mute siblings + dispatch
+        # state listener so the per-RX UI surface appears when SUB
+        # is enabled and collapses when it's disabled.
+        radio.volume_changed_rx2.connect(self._on_volume_changed_rx2)
+        radio.muted_changed_rx2.connect(self._on_muted_changed_rx2)
+        radio.dispatch_state_changed.connect(
+            self._on_dispatch_state_changed)
+        # Initial paint of the SUB-conditional surface.
+        self._on_dispatch_state_changed(radio.dispatch_state)
         # Mute + Auto-LNA state sync (signals driven by Radio — covers
         # QSettings load + any future TCI / CAT mute command).
         radio.muted_changed.connect(self._on_muted_changed)
@@ -2719,9 +2836,22 @@ class DspPanel(GlassPanel):
         return int(round(frac * 100))
 
     def _on_vol_slider(self, slider_val: int):
-        """User dragged the slider → apply perceptual curve → Radio."""
+        """User dragged the Vol slider → curve → RX1 volume.
+
+        Phase 3.D v0.1: this slider always targets RX1 (target_rx=0)
+        so when SUB is enabled the operator's "Vol-A" edits don't
+        accidentally route to whichever RX is focused.
+        """
         self.vol_label.setText(f"{slider_val}%")
-        self.radio.set_volume(self._slider_to_volume(slider_val))
+        self.radio.set_volume(
+            self._slider_to_volume(slider_val), target_rx=0)
+
+    def _on_vol_b_slider(self, slider_val: int):
+        """RX2 volume slider drag — perceptual curve → ``set_volume(
+        target_rx=2)``.  Phase 3.D v0.1."""
+        self.vol_b_label.setText(f"{slider_val}%")
+        self.radio.set_volume(
+            self._slider_to_volume(slider_val), target_rx=2)
 
     # ── LNA linearity zones ─────────────────────────────────────
     # AD9866 PGA linearity behaviour (HL2 community consensus):
@@ -2786,14 +2916,49 @@ class DspPanel(GlassPanel):
         self.lna_slider.setStyleSheet("")
 
     def _on_volume_changed(self, v: float):
-        """Radio volume changed elsewhere — convert multiplier back
-        to slider position via inverse curve and update UI."""
+        """Radio RX1 volume changed elsewhere — convert multiplier
+        back to slider position via inverse curve and update UI.
+        Phase 3.D: this signal is RX1-only; Vol-B uses
+        ``volume_changed_rx2``."""
         target = self._volume_to_slider(v)
         self.vol_label.setText(f"{target}%")
         if self.vol_slider.value() != target:
             self.vol_slider.blockSignals(True)
             self.vol_slider.setValue(target)
             self.vol_slider.blockSignals(False)
+
+    def _on_volume_changed_rx2(self, v: float):
+        """RX2 volume changed elsewhere (QSettings load, future
+        CAT/TCI) — update Vol-B slider + label."""
+        target = self._volume_to_slider(v)
+        self.vol_b_label.setText(f"{target}%")
+        if self.vol_b_slider.value() != target:
+            self.vol_b_slider.blockSignals(True)
+            self.vol_b_slider.setValue(target)
+            self.vol_b_slider.blockSignals(False)
+
+    def _on_muted_changed_rx2(self, muted: bool):
+        """RX2 mute changed elsewhere -- mirror Mute-B button state."""
+        if self.mute_b_btn.isChecked() != muted:
+            self.mute_b_btn.blockSignals(True)
+            self.mute_b_btn.setChecked(muted)
+            self.mute_b_btn.blockSignals(False)
+
+    def _on_dispatch_state_changed(self, state) -> None:
+        """Phase 3.D v0.1: toggle per-RX Vol/Mute UI visibility based
+        on ``state.rx2_enabled``.  Re-labels Vol-A/Mute-A when SUB
+        is ON; collapses back to plain Vol/MUTE when OFF."""
+        on = bool(state.rx2_enabled)
+        # Vol-A vs Vol caption.
+        self.vol_label_caption.setText("Vol-A" if on else "Vol")
+        # Mute button label change is purely cosmetic; the button
+        # text is the affordance label.
+        self.mute_btn.setText("MUTE-A" if on else "MUTE")
+        # RX2 sibling widgets.
+        self.vol_b_label_caption.setVisible(on)
+        self.vol_b_slider.setVisible(on)
+        self.vol_b_label.setVisible(on)
+        self.mute_b_btn.setVisible(on)
 
     # ── Balance slider (Phase 1: pan a single mono RX across L/R) ───
     # Future RX2 / Split expansion: when a second receiver lands, the

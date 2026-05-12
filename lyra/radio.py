@@ -163,6 +163,11 @@ class Radio(QObject):
     mode_changed_rx2     = Signal(str)
     af_gain_db_changed_rx2 = Signal(int)
     rx_bw_changed_rx2    = Signal(str, int)
+    # Phase 3.D v0.1: per-RX volume + mute signals (§6.8 consensus
+    # plan -- Vol-A / Vol-B and Mute-A / Mute-B surface when SUB is
+    # enabled).
+    volume_changed_rx2   = Signal(float)
+    muted_changed_rx2    = Signal(bool)
     tx_bw_changed        = Signal(str, int)
     bw_lock_changed      = Signal(bool)
     notches_changed      = Signal(list)           # list[Notch] (see dataclass above)
@@ -999,6 +1004,16 @@ class Radio(QObject):
         self._agc_profile_rx2: str = self._agc_profile
         self._agc_target_rx2: float = self._agc_target
         self._af_gain_db_rx2: int = self._af_gain_db
+        # Phase 3.D v0.1 (2026-05-12): per-RX volume + mute state.
+        # The UI only surfaces Vol-A / Vol-B / Mute-A / Mute-B when
+        # ``dispatch_state.rx2_enabled`` is True (per consensus plan
+        # §6.8); when RX2 is off, the single Vol / Mute control
+        # writes to RX1's per-RX state and the mixer's RX2 path is
+        # zeroed anyway.  RX1 fields keep their existing names (
+        # ``_volume`` / ``_muted``) so Phase 0 callers aren't
+        # disturbed.
+        self._volume_rx2: float = self._volume
+        self._muted_rx2: bool = self._muted
 
         # Captured-profile IQ-domain engine (§14.6, v0.0.9.9).
         # Created/recreated alongside the WDSP channel so the
@@ -1842,6 +1857,14 @@ class Radio(QObject):
         """
         return self._dispatch_state
 
+    @property
+    def dispatch_state(self) -> DispatchState:
+        """Convenience property mirror of ``snapshot_dispatch_state()``
+        for Qt main-thread readers (panels, dialogs) that want
+        property-style access.  Identical semantics: returns the
+        current frozen ``DispatchState``.  Phase 3.D v0.1."""
+        return self._dispatch_state
+
     # ── Phase 3.A v0.1: focused-RX surface ──────────────────────────
     @property
     def focused_rx(self) -> int:
@@ -1946,6 +1969,14 @@ class Radio(QObject):
         rx_id, _ = self._resolve_rx_target(target_rx)
         return (self._agc_target if rx_id == 0
                 else self._agc_target_rx2)
+
+    def volume_for_rx(self, target_rx: Optional[int] = None) -> float:
+        rx_id, _ = self._resolve_rx_target(target_rx)
+        return self._volume if rx_id == 0 else self._volume_rx2
+
+    def muted_for_rx(self, target_rx: Optional[int] = None) -> bool:
+        rx_id, _ = self._resolve_rx_target(target_rx)
+        return self._muted if rx_id == 0 else self._muted_rx2
 
     def set_mox(self, mox: bool) -> None:
         """Set the MOX axis of DispatchState.  Call from Qt main thread.
@@ -2527,13 +2558,25 @@ class Radio(QObject):
             self._save_current_band_memory()
         self.gain_changed.emit(db)
 
-    def set_volume(self, v: float):
-        # Volume is now purely a final trim stage (post AF Gain), so
-        # its effective range is 0..1.0 (0 = silent, 1 = unity pass of
-        # AF-gained signal). Old QSettings values in the 0..3.0 range
-        # from pre-split code get clamped to 1.0 at load time; the
-        # operator can re-dial to taste from there.
+    def set_volume(self, v: float, target_rx: Optional[int] = None):
+        """Final-trim volume for ``target_rx`` (default = focused RX).
+
+        Volume is post AF Gain, range 0..1.0 (0 = silent, 1 = unity
+        pass of AF-gained signal). Old QSettings values in the
+        0..3.0 range from pre-split code get clamped to 1.0 at load
+        time; the operator can re-dial to taste from there.
+
+        Phase 3.D v0.1: per-RX semantics surface as Vol-A / Vol-B
+        in the DSP+Audio panel when ``dispatch_state.rx2_enabled``
+        is True (consensus plan §6.8).  RX1's combined volume
+        applies to the summed dual-RX audio path when RX2 is OFF.
+        """
         v = max(0.0, min(1.0, float(v)))
+        rx_id, _ = self._resolve_rx_target(target_rx)
+        if rx_id == 2:
+            self._volume_rx2 = v
+            self.volume_changed_rx2.emit(v)
+            return
         self._volume = v
         self.volume_changed.emit(v)
 
@@ -5408,15 +5451,32 @@ class Radio(QObject):
         self._dsp_threading_mode = m
         self.dsp_threading_mode_changed.emit(m)
 
-    def set_muted(self, on: bool):
+    def set_muted(self, on: bool, target_rx: Optional[int] = None):
+        """Set mute state for ``target_rx`` (default = focused RX).
+
+        Phase 3.D v0.1: per-RX semantics surface as Mute-A / Mute-B
+        in the DSP+Audio panel when ``dispatch_state.rx2_enabled``
+        is True (consensus plan §6.8).  When RX2 is OFF, RX1's mute
+        applies to the summed audio path; RX2's mute is a no-op
+        because the RX2 demod loop isn't producing audio anyway.
+        """
         on = bool(on)
+        rx_id, _ = self._resolve_rx_target(target_rx)
+        if rx_id == 2:
+            if on == self._muted_rx2:
+                return
+            self._muted_rx2 = on
+            self.muted_changed_rx2.emit(on)
+            return
         if on == self._muted:
             return
         self._muted = on
         self.muted_changed.emit(on)
 
-    def toggle_muted(self):
-        self.set_muted(not self._muted)
+    def toggle_muted(self, target_rx: Optional[int] = None):
+        rx_id, _ = self._resolve_rx_target(target_rx)
+        current = self._muted if rx_id == 0 else self._muted_rx2
+        self.set_muted(not current, target_rx=rx_id)
 
     # ── Auto-LNA ────────────────────────────────────────────────────
     # Periodically nudges LNA gain up/down to keep the ADC peak inside
@@ -7975,6 +8035,61 @@ class Radio(QObject):
                 )
         self.rx2_freq_changed.emit(new_hz)
 
+    # ── Phase 3.D v0.1: VFO transfer helpers (A->B / B->A / Swap) ─
+    # Per consensus plan §6.8 working-group decision: when RX2 is
+    # ENABLED, A->B / B->A / Swap copy the FULL state (freq + mode
+    # + RX BW); when RX2 is DISABLED, they only move VFO B's shadow
+    # frequency.  Implementation reads from the per-RX state fields
+    # added in Phase 3.A and writes through the per-target setters
+    # from Phase 3.C so signals fire correctly and panels rebind.
+    def vfo_a_to_b(self) -> None:
+        """Copy VFO A (RX1) state onto VFO B (RX2).
+
+        When ``rx2_enabled``: full state copy (freq + mode + RX BW
+        for the destination mode).  When ``rx2_enabled`` is False:
+        freq-only copy (VFO B is just a "shadow" freq for SPLIT TX).
+        """
+        a_freq = int(self._freq_hz)
+        self.set_rx2_freq_hz(a_freq)
+        if self._dispatch_state.rx2_enabled:
+            a_mode = self._mode
+            self.set_mode(a_mode, target_rx=2)
+            a_bw = self.rx_bw_for(a_mode)
+            self.set_rx_bw(a_mode, a_bw, target_rx=2)
+
+    def vfo_b_to_a(self) -> None:
+        """Copy VFO B (RX2) state onto VFO A (RX1).  Mirror of
+        ``vfo_a_to_b`` -- full state when ``rx2_enabled``, freq-only
+        otherwise."""
+        b_freq = int(self._rx2_freq_hz)
+        self.set_freq_hz(b_freq)
+        if self._dispatch_state.rx2_enabled:
+            b_mode = self._mode_rx2
+            self.set_mode(b_mode, target_rx=0)
+            b_bw = self._rx_bw_by_mode_rx2.get(b_mode, 2400)
+            self.set_rx_bw(b_mode, b_bw, target_rx=0)
+
+    def vfo_swap(self) -> None:
+        """Swap VFO A and VFO B in one atomic update.  Full state
+        when ``rx2_enabled``, freq-only otherwise."""
+        a_freq = int(self._freq_hz)
+        b_freq = int(self._rx2_freq_hz)
+        if self._dispatch_state.rx2_enabled:
+            a_mode = self._mode
+            b_mode = self._mode_rx2
+            a_bw = self.rx_bw_for(a_mode)
+            b_bw = self._rx_bw_by_mode_rx2.get(b_mode, 2400)
+            # Apply RX2 side first so RX1 reads can stay valid until
+            # the moment of swap.
+            self.set_mode(a_mode, target_rx=2)
+            self.set_rx_bw(a_mode, a_bw, target_rx=2)
+            self.set_mode(b_mode, target_rx=0)
+            self.set_rx_bw(b_mode, b_bw, target_rx=0)
+        # Freq swap last so any mode-change passband re-emits don't
+        # alias the wrong VFO's freq.
+        self.set_rx2_freq_hz(a_freq)
+        self.set_freq_hz(b_freq)
+
     def read_rx2_iq_snapshot(self) -> np.ndarray:
         """Return a time-ordered copy of the most-recent RX2 IQ
         samples (Phase 1 bench-test accessor).
@@ -8917,6 +9032,21 @@ class Radio(QObject):
             print(f"[Radio] WDSP rx2 process error: {exc}")
             audio_rx2 = None
 
+        # ── Pre-sum per-RX volume + mute (Phase 3.D v0.1) ───────────
+        # Per consensus plan §6.8: when SUB (rx2_enabled) is on, the
+        # operator sees Vol-A / Vol-B and Mute-A / Mute-B sliders.
+        # We apply those gains here BEFORE summing so each RX's
+        # stereo half (RX1 in L, RX2 in R via the SetRXAPanelPan
+        # 0.0 / 1.0 split) gets its own trim.  When RX2 is OFF the
+        # mixer doesn't feed _do_demod_wdsp_dual at all -- this
+        # path is unreachable in the SUB-off case.
+        rx1_vol = 0.0 if self._muted else float(self._volume)
+        rx2_vol = 0.0 if self._muted_rx2 else float(self._volume_rx2)
+        if audio_rx1 is not None and audio_rx1.size > 0 and rx1_vol != 1.0:
+            audio_rx1 = audio_rx1 * np.float32(rx1_vol)
+        if audio_rx2 is not None and audio_rx2.size > 0 and rx2_vol != 1.0:
+            audio_rx2 = audio_rx2 * np.float32(rx2_vol)
+
         # ── Combine RX1 + RX2 audio ─────────────────────────────────
         # WDSP returns (N, 2) float32 stereo.  RX1's pan=0 produced
         # (L=signal, R=0); RX2's pan=1 produced (L=0, R=signal).
@@ -8935,16 +9065,10 @@ class Radio(QObject):
                 return
             audio = audio_rx1[:n] + audio_rx2[:n]
 
-        # ── Output stage (mute / volume / BIN / sink / TCI) ─────────
-        # Phase 2: single Vol + Mute apply to combined.  Phase 3
-        # splits per-RX (Thetis-style) -- see CLAUDE.md §6.2 + the
-        # Phase 3 design TODO when that lands.
-        if self._muted:
-            audio = audio * 0.0
-        else:
-            v = float(self._volume)
-            if v != 1.0:
-                audio = audio * np.float32(v)
+        # ── Output stage (BIN / sink / TCI) ─────────────────────────
+        # Per-RX volume + mute already applied above (Phase 3.D);
+        # no post-sum trim here.  BAL stays single per consensus
+        # plan §6.8 (it's combined-output stereo balance).
 
         if self._bin_enabled and self._binaural.enabled:
             try:
