@@ -388,7 +388,7 @@ class TuningPanel(GlassPanel):
             # Older Radio without the signal -- safe to ignore.
             pass
         self.freq_display_rx2.setToolTip(
-            "VFO B (RX2).  Click to focus RX2 -- the MODE+FILTER + "
+            "RX2.  Click to focus RX2 -- the MODE+FILTER + "
             "DSP+AUDIO panels then operate on RX2's state.  Double-"
             "click to type a frequency.  Ctrl+2 does the same focus "
             "shift from the keyboard."
@@ -783,46 +783,46 @@ class ModeFilterPanel(GlassPanel):
         # comfortable margin on every system Lyra runs on.
         self.sub_btn.setMinimumWidth(72)
         self.sub_btn.setToolTip(
-            "Enable RX2 (VFO B) for dual-receiver operation. "
+            "Enable RX2 for dual-receiver operation. "
             "When ON, RX1 audio routes hard-left, RX2 hard-right, "
-            "and per-RX Vol-A / Vol-B / Mute-A / Mute-B sliders "
+            "and per-RX Vol-A / Vol-B sliders plus MUTE buttons "
             "appear on the DSP+Audio panel."
         )
         self.sub_btn.setChecked(bool(radio.dispatch_state.rx2_enabled))
         self.sub_btn.toggled.connect(self._on_sub_toggled)
         h.addWidget(self.sub_btn)
 
-        self.ab_btn = QPushButton("A→B")
-        # Phase 3.D hotfix: setMinimumWidth + → (U+2192, RIGHTWARDS
-        # ARROW) instead of ▸ (U+25B8) because → is in every
-        # default Windows / macOS / Linux font and renders at a
-        # predictable narrow width.  ▸ triggers font fallback to a
-        # wider face on some systems and clipped on the operator's
-        # bench pass.
+        # Phase 3.D UX cleanup (2026-05-12): button labels and
+        # tooltips standardized on the RX1 / RX2 naming used by the
+        # Tuning Panel VFO LED captions, instead of the legacy "VFO
+        # A / VFO B" terminology.  Internal Radio methods keep
+        # ``vfo_a_to_b`` / ``vfo_b_to_a`` / ``vfo_swap`` names since
+        # those describe the canonical SDR operation pattern.
+        self.ab_btn = QPushButton("1→2")
+        # setMinimumWidth + → (U+2192) so the button text doesn't
+        # clip on systems with wider button fonts.
         self.ab_btn.setMinimumWidth(66)
         self.ab_btn.setToolTip(
-            "Copy VFO A to VFO B.  Full state copy (freq + mode + "
+            "Copy RX1 to RX2.  Full state copy (freq + mode + "
             "RX BW) when SUB is ON; freq-only otherwise."
         )
         self.ab_btn.clicked.connect(lambda: self.radio.vfo_a_to_b())
         h.addWidget(self.ab_btn)
 
-        self.ba_btn = QPushButton("B→A")
+        self.ba_btn = QPushButton("2→1")
         self.ba_btn.setMinimumWidth(66)
         self.ba_btn.setToolTip(
-            "Copy VFO B to VFO A.  Full state copy (freq + mode + "
+            "Copy RX2 to RX1.  Full state copy (freq + mode + "
             "RX BW) when SUB is ON; freq-only otherwise."
         )
         self.ba_btn.clicked.connect(lambda: self.radio.vfo_b_to_a())
         h.addWidget(self.ba_btn)
 
         self.swap_btn = QPushButton("⇄")
-        # Phase 3.D hotfix: setMinimumWidth + larger size for the
-        # wide ⇄ unicode glyph.
         self.swap_btn.setMinimumWidth(54)
         self.swap_btn.setToolTip(
-            "Swap VFO A and VFO B.  Full state swap when SUB is "
-            "ON; freq-only otherwise."
+            "Swap RX1 and RX2.  Full state swap when SUB is ON; "
+            "freq-only otherwise."
         )
         self.swap_btn.clicked.connect(lambda: self.radio.vfo_swap())
         h.addWidget(self.swap_btn)
@@ -1904,22 +1904,14 @@ class DspPanel(GlassPanel):
         self.auto_lna_btn.toggled.connect(self.radio.set_lna_auto)
         levels.addWidget(self.auto_lna_btn)
 
-        # "Last Auto-LNA event" badge — shows the most recent
-        # back-off Auto applied (e.g. "↓2 dB 14:23:01") so the
-        # operator can see Auto IS working, even if the event is
-        # transient. Empty until Auto first fires; cleared when Auto
-        # is toggled off.
-        self.lna_auto_event_lbl = QLabel("")
-        self.lna_auto_event_lbl.setFixedWidth(120)
-        self.lna_auto_event_lbl.setStyleSheet(
-            "color: #ffab47; font-family: Consolas, monospace; "
-            "font-size: 10px;")
-        self.lna_auto_event_lbl.setToolTip(
-            "Most recent Auto-LNA back-off event. Updates whenever "
-            "Auto drops gain; persists between events so you can see "
-            "what Auto last did.")
-        levels.addWidget(self.lna_auto_event_lbl)
-        # Subscribe to Radio's new lna_auto_event signal (added below).
+        # Phase 3.D UX cleanup (2026-05-12): the "Last Auto-LNA event"
+        # badge that used to live here was a debug readout from the
+        # Auto-LNA development period; operator confirmed it's no
+        # longer needed for production UI.  Removed entirely to give
+        # the rest of the levels row more breathing room.  The
+        # operator-facing "Auto fired" feedback is still present via
+        # the brief amber slider flash below + the slider physically
+        # moving to the new gain value.
         radio.lna_auto_event.connect(self._on_lna_auto_event)
         # Brief slider flash after an Auto event — handled by a
         # one-shot QTimer that resets the slider's stylesheet.
@@ -3058,22 +3050,13 @@ class DspPanel(GlassPanel):
             self.lna_slider.setValue(db)
             self.lna_slider.blockSignals(False)
 
-    def _on_lna_auto_event(self, payload: dict):
+    def _on_lna_auto_event(self, _payload: dict):
         """Radio.lna_auto_event — Auto-LNA just adjusted gain.
-        Show a 'last event' badge and briefly flash the slider so
-        the operator can SEE Auto working in real time (the slider
-        movement alone can be missed if you're not looking at it)."""
-        delta = payload.get("delta_db", 0)
-        when = payload.get("when_local", "")
-        peak = payload.get("peak_dbfs", 0.0)
-        arrow = "↓" if delta < 0 else "↑"
-        self.lna_auto_event_lbl.setText(
-            f"{arrow}{abs(delta)} dB  {when}")
-        self.lna_auto_event_lbl.setToolTip(
-            f"Auto-LNA fired at {when}\n"
-            f"ADC peak was {peak:+.1f} dBFS\n"
-            f"Gain change: {arrow}{abs(delta)} dB")
-        # Brief amber flash on the slider so the eye catches it.
+        Brief amber flash on the slider so the operator catches
+        the event in their peripheral vision.  The "last event"
+        badge was removed in Phase 3.D cleanup (2026-05-12); the
+        slider physically moving to the new gain value is
+        sufficient post-event feedback."""
         self.lna_slider.setStyleSheet(
             "QSlider::groove:horizontal { "
             "background: #ffab47; border-radius: 3px; }"
