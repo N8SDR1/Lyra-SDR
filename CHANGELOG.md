@@ -13,6 +13,117 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.1.0-pre2] — 2026-05-12 — RX2 Dual Receiver (tester pre-release)
+
+First pre-release of the v0.1 line.  Lands the full **RX2 dual
+receiver** feature stack: a second receiver running on the HL2's
+DDC1 channel, with independent frequency / mode / bandwidth /
+AGC, plus a stereo-split audio mode where RX1 routes hard-left
+and RX2 hard-right.  Operator UX overhauled to put all
+tuning-related controls (both VFO LEDs, per-VFO Step + Mode,
+CW Pitch, SUB toggle, VFO bridge buttons) on the TUNING panel.
+
+This is a tester pre-release for Brent + Timmy + N8SDR's bench
+flight.  Production v0.1.0 follows after operator-confirmation
+on real-band usage.
+
+### What's new (operator-facing)
+
+* **Two big VFO LEDs side by side** on the TUNING panel — RX1
+  left, RX2 right, Lyra logo center.  Each LED supports
+  double-click + type, mouse-wheel tuning, click-to-focus.
+  Vertical centering kills the dead black space the v0.0.9.x
+  panel had under the LEDs.
+* **Focus model** — green border marks the focused VFO.  Click
+  the other LED, **Ctrl+1** / **Ctrl+2**, or middle-click the
+  panadapter to swap focus.  Mode picker, panadapter
+  click-tune, wheel-tune, band buttons, GEN/TIME/Mem recalls,
+  FT8 / NCDXF marker clicks, cluster spot clicks — all route
+  to whichever VFO is currently focused.
+* **SUB button** — toggle dual-RX stereo split.  Off = mono on
+  focused VFO.  On = RX1 hard-left + RX2 hard-right with
+  independent Vol RX1 / Vol RX2 / Mute-A / Mute-B sliders
+  always visible on the DSP+AUDIO panel.
+* **1→2 / 2→1 / ⇄ buttons** in the inter-VFO cluster — full
+  state copy / swap when SUB is on, frequency-only when SUB
+  is off.
+* **CW Pitch control moved** to the TUNING panel (was buried
+  on the MODE+FILTER panel).  Shared across both receivers
+  since it's an ear-preference setting.  Applies the
+  appropriate ±pitch DDS offset to both DDC0 and DDC1 when
+  either VFO is on CW.
+* **Per-VFO Step combo + Mode combo** under each LED — RX1
+  on band-sweep at 1 kHz while RX2 holds at 1 Hz zero-beat
+  works exactly as you'd expect.
+* **Panadapter follows focused RX** — including the
+  passband-rectangle overlay, the orange VFO marker, the
+  CW pitch offset, and click-to-tune routing.
+* **Persistence** — every RX2 state field (freq, mode,
+  per-mode BW dict, AF gain, volume, mute, AGC profile, AGC
+  threshold, SUB on/off, focused RX) survives Lyra restarts.
+  No more "RX2 always boots to 7.250 MHz USB" surprise.
+
+### What's new (under the hood)
+
+* **HL2 Protocol 1 ``nddc=4`` enablement** with per-DDC
+  dispatch (DDC0=RX1, DDC1=RX2, DDC2/3 reserved for TX +
+  PureSignal feedback in v0.2/v0.3).
+* **Stereo-split audio routing** via WDSP's
+  ``SetRXAPanelPan`` cffi binding.  Each WDSP channel pans
+  hard-left (RX1) / hard-right (RX2) when SUB is on; both
+  center when SUB is off.
+* **Three-way worker dispatch** based on
+  ``(SUB, focused_rx)``: SUB on → ``_do_demod_wdsp_dual``
+  (stereo split).  SUB off, focus RX1 → ``_do_demod_wdsp``
+  (RX1 mono center).  SUB off, focus RX2 → new
+  ``_do_demod_wdsp_rx2_only`` (RX2 mono center).
+* **Per-RX state model** on Radio — every operator-tunable
+  field has a sibling ``*_rx2`` variant; setters accept a
+  ``target_rx=0/2/None`` parameter that defaults to the
+  focused RX.  Per-RX query accessors
+  (``mode_for_rx``, ``volume_for_rx``, etc.) for the
+  panel-binding layer.
+* **DispatchState dataclass** tracks the
+  ``(mox, ps_armed, rx2_enabled, family)`` axes that drive
+  routing decisions across the worker / audio / protocol
+  layers.
+* **Marker offset + passband + spectrum center** all
+  panadapter-source-aware so the orange marker draws on the
+  operator's tuned carrier regardless of which VFO owns the
+  pane.
+
+### Other improvements
+
+* **Propagation panel** — synchronous fetch from
+  ``hamqsl.com/solarxml.php`` now skips SSL cert verification
+  (matches SDRLogger+'s ``requests.get(..., verify=False)``
+  posture).  Tester "Timmy"'s blank-propagation-panel failure
+  was Python's stdlib urllib rejecting hamqsl.com's cert
+  chain while browsers + SDRLogger+ accepted it on the same
+  machine.  Diagnostic surface added in parallel: panel
+  tooltip + status bar + ``crash.log`` all surface fetch
+  exceptions clearly.
+* **``print()`` redirection** to ``crash.log`` on the
+  PyInstaller windowed build — previously every
+  ``[Radio] ...`` diagnostic print went to ``sys.stderr =
+  None`` and vanished.  Now they land alongside any
+  fatal-crash traces.  Each session writes a start-marker
+  line so multi-run logs are readable.
+* **GEN slot owner-RX tracking** — clicking GEN1 while
+  focused on RX2 makes RX2 the "owner" of that slot's
+  auto-save; tweaking RX1 freq doesn't clobber GEN1's stored
+  state.
+* **Mouse-wheel + Exact / 100 Hz quantization** on the
+  panadapter both work for either RX (was RX1-only).
+
+### Test coverage
+
+225/225 unit tests passing, including the Phase 0 RX1
+byte-identical null gate that protects against any RX1
+regression from the dual-channel refactor.
+
+---
+
 ## [0.0.9.9.1] — 2026-05-10 — Launch Hotfix
 
 Emergency patch over v0.0.9.9.  Anyone who downloaded the

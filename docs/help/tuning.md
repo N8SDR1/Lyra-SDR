@@ -4,12 +4,27 @@
 the main window — handy if you're not sure where it is among your
 docked panels.)*
 
-## The frequency display
+> **Two receivers, one panel.**  Starting in v0.1, the TUNING
+> panel hosts BOTH receivers' frequency displays side by side
+> (RX1 left, RX2 right, Lyra logo center).  Most of this page is
+> written from RX1's perspective — everything applies to RX2 too,
+> just on the right-hand LED.  See the **RX2 (Dual Receiver)**
+> topic for the dual-receiver workflow specifics: focus model,
+> SUB stereo split, VFO bridge buttons, and per-VFO mode/step.
 
-The big amber 7-segment readout on the [TUNING panel](panel:tuning)
-is the RX frequency in `MMM.kkk.hhh` format (MHz.kHz.Hz). Dots are
-thousand-separators (rig-style) — so `7.125.000` reads "seven
-million one hundred twenty-five thousand Hz" = 7.125 MHz.
+## The frequency displays
+
+Each receiver gets its own big amber 7-segment readout — RX1 on
+the left, RX2 on the right.  Format is `MMM.kkk.hhh`
+(MHz.kHz.Hz). Dots are thousand-separators (rig-style) — so
+`7.125.000` reads "seven million one hundred twenty-five thousand
+Hz" = 7.125 MHz.
+
+The **focused VFO** has a green border around its LED.  Click the
+other LED (or press **Ctrl+1** / **Ctrl+2**) to swap focus.
+Frequency-entry surfaces (mode picker, panadapter click-to-tune,
+band buttons, GEN/Memory recalls, etc.) all operate on whichever
+VFO is currently focused.
 
 **What the LED represents.**  In every mode — SSB, CW, AM, FM,
 digital — the LED reads the **carrier frequency** of the signal
@@ -17,9 +32,7 @@ you're tuned to.  In CW modes (CWU / CWL), Lyra automatically
 shifts the actual hardware DDS by your configured CW pitch
 offset on the receive side so the carrier lands inside the CW
 filter and you hear it as a tone at the configured pitch.  This
-is the standard convention used across major HF SDR
-applications: type or click a frequency, hear what's there at
-your pitch tone.  No mental "subtract pitch" math.
+applies to both VFOs independently.
 
 ## Mouse wheel — three-tier behavior
 
@@ -40,7 +53,8 @@ override-by-precision-aim — the standard SDR-client convention.
 
 ## Step combo
 
-Dropdown next to the MHz spinbox on the TUNING panel. Eight presets:
+Each VFO has its own **Step** dropdown directly under its LED.
+Eight presets:
 
 | Step | Use |
 |---|---|
@@ -54,7 +68,9 @@ Dropdown next to the MHz spinbox on the TUNING panel. Eight presets:
 | **10 kHz** | Cross-band scanning |
 
 Picking a step here drives the wheel-on-empty-space behavior (see
-above) AND sets the MHz spinbox's step size to the same value.
+above) for that VFO's LED.  Each VFO's Step combo is independent
+— useful when RX1 is on a band-sweep at 1 kHz while RX2 holds
+zero-beat on a CW target at 1 Hz.
 
 ## Keyboard
 
@@ -91,20 +107,17 @@ freq stays put).
 The flexible parser means you can type the same format the LED
 displays — see "7.200.000", retype "7.125.000", press Enter, done.
 
-### Option B: The MHz spinbox
+Works on **either** LED — double-click RX1 to enter an RX1 freq,
+double-click RX2 to enter an RX2 freq.
 
-Small editable field next to the LED display. Accepts a value in
-**MHz** with up to 6 decimals. Type `14.074050` → Enter to jump to
-14,074,050 Hz. Has up/down spinner buttons that step by the
-currently-selected Step combo value.
+### Option B: Click-to-tune on the panadapter
 
-### Option C: Click-to-tune on the panadapter
+Left-click anywhere on the spectrum or waterfall and the
+currently-focused VFO retunes to that frequency. Best for visual
+band hunting — you can SEE the signal you want to land on before
+clicking it.
 
-Left-click anywhere on the spectrum or waterfall and the radio
-re-tunes to that frequency. Best for visual band hunting — you can
-SEE the signal you want to land on before clicking it.
-
-### Option D: Click-and-drag the spectrum (pan tuning)
+### Option C: Click-and-drag the spectrum (pan tuning)
 
 Press and hold left button on empty spectrum (or waterfall), then
 drag horizontally — the spectrum slides under your cursor like
@@ -123,16 +136,24 @@ keep their existing drag-to-resize behavior.
 ## Bands
 
 The **BAND** panel has quick-pick buttons for every amateur HF band
-plus common broadcast segments. Clicking a band jumps to the last
-frequency you were on in that band (per-band memory). If you haven't
-visited a band before, you get a reasonable default (middle of the
-phone sub-band, FT8 frequency for digital, etc.).
+plus common broadcast segments.  Clicking a band jumps the
+**currently focused VFO** to the last frequency you were on in
+that band (per-band memory). If you haven't visited a band before,
+you get a reasonable default (middle of the phone sub-band, FT8
+frequency for digital, etc.).
+
+Same logic applies to **GEN1 / GEN2 / GEN3**, **TIME**, and the
+**Mem** memory bank — they all retune the focused VFO.  Click the
+other VFO's LED first if you want the band button to retune that
+receiver instead.
 
 ## Mouse wheel on the panadapter
 
-- **Over empty spectrum** → tunes the VFO by the **Panafall Step**
-  set on the Display panel (default 1 kHz; presets 100 Hz / 500 Hz /
-  1 kHz / 5 kHz / 10 kHz / 25 kHz / 100 kHz).  Wheel up = freq up.
+- **Over empty spectrum** → tunes the **focused VFO** by the
+  **Panafall Step** set on the Display panel (default 1 kHz; presets
+  100 Hz / 500 Hz / 1 kHz / 5 kHz / 10 kHz / 25 kHz / 100 kHz).
+  Wheel up = freq up.  Click the other LED to switch which VFO
+  the wheel moves.
 - **Ctrl + wheel over empty spectrum** → zooms bandwidth (escape
   hatch for the legacy zoom gesture; same 1× / 2× / 4× / 8× / 16×
   preset levels as the Display panel Zoom combo)
@@ -164,6 +185,26 @@ Direct freq entry, memory recall, band buttons, and CAT writes are
 NOT affected — exact-precision tuning paths stay exact regardless
 of this toggle.
 
+## CW Pitch, SUB, and VFO bridge buttons
+
+Centered under the Lyra logo on the TUNING panel:
+
+* **CW Pitch** — operator-tuned audio tone for CW signals
+  (200..1500 Hz).  Shared across both receivers since it's an
+  ear-preference setting.  Always visible.  See the **RX2** topic
+  for the full per-RX CW pitch + DDS handling.
+* **SUB** — toggle dual-RX audio routing.  Off = mono, focused
+  VFO is audible.  On = stereo split, RX1 left + RX2 right with
+  independent Vol/Mute on the DSP+AUDIO panel.  See **RX2**.
+* **1→2** — copy RX1 to RX2.
+* **2→1** — copy RX2 to RX1.
+* **⇄** — swap RX1 and RX2 (frequency-only when SUB is off, full
+  state when SUB is on).
+
 ## VFO lock / split / RIT / XIT
 
-Not yet implemented. On the backlog for when the TX path goes in.
+Lock / RIT / XIT are not yet implemented; on the backlog for when
+the TX path goes in.  SPLIT (TX on VFO B while RX on VFO A) is
+also TX-side work — operator UX discussion ongoing for whether to
+fold it into the existing SUB button as a tri-state SUB/SPLIT/OFF
+control.

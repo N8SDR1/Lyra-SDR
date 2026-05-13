@@ -213,22 +213,36 @@ signals can be 30 dB quieter than they would be on AGC ON,
 and the extra AF range closes that gap.  Operators who don't
 need it simply never visit it.
 
-### Volume — final output trim
+### Volume — final output trim (Vol RX1 + Vol RX2)
 
-Slider on the DSP + Audio panel, range 0 to 100%. Pure trim of the
-final output before it hits the speakers. Uses a **perceptual
-(quadratic) curve** so each tick yields roughly equal loudness
-change — unity gain (full AF-gained signal) sits at 100%, 71% =
-−6 dB, 50% = −12 dB, 25% = −24 dB.
+Two sliders on the DSP + Audio panel, range 0 to 100% each.
+**Vol RX1** controls RX1's output trim, **Vol RX2** controls
+RX2's.  Both are always visible regardless of the SUB toggle
+state (operator UX 2026-05-12: predictable layout beats
+conditional widgets).  Pure trim of the final output before it
+hits the speakers. Uses a **perceptual (quadratic) curve** so
+each tick yields roughly equal loudness change — unity gain
+(full AF-gained signal) sits at 100%, 71% = −6 dB, 50% = −12 dB,
+25% = −24 dB.
 
-This is the moment-to-moment "louder/quieter" knob.
+In **SUB-off** mode only the focused VFO is audible.  Adjusting
+the non-audible RX's slider has no immediate effect — it
+pre-sets that VFO's level for when you flip focus or enable SUB.
+Lyra also mirrors the previously-focused RX's volume to the
+newly-focused RX on every focus flip, so audible level stays
+consistent across VFO switches.
 
-### Mute
+In **SUB-on** mode both VFOs are audible (RX1 left, RX2 right)
+and the two sliders are independent — drag Vol RX1 down without
+touching RX2's level, or vice versa.
 
-Button next to Vol. Multiplies the final output by 0 without
-changing the Volume slider position — quick "hold" during a knock
-at the door, click again to resume at exactly the volume you set.
-Mute state is Radio-side, so TCI volume commands can't accidentally
+### MUTE buttons
+
+Two buttons, one next to each Vol slider.  Multiplies that
+receiver's output by 0 without changing its Volume slider
+position — quick "hold" during a knock at the door, click again
+to resume at exactly the volume you set. Mute state is
+Radio-side per RX, so TCI volume commands can't accidentally
 un-mute you.
 
 ### Bal — stereo balance / pan

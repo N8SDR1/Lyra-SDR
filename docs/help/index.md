@@ -35,6 +35,8 @@ up changes.
   philosophy, who's behind it
 - **Getting Started** — first-time setup, connecting to the HL2
 - **Tuning** — frequency display, bands, VFO memory
+- **RX2 (Dual Receiver)** — second receiver on DDC1, focus model,
+  stereo split (SUB), VFO bridge buttons (1→2 / 2→1 / ⇄)
 - **Time Stations** — TIME button cycles through WWV / WWVH / CHU
   HF time-signal broadcasters; country-aware ordering puts your
   closest stations first

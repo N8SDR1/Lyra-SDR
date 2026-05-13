@@ -43,7 +43,30 @@ References to the old numbering in commit history / older doc
 revisions are historical and intentionally not back-edited.  Doc
 content below has been mass-renumbered to the new scheme.
 
-**Subsequent patch releases (2026-05-05 / 06):**
+**Subsequent releases (2026-05-05 onward):**
+
+- **v0.1.0-pre2** "RX2 Dual Receiver — tester pre-release"
+  (2026-05-12) — first v0.1 line pre-release.  Lands the full
+  RX2 dual-receiver feature stack: second receiver on HL2
+  DDC1, stereo-split audio routing (SUB toggle), focus model
+  with green-border indicator, per-VFO Step + Mode combos,
+  inter-VFO bridge buttons (1→2 / 2→1 / ⇄), CW Pitch moved
+  from MODE+FILTER to TUNING panel, panadapter follows
+  focused RX (click-tune, wheel-tune, Exact/100Hz, marker,
+  passband overlay, CW pitch offset all RX-aware), GEN slot
+  owner tracking, full QSettings persistence for every RX2
+  state field.  Also bundles two propagation-panel fixes
+  surfaced by tester Timmy's blank panel: SSL cert verify
+  skipped to match SDRLogger+'s posture (which works on the
+  same machine where Lyra failed), and ``print()`` redirected
+  to ``crash.log`` on the PyInstaller windowed build so
+  diagnostic output is no longer silently dropped to a None
+  ``sys.stderr``.  Test count: 225/225 green incl. Phase 0
+  RX1 byte-identical null gate.  Tester pre-release for
+  Brent + Timmy + N8SDR bench flight; production v0.1.0
+  follows operator confirmation on real-band sessions.
+
+
 - **v0.0.9.4** "Polish & Notifications" — watermark bundling fix,
   first-time-per-version update modal, toolbar pulse, Settings
   dialog lambda crash fixes.
