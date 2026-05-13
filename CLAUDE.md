@@ -2818,6 +2818,101 @@ remains in `lyra/radio.py` for future use — gated on
   fine for v0.1 RX2)
 - Linux/macOS rmatch behavior (Windows WASAPI only tested)
 
+### 15.8 — v0.2-era architecture conversation (PARKED 2026-05-13)
+
+Strategic items the operator surfaced during the §15.7 latency
+work that are **not latency fixes** but are worth deliberate
+v0.2-era architecture decisions.  Recorded here so they don't
+get lost between sessions and so the design conversation
+happens before TX bring-up shapes the code base around
+assumptions that would conflict.
+
+**Why they were deferred during §15.7:**  the rmatch ring
+(400 ms pre-§15.7) was 400× the entire CPU-side DSP cost
+(~1-2 ms typical).  Moving DSP to GPU would have saved
+microseconds while the ring was eating 400 ms.  Bench-tuning
+the buffer was the only thing that could move the latency
+needle.  Now that latency is bench-validated and shipped in
+v0.1.0-pre3 (−275 ms total), these other axes become
+legitimate next-conversation items.
+
+#### 1. Vulkan compute path for DSP (FFT / windowing)
+
+* **Motivation:** vendor-neutral GPU compute.  Thetis is
+  NVIDIA-only via CUDA; AMD users either use Thetis on CPU
+  or don't use Thetis.  Lyra targeting Vulkan (cross-vendor)
+  is a genuine differentiator.
+* **What it buys:** CPU headroom on weak machines, not
+  latency.  Win = Lyra feels snappier under contest load
+  (EiBi overlay + captured-profile NR + everything-on)
+  without GPU-vendor lock-in.
+* **Scope:** clean Vulkan FFT compute shader path is roughly
+  2 weeks of focused work.  Don't tackle in v0.1; right
+  window is v0.2 alongside TX bring-up.
+* **Operator hardware note:** AMD has genuinely caught up
+  for compute; pricing/availability often beats NVIDIA in
+  mid-range.  Vulkan-friendly path makes Lyra installable
+  on AMD-equipped operator shacks without compromise.
+
+#### 2. Dedicated calc thread for PureSignal (v0.3)
+
+* **Motivation:** when PureSignal lands, its IMD-prediction
+  calc loop is real compute (Thetis bench shows ~20-40 ms
+  per envelope evaluation depending on tap count).  Running
+  it on the DSP worker thread would steal cycles from
+  realtime RX/TX path.
+* **Current state:** Lyra already uses 5 threads — main, DSP
+  worker, RX, EP2 writer, plus WDSP's internal C thread.
+  Adding a 6th dedicated PS thread is straightforward.
+* **Scope:** design happens in v0.2 (when TX-path threading
+  is being architected anyway).  Implementation lands in
+  v0.3 with PureSignal itself.
+* **Watch:** thread affinity / NUMA hints on multi-core
+  systems become relevant once we have this many threads.
+
+#### 3. Explicit modern-hardware floor (low-cost cleanup)
+
+* **Motivation:** install guide + README are currently
+  vague on minimum requirements.  We assume modern
+  SSE/AVX (WDSP cffi requires it) and OpenGL 3.3+ (GPU
+  panadapter widget requires it) — but say so nowhere
+  user-facing.
+* **What's needed:** explicit "Windows 10 / 11, x86-64
+  with SSE 4.1+, GPU with OpenGL 3.3+ for accelerated
+  panadapter" line in install guide + README.  Inno
+  Setup already enforces Windows 10 1809+ baseline (see
+  `build/installer.iss` `MinVersion=10.0.17763`).
+* **Scope:** small, do anytime.  Probably bundle with
+  the next docs-touch commit.
+
+#### 4. Multi-radio refactor groundwork (v0.4)
+
+* **Motivation:** Brent's ANAN G2 needs Protocol 2 + a
+  factored radio abstraction that doesn't bake HL2
+  assumptions into UI/dispatch.
+* **Current state:** capability-driven UI discipline
+  (see `lyra/protocol/capabilities.py` and the
+  pre-commit hook that bans `isinstance(*, HL2*)`
+  checks in `lyra/ui/`) is already paying down this
+  debt as we go.
+* **Scope:** spread across v0.2 + v0.3 incrementally;
+  v0.4 is when ANAN-specific work lands.
+
+#### When to revisit
+
+This section comes off PARKED when any of these triggers
+fire:
+
+1. v0.2 TX-path planning kicks off (decisions 2 + 3 + 4
+   should inform that design).
+2. A tester reports AMD-GPU-specific issues that hint at
+   compute-shader needs (decision 1).
+3. Install-time confusion from a tester on minimum
+   requirements (decision 3 — bump to "do now").
+
+Until then: latency win is shipped, RX2 is in tester hands,
+TX is next.  No need to swing at these now.
+
 ---
 
 *Last updated: 2026-05-11 — Round 3 amendments applied (operator
