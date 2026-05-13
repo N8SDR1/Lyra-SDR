@@ -2913,6 +2913,242 @@ fire:
 Until then: latency win is shipped, RX2 is in tester hands,
 TX is next.  No need to swing at these now.
 
+### 15.9 — TX visual state design (PARKED 2026-05-13, scope: v0.2)
+
+Defines the unified color language for "is Lyra transmitting"
+indicators across all RX2 modes (OFF / SUB / SPLIT).  Filed
+during a §15.6 follow-up conversation about what happens
+visually when the operator goes TX in non-SPLIT mode,
+specifically when BW lock is OFF and RX BW differs from TX BW.
+
+#### Core principle: red = "transmitting RIGHT NOW"
+
+Every red UI element tells the operator the same thing: this
+is where you are on the air at this moment.  One color, one
+meaning, applied uniformly across every visual surface that
+could indicate TX state.  Operator's peripheral vision latches
+onto whatever is red and reads "I am transmitting" without
+needing to track multiple cues.
+
+This rule extends the existing Phase 3.E
+``FrequencyDisplay.set_tx_active`` red treatment (the VFO LED
+goes red on PTT) into a project-wide convention.
+
+#### What turns red on PTT
+
+| Element | Color while RX | Color while TX-active |
+|---------|----------------|------------------------|
+| VFO LED (the transmitting VFO) | Normal | **Red** (Phase 3.E, already wired) |
+| Passband rectangle (TX VFO) | Cyan (RX BW) | **Red** (TX BW; see below) |
+| Audio meter readouts | S-meter | PWR / SWR / ALC |
+| SPLIT TX marker (when SPLIT enabled) | Cyan/amber (per §15.6) | **Red** (overrides §15.6 idle color) |
+| Status bar accent (optional polish) | Normal | Red accent (deferred to v0.2 polish pass) |
+
+The passband rectangle is the key new behavior.  When BW
+lock is OFF and the operator has a different TX BW than RX
+BW configured for the current mode, the rectangle width
+*changes* on PTT — operator sees the actual TX filter
+width, not the RX filter width.  Eliminates the "I thought
+I had a wide TX filter but didn't" surprise on ESSB and
+the inverse on CW.
+
+#### Cross-mode behavior table
+
+| Mode | RX BW rect | TX marker/rect during TX |
+|------|-----------|---------------------------|
+| **OFF**, listening | Cyan | (none — same VFO) |
+| **OFF**, transmitting | (display swaps) | **Red rectangle at focused VFO BW** |
+| **SUB**, listening | Cyan | (none — TX = focused VFO) |
+| **SUB**, transmitting | Cyan stays on unfocused RX | **Red rectangle at focused VFO BW** |
+| **SPLIT**, listening | Cyan (VFO A) | Cyan/amber marker + BW rect (VFO B, idle) |
+| **SPLIT**, transmitting | Cyan stays on VFO A (still RX) | **Red** marker + BW rect (VFO B) |
+
+Nice property: red is always something *new appearing* or
+*changing*, never the steady-state RX visualization.  Anything
+red on screen = active transmission, full stop.
+
+#### §15.6 reconciliation
+
+§15.6 said the SPLIT TX marker should be "cyan or amber, NOT
+red since red is reserved for TX-active."  Under §15.9 that
+becomes a clean two-state pattern:
+
+* **SPLIT enabled, not transmitting** → marker is cyan/amber
+  ("here's where I'd TX if I keyed up now" — informational)
+* **SPLIT enabled, PTT firing** → marker turns **red**
+  (everything-red-means-active rule wins)
+
+This is fully consistent with §15.6's intent; §15.9 just
+makes the steady-state-vs-active transition explicit.
+
+#### Implementation scope (when greenlit in v0.2)
+
+1. `spectrum.py` / `spectrum_gpu.py` passband rectangle: add
+   a "TX active" branch that reads ``radio.tx_bw_for(mode)``
+   and renders red instead of cyan.  ~20 LOC across both
+   widget classes plus the GPU shader uniform.
+2. Wire `radio.tx_active_changed` signal (Phase 3.E already
+   defines it) into the spectrum panels so the repaint fires
+   on PTT edges, not just on next FFT tick.
+3. SPLIT TX marker color logic: extend the existing color
+   uniform to flip to red on `tx_active_changed`.
+4. Palette in `lyra/ui/palettes.py`: add semantic names
+   (`COLOR_TX_ACTIVE`, `COLOR_SPLIT_TX_IDLE`,
+   `COLOR_RX_PASSBAND`) so the rule is centralized, not
+   sprinkled across widget code.
+5. Color picker in Settings → Visuals → Colors should expose
+   these three semantic colors so operators with red/green
+   colorblindness can override (operator request implicit;
+   palette already has the click-label color picker
+   infrastructure).
+
+#### When to revisit
+
+Comes off PARKED when v0.2 TX bring-up reaches the point of
+needing visual state for PTT.  At that point:
+
+* Verify color palette renders distinguishably on all eight
+  waterfall palettes (a red TX rectangle on a Rainbow
+  waterfall could be hard to see — may need an outline /
+  glow to ensure it always stands out)
+* Audit all panadapter overlays for color collisions (peak
+  markers, landmark triangles, TCI spot boxes, EiBi labels —
+  any of these defaulting to red would muddy the signal)
+* Tester-visible polish: brief animated flash or short fade-in
+  on the red transition, optional
+
+Until then: idea is captured; v0.1 ships with RX-only path
+where none of this is triggerable.
+
+### 15.10 — RIT/XIT controls (PARKED 2026-05-13, scope: v0.1.x or v0.2)
+
+Surfaced during the §15.6 SUB/SPLIT/OFF tri-state design
+conversation when operator (Rick) noticed RIT/XIT had been
+omitted from that section.  RIT (Receiver Incremental Tuning)
+is an RX-only frequency offset typically ±0 to ±9.99 kHz used
+to chase a slightly off-frequency DX station without retuning
+the main VFO; XIT (Transmitter Incremental Tuning) is the TX
+mirror image used for split-style operation without engaging
+full SPLIT mode.  Standard on every HF rig built in the last
+40 years; conspicuous absence in Lyra.
+
+#### Placement: TUNING panel CW-pitch row
+
+Operator-proposed and locked: extend the existing horizontal
+row on the TUNING panel that already holds
+``CW Pitch label + spin → SUB → 1→2 → 2→1 → ⇄``
+(``lyra/ui/panels.py`` ``self.cw_pitch_row``, L591 onward).
+
+Two new buttons added between ``⇄`` and the trailing
+``addStretch(1)``:
+
+```
+[ CW Pitch | spin ]   [ SUB ]   [ 1→2 ]   [ 2→1 ]   [ ⇄ ]   [ RIT ]   [ XIT ]
+```
+
+Both buttons follow the existing **lit-when-active** idiom
+already used for AGC ``AUTO``, NR Mode 1-4, AEPF, LMS, etc.
+Operator's mental model: "highlighted = doing something."
+Zero new visual vocabulary.
+
+Row is currently sandwiched between two ``addStretch(1)``
+spacers, so the row floats centered and can absorb the two
+new buttons cleanly at typical window widths.  No combobox
+fallback needed.
+
+#### Interaction model (Option 1 from §15.10 design chat)
+
+The buttons themselves are visually minimal — the **offset
+value** and **clear** functions are gestures, not separate
+widgets on the row.  Keeps the TUNING panel tidy and matches
+the AGC right-click + Shift-click pattern operators already
+know.
+
+| Gesture | Action |
+|---------|--------|
+| Click ``RIT`` / ``XIT`` | Toggle on/off (button lights when active) |
+| Right-click ``RIT`` / ``XIT`` | Open small popup: spin-box for offset (±0..±9.99 kHz, 10 Hz step) + ``Clear`` button + ``Close`` button |
+| Shift-click ``RIT`` / ``XIT`` | Instant zero (offset → 0, button stays lit if it was lit) |
+| Hover (when lit) | Tooltip shows live offset (e.g., ``"RIT: +1.20 kHz"``) |
+
+Operators who want a dedicated spin-box surface can use the
+right-click popup; operators who want fast in-and-out get
+the button + shift-click idiom.
+
+#### Persistence
+
+Two new QSettings keys (under existing ``radio/`` group):
+
+* ``radio/rit_enabled`` (bool, default False)
+* ``radio/rit_offset_hz`` (int, default 0, signed)
+* ``radio/xit_enabled`` (bool, default False)
+* ``radio/xit_offset_hz`` (int, default 0, signed)
+
+RIT/XIT state restores on app launch.  Per-band memory NOT
+needed (these are session-level offsets, not band defaults —
+matches industry convention).
+
+#### Scope: RIT ships pre-TX, XIT waits for v0.2
+
+* **RIT** is RX-only and can ship in a v0.1.x patch release
+  ahead of TX (operator can use it the day it lands — chase
+  a drifted DX station, listen 200 Hz off the center of a CW
+  signal without retuning, etc.).
+* **XIT** only matters when TX exists.  Button renders in v0.1.x
+  but **disabled with explanatory tooltip** ("XIT activates
+  with TX in v0.2") so the row layout is final and doesn't
+  shift when v0.2 lands.
+
+Implementation effort estimate: ~1 day for RIT (button +
+popup + Radio offset plumbing + spectrum-marker shift +
+QSettings persistence + help docs); XIT enable in v0.2 is
+~2 hours on top of that since the UI surface is already
+built and tested.
+
+#### Effect on DSP / protocol
+
+* **RIT path:** offsets the **DDC frequency** by the RIT value
+  while leaving the displayed VFO unchanged.  Composes with
+  the existing v0.0.9.8 ``_compute_dds_freq_hz`` central CW
+  pitch offset (already centralizes "displayed VFO → actual
+  DDS freq" math).  Add ``+ rit_offset_hz`` inside that helper
+  when RIT is enabled.  Spectrum marker stays at displayed
+  VFO; DDC center shifts; passband rectangle visually shifts
+  the same amount on the panadapter (operator sees "I am
+  listening here, but my VFO LED still reads the marked
+  freq").
+* **XIT path (v0.2):** mirror — offsets the **TX DDS frequency**
+  by the XIT value while leaving the displayed TX VFO
+  unchanged.  Lands when TX path lands in v0.2.
+
+No protocol-layer changes.  Just one helper line in
+``_compute_dds_freq_hz`` for RIT, and the equivalent in the
+TX-freq helper when v0.2 ships XIT.
+
+#### Visual feedback on the panadapter (optional polish)
+
+When RIT is lit, a small amber tick-mark + label could be
+drawn on the panadapter at the **displayed-VFO** position
+(distinct from the orange tuning marker, which would now sit
+at the **actual DDC center**).  Lets operator see at a glance
+"my VFO marker says here, but I'm actually listening here."
+
+Deferred to a polish pass — first implementation can ship with
+just the lit button + tooltip + marker shift, and we add the
+panadapter tick-mark if a tester says they wanted it.
+
+#### When to revisit
+
+* **RIT**: any time after v0.1.0 stable ships and tester
+  feedback on the dual-RX UX has settled.  Likely v0.1.1 or
+  v0.1.2 polish window.
+* **XIT**: v0.2 TX bring-up — re-read this section when wiring
+  the TX VFO offset, take the ~2 hour enable path.
+
+Until then: row layout decision is final, gestures are
+locked, persistence keys reserved.  Operator can stop
+mentally tracking "we forgot RIT" — it's captured.
+
 ---
 
 *Last updated: 2026-05-11 — Round 3 amendments applied (operator
