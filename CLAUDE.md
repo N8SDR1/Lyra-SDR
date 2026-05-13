@@ -2530,6 +2530,161 @@ The full radio-side wiring already existed (release time
 since the v0.0.9.6 cleanup arc — only the UI exposure was
 missing.
 
+### 15.6 — SPLIT operation UX design (proposed 2026-05-12, NOT yet built)
+
+Operator design discussion 2026-05-12 (Rick): proposed
+extending the current binary **SUB** button on the TUNING
+panel into a **tri-state SUB / SPLIT / OFF** cycle button as
+the v0.1 / v0.2 path for SPLIT TX operation, INSTEAD of (or
+in addition to) the split-panadapter pane originally on the
+v0.1 plan §7 (Phase 4).
+
+**Proposed behavior:**
+
+| State | RX behavior | TX behavior |
+|---|---|---|
+| **OFF** | Single RX on focused VFO (current SUB-off) | TX on focused VFO |
+| **SUB** | Dual RX stereo split (current SUB-on) | TX on focused VFO |
+| **SPLIT** | Single RX on VFO A (DX pile-up workflow) | TX on VFO B |
+
+Plus: in SPLIT, a **TX marker + BW rectangle** drawn on the
+existing single panadapter (distinct color from the RX
+marker — proposed cyan or amber, NOT red since red is
+reserved for TX-active per Phase 3.E
+`FrequencyDisplay.set_tx_active`).
+
+**Rationale for tri-state instead of separate SPLIT button:**
+the three configurations (single RX, dual RX listening, SPLIT
+pile-up) are the operationally common ones.  The fourth combo
+(SUB + SPLIT) is rare and can be a right-click extension
+later.  Three states cover 95% of operating reality.
+
+**Rationale for "TX marker on existing panadapter" instead of
+split-panadapter pane:**
+
+Most operators in SPLIT operation watch the *RX-side* spectrum
+(where they're listening for the DX station's response) while
+the *TX-side* freq is just "where I'm calling — show me a
+marker."  A single panadapter that follows the RX side, with
+a separate-colored TX marker + BW box overlay, gives the
+operator all the visual feedback they need without doubling
+the spectrum widget complexity.
+
+Split-panadapter pane is still possible later if testers ask
+for it.  Operator decision 2026-05-12: parked pending Brent +
+Timmy bench feedback on whether the tri-state + TX-marker
+approach is sufficient.
+
+**Caveats / edges discussed:**
+
+* **Cross-band SPLIT** (e.g. RX1 on 40m, VFO B on 20m for
+  cross-band repeater work) — the single panadapter can only
+  show one band's spectrum.  Best default: panadapter follows
+  the RX side (where operator's listening for the DX);
+  off-screen TX marker is fine.
+* **State model**: keep `rx2_enabled` + `split_on` as two
+  separate dispatch axes on Radio.  The tri-state button is
+  just a UX projection over those axes — internal model stays
+  orthogonal.  Lets future workflows independently combine
+  states without re-architecting.
+* **Persistence**: `dispatch/split_on` joins the v0.1 Phase 4
+  RX2 persistence keys.
+* **TX itself is v0.2.**  The SPLIT button + TX marker can
+  ship in v0.1 as **prep work** — button cycles, state
+  persists, TX marker draws.  v0.2 TX hooks the actual
+  transmit path to the SPLIT-on VFO B selection.  Zero UI
+  changes needed when TX lands.
+
+**Implementation scope when greenlit:**
+
+1. `split_on` dispatch axis on Radio + signal + setter
+2. Tri-state SUB/SPLIT/OFF button on TuningPanel (cycle on
+   click, distinct visual state per mode)
+3. Persistence for both axes (extends v0.1 Phase 4 work)
+4. TX marker + BW rectangle on the spectrum widget
+   (panadapter-source-aware like the existing markers; reads
+   `radio.tx_freq_hz` = VFO B in SPLIT, VFO A otherwise)
+5. Right-click on the tri-state button → tooltip / help
+   dialog explaining the three states (UX clarity for new
+   operators)
+
+**Status: PARKED** pending Brent + Timmy bench feedback on the
+v0.1.0-pre2 dual-RX UX.  If the focused-VFO single-panadapter
+approach feels sufficient in practice, this design likely
+ships in v0.2 as the SPLIT pre-work.  If the testers ask for
+split-panadapter pane instead, this design gets rolled back
+and Phase 4 split-pane comes back on.  See full discussion in
+session transcript at
+`C:\Users\N8SDR\.claude\projects\...` (session 2026-05-12).
+
+### 15.7 — Sync investigation: waterfall / panadapter / audio delays
+
+**Filed 2026-05-12 by operator (Rick).**  Possibly an
+operator-perceptible time skew between the three live
+RX-rendered surfaces:
+
+1. **Audio output** — what the operator HEARS
+2. **Panadapter spectrum** — what the operator SEES as the
+   spectrum
+3. **Waterfall** — what the operator SEES as the rolling
+   history
+
+Operator's working hypothesis (to confirm on next bench
+session): one or more of these may be running with different
+latency than the others, such that a "pop heard at moment T"
+shows up as a spectrum blip at moment T+Δ₁ and a waterfall
+streak at T+Δ₂ — feeling out of sync rather than coherent.
+
+**Background context** (worth investigating from):
+
+* **Audio path latency**: HL2 IQ → EP6 parser → DspWorker
+  queue → WDSP cffi process → audio sink.  Audio sink itself
+  may add buffering (HL2 audio jack has a hardware FIFO,
+  PC Soundcard has WASAPI buffer).  Net ~50-200 ms depending
+  on sink.
+* **Spectrum path latency**: IQ → DspWorker FFT ring buffer
+  → `_maybe_run_fft` cadence (every N IQ blocks based on
+  `_fft_interval_ms`) → `_process_spec_db` → `spectrum_ready`
+  signal → Qt main thread → spectrum widget repaint.  FFT
+  cadence default ~30-60 fps; ring buffer adds 1-2 FFT
+  windows of delay.
+* **Waterfall path latency**: same FFT source as spectrum
+  but emit cadence is divided by `_waterfall_divider`
+  (default 2-3) and may also multi-emit per push for fast-
+  scroll.  Should be the SAME spectrum frames just displayed
+  differently — if there's skew between spectrum and
+  waterfall, that's a real bug (not just latency).
+
+**Diagnostic approach when picking this up:**
+
+1. **First confirm the phenomenon.**  Generate a known
+   impulse (tap the antenna line, click an SDR tone
+   generator) and measure latency between hearing it,
+   seeing the spectrum blip, and seeing the waterfall
+   streak.  Phone camera at ~60 fps recording the screen +
+   speaker audio is plenty.
+2. **Compare to expected delays.**  If audio is leading
+   spectrum by ~50 ms and waterfall by ~150 ms, that's
+   probably just sink buffering + FFT cadence — operationally
+   acceptable.  If they're WILDLY apart (>500 ms) something
+   structural is wrong.
+3. **Check spectrum vs waterfall coherence specifically** —
+   they share the same FFT source, so they should be perfectly
+   coherent or off by exactly the waterfall divider.  Any
+   other skew = bug.
+4. **Suspects** (rank when investigating):
+   - Waterfall multi-emit interpolation drifting from real
+     time (lyra/radio.py:10501+ `_waterfall_tick_counter`)
+   - Spectrum widget repaint throttling vs Qt event loop
+     pressure under high DSP load
+   - HL2 audio jack EP2 buffer depth vs PC Soundcard rmatch
+     latency difference
+
+**Status: PARKED — TODO investigation on next bench session.**
+Operator will gather repro evidence ("ooos when I restart
+later") and update this entry with findings before code work
+starts.
+
 ---
 
 *Last updated: 2026-05-11 — Round 3 amendments applied (operator
