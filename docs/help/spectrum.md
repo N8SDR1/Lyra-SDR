@@ -530,7 +530,7 @@ QPainter version on the same hardware.
 **What works in v0.0.5** (full feature parity with the QPainter widget):
 
 - Trace + waterfall render with full color palette + live Settings
-- VFO marker, CW Zero reference line
+- VFO marker
 - Click-to-tune on the trace and waterfall
 - Right-click context menu (notch quick-add, etc.)
 - Wheel-to-zoom on empty spectrum

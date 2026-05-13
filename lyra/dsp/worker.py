@@ -608,6 +608,17 @@ class DspWorker(QObject):
                 print(f"[DspWorker] tone error: {exc}")
             return
 
+        # §15.7 sync instrumentation (LYRA_TIMING_DEBUG=1) -- record
+        # worker-thread audio + spectrum processing latency per
+        # batch.  Cheap when env var is off: one ``getattr`` to
+        # ``_timing_stats``, which is None unless gated on.
+        _timing = getattr(radio, "_timing_stats", None)
+        if _timing is not None:
+            import time as _t
+            _audio_t0 = _t.monotonic_ns()
+        else:
+            _audio_t0 = 0
+
         # WDSP engine path — only DSP path as of Phase 3 (2026-05-08).
         # The DSP heavy work happens inside the WDSP DLL's C thread, so
         # even though we're on the Python worker thread, the GIL is
@@ -662,6 +673,24 @@ class DspWorker(QObject):
                     radio._do_demod_wdsp(samples)
             except Exception as exc:
                 print(f"[DspWorker] WDSP demod error: {exc}")
+            # §15.7 timing -- record audio path total (worker enter
+            # to sink write returned).  Does NOT include sink-internal
+            # buffering (HL2 gateware FIFO 40 ms, PC Soundcard rmatch
+            # 200 ms) -- those are constants documented in §15.7.
+            if _timing is not None and _audio_t0 > 0:
+                import time as _t
+                _timing.record(
+                    "audio_worker_ms",
+                    _t.monotonic_ns() - _audio_t0)
+                # Queue depth context updated per record so the
+                # next flush includes the latest snapshot.
+                try:
+                    _timing.set_context(
+                        "q_rx1", self._input_queue.qsize())
+                    _timing.set_context(
+                        "q_rx2", self._input_queue_rx2.qsize())
+                except Exception:
+                    pass
         # FFT cadence (B.8): append IQ to the worker-owned sample
         # ring; every N blocks compute one FFT and emit raw spec_db.
         # Errors NEVER stop audio — at worst the panadapter freezes
@@ -682,6 +711,16 @@ class DspWorker(QObject):
                 self._maybe_run_fft(samples)
         except Exception as exc:
             print(f"[DspWorker] fft error: {exc}")
+        # §15.7 timing -- record total worker block time (audio +
+        # FFT cadence + emit).  Difference (fft_worker_ms minus
+        # audio_worker_ms) shows the FFT slice's contribution; note
+        # FFTs only emit on cadence ticks (~once every 2 batches at
+        # 192k) so this metric's ``n`` will be less than
+        # ``audio_worker_ms``'s ``n``.
+        if _timing is not None and _audio_t0 > 0:
+            import time as _t
+            _timing.record(
+                "fft_worker_ms", _t.monotonic_ns() - _audio_t0)
 
     def _maybe_run_fft(self, samples: np.ndarray) -> None:
         """Append IQ to the worker-owned sample ring; if the FFT

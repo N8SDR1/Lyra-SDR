@@ -598,10 +598,42 @@ class HL2Stream:
         # only one ADC but the bit pattern matters), 0x14 (LNA C4
         # = 0x40 override-enable bit being cycled at 20 Hz), or
         # 0x16 (step-ATT enable bit 0x20 being cycled).
+        # ── §15.7 latency tune-down hook (2026-05-13) ─────────────────
+        # HL2 TX-latency register (gateware 0x17) defaults to 40 ms.
+        # That value was chosen during the v0.0.9.6 audio quiet-pass
+        # to give Python/Qt scheduling jitter plenty of headroom.
+        # Post-v0.0.9.6 we have MMCSS Pro Audio + 1 ms timer + GIL
+        # switchinterval + producer-paced EP2 cadence — the original
+        # 40 ms margin is likely larger than needed.
+        #
+        # Operator-tunable via ``LYRA_HL2_TXLATENCY_MS=N`` env var for
+        # bench experimentation.  Range-clamped to 5..127 (gateware
+        # is a 7-bit field; 5 is the safe floor before audio jitter
+        # could cause underruns).  Default 15 = post-§15.7 production
+        # floor (validated 2026-05-13 on RX path; HL2 jack stable
+        # with same brief startup hiccup as 25 ms).  Was 40 ms
+        # pre-§15.7 — set LYRA_HL2_TXLATENCY_MS=40 to revert.
+        # Other HPSDR clients (Thetis, EESDR3) typically run this
+        # register at ~10 ms because C/C++ doesn't have Python's
+        # scheduling overhead.  TX-side validation pending TX bring-up.
+        import os as _os_txlat
+        _txlat_raw = _os_txlat.environ.get(
+            "LYRA_HL2_TXLATENCY_MS", "").strip()
+        if _txlat_raw:
+            try:
+                self._tx_latency_ms = max(5, min(127, int(_txlat_raw)))
+                print(f"[HL2Stream] §15.7 override: "
+                      f"TX-latency register = {self._tx_latency_ms} ms "
+                      f"(LYRA_HL2_TXLATENCY_MS; default 15)")
+            except (TypeError, ValueError):
+                self._tx_latency_ms = 15
+        else:
+            self._tx_latency_ms = 15
         self._cc_registers: dict[int, tuple[int, int, int, int]] = {
             0x00: (SAMPLE_RATES[sample_rate], 0x00, 0x00,
                    self._config_c4),                # general settings
-            0x2e: (0, 0, 12 & 0x1F, 40 & 0x7F),     # TX latency (HL2 reg 0x17)
+            0x2e: (0, 0, 12 & 0x1F,                 # TX latency (HL2 reg 0x17)
+                   self._tx_latency_ms & 0x7F),
         }
         self._cc_cycle: tuple[int, ...] = (
             0x00,  # general

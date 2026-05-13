@@ -641,7 +641,35 @@ class SoundDeviceSink:
                 # vs 160ms at 0.05.  Aggressive enough to catch up
                 # before the next perturbation, conservative enough
                 # to not overshoot.
-                ring_target = int(actual_outrate * 0.400)
+                #
+                # ── §15.7 latency tune-down hook (2026-05-13) ────
+                # The 0.400 multiplier (= 400 ms ring target) was a
+                # conservative pre-v0.0.9.6 choice when Python/Qt
+                # scheduling jitter was much worse.  Other HPSDR
+                # clients using the same rmatch algorithm (e.g.
+                # Thetis port) typically run ~50-100 ms targets.
+                # Operator-tunable via ``LYRA_RMATCH_RING_MS=N`` env
+                # var for bench experimentation.  Range-clamped to
+                # 30..1000 (below 30 ms the PI loop probably can't
+                # absorb drift; above 1000 ms is operationally
+                # ridiculous).  Default 150 = post-§15.7 production
+                # floor (validated 2026-05-13 under NR4 + LMS + AGC
+                # Fast load; clean on PC Soundcard).  Was 400 ms
+                # pre-§15.7 — set LYRA_RMATCH_RING_MS=400 to revert.
+                import os as _os_ring
+                _ring_raw = _os_ring.environ.get(
+                    "LYRA_RMATCH_RING_MS", "").strip()
+                if _ring_raw:
+                    try:
+                        _ring_ms = max(30, min(1000, int(_ring_raw)))
+                        print(f"[Lyra audio] §15.7 override: "
+                              f"rmatch ring target = {_ring_ms} ms "
+                              f"(LYRA_RMATCH_RING_MS; default 150)")
+                    except (TypeError, ValueError):
+                        _ring_ms = 150
+                else:
+                    _ring_ms = 150
+                ring_target = int(actual_outrate * (_ring_ms / 1000.0))
 
                 # v0.0.9.6 polish (B): seed initial_var from the
                 # last-known value saved on a previous Lyra session.

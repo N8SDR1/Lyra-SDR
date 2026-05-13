@@ -43,10 +43,11 @@ Lyra aims to be:
   expose exactly the right controls (OC outputs, USB-BCD for the
   amp, AK4951 audio routing) without ever becoming a lowest-common-
   denominator panel.
-- **Modern to look at.** Glassy / mirror-surface panels, analog
-  meter with lit-amber arc on black, 7-segment amber frequency
-  readout, dockable everything. Inspired by ExpertSDR3's look-and-
-  feel but an independent visual design.
+- **Modern to look at.** Glassy / mirror-surface panels, lit-amber
+  arc S-meter on black (with LED-bar alternative one click away),
+  7-segment amber frequency readout, dockable everything.
+  Inspired by ExpertSDR3's look-and-feel but an independent visual
+  design.
 - **Scripting-friendly.** TCI v1.9 server built in from day one so
   log4OM, N1MM+, JS8Call, SDRLogger+, and anything else speaking
   TCI just works.
@@ -85,8 +86,11 @@ Lyra is built by **Rick Langford (N8SDR)** — project lead and
 sole developer through the v0.0.9.x line.  **Brent Crier
 (N9BC)** joined as co-contributor during v0.0.9.1 testing,
 bringing the Hermes Lite 2+ and ANAN G2 perspective; joint
-development begins with the v0.1 RX2 work.  Both are licensed
-amateur radio operators who actually use the rigs Lyra targets.
+development begins with the v0.1 RX2 work.  **Timmy Davis
+(KC8TYK)** joined for the v0.1.0-pre2 tester flight, bringing
+additional bench-test coverage on the RX2 dual-receiver build.
+All three are licensed amateur radio operators who actually use
+the rigs Lyra targets.
 
 See `CONTRIBUTORS.md` at the project root for the full contributor
 list.

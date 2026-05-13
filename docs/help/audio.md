@@ -51,17 +51,24 @@ Every audio sample passes through this chain before reaching
 your speakers:
 
 ```
-RF in → LNA → ADC → IQ → demod → notches → NR → ANF
-                              ↓
-                      AF Gain (pre-AGC) → AGC → APF (CW only)
-                              ↓
-                          Volume → Mute → Bal → sink
+RF in → LNA → ADC → IQ → WDSP RXA chain → demod
+                          │                  ↓
+                          ├─ NBP0 + notches  │
+                          ├─ NR (EMNR)       │
+                          ├─ ANF             │
+                          ├─ AGC             │
+                          └─ APF (CW only)   │
+                                             ↓
+                              AF Gain (pre-AGC reference)
+                                             ↓
+              Per-RX Vol-A / Vol-B → Mute → Bal → audio sink
+                       (RX1 left / RX2 right when SUB is on)
 ```
 
 The DSP stages (notches / NR / ANF / AGC / APF) all run inside
-the WDSP engine; the operator-controlled level stages (LNA, AF
-Gain, Volume, Mute, Bal) wrap around it.  This matches Thetis
-and other openHPSDR-class clients.
+the WDSP RXA engine via cffi; the operator-controlled level
+stages (LNA, AF Gain, per-RX Vol, Mute, Bal) wrap around it.
+This matches Thetis and other openHPSDR-class clients.
 
 Operator-controlled stages, each with a distinct role:
 
@@ -275,9 +282,11 @@ sagging in the middle the way a naive linear pan would.
   independently.  Lyra applies the balance gains and feeds
   proper stereo to both.
 
-**Future expansion (after RX2 ships):** the same Bal slider will
-become the RX1 / RX2 mixing control — RX1 to one ear, RX2 to the
-other for DX-split listening.
+Note: with v0.1 RX2 shipped, RX1-left / RX2-right stereo split is
+done by the **SUB button** on the TUNING panel — not the Bal
+slider.  Bal stays a single shared control acting on the combined
+output (pre-AGC reference), so you can still pan the mixed audio
+left or right independently of the SUB stereo split.
 
 ## AGC interactions
 
@@ -360,6 +369,23 @@ software install.  Use only when TCI isn't available.
 
 ## Latency
 
-PC Soundcard latency is PortAudio-default, typically 20–50 ms.
-AK4951 latency is hardware-only (under 5 ms typical). Tighter
-PortAudio latency settings are on the backlog.
+Post-§15.7 polish (2026-05-13):
+
+- **PC Soundcard** — ~172 ms total ear-lag (150 ms rmatch ring +
+  22 ms WASAPI host buffer).  Down from ~434 ms pre-§15.7.
+- **HL2 audio jack** — hardware-only latency, under 5 ms typical.
+
+Operator-tunable diagnostic env vars (intended for testers reporting
+audio dropouts; defaults are validated under heavy DSP load):
+
+- `LYRA_RMATCH_RING_MS=N` — rmatch ring target.  Default 150 ms,
+  range 30–1000 ms.  Increase if you hear dropouts; decrease for
+  shorter latency at the cost of less headroom for DSP spikes.
+- `LYRA_HL2_TXLATENCY_MS=N` — HL2 gateware TX-latency register.
+  Default 15 ms, range 5–127 ms.
+- `LYRA_TIMING_DEBUG=1` — print `[TIMING]` instrumentation once
+  per second (worker times, queue depths, current audio sink).
+
+See **Troubleshooting → Advanced: latency tuning** for the full
+methodology and revert procedure if a build feels worse than
+expected on your hardware.

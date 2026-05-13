@@ -214,6 +214,10 @@ class SpectrumGpuWidget(SpectrumSourceMixin, QOpenGLWidget):
     # panadapter scroll step (Display panel combo).  Positive = wheel
     # up = freq up.
     wheel_tune = Signal(int)
+    # v0.1 RX2: middle-click swaps focus between RX1 and RX2.
+    # Mirrors the Ctrl+1 / Ctrl+2 keyboard shortcut as a mouse
+    # gesture.  SpectrumPanel wires this to the RX-toggle slot.
+    focus_swap_requested = Signal()
     # Wheel-over-notch — payload is (notch_freq_hz, delta_units).
     # Panel routes to set_notch_width_at to adjust the notch's width
     # multiplicatively. Same name as the QPainter widget's signal.
@@ -1276,6 +1280,9 @@ class SpectrumGpuWidget(SpectrumSourceMixin, QOpenGLWidget):
                     float(self._freq_at_pixel(x)),
                     shift_held,
                     event.globalPosition().toPoint())
+        elif event.button() == Qt.MiddleButton:
+            # v0.1 RX2: middle-click swaps focus between RX1 and RX2.
+            self.focus_swap_requested.emit()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
@@ -2719,6 +2726,8 @@ class WaterfallGpuWidget(QOpenGLWidget):
 
     clicked_freq = Signal(float)
     right_clicked_freq = Signal(float, bool, QPoint)
+    # v0.1 RX2: middle-click swaps focus between RX1 and RX2.
+    focus_swap_requested = Signal()
 
     # Number of rows in the texture. 600 matches the typical Lyra
     # waterfall height. Allocated once at initializeGL — operator
@@ -2859,6 +2868,9 @@ class WaterfallGpuWidget(QOpenGLWidget):
         f = self._freq_at_pixel(x)
         if event.button() == Qt.LeftButton:
             self.clicked_freq.emit(float(f))
+        elif event.button() == Qt.MiddleButton:
+            # v0.1 RX2: middle-click swaps focus between RX1 and RX2.
+            self.focus_swap_requested.emit()
         elif event.button() == Qt.RightButton:
             shift_held = bool(event.modifiers() & Qt.ShiftModifier)
             self.right_clicked_freq.emit(

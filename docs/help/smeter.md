@@ -5,9 +5,12 @@ can't find it among your docked windows.)*
 
 ## Styles
 
-Three styles, switchable via the chip-row in the Meters panel header
-(`Lit-Arc | LED | Analog`). Click any chip to swap instantly. Choice
+Two styles, switchable via the chip-row in the Meters panel header
+(`Lit-Arc | LED`). Click any chip to swap instantly. Choice
 persists across launches.
+
+*(The legacy Analog needle meter was retired in v0.1 — see
+"Removed" below.)*
 
 ### Lit-Arc *(default)*
 Curved analog-style face with **NO needle** — instead a row of ~80
@@ -43,17 +46,20 @@ meter shows the exact value (e.g. `S9+12`, `−61 dBm`, `+18.5 dB`).
 ### LED bar-graph
 Modern Icom/Yaesu aesthetic — segmented colored bars. Stacked rows
 for different meter types (S-meter during RX; PWR, SWR, ALC, MIC
-during TX when the TX path ships).
+during TX when the TX path ships).  Now displays AGC
+gain-reduction on its own row alongside the S-meter (v0.1 parity
+with Lit-Arc, was missing in v0.0.9.x).
 
-### Analog needle *(legacy — slated for removal)*
-Classic Kenwood/Yaesu aesthetic — shallow-arc dial with concentric
-scales, cream face with lit-amber markings on black. Single white
-needle tracks the signal level. **Will be removed in a future
-release** once the new Lit-Arc style is settled in operator hands;
-kept now as a fallback during the transition.
+### Removed: Analog needle *(v0.0.9.x — gone as of v0.1)*
+The classic Kenwood/Yaesu-style needle meter has been removed.
+Operator feedback rated it harder to calibrate at a glance than
+the LED bar or Lit-Arc, and visual polish lagged the other two.
+If you had Analog as your saved style, Lyra silently migrates
+your preference to Lit-Arc on first launch after the upgrade.
 
-All three styles share the same underlying data feed — switching is
-purely visual and does not affect the meter's data path.
+Both remaining styles share the same underlying data feed —
+switching is purely visual and does not affect the meter's data
+path.
 
 ## Calibration
 

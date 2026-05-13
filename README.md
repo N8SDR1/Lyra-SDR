@@ -1,18 +1,19 @@
 # Lyra — Qt6 SDR Transceiver for Hermes Lite 2 / 2+
 
-**Current version: 0.0.9.3 — "WDSP AGC"**
+**Current version: 0.1.0-pre2 — "RX2 Dual Receiver"**
 
 Modern PySide6 desktop SDR for Steve Haynal's Hermes Lite 2 and HL2+.
 Native Python HPSDR Protocol 1, TCI v1.9 server, glassy UI with
-analog-look meters, a band-plan overlay with landmark click-to-tune,
-GPU-accelerated panadapter + waterfall, a CW-focused audio toolkit
-(APF audio peaking filter + BIN binaural pseudo-stereo), and a deep
-noise-toolkit drawing on Warren Pratt's WDSP — adaptive line
-enhancer, Martin-statistics MMSE-LSA noise reduction, all-mode
-squelch.  Built-in weather alerts watch the operator's local
-conditions across multiple data sources (Blitzortung, NWS, Ambient,
-Ecowitt) and raise toolbar + toast notifications for lightning and
-high-wind events.
+lit-arc and LED-bar meters, a band-plan overlay with landmark
+click-to-tune, GPU-accelerated panadapter + waterfall, dual-receive
+(RX2) with focused-VFO operator model and SUB stereo split, a
+CW-focused audio toolkit (APF audio peaking filter + BIN binaural
+pseudo-stereo), and a deep WDSP-cffi noise toolkit drawing on
+Warren Pratt's WDSP — EMNR mode 1-4 noise reduction, adaptive line
+enhancer (ANF), all-mode squelch.  Built-in weather alerts watch the
+operator's local conditions across multiple data sources
+(Blitzortung, NWS, Ambient, Ecowitt) and raise toolbar + toast
+notifications for lightning and high-wind events.
 
 ![Lyra](assets/logo/Lyra-SDR.png)
 
@@ -34,42 +35,43 @@ display surface follows automatically.
 
 ## Latest release — see [CHANGELOG.md](./CHANGELOG.md)
 
-The current release is **0.0.9.3 — "WDSP AGC"** (2026-05-05).
-The audio-quality follow-up to v0.0.9.2's host-side cadence rebuild,
-focused on the AGC + APF chain operators interact with directly.
+The current release is **0.1.0-pre2 — "RX2 Dual Receiver"** (2026-05-12).
+Pre-release for tester bench-flight with Brent (N9BC), Timmy (KC8TYK),
+and N8SDR.  The headline change is full RX2 dual receive on the HL2 —
+two independent receivers running side-by-side under a focused-VFO
+operator model.
 
-- **WDSP-pattern AGC engine** — Lyra's legacy single-state peak
-  tracker is retired in favor of a Python port of Warren Pratt's
-  WDSP wcpAGC.  Look-ahead ring buffer, 5-state machine, soft-knee
-  compression curve, hang threshold gating.  Smoother noise floor,
-  fast recovery after transients (~25 ms vs ~500 ms in legacy),
-  no scratchy modulation, no post-attack volume surges.  Operator-
-  facing presets (Off / Fast / Med / Slow / Auto) are unchanged
-  in name; the audio character is consistent with what operators
-  hear on Thetis and PowerSDR-class clients.
-- **APF moved post-AGC** — the Audio Peaking Filter (CW only) now
-  applies its boost AFTER AGC + Volume, so the +18 dB max gain
-  produces a literal audible loudness boost on the CW tone instead
-  of being absorbed by AGC compensation.  Default bandwidth bumped
-  from 80 → 100 Hz so the boost catches signals even when slightly
-  off-zero-beat.  Right-click the APF button to pick BW / Gain
-  presets; the operator-tunable range (30-200 Hz, 0-18 dB) is
-  unchanged.
-- **SoundDeviceSink device-info diagnostic** — when an operator
-  switches Out: combo to PC Soundcard, the console now logs the
-  device PortAudio actually picked, host API in use, and the
-  negotiated sample rate vs requested.  Added to diagnose ring-
-  overrun reports from PortAudio chains where Windows is doing
-  shared-mode resampling silently.
-- **Workflow housekeeping** — version bumps, CHANGELOG, install
-  guide refresh, and the WDSP integration attribution chain
-  (Pratt's GPL v2+ → Lyra's GPL v3+) is fully documented for the
-  ported AGC engine.
+- **RX2 dual receiver** — second receiver on DDC1 with its own VFO,
+  mode, filter, AGC, and NR state.  Both receivers run continuously
+  whenever RX2 is enabled — no muting tricks or quick-toggles.
+- **Focused VFO model** — exactly one VFO is "focused" at any time;
+  panadapter, tuning knob, mode picker, band buttons, and GEN/TIME/
+  Mem recalls all act on the focused VFO.  Green border on the
+  focused VFO's frequency display marks where input goes.  Swap
+  focus by clicking the other VFO's LED, **Ctrl+1** / **Ctrl+2**,
+  or **middle-click** anywhere on the panadapter.
+- **SUB stereo split** — single-button toggle on the TUNING panel.
+  SUB off = mono on focused VFO.  SUB on = RX1-left / RX2-right
+  stereo split.  Vol-A / Vol-B / Mute-A / Mute-B sliders are always
+  visible (Phase 3.E.1 hotfix — predictable layout beats conditional
+  widgets).  Balance + AF Gain remain single shared controls.
+- **VFO B always-visible** — the second frequency display
+  (previously hidden) now sits permanently below VFO A.  Click to
+  give it focus; double-click to type a frequency.
+- **Persistence across sessions** — `rx2_enabled`, `focused_rx`,
+  per-RX vol / mute, and per-RX mode all round-trip through the
+  Lyra session file.  Open Lyra exactly how you left it.
+- **Audio-path latency reduction** (post-pre2 polish, §15.7) —
+  rmatch ring 400 → 150 ms, HL2 TX-latency register 40 → 15 ms.
+  ~275 ms shaved off the RX path vs pre-§15.7.  See the User Guide
+  Troubleshooting topic for the tester-diagnostic env vars
+  (`LYRA_RMATCH_RING_MS`, `LYRA_HL2_TXLATENCY_MS`, `LYRA_TIMING_DEBUG`).
 
-For the previous v0.0.9.2 release (host → radio EP2 cadence
-rewrite, band-change fixes, 48 k IQ rate retirement) and the
-v0.0.9 / v0.0.9.1 batch (Memory & Stations, TIME button, EiBi
-overlay, etc.):
+For the previous v0.0.9.3 release ("WDSP AGC" — Warren Pratt
+wcpAGC engine, APF moved post-AGC, sounddevice device-info
+diagnostic), v0.0.9.2 (host → radio EP2 cadence rewrite, band-change
+fixes, 48 k IQ rate retirement), and the v0.0.9 / v0.0.9.1 batch
+(Memory & Stations, TIME button, EiBi overlay, etc.):
 
 - **TIME button (HF time-station cycle).**  Press TIME on the BANDS
   panel to jump to WWV / WWVH / CHU.  Press again to step through
@@ -107,12 +109,15 @@ F1 inside the app for the in-app User Guide.
 
 **RX signal chain**
 - Native HPSDR P1 discovery + streaming (UDP, port 1024)
+- Dual-receive (RX2) on DDC1 — independent VFO / mode / filter / AGC / NR per RX
 - Spectrum-correct panadapter (HL2 baseband mirror correction applied)
-- AGC with Fast / Medium / Slow / Auto / Custom profiles
-- Per-band auto-LNA (overload-protection mode, capped +31 dB)
+- AGC with Fast / Medium / Slow / Long / Auto / Custom profiles
+  (WDSP wcpAGC engine via cffi)
+- Auto LNA back-off + opt-in pull-up (overload protection, range -12 to +48 dB)
 - Manual notch filters — multi-notch, per-notch Q, live cut-depth
   visualization on the spectrum
-- Spectral-subtraction noise reduction (Light / Medium / Aggressive)
+- WDSP EMNR noise reduction (Mode 1-4 picker, AEPF post-filter, NPE noise estimator)
+- Captured noise-profile library (snapshot the band's noise, recall later)
 - Noise-floor reference line with auto-threshold feeding AGC
 - Passband overlay with draggable edges for live RX BW tweaks
 - Peak markers (Line / Dots / Triangles, in-passband only)
@@ -125,7 +130,10 @@ F1 inside the app for the in-app User Guide.
 
 **UI**
 - Docked-panel workspace (drag to float / tab / reset layout)
-- Analog S-meter with LED-bar alternative (right-click to switch)
+- Lit-Arc S-meter with LED-bar alternative (click the chip-row
+  in the Meters panel header to switch styles)
+- Focused-VFO indicator (green border) + middle-click-to-swap on
+  the panadapter
 - Waterfall with eight palettes (Classic / Inferno / Viridis /
   Plasma / Rainbow / Ocean / Night / Grayscale)
 - Click-label color picker in Settings → Visuals (text of each field
@@ -142,17 +150,20 @@ F1 inside the app for the in-app User Guide.
 - Per-session notch bank, per-band frequency memory
 
 **Audio out**
-- AK4951 (HL2's onboard codec) or PC soundcard
-- Automatic fallback when the stream rate exceeds AK4951's 48 kHz
+- HL2 audio jack (EP2 → AK4951 onboard codec, default for HL2 hardware)
+  or PC Soundcard (WASAPI via PortAudio with adaptive rmatch resampler)
+- Automatic fallback when the IQ stream rate exceeds AK4951's 48 kHz
+- Per-RX Vol-A / Vol-B / Mute-A / Mute-B sliders always visible (SUB-aware)
 
 ## Stack
 
 - **UI:** PySide6 (Qt6)
 - **Protocol:** Native Python HPSDR Protocol 1 (UDP, port 1024)
-- **DSP:** NumPy / SciPy (C++ core via pybind11 planned post-RX-stable)
+- **DSP:** WDSP via cffi (bundled GPL DLLs in `lyra/dsp/_native/`)
+  + NumPy / SciPy glue for non-DSP signal handling
 - **Control:** TCI v1.9 server
-- **Audio:** sounddevice (portaudio), optional AK4951 passthrough via
-  the HL2's EP2 frames
+- **Audio:** HL2 audio jack (EP2 codec) by default;
+  sounddevice / PortAudio (WASAPI) for the PC Soundcard output path
 - **Target OS:** Windows-first
 
 ## Running from source
@@ -204,7 +215,8 @@ inspiration only, no code involvement.
 ## Backlog
 
 Tracked in `docs/backlog.md`. High-priority open items: TX path,
-per-band notch memory, neural NR integration, installer for beta
+per-band notch memory, expose bundled RNNoise / SpectralBleach NR
+via UI (DLLs already shipped, no front-end yet), installer for beta
 testers.
 
 ## License
@@ -236,5 +248,5 @@ What it does NOT change:
 For the canonical GPL v3 text, see `LICENSE` in this repository or
 <https://www.gnu.org/licenses/gpl-3.0.html>.
 
-© 2026 Rick Langford (N8SDR), Brent Crier (N9BC),
+© 2026 Rick Langford (N8SDR), Brent Crier (N9BC), Timmy Davis (KC8TYK),
 and Lyra-SDR contributors — see [CONTRIBUTORS.md](./CONTRIBUTORS.md)

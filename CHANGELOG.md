@@ -13,6 +13,98 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.1.0-pre3] — 2026-05-13 — RX2 Dual Receiver (latency + polish)
+
+Follow-up tester pre-release on top of v0.1.0-pre2, focused on
+the §15.7 audio-path latency investigation and a documentation
+audit pass.  Ships the changes from the operator bench session
+of 2026-05-13 (Brent / Timmy / N8SDR participation).
+
+### What's new (operator-facing)
+
+* **Audio-path latency reduction (~275 ms)** — rmatch ring
+  default 400 → 150 ms; HL2 gateware TX-latency register
+  default 40 → 15 ms.  PC Soundcard ear-lag drops from ~434 ms
+  to ~172 ms while staying clean under heavy DSP load (NR Mode 4
+  + LMS + AGC Fast on voice peaks).  Both knobs remain operator-
+  tunable via env vars (`LYRA_RMATCH_RING_MS`,
+  `LYRA_HL2_TXLATENCY_MS`, `LYRA_TIMING_DEBUG`) — see User Guide
+  Troubleshooting → "Advanced: latency tuning" for the diagnostic
+  pattern + revert procedure.
+* **Middle-click panadapter focus swap — actually wired this
+  time.**  pre2's CHANGELOG advertised middle-click focus swap
+  but the handler was never plumbed; it was effectively a
+  documentation promise with no implementation.  pre3 adds the
+  `focus_swap_requested` signal in all four panadapter widget
+  classes (CPU + GPU paint paths) and routes it through
+  `radio.set_focused_rx` with the RX1 ↔ RX2 toggle.
+* **MultiMeterPanel Analog style retired (§7.1 polish)** — only
+  Lit-Arc and LED-bar S-meter styles remain.  Switch via the
+  chip-row in the Meters panel header.
+* **New help topic: Weather Alerts.**  Full doc for the
+  lightning / wind / NWS / personal-weather-station monitoring
+  feature that's been shipping in the toolbar since v0.0.9.x
+  but was previously undocumented.
+
+### Documentation pass (triple-agent audit + verified fixes)
+
+* **README.md** rewritten for v0.1.0 reality (was still pitching
+  v0.0.9.3 — multiple releases stale).  Features list now
+  reflects RX2, WDSP EMNR Mode 1-4, AGC profile list including
+  Long, HL2 audio jack naming, WDSP cffi stack.
+* **`docs/help/audio.md`** — chain diagram refreshed to show
+  WDSP RXA pipeline + per-RX Vol stage.  Latency section
+  updated with post-§15.7 numbers + env-var reference.  "Future
+  expansion" paragraph for Bal slider removed (RX2 has shipped;
+  SUB button does stereo split).
+* **`docs/help/shortcuts.md`** — "Reserved for v0.1 RX2" framing
+  promoted to live "RX focus" section.  Middle-click row added.
+  AGC right-click list includes Long.  Meter style switch
+  documented as chip-row gesture (not right-click).
+* **`docs/help/rx2.md`** — middle-click description updated to
+  "shipped" (matching reality).  AF Gain mirroring clarified
+  as not-applicable (AF Gain is a single shared control).
+* **`docs/help/spectrum.md`** — CW Zero reference line bullet
+  struck from GPU features list (removed in v0.0.9.8).
+* **`docs/help/troubleshooting.md`** — new "Advanced: latency
+  tuning" section.
+* **Install guide refresh** — both the `.pdf` and `.docx` build
+  scripts updated to match `INSTALL.md`: license updated to
+  GPL v3+ (was still MIT), authors line includes Brent + Timmy,
+  install command uses `pip install -r requirements.txt` (was
+  individual packages).  Both formats regenerated.
+* **Help dialog TOPIC_ORDER** — `rx2`, `propagation`, `weather`
+  registered in their logical positions (were falling to
+  alphabetical sort).
+
+### Contributors
+
+* **Timmy Davis (KC8TYK)** onboarded as tester / co-contributor
+  for the v0.1 pre-release flight.  Credited in `CONTRIBUTORS.md`,
+  `NOTICE.md`, README copyright line, in-app help, and the
+  regenerated install guide.
+
+### Architecture / docs (CLAUDE.md)
+
+* **§15.7 RESOLVED** — investigation methodology, test matrix,
+  baked defaults, and revert path documented.
+* **§6.2 corrected** — Vol-A/Vol-B/Mute-A/Mute-B sliders are
+  always visible (Phase 3.E.1 hotfix v0.16 superseded the
+  original SUB-gated plan).
+
+### Known issues / parked work
+
+* **SPLIT operation UX (§15.6)** — still parked pending bench
+  feedback from Brent + Timmy on the focused-VFO single-
+  panadapter approach.
+* **TX path** — v0.2 scope; not in this release.
+* **Linux / macOS validation** of §15.7 latency values — pending
+  (Windows WASAPI only tested).
+* **HL2 TX-latency below 15 ms** — deferred pending TX bring-up
+  (TX-side stability can't be validated on an RX-only path).
+
+---
+
 ## [0.1.0-pre2] — 2026-05-12 — RX2 Dual Receiver (tester pre-release)
 
 First pre-release of the v0.1 line.  Lands the full **RX2 dual

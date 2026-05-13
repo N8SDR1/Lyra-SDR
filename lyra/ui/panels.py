@@ -4713,28 +4713,36 @@ class SMeterPanel(GlassPanel):
     """Meter panel with switchable visual style.
 
     Three meter implementations share the same signal-level input:
-      - `LitArcMeter`  (NEW default — analog-curve face with NO needle;
+      - `LitArcMeter`  (default — analog-curve face with NO needle;
                         a row of LED-style segments lights cumulatively
                         along the arc; click-the-mode-chip switches
                         between S / dBm / AGC scales with per-mode color)
       - `LedBarMeter`  (compact stacked LED bars)
-      - `AnalogMeter`  (legacy classic dial with needle — kept as
-                        fallback during the LitArcMeter rollout, will be
-                        removed once the new meter is settled)
 
     Operator picks via the small style chip-row in the panel header.
     Choice persists via QSettings (key: meters/style).
+
+    Phase 4 v0.1 (2026-05-13): Analog needle meter removed per
+    operator UX call ("kind of horrid looking", and harder to
+    calibrate than the LED bar or Lit-Arc).  Help doc had been
+    flagging it "slated for removal" since v0.0.9.7; this is
+    the cleanup landing.  ``AnalogMeter`` widget class itself
+    stays in ``lyra/ui/smeter.py`` for now since the right-click
+    cal menu's freq/band wiring is non-trivial to untangle from
+    its history; it just isn't instantiated or shown anywhere.
     """
 
-    # Stack indices for the three meter styles.
+    # Stack indices for the two meter styles.
     STYLE_LITARC = "litarc"
     STYLE_LED    = "led"
-    STYLE_ANALOG = "analog"
-    _STYLE_ORDER = (STYLE_LITARC, STYLE_LED, STYLE_ANALOG)
+    # Legacy STYLE_ANALOG kept as a constant so set_style() can
+    # silently migrate an operator's saved "analog" preference to
+    # the default LitArc on first launch after the v0.1 upgrade.
+    STYLE_ANALOG = "analog"   # legacy, no longer offered
+    _STYLE_ORDER = (STYLE_LITARC, STYLE_LED)
     _STYLE_LABELS = {
         STYLE_LITARC: "Lit-Arc",
         STYLE_LED:    "LED",
-        STYLE_ANALOG: "Analog",
     }
 
     def __init__(self, radio: Radio, parent=None):
@@ -4748,15 +4756,15 @@ class SMeterPanel(GlassPanel):
         # the operator can't drag the splitter narrower than that.
         self.setMinimumWidth(200)
 
-        # All three meter widgets live in the stack; we just swap visibility.
+        # Both meter widgets live in the stack; we swap visibility.
+        # Phase 4 v0.1: AnalogMeter dropped from the live UI (see
+        # class docstring); only LitArc + LedBar remain.
         self.litarc_meter = LitArcMeter()
         self.led_meter    = LedBarMeter()
-        self.analog_meter = AnalogMeter(title="S")
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.litarc_meter)   # index 0
         self.stack.addWidget(self.led_meter)      # index 1
-        self.stack.addWidget(self.analog_meter)   # index 2
         self.stack.setMinimumWidth(200)
 
         # Header — style picker as a row of small toggle chips.
@@ -4801,11 +4809,14 @@ class SMeterPanel(GlassPanel):
         self._latest_smeter_dbm = -120.0
         radio.smeter_level.connect(self.litarc_meter.set_level_dbfs)
         radio.smeter_level.connect(self.led_meter.set_level_dbfs)
-        radio.smeter_level.connect(self.analog_meter.set_level_dbfs)
         radio.smeter_level.connect(self._track_smeter_dbm)
+        # Phase 4 v0.1 (2026-05-13): AGC signal now also drives the
+        # LED bar meter's gain-reduction readout, not just Lit-Arc.
+        # Was a v0.1-plan §7.1(b) parity item.  ``LedBarMeter`` has
+        # had ``set_agc_db`` since v0.0.9.6 -- just wasn't connected.
         radio.agc_action_db.connect(self.litarc_meter.set_agc_db)
+        radio.agc_action_db.connect(self.led_meter.set_agc_db)
         radio.freq_changed.connect(self._on_freq_changed)
-        radio.mode_changed.connect(self.analog_meter.set_mode)
 
         # Right-click on the meter stack → calibration menu. Wired on
         # the QStackedWidget so it works regardless of which child
@@ -4815,8 +4826,6 @@ class SMeterPanel(GlassPanel):
         self.stack.customContextMenuRequested.connect(
             self._show_smeter_cal_menu)
 
-        self.analog_meter.set_freq_hz(radio.freq_hz)
-        self.analog_meter.set_mode(radio.mode)
         self._on_freq_changed(radio.freq_hz)
 
         # Default to the new lit-arc meter; load_settings() will
@@ -4841,9 +4850,13 @@ class SMeterPanel(GlassPanel):
             btn.blockSignals(False)
 
     def _on_freq_changed(self, hz: int):
-        self.analog_meter.set_freq_hz(hz)
-        b = band_for_freq(hz)
-        self.analog_meter.set_band(b.name if b else "GEN")
+        # Phase 4 v0.1: AnalogMeter dropped; freq + band updates no
+        # longer have a target.  Kept as a stub so the
+        # ``freq_changed`` signal connection stays valid.  When the
+        # LitArc / LedBar meters need freq-aware behavior in the
+        # future (e.g. band-color cues on the S0-S9 grad), hook them
+        # here.
+        return
 
     def _track_smeter_dbm(self, dbfs: float):
         """Track the latest meter reading in dBm so the right-click
@@ -5280,6 +5293,13 @@ class SpectrumPanel(GlassPanel):
         # modes get the pitch offset compensation (signal lands inside
         # the SSB-style filter at +/- pitch from the marker).
         self.widget.clicked_freq.connect(self._on_click)
+        # v0.1 RX2: middle-click anywhere on the panadapter (spectrum
+        # or waterfall) swaps focus between RX1 and RX2.  Mirrors the
+        # Ctrl+1 / Ctrl+2 keyboard shortcut as a mouse gesture for
+        # operators who'd rather not reach for the keyboard.
+        self.widget.focus_swap_requested.connect(
+            lambda: self.radio.set_focused_rx(
+                2 if self.radio.focused_rx == 0 else 0))
         # Right-click context menu (Phase B.6). Reuses the same
         # handlers as the QPainter path — _on_right_click handles
         # the shift+right quick-remove + plain-right menu logic.
@@ -5486,6 +5506,13 @@ class SpectrumPanel(GlassPanel):
         self.widget = SpectrumWidget()
         self.content_layout().addWidget(self.widget)
         self.widget.clicked_freq.connect(self._on_click)
+        # v0.1 RX2: middle-click anywhere on the panadapter (spectrum
+        # or waterfall) swaps focus between RX1 and RX2.  Mirrors the
+        # Ctrl+1 / Ctrl+2 keyboard shortcut as a mouse gesture for
+        # operators who'd rather not reach for the keyboard.
+        self.widget.focus_swap_requested.connect(
+            lambda: self.radio.set_focused_rx(
+                2 if self.radio.focused_rx == 0 else 0))
         self.widget.right_clicked_freq.connect(self._on_right_click)
         self.widget.wheel_at_freq.connect(self._on_wheel)
         # Plain wheel over empty spectrum = tune VFO by panadapter
@@ -6882,6 +6909,13 @@ class WaterfallPanel(GlassPanel):
         # Click-to-tune (Phase B.5) — route through _on_click so the
         # CW pitch correction applies in GPU mode too.
         self.widget.clicked_freq.connect(self._on_click)
+        # v0.1 RX2: middle-click anywhere on the panadapter (spectrum
+        # or waterfall) swaps focus between RX1 and RX2.  Mirrors the
+        # Ctrl+1 / Ctrl+2 keyboard shortcut as a mouse gesture for
+        # operators who'd rather not reach for the keyboard.
+        self.widget.focus_swap_requested.connect(
+            lambda: self.radio.set_focused_rx(
+                2 if self.radio.focused_rx == 0 else 0))
         # Right-click context menu (Phase B.6) — reuses _on_right_click.
         self.widget.right_clicked_freq.connect(self._on_right_click)
         # Notch markers on the waterfall (Phase B.13).
@@ -6921,6 +6955,13 @@ class WaterfallPanel(GlassPanel):
         self.widget = WaterfallWidget()
         self.content_layout().addWidget(self.widget)
         self.widget.clicked_freq.connect(self._on_click)
+        # v0.1 RX2: middle-click anywhere on the panadapter (spectrum
+        # or waterfall) swaps focus between RX1 and RX2.  Mirrors the
+        # Ctrl+1 / Ctrl+2 keyboard shortcut as a mouse gesture for
+        # operators who'd rather not reach for the keyboard.
+        self.widget.focus_swap_requested.connect(
+            lambda: self.radio.set_focused_rx(
+                2 if self.radio.focused_rx == 0 else 0))
         self.widget.right_clicked_freq.connect(self._on_right_click)
         self.widget.wheel_at_freq.connect(self._on_wheel)
         # Plain wheel over waterfall = tune VFO by panadapter scroll

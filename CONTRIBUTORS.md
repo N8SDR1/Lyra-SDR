@@ -20,6 +20,12 @@ attribution.
   See `docs/onboarding/contributor-discussion-2026-05-03.md` for the
   ground-rules conversation we had on his arrival.
 
+- **Timmy Davis** — KC8TYK — <https://www.qrz.com/db/KC8TYK>
+  Joined as tester / co-contributor for the v0.1.0-pre2 tester
+  release flight.  Bench-testing the RX2 dual-receiver build
+  alongside Brent and Rick; feedback drives v0.1 UX decisions
+  (see CLAUDE.md §15.6 on SPLIT design pending tester input).
+
 ## Roadmap context
 
 - v0.0.x — v0.0.9 ("Memory & Stations") and v0.0.9.1 (audio-architecture

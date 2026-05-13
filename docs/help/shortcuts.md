@@ -14,26 +14,20 @@
 | **F3**       | (In User Guide) Jump to next search match  |
 | **Esc**      | (In User Guide) Close the guide window     |
 
-### Reserved for v0.1 RX2 (Phase 3 — focus model)
+### RX focus (v0.1 RX2)
 
-The following shortcuts are **reserved** for the RX1/RX2 focus model
-landing in v0.1 Phase 3.  They are not wired yet but the keys are
-held off-limits so no v0.0.9.x patch picks them for an unrelated
-binding:
+When dual receive (RX2) is enabled, exactly one VFO is "focused"
+at any time.  The panadapter, tuning knob, mode picker, band
+buttons, and GEN / TIME / Mem recalls all act on the focused VFO.
 
-| Key          | Action (Phase 3)                           |
-|--------------|--------------------------------------------|
-| **Ctrl + 1** | Focus RX1 (VFO A becomes the "active" receiver — MODE+FILTER and DSP+AUDIO panels operate on it) |
-| **Ctrl + 2** | Focus RX2 (VFO B becomes the "active" receiver — only relevant when RX2 is enabled) |
+| Key          | Action                                                                                          |
+|--------------|--------------------------------------------------------------------------------------------------|
+| **Ctrl + 1** | Focus RX1 (VFO A becomes the active receiver — MODE+FILTER and DSP+AUDIO panels operate on it)  |
+| **Ctrl + 2** | Focus RX2 (VFO B becomes the active receiver — only relevant when RX2 is enabled)               |
 
-Hotkey audit (v0.1 Phase 0 item 11, 2026-05-11):
-
-* Re-grepped `lyra/ui/app.py` and the entire `lyra/ui/` tree for
-  any existing binding to `Ctrl+1` / `Ctrl+2` — none found.
-* Re-grepped this file (`docs/help/shortcuts.md`) for the same —
-  none found.
-* Path is clear; consensus-plan §3.1.x item 11's fallback to
-  `Alt+1` / `Alt+2` is not needed.
+You can also **middle-click anywhere on the panadapter** to swap
+focus, or click the other VFO's LED directly.  The green border on
+the frequency display marks the currently-focused VFO.
 
 ## User Guide navigation
 
@@ -94,6 +88,7 @@ matches your habit:
 | Right-click (**NF on**)                  | Notch context menu (Add / Remove nearest / Clear all / Default Q / Disable) |
 | Right-click (**NF off**)                 | Minimal menu — "Enable Notch Filter" only (right-click reserved for future features) |
 | Shift + Right-click (**NF on**)          | Quick-remove nearest notch                                       |
+| Middle-click anywhere on panadapter      | Swap RX focus between RX1 and RX2 (v0.1 RX2; mirrors Ctrl+1 / Ctrl+2) |
 | Mouse wheel (open spectrum)              | Zoom BW (1× / 2× / 4× / 8× / 16×)                                |
 | Mouse wheel (over a notch rectangle)     | Adjust that notch's width (up = narrower, down = wider)           |
 | Left-drag vertically on a notch rectangle | Fine-tune that notch's width (up = narrower, down = wider)        |
@@ -104,9 +99,9 @@ matches your habit:
 
 | Panel              | Right-click action                                          |
 |--------------------|--------------------------------------------------------------|
-| AGC cluster (DSP panel) | Pick AGC profile (Off / Fast / Med / Slow / Auto / Custom) |
+| AGC cluster (DSP panel) | Pick AGC profile (Off / Fast / Med / Slow / Long / Auto / Custom) |
 | NR button (DSP panel)   | Pick NR Mode (1 / 2 / 3 / 4) + AEPF on/off + NPE method (OSMS / MCRA / etc.) |
-| Meter              | Switch style (Analog / LED)                                  |
+| Meter              | Switch style — click the chip-row in the Meters panel header (Lit-Arc / LED) |
 | BAND               | Per-band memory context menu                                 |
 | Spectrum/Waterfall | Notch context menu when NF on; Enable-NF-only menu when NF off |
 | Color-field labels (Settings → Visuals → Colors) | Reset that one field to its factory default |

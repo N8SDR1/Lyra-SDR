@@ -71,8 +71,12 @@ up changes.
 - **Propagation** — slim panel showing live solar numbers
   (SFI / A / K), color-coded band-conditions heatmap, and
   NCDXF International Beacon Project auto-follow
+- **Weather Alerts** — background watcher for lightning
+  (Blitzortung), high wind + storm warnings (NWS), and personal
+  weather station integration (Ambient WS-2000, Ecowitt).
+  Toolbar indicator + desktop toasts.
 - **Spectrum & Waterfall** — pan, zoom, drag, palettes
-- **S-Meter** — analog vs LED styles
+- **S-Meter** — Lit-Arc vs LED-bar styles (chip-row picker in Meters header)
 - **External Hardware** — N2ADR filter board, USB-BCD for
   linear amps
 - **TCI Server** — integration with log4OM, N1MM+, JS8Call,

@@ -164,7 +164,7 @@ gotchas_rows = [
      "Check HL2 power, network cable, and that no other client "
      "(Thetis, SparkSDR) is connected at the same time."],
     ["Audio works in other apps but not Lyra",
-     "Switch the “Out” combo on the DSP+Audio panel between AK4951 "
+     "Switch the “Out” combo on the DSP+Audio panel between HL2 audio jack "
      "and PC Soundcard. Most operators use PC Soundcard."],
 ]
 
@@ -235,8 +235,10 @@ story.append(Paragraph(
                     "https://github.com/N8SDR1/Lyra-SDR"),
     body_style,
 ))
-story.append(Paragraph("License: MIT", body_style))
-story.append(Paragraph("Author: Rick Langford (N8SDR)", body_style))
+story.append(Paragraph("License: GPL v3 or later (since v0.0.6)", body_style))
+story.append(Paragraph(
+    "Authors: Rick Langford (N8SDR), Brent Crier (N9BC), "
+    "Timmy Davis (KC8TYK)", body_style))
 story.append(Paragraph(
     "This guide is written for “I have Windows and I sort of know what a "
     "terminal is” — not for Python developers. If you can copy and paste, "
@@ -318,7 +320,7 @@ story.append(hr())
 story.append(Paragraph("Install Python dependencies (one-time)", h2_style))
 story.append(Paragraph("In the Lyra-SDR folder:", body_style))
 story.append(code_block([
-    "pip install PySide6 numpy scipy sounddevice ftd2xx websockets",
+    "pip install -r requirements.txt",
 ]))
 story.append(Paragraph(
     "This downloads about 150 MB of libraries. Takes a minute or two.",
@@ -328,7 +330,7 @@ story.append(Paragraph(
     "If you hit “permission denied” errors, try:", body_style,
 ))
 story.append(code_block([
-    "pip install --user PySide6 numpy scipy sounddevice ftd2xx websockets",
+    "pip install --user -r requirements.txt",
 ]))
 story.append(Paragraph(
     "If <font face='Courier'>ftd2xx</font> specifically fails, you can skip "
@@ -373,8 +375,8 @@ story.append(code_block([
     "git pull",
 ]))
 story.append(Paragraph(
-    "Done. No re-install needed unless dependencies change "
-    "(we will call that out in the commit message).",
+    "The second pip install only matters when dependencies change — "
+    "it’s a no-op otherwise, so it’s safe to always run after a pull.",
     body_style,
 ))
 story.append(hr())

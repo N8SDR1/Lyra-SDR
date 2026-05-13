@@ -99,6 +99,90 @@ class Notch:
         return self.cascade > 1
 
 
+# ──────────────────────────────────────────────────────────────────────
+# §15.7 sync investigation — env-var-gated timing instrumentation.
+# Operator UX (Rick 2026-05-13): "enable this on my local copy, I will
+# get you the information on both an HL2 audio and PC Soundcard runs."
+# Set ``LYRA_TIMING_DEBUG=1`` before launching Lyra to get rate-limited
+# (one line per ~1 sec) summary output showing min / avg / max latency
+# at four key measurement points in the RX signal flow.
+#
+# All four metrics are tracked in ``_TimingStats`` instances on the
+# ``Radio`` object.  Worker thread and main thread both contribute to
+# the same instance via thread-safe ``record()`` calls.  Once per
+# second, the next call to ``record()`` triggers a flush() that prints
+# all buckets and clears them.
+# ──────────────────────────────────────────────────────────────────────
+class _TimingStats:
+    """Rate-limited timing collector for §15.7 sync investigation.
+
+    Append measurements via ``record(name, dt_ns)``.  Every ~1 second
+    the next call prints a one-line summary covering all buckets:
+
+        [TIMING] audio_worker n=187 min=4.8 avg=5.6 max=11.2 ms
+                 fft_worker  n=46  min=8.1 avg=9.4 max=14.7 ms
+                 spec_main   n=46  min=2.0 avg=3.2 max=6.5 ms
+                 wf_offset   n=46  min=0.02 avg=0.04 max=0.18 ms
+                 q_rx1=0 q_rx2=0  sink=HL2
+
+    Thread-safe via a small lock.  Cheap when not flushing (just
+    append).  The flush itself is O(N) over the window's samples
+    (computes min/avg/max).  Window samples are dropped after print.
+    """
+    import threading as _threading
+
+    def __init__(self):
+        from collections import defaultdict
+        self._buckets = defaultdict(list)
+        self._lock = self._threading.Lock()
+        self._last_flush_ns: int = 0
+        self._period_ns: int = 1_000_000_000   # 1 sec
+        self._ctx: dict = {}   # static keys updated per-record (sink, etc.)
+
+    def set_context(self, key: str, value) -> None:
+        """Set a static context field shown on each flush (e.g. sink
+        name).  Thread-safe."""
+        with self._lock:
+            self._ctx[key] = value
+
+    def record(self, name: str, dt_ns: int) -> None:
+        """Append a per-event latency in nanoseconds.  Flushes when
+        the 1-sec window expires.  Safe from any thread."""
+        import time
+        now = time.monotonic_ns()
+        with self._lock:
+            self._buckets[name].append(int(dt_ns))
+            if self._last_flush_ns == 0:
+                self._last_flush_ns = now
+                return
+            if (now - self._last_flush_ns) < self._period_ns:
+                return
+            # 1 sec elapsed -- flush all buckets and reset.
+            snapshot = self._buckets
+            self._buckets = type(snapshot)(list)
+            ctx_snap = dict(self._ctx)
+            self._last_flush_ns = now
+        # Print OUTSIDE the lock so signal slots / file flushes
+        # don't serialize on the lock held by the worker thread.
+        try:
+            parts: list[str] = []
+            for name in sorted(snapshot.keys()):
+                vals = snapshot[name]
+                if not vals:
+                    continue
+                lo = min(vals) / 1_000_000.0
+                hi = max(vals) / 1_000_000.0
+                avg = (sum(vals) / len(vals)) / 1_000_000.0
+                parts.append(
+                    f"{name} n={len(vals)} "
+                    f"min={lo:.1f} avg={avg:.1f} max={hi:.1f} ms")
+            ctx_parts = [f"{k}={v}" for k, v in sorted(ctx_snap.items())]
+            ctx_str = "  " + " ".join(ctx_parts) if ctx_parts else ""
+            print(f"[TIMING] " + "  ".join(parts) + ctx_str, flush=True)
+        except Exception:
+            pass
+
+
 class Radio(QObject):
     # ── State change signals (UI subscribes) ───────────────────────────
     stream_state_changed = Signal(bool)
@@ -1344,6 +1428,17 @@ class Radio(QObject):
         import os as _os
         self._radio_debug = (_os.environ.get("LYRA_PAINT_DEBUG", "")
                              .strip() in ("1", "true", "True"))
+        # ── §15.7 audio/spectrum/waterfall sync instrumentation ──────
+        # LYRA_TIMING_DEBUG=1 enables rate-limited (1 sec) timing
+        # measurements at four points in the signal flow.  Output goes
+        # to stdout in dev-tree runs and to ``%APPDATA%\Lyra\crash.log``
+        # in the PyInstaller windowed build (per v0.20 stdio redirect).
+        # Used to confirm or refute operator-perceived skew between
+        # the three live RX surfaces.  See CLAUDE.md §15.7 for the
+        # investigation context.
+        self._timing_debug = (_os.environ.get("LYRA_TIMING_DEBUG", "")
+                              .strip() in ("1", "true", "True"))
+        self._timing_stats = _TimingStats() if self._timing_debug else None
         self._dbg_t0_window: float = 0.0
         self._dbg_fft_ticks: int = 0
         self._dbg_fft_emits: int = 0
@@ -7946,6 +8041,11 @@ class Radio(QObject):
             self._audio_sink = new_sink
             self._push_balance_to_sink()
             self.worker_audio_sink_changed.emit(new_sink)
+            # §15.7 timing -- record which audio sink is active so the
+            # next [TIMING] line carries the right ``sink=...`` context.
+            if self._timing_stats is not None:
+                self._timing_stats.set_context(
+                    "sink", str(self._audio_output))
         else:
             # Single-thread (default) path — close-then-rebuild on
             # the main thread, with the small WASAPI grace sleep.
@@ -8014,6 +8114,30 @@ class Radio(QObject):
             return
         self._audio_sink = self._make_sink()
         self._push_balance_to_sink()
+        # §15.7 timing: stamp the sink kind + active latency-tune
+        # env-var values so [TIMING] lines record which experimental
+        # config produced them (operator running a tune-down session
+        # can cross-reference TIMING numbers with the env settings).
+        if self._timing_stats is not None:
+            self._timing_stats.set_context(
+                "sink", str(self._audio_output))
+            try:
+                tx_lat = getattr(self._stream, "_tx_latency_ms", 40)
+                self._timing_stats.set_context("hl2_txlat_ms", tx_lat)
+            except Exception:
+                pass
+            try:
+                import os as _os_t
+                rl = _os_t.environ.get(
+                    "LYRA_RMATCH_RING_MS", "").strip()
+                if rl:
+                    self._timing_stats.set_context(
+                        "rmatch_ring_ms", rl)
+                else:
+                    self._timing_stats.set_context(
+                        "rmatch_ring_ms", "400")
+            except Exception:
+                pass
         # B.5 — in worker mode, hand the freshly-built sink to the
         # worker so it writes to it directly (and closes the
         # previous NullSink seed) without the main-thread close
@@ -10388,7 +10512,15 @@ class Radio(QObject):
             return
         # _dbg_fft_emits is incremented inside _process_spec_db right
         # after spectrum_ready.emit — no double-counting needed here.
-        self._process_spec_db(spec_db)
+        # §15.7 timing -- main-thread post-FFT processing latency.
+        if self._timing_stats is not None:
+            import time as _t
+            _spec_t0 = _t.monotonic_ns()
+            self._process_spec_db(spec_db)
+            self._timing_stats.record(
+                "spec_main_ms", _t.monotonic_ns() - _spec_t0)
+        else:
+            self._process_spec_db(spec_db)
 
     def _process_spec_db(self, spec_db):
         """Post-FFT processing — S-meter, noise floor, auto-scale,
@@ -10692,6 +10824,16 @@ class Radio(QObject):
             center_hz = float(self._compute_dds_freq_hz(target_rx=2))
         else:
             center_hz = float(self._compute_dds_freq_hz())
+        # §15.7 timing -- measure spectrum→waterfall emit gap.
+        # Should be sub-millisecond (Tech #3 confirmed both fire
+        # atomically from same function); this is the regression
+        # marker.  Captured around the spectrum emit so the delta
+        # is computed at waterfall emit time below.
+        if self._timing_stats is not None:
+            import time as _t
+            _wf_spec_emit_t = _t.monotonic_ns()
+        else:
+            _wf_spec_emit_t = 0
         self.spectrum_ready.emit(spec_out, center_hz, eff_rate)
         if self._radio_debug:
             self._dbg_fft_emits += 1
@@ -10715,6 +10857,12 @@ class Radio(QObject):
                 # Cold path / first frame after rate change: just emit
                 # the current spectrum once (mult==1) or M times (no
                 # previous frame to interp from yet).
+                # §15.7 timing -- record gap on first emit only.
+                if self._timing_stats is not None and _wf_spec_emit_t > 0:
+                    import time as _t
+                    self._timing_stats.record(
+                        "wf_offset_ms",
+                        _t.monotonic_ns() - _wf_spec_emit_t)
                 for _ in range(mult):
                     self.waterfall_ready.emit(
                         spec_out, float(self._compute_dds_freq_hz()), eff_rate)
@@ -10724,6 +10872,12 @@ class Radio(QObject):
                 # prev*(1 - k/M) + spec_out*(k/M), so the LAST
                 # frame is the actual current spectrum and the
                 # earlier frames bridge the gap from prev.
+                # §15.7 timing -- record gap on first emit only.
+                if self._timing_stats is not None and _wf_spec_emit_t > 0:
+                    import time as _t
+                    self._timing_stats.record(
+                        "wf_offset_ms",
+                        _t.monotonic_ns() - _wf_spec_emit_t)
                 for k in range(1, mult + 1):
                     t = k / mult
                     frame = (prev * (1.0 - t) + spec_out * t).astype(

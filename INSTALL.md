@@ -142,7 +142,7 @@ a no-op otherwise, so it's safe to always run after a pull.
 | `ftd2xx` fails to install | Skip it — install the other deps without `ftd2xx`. |
 | Windows firewall popup on first launch | Allow it. Lyra needs UDP to talk to the HL2. |
 | `No radio found` | Check HL2 power, network cable, and that no other client (Thetis, SparkSDR) is connected at the same time. |
-| Audio works in other apps but not Lyra | Switch the **Out** combo on the DSP + Audio panel between **AK4951** and **PC Soundcard**. Most operators use PC Soundcard. |
+| Audio works in other apps but not Lyra | Switch the **Out** combo on the DSP + Audio panel between **HL2 audio jack** and **PC Soundcard**. Most operators use PC Soundcard. |
 
 ---
 

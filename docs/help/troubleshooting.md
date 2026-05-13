@@ -394,6 +394,75 @@ Two View-menu features help avoid layout breakage:
   factory). Saving refuses to capture a degenerate layout, so you
   can't accidentally save a broken one as your default.
 
+## Advanced: latency tuning
+
+Lyra's audio path has two operator-tunable latency knobs.  The
+factory defaults (post-§15.7 polish, 2026-05-13) are bench-validated
+under heavy DSP load (NR4 + LMS + AGC Fast on voice peaks) on a
+N8SDR-class workstation.  If the audio feels worse on your hardware
+than what other operators are reporting, try the env-var overrides
+below before filing a bug.
+
+### The two knobs
+
+| Env var | Default | Range | What it does |
+|---|---|---|---|
+| `LYRA_RMATCH_RING_MS` | **150 ms** | 30 – 1000 ms | rmatch adaptive resampler ring depth (PC Soundcard path).  Smaller = lower latency, less headroom for DSP compute spikes.  Larger = more cushion, more delay. |
+| `LYRA_HL2_TXLATENCY_MS` | **15 ms** | 5 – 127 ms | HL2 gateware TX-latency register (0x17).  Governs HL2-side TX buffer depth and indirectly the EP2 / C&C cadence Lyra has to keep up with. |
+| `LYRA_TIMING_DEBUG` | unset | `1` to enable | When set, prints a one-line `[TIMING]` summary per second showing DSP worker times, queue depths, current audio sink.  Useful for diagnosing where time is going. |
+
+### Setting them
+
+Windows Command Prompt:
+
+```cmd
+set LYRA_TIMING_DEBUG=1
+set LYRA_RMATCH_RING_MS=200
+set LYRA_HL2_TXLATENCY_MS=20
+python -m lyra.ui.app
+```
+
+The banner near the top of the console will confirm both overrides:
+
+```
+[HL2Stream] §15.7 override: TX-latency register = 20 ms
+[Lyra audio] §15.7 override: rmatch ring target = 200 ms
+```
+
+### When to bump them up
+
+- **Hearing occasional pops / clicks on voice peaks under NR Mode 4
+  + LMS**: increase `LYRA_RMATCH_RING_MS` in 25 ms steps (try 175,
+  200, 250, then 400 which is the pre-§15.7 conservative value).
+- **`[Lyra audio] SoundDeviceSink ring: underruns=N` repeatedly
+  showing N ≥ 5 after the PI loop has settled (first 30 seconds
+  past startup)**: same fix — bump the ring target up.
+- **Anything that smells like protocol cadence issues** (HL2Stream
+  heartbeat timeout warnings, jittery panadapter): try bumping
+  `LYRA_HL2_TXLATENCY_MS` back to 40 (the pre-§15.7 value).
+
+### When to push them down (advanced)
+
+If your hardware comfortably handles 150 ms ring + 15 ms TX-latency
+and you want even shorter audio delay, you can experiment with
+lower values.  Diminishing returns set in fast — 100 ms ring still
+works for plain SSB voice without heavy NR; below that gets
+fragile under load.  Same for TX-latency below 15 ms — it's
+operating room but TX-side behavior (post-TX-bringup) may force
+revisiting.
+
+### Full revert to pre-§15.7 behavior
+
+```cmd
+set LYRA_RMATCH_RING_MS=400
+set LYRA_HL2_TXLATENCY_MS=40
+python -m lyra.ui.app
+```
+
+If full revert fixes a regression you're seeing post-v0.1, **file
+a bug** — the defaults are supposed to work for every operator and
+"need the env-var override" is itself information we want.
+
 ## Something else is broken
 
 Save a **per-session log** (backlog feature — not yet implemented)

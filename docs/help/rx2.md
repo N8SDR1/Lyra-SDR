@@ -66,8 +66,9 @@ receiver you're working with."  This affects:
 
 * **Click on the other VFO's LED** — most direct.
 * **Ctrl+1** → focus RX1; **Ctrl+2** → focus RX2.
-* Middle-click on the panadapter swaps focus between VFOs (future
-  build).
+* **Middle-click anywhere on the panadapter** — swaps focus between
+  VFOs.  Mirrors the Ctrl+1 / Ctrl+2 keyboard shortcut as a mouse
+  gesture for operators who'd rather not reach for the keyboard.
 
 The **green border** marks the currently-focused LED.  RED is
 reserved for the actively-transmitting VFO once TX ships in v0.2.
@@ -114,9 +115,12 @@ Enable dual-RX operation:
   Vol RX1 / Vol RX2 sliders each control their own RX
   independently.
 
-When SUB rises (off→on), Lyra **mirrors** RX1's current volume,
-mute, and AF gain onto RX2 so you don't get a surprise blast from
-RX2's last-saved levels.  You can adjust RX2 independently after.
+When SUB rises (off→on), Lyra **mirrors** RX1's current volume
+and mute state onto RX2 so you don't get a surprise blast from
+RX2's last-saved levels.  You can adjust RX2 independently after
+using the always-visible Vol RX2 / Mute RX2 controls.  (AF Gain
+stays a single shared control — it's a pre-AGC reference that
+operates on the combined output, not a per-RX volume.)
 
 ### 1→2  /  2→1  buttons
 

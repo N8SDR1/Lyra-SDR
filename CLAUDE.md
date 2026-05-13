@@ -613,15 +613,19 @@ Summary:
   SPLIT in the MODE+FILTER strip.
 * **A→B / B→A / SWAP** buttons same strip — full state copy
   when RX2 enabled, freq-only when disabled.
-* **Per-RX Vol-A / Vol-B + Mute-A / Mute-B sliders appear only
-  when SUB is enabled** (replacing the single Vol/Mute).
-  Balance + AF Gain stay single (combined-output and pre-AGC
-  reference respectively).  Rationale: ear-balance is the one
-  control that genuinely needs per-RX independence in real
-  dual-RX use — the two receivers produce wildly different
-  signal levels.  Phase 2's `_do_demod_wdsp_dual` already
-  supports per-channel volume; Phase 3 just adds the state +
-  conditional UI surface.
+* **Per-RX Vol-A / Vol-B + Mute-A / Mute-B sliders are always
+  visible** (Phase 3.E.1 hotfix v0.16, 2026-05-12 — superseded the
+  original "only when SUB is enabled" plan).  Operator UX feedback
+  on the conditional-visibility version: predictable layout beats
+  conditional widgets — operators were reaching for sliders that
+  weren't there.  Implementation pinned in `lyra/ui/panels.py`
+  around L2040–L2114 (`Vol-A`/`Vol-B`/`Mute-A`/`Mute-B` mirror
+  RX1/RX2 in both SUB-on and SUB-off modes).  Balance + AF Gain
+  stay single (combined-output and pre-AGC reference respectively).
+  Rationale for per-RX vol: ear-balance is the one control that
+  genuinely needs per-RX independence in real dual-RX use — the
+  two receivers produce wildly different signal levels.  Phase 2's
+  `_do_demod_wdsp_dual` already supports per-channel volume.
 
 ### 6.3 SPLIT semantics
 
@@ -2680,10 +2684,139 @@ streak at T+Δ₂ — feeling out of sync rather than coherent.
    - HL2 audio jack EP2 buffer depth vs PC Soundcard rmatch
      latency difference
 
-**Status: PARKED — TODO investigation on next bench session.**
-Operator will gather repro evidence ("ooos when I restart
-later") and update this entry with findings before code work
-starts.
+**Status: RESOLVED — 2026-05-13.**  Investigation completed
+across two bench sessions.  Findings, methodology, and baked
+defaults below.  Revert instructions at end.
+
+#### Resolution summary
+
+The operator-perceived delay between hearing/seeing was real
+but **not** a coherence bug between spectrum and waterfall —
+those proved coherent to within 0.1–0.6 ms (`wf_offset_ms`
+instrumentation, see below).  The root cause was two
+Lyra-specific **conservative pre-v0.0.9.6 latency margins**
+that other HPSDR clients (Thetis, EESDR3) don't carry:
+
+1. **rmatch ring target** in `lyra/dsp/audio_sink.py`,
+   previously 400 ms.  This is the WDSP-style adaptive
+   resampler ring depth used on the PC Soundcard path.
+2. **HL2 TX-latency register** (gateware reg 0x17, exposed via
+   C&C tuple `0x2e`) in `lyra/protocol/stream.py`, previously
+   40 ms.  Affects HL2-side TX-buffer depth and indirectly
+   the EP2 / C&C polling cadence Lyra has to keep up with.
+
+Combined, these added ~275 ms of needless headroom on the RX
+path vs other apps on the same hardware.
+
+#### Baked production defaults (post-§15.7)
+
+| Knob | Old default | **New default** | Savings |
+|------|-------------|------------------|---------|
+| `_ring_ms` (audio_sink.py) | 400 ms | **150 ms** | −250 ms |
+| `self._tx_latency_ms` (stream.py) | 40 ms | **15 ms** | −25 ms |
+| **Total RX-path margin removed** |  |  | **−275 ms** |
+
+PC Soundcard ear-lag math: 150 ms ring + 22 ms WASAPI host
+latency ≈ **172 ms** total (was ~434 ms).
+
+#### Test matrix (operator bench, 2026-05-13)
+
+All tests: LSB voice, NR Mode 4 + LMS + AGC Fast (heaviest
+DSP load currently available), 1–3 minute runs, `[TIMING]`
+instrumentation enabled.
+
+| rmatch ring | TX-latency | Sink | Result |
+|------|------|------|--------|
+| 75 ms  | 40 ms | PC SC | **Below floor** — sustained 1–5 underruns/10s, audible pops on voice peaks under NR4 |
+| 100 ms | 40 ms | PC SC | Borderline — clean on plain voice, occasional pop under NR4 |
+| 125 ms | 40 ms | PC SC | Edge of floor — 1 slight pop in 2.5 min under NR4 |
+| **150 ms** | 40 ms | PC SC | ✅ **Clean** — 1 underrun during PI loop init, zero after |
+| 150 ms | 40 ms | HL2 jack | ✅ Clean on RX (ring bypassed; AK4951 path validated) |
+| 150 ms | **25 ms** | HL2 jack | ✅ Clean, 1–2 brief startup hiccups (gateware settling) |
+| 150 ms | **15 ms** | HL2 jack | ✅ Clean, same brief startup hiccups as 25 ms |
+
+Pushing TX-latency below 15 ms (10, 12) was considered but
+deferred — diminishing returns on RX-only validation, and the
+register's true floor is governed by TX-side buffer behavior
+which can't be validated until TX bring-up.
+
+#### Methodology — env-var override pattern
+
+Both knobs are operator-tunable at runtime via environment
+variables, **kept in place after §15.7 resolution** for
+future tester diagnostics and easy reproduction of this
+investigation:
+
+```cmd
+set LYRA_RMATCH_RING_MS=400         :: revert to pre-§15.7 ring
+set LYRA_HL2_TXLATENCY_MS=40        :: revert to pre-§15.7 TX-latency
+set LYRA_TIMING_DEBUG=1             :: enable [TIMING] instrumentation
+python -m lyra.ui.app
+```
+
+`LYRA_RMATCH_RING_MS` is clamped to 30..1000 ms.
+`LYRA_HL2_TXLATENCY_MS` is clamped to 5..127 ms.
+
+The `[TIMING]` instrumentation lives in `_TimingStats`
+(module-level in `lyra/radio.py`) and emits one summary line
+per second when `LYRA_TIMING_DEBUG=1`.  Tracks:
+- `audio_worker_ms` — DspWorker process_block dispatch time
+- `fft_worker_ms` — DspWorker FFT emit time
+- `spec_main_ms` — Qt main-thread `_process_spec_db` time
+- `wf_offset_ms` — gap between spectrum emit and waterfall
+  emit (proves coherence — was always 0.1–0.6 ms across all
+  runs, confirming spectrum/waterfall are *not* skewed)
+- `q_rx1`, `q_rx2` — DspWorker queue depths
+- Context: `hl2_txlat_ms`, `rmatch_ring_ms`, `sink` name
+
+#### How to revert if a tester regression is reported
+
+If a tester reports new audio dropouts post-v0.1 release that
+correlate with this change:
+
+1. **First try the env-var override** (fastest, no code
+   change):
+   ```cmd
+   set LYRA_RMATCH_RING_MS=400
+   set LYRA_HL2_TXLATENCY_MS=40
+   ```
+   If that fixes it, the tester's hardware needs more
+   headroom than our bench environment showed.  Don't revert
+   globally — add an entry to the User Guide pointing at the
+   env vars instead.
+
+2. **If full revert is needed**, change two lines each in
+   two files (defaults only; keep env-var infrastructure):
+
+   `lyra/dsp/audio_sink.py` (~lines 666, 668):
+   ```python
+   _ring_ms = 150  →  _ring_ms = 400
+   ```
+
+   `lyra/protocol/stream.py` (~lines 626, 628):
+   ```python
+   self._tx_latency_ms = 15  →  self._tx_latency_ms = 40
+   ```
+
+   Also update the banner default labels and comment headers
+   (`"default 150"` → `"default 400"`, etc.).
+
+#### Session reference
+
+Full bench session transcript with all timing data captured
+in operator session of 2026-05-13 (continued from compaction
+of 2026-05-12 session that filed this §15.7 originally).
+Latency instrumentation code (`_TimingStats` class, hook
+points in `_on_worker_spectrum_raw` and `_process_spec_db`)
+remains in `lyra/radio.py` for future use — gated on
+`LYRA_TIMING_DEBUG` so zero cost when disabled.
+
+**Not investigated in this session, deferred:**
+- HL2 TX-latency floor below 15 ms (needs TX bring-up to
+  validate; 10–12 ms might be reachable then)
+- Per-band-per-RX ring tuning (single global default is
+  fine for v0.1 RX2)
+- Linux/macOS rmatch behavior (Windows WASAPI only tested)
 
 ---
 

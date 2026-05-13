@@ -4,11 +4,14 @@
 
 - [/] **Neural / AI Noise Reduction** — original day-one spec item.
       **Phase 1 (classical spectral subtraction) shipped 2026-04-23**
-      as the NR button on DSP & AUDIO with three profiles (Light /
-      Medium / Aggressive). See `lyra/dsp/nr.py` and `docs/help/nr.md`.
-      A **Neural** slot is reserved in the right-click profile menu,
-      greyed out until a neural package is importable — detection via
-      `Radio.neural_nr_available()` (tries `rnnoise_wrapper` and
+      and was superseded in **v0.0.9.6 by WDSP EMNR Mode 1-4 + AEPF +
+      NPE** (Warren Pratt's spectral-subtraction engine ported via
+      cffi), which is the production NR engine today.  See
+      `lyra/dsp/wdsp_engine.py` and `docs/help/nr.md`.
+      The neural path remains the **Phase 2** plan — a **Neural**
+      slot is reserved in the NR right-click profile menu, greyed
+      out until a neural package is importable (detection via
+      `Radio.neural_nr_available()` trying `rnnoise_wrapper` and
       `deepfilternet` as import targets).
 
       **Phase 2 — remaining work for neural integration:**
@@ -29,9 +32,6 @@
         runtime (missing model file, hardware issue, etc.).
       - Neural NR operates on 48 kHz mono, same contract as classical;
         no pipeline changes needed.
-- [ ] **Pre-distortion (PureSignal-equivalent)** — the other day-one TX
-      spec item; reduces IMD products dramatically for clean wideband
-      TX. Big DSP lift. After basic TX is working.
 - [ ] **Pre-distortion (PureSignal-equivalent)** — the other day-one TX
       spec item; reduces IMD products dramatically for clean wideband
       TX. Big DSP lift. After basic TX is working.
@@ -68,13 +68,14 @@ Already added (2026-04-21): LSB, USB, CWL, CWU, DSB, AM, FM, DIGU, DIGL.
       shift keys for Lo/Hi cutoff (same idiom as per-notch Q).
 - [ ] **TX filter** — currently just a stored value. Wire it to the TX
       modulator once TX path is built.
-- [x] **Analog-needle S-meter** — shipped as lit-amber arc on black dial
+- [x] **Lit-Arc S-meter** — shipped as lit-amber arc on black dial
       (classic Kenwood/Yaesu aesthetic, matching the reference photo).
-- [ ] **LED multi-scale bar-graph meter mode** — alternative style a la
-      modern Icom/Yaesu: S+Watts+SWR stacked with segmented bars, FILTER
-      label, PROC / MONI / CH1 indicators. Right-click on meter → "Meter
-      Style → Analog / LED / Digital" selector. Will share the same
-      multi-meter data feed (S-meter for RX, Power+SWR+ALC for TX).
+      In v0.1 §7.1 polish, the original "Analog needle" variant was
+      retired in favor of just two styles: Lit-Arc and LED-bar.
+- [x] **LED multi-scale bar-graph meter mode** — shipped as the LED-bar
+      alternative meter style.  Switch via the chip-row in the Meters
+      panel header (not right-click).  Will share the same multi-meter
+      data feed (S-meter for RX, Power+SWR+ALC for TX) once TX lands.
 
 ## DSP — EESDR3-parity RX audio chain
 

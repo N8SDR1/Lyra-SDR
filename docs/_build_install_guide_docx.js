@@ -175,7 +175,7 @@ const gotchas = [
   ["“No radio found”",
     "Check HL2 power, network cable, and that no other client (Thetis, SparkSDR) is connected at the same time."],
   ["Audio works in other apps but not Lyra",
-    "Switch the “Out” combo on the DSP+Audio panel between AK4951 and PC Soundcard. Most operators use PC Soundcard."],
+    "Switch the “Out” combo on the DSP+Audio panel between HL2 audio jack and PC Soundcard. Most operators use PC Soundcard."],
 ];
 
 const gotchaTable = new Table({
@@ -207,8 +207,8 @@ children.push(PMixed([
   Link("https://github.com/N8SDR1/Lyra-SDR", "https://github.com/N8SDR1/Lyra-SDR"),
 ]));
 
-children.push(P("License: MIT"));
-children.push(P("Author: Rick Langford (N8SDR)"));
+children.push(P("License: GPL v3 or later (since v0.0.6)"));
+children.push(P("Authors: Rick Langford (N8SDR), Brent Crier (N9BC), Timmy Davis (KC8TYK)"));
 
 children.push(P(
   "This guide is written for “I have Windows and I sort of know what a terminal is” — not for Python developers. If you can copy and paste, you can install Lyra."
@@ -281,17 +281,17 @@ children.push(HR());
 
 // Install Python deps
 children.push(H2("Install Python dependencies (one-time)"));
-children.push(P("In the Lyra-SDR folder:"));
+children.push(P("In the Lyra-SDR folder, the easy way:"));
 children.push(...CodeBlock([
-  "pip install PySide6 numpy scipy sounddevice ftd2xx websockets",
+  "pip install -r requirements.txt",
 ]));
-children.push(P("This downloads about 150 MB of libraries. Takes a minute or two."));
-children.push(P("If you hit “permission denied” errors, try:"));
+children.push(P("Pip downloads about 150 MB of libraries. Takes a minute or two."));
+children.push(P("If you hit “permission denied” errors:"));
 children.push(...CodeBlock([
-  "pip install --user PySide6 numpy scipy sounddevice ftd2xx websockets",
+  "pip install --user -r requirements.txt",
 ]));
 children.push(P(
-  "If ftd2xx specifically fails, you can skip it — that package is only needed for USB-BCD external linear amplifier control. Most users don’t need it. Run instead:"
+  "If ftd2xx specifically fails (no FTDI driver on your machine), it’s optional — only needed for USB-BCD external linear-amp control. To install everything else and skip it:"
 ));
 children.push(...CodeBlock([
   "pip install PySide6 numpy scipy sounddevice websockets",
@@ -318,9 +318,10 @@ children.push(P("When new commits land in the repo:"));
 children.push(...CodeBlock([
   "cd %USERPROFILE%\\Documents\\Lyra-SDR",
   "git pull",
+  "pip install -r requirements.txt",
 ]));
 children.push(P(
-  "Done. No re-install needed unless dependencies change (we will call that out in the commit message)."
+  "The second pip install only matters when dependencies change — it’s a no-op otherwise, so it’s safe to always run after a pull."
 ));
 
 children.push(HR());

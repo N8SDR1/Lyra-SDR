@@ -52,6 +52,10 @@ class SpectrumWidget(SpectrumSourceMixin, _PaintedWidget):
     # so power users with muscle memory for the old gesture still
     # have a path.  Positive = zoom in, negative = zoom out.
     wheel_zoom    = Signal(int)
+    # v0.1 RX2: middle-click swaps focus between RX1 and RX2.
+    # Mirrors the Ctrl+1 / Ctrl+2 keyboard shortcut as a mouse
+    # gesture.  SpectrumPanel wires this to the RX-toggle slot.
+    focus_swap_requested = Signal()
     notch_q_drag = Signal(float, float)
     spot_clicked = Signal(float)                      # freq near a spot
     # Live-fired while the user drags a passband edge. Payload is the
@@ -861,6 +865,11 @@ class SpectrumWidget(SpectrumSourceMixin, _PaintedWidget):
             self._drag_tune = (
                 int(x), float(self._center_hz), False, press_snap)
             self.setCursor(Qt.OpenHandCursor)
+        elif event.button() == Qt.MiddleButton:
+            # v0.1 RX2: middle-click anywhere on the spectrum swaps
+            # focus between RX1 and RX2 (mirrors Ctrl+1 / Ctrl+2).
+            self.focus_swap_requested.emit()
+            return
         elif event.button() == Qt.RightButton:
             gpos = event.globalPosition().toPoint()
             # Right-click in the dB-scale zone (right-edge strip) gets
@@ -2112,6 +2121,9 @@ class WaterfallWidget(_PaintedWidget):
     # step).  Mirrors SpectrumWidget so the gesture works on either
     # view.
     wheel_tune = Signal(int)
+    # v0.1 RX2: middle-click anywhere on the waterfall swaps focus
+    # between RX1 and RX2 (mirrors SpectrumWidget gesture).
+    focus_swap_requested = Signal()
     notch_q_drag = Signal(float, float)
 
     NOTCH_HIT_PX = 14
@@ -2209,6 +2221,10 @@ class WaterfallWidget(_PaintedWidget):
             # See SpectrumWidget mousePressEvent for full design notes.
             self._drag_tune = (int(x), float(self._center_hz), False)
             self.setCursor(Qt.OpenHandCursor)
+        elif event.button() == Qt.MiddleButton:
+            # v0.1 RX2: middle-click swaps focus between RX1 and RX2.
+            self.focus_swap_requested.emit()
+            return
         elif event.button() == Qt.RightButton:
             gpos = event.globalPosition().toPoint()
             self.right_clicked_freq.emit(freq, shift, gpos)

@@ -114,11 +114,12 @@ licenses them to the project under the GPL v3+ on submission.
 - Rick Langford (N8SDR) — project lead, original author, all work
   through v0.0.9
 - Brent Crier (N9BC) — joined 2026-05-03 during v0.0.9.1 testing
+- Timmy Davis (KC8TYK) — joined during v0.1.0-pre2 tester flight
 
 See `CONTRIBUTORS.md` at the project root for the full active
 contributor roster and onboarding history.
 
 ---
 
-Last updated: 2026-05-03 (v0.0.9.1 — audio architecture fix +
-N9BC onboarding)
+Last updated: 2026-05-13 (v0.1.0-pre — RX2 release polish +
+KC8TYK onboarding)
