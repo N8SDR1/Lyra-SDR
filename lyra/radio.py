@@ -6325,7 +6325,21 @@ class Radio(QObject):
             floor_locked / ceiling_locked     — spectrum per-edge locks
             waterfall_min_db / max_db         — waterfall manual range
                 (per-band 2026-05-09 — was global before the fix)
+
+        v0.1.0-pre3 guard (2026-05-13, operator report):  when the
+        panadapter is showing RX2 (``_panadapter_source_rx == 2``),
+        ``_freq_hz`` still refers to RX1's frequency, so an
+        unguarded save would write the RX2 drag values under RX1's
+        band-memory entry — corrupting whatever the operator had
+        set up for RX1 on that band.  Since Lyra always restarts
+        in RX1-focused mode (intentional UX choice), saving only
+        when source == RX1 (0) keeps the persisted values correct
+        for the next startup.  In-session, RX2 drags still update
+        the live display (set_*_db_range applies the visual change
+        BEFORE calling here); they're just session-scoped.
         """
+        if self._panadapter_source_rx != 0:
+            return
         band = band_for_freq(self._freq_hz)
         if band is None:
             return
@@ -7377,25 +7391,35 @@ class Radio(QObject):
         right-click "Reset display range" item on the dB scale zone.
         Also clears the saved range from the current band's memory
         so a future band switch doesn't drag the old preference back.
+
+        v0.1.0-pre3 guard (2026-05-13):  same RX2-panadapter-source
+        check as ``_save_current_band_range``.  Right-clicking
+        "Reset display range" on an RX2 panadapter shouldn't clear
+        RX1's saved band-memory locks (which are keyed off
+        ``_freq_hz``, RX1's frequency).  Live-display clear and
+        auto-scale kick still happen regardless of source — the
+        operator's "reset what I'm looking at" intent is honored.
         """
         self._user_floor_locked = False
         self._user_ceiling_locked = False
-        # Drop the per-band saved bounds so the band defaults take
-        # over on next recall.
-        try:
-            band = band_for_freq(self._freq_hz)
-        except Exception:
-            band = None
-        if band is not None:
-            existing = self._band_memory.get(band.name, {})
-            existing.pop("range_min_db", None)
-            existing.pop("range_max_db", None)
-            existing.pop("floor_locked", None)
-            existing.pop("ceiling_locked", None)
-            if existing:
-                self._band_memory[band.name] = existing
-            else:
-                self._band_memory.pop(band.name, None)
+        if self._panadapter_source_rx == 0:
+            # Drop the per-band saved bounds so the band defaults take
+            # over on next recall.  (Skipped on RX2 panadapter to keep
+            # RX1's band memory intact — see docstring.)
+            try:
+                band = band_for_freq(self._freq_hz)
+            except Exception:
+                band = None
+            if band is not None:
+                existing = self._band_memory.get(band.name, {})
+                existing.pop("range_min_db", None)
+                existing.pop("range_max_db", None)
+                existing.pop("floor_locked", None)
+                existing.pop("ceiling_locked", None)
+                if existing:
+                    self._band_memory[band.name] = existing
+                else:
+                    self._band_memory.pop(band.name, None)
         # Force the next auto-scale tick to fire immediately so the
         # operator gets visible feedback rather than waiting ~2 sec.
         self._auto_scale_tick_counter = self.AUTO_SCALE_INTERVAL_TICKS
@@ -7874,11 +7898,19 @@ class Radio(QObject):
                     self.set_agc_threshold(v, target_rx=2)
             except (TypeError, ValueError):
                 pass
-        if s.contains("radio/focused_rx"):
-            try:
-                self.set_focused_rx(int(s.value("radio/focused_rx")))
-            except (TypeError, ValueError):
-                pass
+        # v0.1.0-pre3 (2026-05-13 operator UX choice): Lyra always
+        # starts in RX1-focused mode regardless of last session's
+        # focused_rx.  The persisted value at ``radio/focused_rx``
+        # is left intact for future flexibility but intentionally
+        # NOT applied at startup — operator preference is to always
+        # land on RX1 so the panadapter / waterfall / save-restore
+        # paths (which key off ``_freq_hz``, RX1's frequency) are
+        # always in agreement with what the operator sees.
+        # if s.contains("radio/focused_rx"):
+        #     try:
+        #         self.set_focused_rx(int(s.value("radio/focused_rx")))
+        #     except (TypeError, ValueError):
+        #         pass
         # SUB state LAST + mirror suppressed so persisted RX2
         # vol/mute/AF gain don't get smashed by the rising-edge
         # mirror in ``set_rx2_enabled``.
