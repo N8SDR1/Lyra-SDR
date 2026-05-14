@@ -10,11 +10,12 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
-    QPushButton, QSizePolicy, QSlider, QSpinBox, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout,
+    QInputDialog, QLabel, QLineEdit, QMenu, QPushButton, QSizePolicy,
+    QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
+
+from lyra.ui.widgets.stepper_readout import StepperReadout
 
 
 # ── Captured-noise-profile name length cap ──────────────────────────
@@ -197,109 +198,41 @@ def wf_from_slider_position(pos: int) -> tuple[int, int]:
     return WATERFALL_SPEED_STEPS[pos]
 
 
-# ── RIT button + offset popup ───────────────────────────────────────────
-# v0.1.1 (§15.10).  Classic ham-rig RIT control: short click toggles the
-# offset on/off, Shift+click zeros + turns off in one gesture, right-
-# click opens a small spinbox for typed-precision offset entry.
+# ── RIT button ──────────────────────────────────────────────────────────
+# v0.1.1 (§15.10 + operator UX call 2026-05-14): classic ham-rig RIT
+# control.  Click toggles RIT on/off; Shift+click zeros the offset and
+# disables in one gesture.  Offset adjustment lives on an inline
+# StepperReadout widget next to the button that materializes when RIT
+# is engaged (matches the new Vol RX1 / RX2 / AF Gain idiom from §15.17
+# -- "[−] value [+]" with click, Shift+click for larger step, hold to
+# ramp, right-click on the value for typed-precision entry).  When RIT
+# is off the stepper hides so the TUNING row stays compact.
 class RitButton(QPushButton):
     """Specialized button for the RIT toggle on TuningPanel.
 
-    Emits one of three Qt signals based on the mouse gesture so the
-    TuningPanel can wire each to the appropriate Radio setter without
-    needing to inspect mouse events itself:
+    Emits two signals depending on gesture so TuningPanel can route
+    each cleanly without inspecting mouse events itself:
 
-      * ``toggled(bool)`` -- standard checkable-button toggle on a
-        plain left-click.  Connects to ``Radio.set_rit_enabled``.
-      * ``shiftClicked()`` -- left-click while Shift held.  Zeroes
-        the offset and turns RIT off in a single gesture (matches
-        the AGC "Shift-click to reset to defaults" idiom operators
-        already know).
-      * ``rightClicked()`` -- right-click.  TuningPanel opens
-        ``RitOffsetDialog`` so the operator can type a precise
-        offset.
-
-    Toggling on a Shift+click is suppressed (we route to
-    ``shiftClicked`` instead of letting the base class flip
-    ``checked``) so the operator gets one clean gesture for
-    "reset and disengage" rather than two state flips.
+      * ``toggled(bool)`` -- inherited from QPushButton, fires on a
+        plain left-click since the button is checkable.  Connects to
+        ``Radio.set_rit_enabled``.
+      * ``shiftClicked()`` -- left-click while Shift held.  Routes to
+        a TuningPanel handler that zeros the offset and turns RIT off
+        in one gesture (matches the AGC "Shift-click to reset" idiom
+        operators already know).  We intercept BEFORE the base class
+        flips ``checked`` so the operator gets one clean gesture for
+        "reset + disengage" rather than two state flips.
     """
 
     shiftClicked = Signal()
-    rightClicked = Signal()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.RightButton:
-            self.rightClicked.emit()
-            event.accept()
-            return
         if (event.button() == Qt.LeftButton
                 and event.modifiers() & Qt.ShiftModifier):
             self.shiftClicked.emit()
             event.accept()
             return
         super().mousePressEvent(event)
-
-
-class RitOffsetDialog(QDialog):
-    """Small popup for typing a precise RIT offset.
-
-    Anchored near the RIT button (TuningPanel positions it on show).
-    Contains a signed QSpinBox (-9999..+9999 Hz, 1 Hz step), a Zero
-    button, and standard OK/Cancel.  Submission writes the value
-    through the supplied ``apply_cb`` callback; the operator can
-    apply changes without closing by hitting Enter on the spinbox
-    (auto-applies on each ``editingFinished`` once keyboard tracking
-    is off).
-    """
-
-    def __init__(self, current_hz: int, apply_cb, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("RIT Offset")
-        self.setWindowFlag(Qt.Tool, True)
-        self._apply_cb = apply_cb
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 12, 12, 12)
-        lay.setSpacing(10)
-
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addWidget(QLabel("Offset:"))
-        self.spin = QSpinBox()
-        self.spin.setRange(-9999, 9999)
-        self.spin.setSingleStep(1)
-        self.spin.setSuffix(" Hz")
-        self.spin.setValue(int(current_hz))
-        # Live-apply on Enter or arrow-spin -- operator sees the
-        # effect without having to close the dialog.
-        self.spin.setKeyboardTracking(False)
-        self.spin.valueChanged.connect(self._on_value_changed)
-        self.spin.setMinimumWidth(120)
-        row.addWidget(self.spin)
-        row.addStretch(1)
-        lay.addLayout(row)
-
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
-        zero_btn = QPushButton("Zero")
-        zero_btn.setToolTip("Set the offset to 0 Hz (RIT stays on).")
-        zero_btn.clicked.connect(self._on_zero)
-        btn_row.addWidget(zero_btn)
-        btn_row.addStretch(1)
-        box = QDialogButtonBox(QDialogButtonBox.Close)
-        box.rejected.connect(self.reject)
-        box.accepted.connect(self.accept)
-        btn_row.addWidget(box)
-        lay.addLayout(btn_row)
-
-    def _on_value_changed(self, v: int) -> None:
-        try:
-            self._apply_cb(int(v))
-        except Exception:
-            pass
-
-    def _on_zero(self) -> None:
-        self.spin.setValue(0)
 
 
 # ── Connection ──────────────────────────────────────────────────────────
@@ -776,34 +709,53 @@ class TuningPanel(GlassPanel):
         self.swap_btn.clicked.connect(lambda: self.radio.vfo_swap())
         cw_h.addWidget(self.swap_btn)
 
-        # RIT (Receiver Incremental Tuning) -- v0.1.1, §15.10.
-        # Click: toggle on/off.  Shift+click: zero offset + turn
-        # off in one gesture.  Right-click: open RitOffsetDialog
-        # for typed-precision entry.  Hover (when lit): tooltip
-        # shows the live offset in kHz.  RX1 only in v0.1.1
-        # (per-RX RIT deferred per §15.16 scope lock).
+        # RIT (Receiver Incremental Tuning) -- v0.1.1, §15.10 +
+        # operator UX call 2026-05-14.  Click: toggle on/off.
+        # Shift+click: zero offset + turn off in one gesture.
+        # Offset adjustment lives on the adjacent rit_stepper which
+        # materializes when RIT is on (hidden when off so the row
+        # stays compact).  RX1 only in v0.1.1 (per-RX deferred per
+        # §15.16 scope lock).
         self.rit_btn = RitButton("RIT")
         self.rit_btn.setCheckable(True)
         self.rit_btn.setMinimumWidth(54)
         self.rit_btn.setChecked(bool(self.radio.rit_enabled))
+        self.rit_btn.setToolTip(
+            "RIT (Receiver Incremental Tuning). Click to toggle. "
+            "Shift-click to zero and disable in one gesture. "
+            "When on, the [-] value [+] stepper to the right "
+            "adjusts the offset (click = 1 Hz, Shift+click = "
+            "10 Hz, click-and-hold ramps, right-click value for "
+            "typed entry)."
+        )
         self.rit_btn.toggled.connect(self.radio.set_rit_enabled)
         self.rit_btn.shiftClicked.connect(self._on_rit_shift_clicked)
-        self.rit_btn.rightClicked.connect(self._on_rit_right_clicked)
-        self._refresh_rit_tooltip()
         cw_h.addWidget(self.rit_btn)
-        # RIT readout chip -- compact signed-kHz label visible only
-        # when RIT is engaged with a nonzero offset.  Sits to the
-        # right of the button so the operator gets at-a-glance
-        # "I'm shifted X.XX kHz off the dial" without hovering.
-        self.rit_chip = QLabel("")
-        self.rit_chip.setStyleSheet(
-            "color: #ffb84d; font-weight: 700; "
-            "letter-spacing: 0.5px;")
-        self.rit_chip.setVisible(False)
-        cw_h.addWidget(self.rit_chip)
+
+        # RIT offset stepper -- inline [-] value [+] adjustment widget
+        # using the §15.17 StepperReadout idiom.  Visible only when
+        # RIT is engaged; toggling RIT off hides it to keep the row
+        # compact.  10 Hz Shift-step matches typical operator nudge
+        # (slow zero-beat search) without being so coarse that single
+        # Hz precision is unreachable.
+        self.rit_stepper = StepperReadout(
+            "",                       # no caption -- RIT button labels it
+            -9999, 9999,
+            step=1,                    # 1 Hz per click
+            shift_step=10,             # 10 Hz with Shift held
+            unit="Hz",
+            decimals=0,
+            initial=int(self.radio.rit_offset_hz),
+            caption_width=0,           # collapse the empty caption
+            value_width=64,            # fits "+9999 Hz"
+        )
+        self.rit_stepper.setVisible(bool(self.radio.rit_enabled))
+        self.rit_stepper.valueChanged.connect(self._on_rit_stepper_changed)
+        cw_h.addWidget(self.rit_stepper)
+
         # Bidirectional sync -- Radio signals drive the UI when
         # state changes externally (autoload at startup, future
-        # CAT/TCI, RX2 button on other panels).
+        # CAT/TCI, persistence restore).
         try:
             self.radio.rit_enabled_changed.connect(
                 self._on_radio_rit_enabled_changed)
@@ -811,9 +763,6 @@ class TuningPanel(GlassPanel):
                 self._on_radio_rit_offset_changed)
         except Exception:
             pass
-        # Reflect any state that autoload may have already written
-        # before signals were connected.
-        self._refresh_rit_chip()
 
         cw_h.addStretch(1)
         outer.addWidget(self.cw_pitch_row)
@@ -925,37 +874,28 @@ class TuningPanel(GlassPanel):
         self.cw_pitch_spin.setValue(int(pitch_hz))
         self.cw_pitch_spin.blockSignals(False)
 
-    # ── RIT (v0.1.1, §15.10) ──────────────────────────────────────
+    # ── RIT (v0.1.1, §15.10 + 2026-05-14 inline-stepper UX) ───────
     def _on_rit_shift_clicked(self) -> None:
         """Shift-click on RIT: zero the offset and turn RIT off.
         Single gesture for "I'm done with RIT, back to dial freq."
+        Both calls flow through Radio setters so QSettings + signals
+        + DDS re-push all fire cleanly.
         """
         self.radio.set_rit_offset_hz(0)
         self.radio.set_rit_enabled(False)
 
-    def _on_rit_right_clicked(self) -> None:
-        """Right-click on RIT: open the typed-precision offset
-        dialog.  The dialog applies values live as the operator
-        spins the value -- they hear the effect immediately
-        without closing."""
-        dlg = RitOffsetDialog(
-            current_hz=int(self.radio.rit_offset_hz),
-            apply_cb=self.radio.set_rit_offset_hz,
-            parent=self,
-        )
-        # Anchor near the button so the operator doesn't have to
-        # chase the popup across the screen.
+    def _on_rit_stepper_changed(self, hz: float) -> None:
+        """Stepper widget emitted a new value -- forward to Radio."""
         try:
-            anchor = self.rit_btn.mapToGlobal(
-                self.rit_btn.rect().bottomLeft())
-            dlg.move(anchor.x(), anchor.y() + 4)
+            self.radio.set_rit_offset_hz(int(round(float(hz))))
         except Exception:
             pass
-        dlg.exec()
 
     def _on_radio_rit_enabled_changed(self, on: bool) -> None:
         """Radio's RIT enable flipped (autoload, CAT/TCI, future
-        bench tools) -- mirror the button without re-firing."""
+        bench tools) -- mirror the button without re-firing AND
+        show/hide the offset stepper so the row stays compact when
+        RIT is off."""
         if not hasattr(self, "rit_btn"):
             return
         target = bool(on)
@@ -963,54 +903,27 @@ class TuningPanel(GlassPanel):
             self.rit_btn.blockSignals(True)
             self.rit_btn.setChecked(target)
             self.rit_btn.blockSignals(False)
-        self._refresh_rit_chip()
-        self._refresh_rit_tooltip()
+        if hasattr(self, "rit_stepper"):
+            self.rit_stepper.setVisible(target)
 
     def _on_radio_rit_offset_changed(self, hz: int) -> None:
-        """Offset changed (dialog, autoload, future CAT/TCI)."""
-        self._refresh_rit_chip()
-        self._refresh_rit_tooltip()
-
-    def _refresh_rit_chip(self) -> None:
-        """Show the chip only when RIT is engaged AND non-zero.
-        Format: signed kHz with 2 decimals when |offset| >= 10 Hz,
-        plain Hz otherwise (sub-10 Hz tweaks don't deserve the
-        decimal noise)."""
-        if not hasattr(self, "rit_chip"):
+        """Offset changed somewhere other than the stepper itself
+        (autoload, Shift+click zero gesture, future CAT/TCI).
+        Mirror into the stepper with signals blocked so we don't
+        echo back into Radio."""
+        if not hasattr(self, "rit_stepper"):
             return
         try:
-            on = bool(self.radio.rit_enabled)
-            off = int(self.radio.rit_offset_hz)
+            current = int(round(float(self.rit_stepper.value())))
         except Exception:
-            on, off = False, 0
-        if not on or off == 0:
-            self.rit_chip.setVisible(False)
-            self.rit_chip.setText("")
+            current = 0
+        if current == int(hz):
             return
-        if abs(off) >= 10:
-            text = f"{off/1000.0:+.2f}k"
-        else:
-            text = f"{off:+d}Hz"
-        self.rit_chip.setText(text)
-        self.rit_chip.setVisible(True)
-
-    def _refresh_rit_tooltip(self) -> None:
-        """Hover tooltip describes the gesture + current offset."""
-        if not hasattr(self, "rit_btn"):
-            return
+        self.rit_stepper.blockSignals(True)
         try:
-            on = bool(self.radio.rit_enabled)
-            off = int(self.radio.rit_offset_hz)
-        except Exception:
-            on, off = False, 0
-        live = (f"  Active offset: {off/1000.0:+.2f} kHz."
-                if on and off != 0 else "")
-        self.rit_btn.setToolTip(
-            "RIT (Receiver Incremental Tuning) -- shifts the RX1 "
-            "DDC by a small offset without changing the displayed "
-            "VFO. Click to toggle. Right-click for a typed offset. "
-            "Shift-click to zero and turn off." + live
-        )
+            self.rit_stepper.setValue(int(hz))
+        finally:
+            self.rit_stepper.blockSignals(False)
 
     # ── SUB toggle + dispatch state mirror (moved from ModeFilterPanel
     #    in Phase 3.E.1 hotfix v0.10, 2026-05-12) ──────────────────
