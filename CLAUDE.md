@@ -45,6 +45,41 @@ content below has been mass-renumbered to the new scheme.
 
 **Subsequent releases (2026-05-05 onward):**
 
+- **v0.1.1** "Polish & Audio Routing" (2026-05-14) — polish
+  batch on top of v0.1.0 GA per the §15.16 scope lock.  Five
+  items shipped together: (1) RIT (Receiver Incremental Tuning)
+  on the TUNING panel — click toggles, Shift+click zeros and
+  disables, inline `[−] value [+]` StepperReadout (§15.17 idiom)
+  for offset adjustment that materializes when RIT is on,
+  ±9999 Hz range, 1 Hz click / 10 Hz Shift+click / right-click
+  for typed entry, persists across sessions, RX1 only (per-RX
+  deferred); (2) TCI RX2 channel — `channel_count:2;` advertised,
+  `DDS:1` / `VFO:0,1` / `IF:0,1` / `MODULATION:1` route to RX2,
+  outbound rx2_freq + mode_changed_rx2 signals broadcast as ch1
+  updates, SDRLogger+ (and any TCI client) can drive both VFOs;
+  (3) device-list grouping by host API on Settings → Audio (same
+  physical device once per WASAPI / WDM-KS / DirectSound / MME /
+  ASIO with section dividers); (4) VAC digital-modes workflow doc
+  (`docs/help/audio.md`); (5) WASAPI Exclusive mode — audit
+  closure (already shipped in v0.0.9.6, was mistakenly logged as
+  parked).  Also bundles: TCI broadcast rate-limit key fix
+  (per-(command, channel) instead of per-command — RX1/RX2
+  updates no longer starve each other), Auto-LNA tooltip
+  refresh for pull-up reality.  Three-push sequence: feature
+  branch + tag + main fast-forward.  Test count: 225/225 green
+  + 11 new TCI RX2 routing assertions + 6 RIT-math assertions +
+  UI bench validation.  XIT (TX-mirror RIT) renders disabled in
+  v0.1.1, ships in v0.2 (~2 hr enable on top of RIT plumbing).
+  v0.1.1 ALSO ships the §15.17 stepper redesign that landed on
+  the feature branch between v0.1.0 GA and v0.1.1 (DSP+Audio top
+  row: three QSlider replaced by `[−] value [+]` StepperReadout
+  widgets for Vol RX1 / Vol RX2 / AF Gain; "Out" picker relocated
+  from header to levels row as icon-only QToolButton; cyan QSS
+  for stepper buttons matching panel accent palette).  Original
+  §15.17 plan was to hold for v0.1.2; rolled into v0.1.1 because
+  RIT's offset stepper reuses the same widget, making §15.17 a
+  hard dependency for v0.1.1 release.  v0.2 TX bring-up is next.
+
 - **v0.1.0** "RX2 Dual Receiver — production GA"
   (2026-05-14) — production GA of the v0.1 line after the
   pre2/pre3 tester flight (Brent + Timmy + N8SDR).  All pre2
@@ -3713,8 +3748,13 @@ and we have a sense of which (if any) field reports need
 faster patching.  No external dependency; can start tomorrow
 or wait two weeks.
 
-Status: **PARKED** — locked scope; ready to execute when
-operator picks it up.  v0.2 TX work waits behind this release.
+Status: **CLOSED 2026-05-14** — all five items shipped in
+v0.1.1.  See version-numbering history above for the full
+release entry.  Bench-validated end-to-end with SDRLogger+
+spots-on-RX2 round trip (Lyra tunes RX2 correctly; the
+spot_activated echo back to SDRLogger+ has a logger-side
+filter gap that operator owns separately).  v0.2 TX work is
+next.
 
 ### 15.17 — DSP+Audio panel top-row redesign (PARKED 2026-05-14, scope: v0.1.2)
 
@@ -3908,7 +3948,16 @@ push window.
 
 ---
 
-*Last updated: 2026-05-14 — **v0.1.0 GA SHIPPED.**  Production
+*Last updated: 2026-05-14 — **v0.1.1 "Polish & Audio Routing"
+SHIPPED.**  Five-item §15.16 batch closed: RIT, TCI RX2 channel,
+device-list grouping by host API, VAC digital-modes doc, WASAPI
+Exclusive (audit closure — was already shipped).  Plus §15.17
+stepper redesign rolled in (RIT's offset stepper reuses the
+widget so §15.17 became a hard dependency; original v0.1.2 hold
+retracted).  Test count: 225/225 green + 11 TCI RX2 routing
+assertions + 6 RIT-math assertions + UI bench validation.  Three-
+push sequence executed.  v0.2 TX bring-up is next.  Earlier:
+2026-05-14 — **v0.1.0 GA SHIPPED.**  Production
 release of the v0.1 line after pre2/pre3 tester flight with
 Brent + Timmy + N8SDR.  Headline: RX2 dual receiver +
 stereo-split audio + focused-VFO operation + post-§15.7

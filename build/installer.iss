@@ -23,8 +23,8 @@
 ;     launch under HKEY_CURRENT_USER\Software\N8SDR\Lyra
 ;   - Run any service / scheduled task / startup hook
 
-#define LyraVersion       "0.1.0"
-#define LyraVersionName   "RX2 Dual Receiver"
+#define LyraVersion       "0.1.1"
+#define LyraVersionName   "Polish & Audio Routing"
 #define LyraBuildDate     "2026-05-14"
 #define LyraPublisher     "Rick Langford (N8SDR)"
 #define LyraURL           "https://github.com/N8SDR1/Lyra-SDR"

@@ -13,6 +13,80 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.1.1] — 2026-05-14 — Polish & Audio Routing
+
+Polish release on top of v0.1.0 RX2 GA.  Five bundled items (§15.16
+scope lock) from the parked-features backlog ship together rather than
+as five rapid-fire patches.
+
+### New features
+
+* **RIT (Receiver Incremental Tuning)** — TUNING panel gets a `RIT`
+  button next to the VFO-bridge group.  Click toggles RIT on/off;
+  Shift+click zeros the offset and disables in one gesture.  When
+  engaged, an inline `[−] value [+]` StepperReadout appears next to
+  the button for offset adjustment (1 Hz / click, 10 Hz / Shift+click,
+  click-and-hold ramps, mouse-wheel = 1 Hz/notch, right-click value
+  for typed precision entry).  Stepper hides when RIT is off so the
+  row stays compact.  Range ±9999 Hz.  Persists across sessions.
+  RX1 only in v0.1.1 — per-RX RIT deferred.
+* **TCI RX2 channel** — Lyra now advertises `channel_count:2;` on
+  client connect and routes `DDS:1` / `VFO:0,1` / `IF:0,1` /
+  `MODULATION:1` commands to RX2.  Outbound `dds:1` / `vfo:0,1` /
+  `modulation:1` broadcasts fire on RX2 state changes.  SDRLogger+
+  (and any other dual-VFO TCI client) can now drive both RX1 and
+  RX2 from a single websocket connection.  Initial-state emission
+  on connect populates the client's ch1 surface without polling.
+* **Device-list grouping by host API** — Settings → Audio →
+  Output Device dropdown now groups entries with section dividers
+  (Windows WASAPI / Windows WDM-KS / DirectSound / MME / ASIO),
+  same physical device once per available host API.  Status banner
+  shows `✓ N device(s) across M host API(s)`.  Removes the previous
+  confusion of seeing "Speakers (Realtek)" five times in a row
+  without explanation.
+* **VAC digital-modes workflow doc** — `docs/help/audio.md` gains a
+  "Digital modes with VAC" section covering Virtual Audio Cable
+  routing to WSJT-X / FLDigi / JS8Call / MSHV, TCI-vs-VAC
+  comparison, latency math, and per-app gotchas.  Code path already
+  worked (VAC registers as a normal audio device); this is the
+  missing documentation.
+
+### Bug fixes
+
+* **TCI rate-limit key collision (RX1 vs RX2)** — `_broadcast`
+  previously keyed rate limiting by command name only, so rapid
+  RX1 tuning could starve RX2 broadcasts and vice versa.  Now keys
+  by `(command, channel)` so each RX gets its own rate bucket.
+* **Auto-LNA button tooltip** — refreshed to match pull-up reality
+  (the legacy "doesn't raise gain" claim was wrong since the
+  Auto-LNA pull-up branch landed several releases back).
+
+### Scope notes
+
+* **XIT** — TX-mirror RIT; renders disabled in v0.1.1, ships fully
+  in v0.2 alongside TX bring-up (~2 hr enable work on top of the
+  v0.1.1 RIT infrastructure).
+* **ASIO support** — host-API grouping plumbing is in place;
+  full ASIO ships in v0.2 when TX-side monitor latency makes the
+  ~5 ms host-API floor worth the implementation effort.
+* **WASAPI Exclusive mode** — already shipped in v0.0.9.6 via
+  the Settings → Audio host API dropdown; the audit during
+  v0.1.1 prep flagged that it had been mistaken for "still
+  parked" in the §15.16 backlog (no code work, just
+  documentation closure).
+
+### Test coverage
+
+Behavioral validation pass: 11 TCI RX2 channel-routing assertions
+(DDS / VFO / IF / MODULATION read+write on ch0 and ch1, channel
+isolation, garbage-index handling, rate-limit key separation) +
+6 RIT-math assertions (USB baseline, off→on toggle, ±offsets, CW
+pitch composition, RX2 isolation, range clamping) + UI bench test
+(stepper visibility, signal sync, no echo loops).  Bench-confirmed
+2026-05-14.
+
+---
+
 ## [0.1.0] — 2026-05-14 — RX2 Dual Receiver (production GA)
 
 Production GA of the v0.1 line after a three-pre-release tester
