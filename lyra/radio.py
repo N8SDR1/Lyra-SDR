@@ -360,6 +360,18 @@ class Radio(QObject):
     # to the protocol layer carries the offset.
     rit_enabled_changed = Signal(bool)
     rit_offset_changed  = Signal(int)      # Hz, signed (-9999..+9999)
+    # v0.2.0 Phase 0: TX-active edge signal.  Emitted True when the
+    # PTT state machine (``lyra.ptt.PttStateMachine``) transitions
+    # out of RX into ANY TX state (MOX_TX / TUN_TX / CW_TX / VOX_TX),
+    # False when it returns to RX.  Phase 0 has no emitter (the
+    # state machine + MOX button + hardware PTT input land in
+    # Phase 3); UI consumers can connect now and stay inert until
+    # Phase 3.  Consumers: ``FrequencyDisplay.set_tx_active`` (red
+    # VFO LED per §15.9), ``SMeter.set_tx_active`` (TX-style
+    # meter layout), spectrum widget (red TX passband rectangle
+    # per §15.9), AAmixer auto-mute-on-TX rules per §15.14, status
+    # bar AAmixer state badge per §15.15.
+    tx_active_changed = Signal(bool)
     # CW Zero (white) line offset from the VFO marker, in Hz.
     # Vertical reference line drawn at the filter center — i.e., where
     # a clicked CW signal lands and where the audio is generated.

@@ -729,6 +729,25 @@ class HL2Stream:
         # with audible clicks.  v0.0.9.1+
         self.tx_audio_underruns: int = 0
         self.tx_audio_overruns: int = 0
+
+        # ── v0.2 TX bring-up Phase 0 scaffolding ────────────────────
+        # TX center frequency in Hz for DDC2/DDC3 NCO writes (C0=0x02,
+        # 0x08, 0x0a per HPSDR P1 networkproto1.c:949-1001).  Phase 0
+        # stores the attribute only -- no setter, no wire emission.
+        # Phase 1 adds ``_set_tx_freq(hz)`` that pushes the value
+        # through the three C&C registers above.  None means "operator
+        # has not set a TX freq yet -- use VFO A (= self._rx1_freq_hz)
+        # as the default" during Phase 1 wiring; Lyra UI later wires
+        # the SPLIT toggle to drive this independently of VFO A.
+        self._tx_freq_hz: Optional[int] = None
+        # PureSignal-run flag for C&C frames 11 + 16 (bit 6 of C2 per
+        # CLAUDE.md §3.7).  Phase 0 stores the attribute only; the
+        # C&C frame builder still emits the bit as zero on the wire.
+        # v0.3 PureSignal work wires the setter + the frame emission +
+        # the gateware cntrl1=4 PA-coupler routing per §3.8.  Phase 0
+        # initialization here ensures v0.2/v0.3 consumers can read
+        # the flag without an AttributeError.
+        self._puresignal_run: bool = False
         # ── EP2 writer thread state (v0.0.9.2 Commit 4) ─────────────
         # Dedicated EP2 writer thread runs the host->radio frame send
         # at the codec's audio cadence (~380 Hz = 48 kHz / 126
