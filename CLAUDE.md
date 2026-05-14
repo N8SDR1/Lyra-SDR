@@ -908,11 +908,52 @@ EiBi shortwave broadcaster overlay with auto-detection.  See
 
 ### v0.2 — TX (post-RX2)
 
-- v0.2.0: SSB only (USB/LSB) + PTT + drive level + fwd/rev power.
-- v0.2.1: CW (with internal keyer + sidetone, CWX PTT bit), AM,
-  compressor port from WDSP.
-- v0.2.2: FM, CFC.
-- v0.2.3: Leveler, equalizer.
+**Cadence resynced 2026-05-14 to match the consensus plan §8.5
+implementation cadence (Round 5 verified).**  Previous CLAUDE.md
+§7 entry (v0.2.0=SSB bare, v0.2.3=leveler+EQ) predated the
+consensus plan and put load-bearing dynamic-range blocks (ALC,
+leveler) in the last sub-release, which the Round 5 review
+caught as a "post-PA splatter on day one" risk.  The order
+below puts the splatter-bound blocks in v0.2.0 with the
+modulator itself.
+
+- **v0.2.0: SSB basics + dynamic-range bounds.**  Modulator
+  (SSB), EP2 TX I/Q packing, MOX/PTT state machine, TX power
+  control (HL2 step attenuator -28..+31 dB via capabilities
+  struct), mic gain, **leveler reuse** (WDSP `wcpagc` mode 5
+  cffi — shared binding with RX AGC), **ALC** (xwcpagc on
+  TXA.c line 579 — 1 ms attack / 10 ms decay / -3 dBFS thresh
+  per Thetis radio.cs; the load-bearing limiter that prevents
+  post-PA splatter), **RX/TX RTA scaffolding** (audio-domain
+  FFT widgets render with live data + taps in place, no EQ
+  yet), **§8.2 sip1 TX I/Q tap** (mandatory in v0.2 — adds
+  the v0.3 PureSignal calibration tap point now so v0.3 can
+  focus purely on PS work without re-validating every TX
+  sub-mode), §15.9 red-on-air visual rule, §15.14 auto-mute-
+  on-TX Settings + behavior, §15.15 AAmixer state badge
+  (partial — TX state strings meaningful, PS strings stay
+  placeholder until v0.3).
+- **v0.2.1: EQ + dynamics.**  WDSP `eqp.c` port → 10-band
+  parametric EQ for both RX and TX, EQ dialog with RTA-driven
+  live preview (the RTA widgets from v0.2.0 now show live
+  data + EQ overlay).  WDSP `compress.c` cffi binding goes
+  live (TX speech compressor + paired bp1).  §15.13 COMP chip
+  (MODE_COMP source-switching meter) lands — `tx_lvlr_db_changed`
+  signal now has a real signal source.
+- **v0.2.2: CW + AM + FM.**  CW modulator with internal keyer
+  + sidetone + CWX PTT bit per CLAUDE.md §3.8 (HL2 has 4 CW
+  state bits — cwx_ptt + dot + dash + cwx — encoded in TX
+  I-sample LSBs during CW transmit).  AM modulator (DSB +
+  SAM + carrier-restore).  FM modulator with deviation control
+  + pre-emphasis position-1 + CTCSS.  WDSP `cfcomp.c` cffi
+  binding for the 5-band speech processor that contest
+  operators want.
+- **v0.2.3: Polish.**  Per-band EQ memory, custom EQ preset
+  save/load, meter calibration UX (per-band 3-point forward-
+  power cal per §8.4(a)), monitor level / sidetone tuning,
+  MOX-edge audio fade tuning, XIT enable (the disabled UI from
+  v0.1.1 just needs `tx_freq += xit_offset_hz` in
+  `_compute_tx_dds_hz`; ~2 h).
 
 ### v0.3 — PureSignal
 
