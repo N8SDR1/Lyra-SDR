@@ -3465,6 +3465,62 @@ writing the PTT state machine + AAmixer auto-mute path.  GA
 Phase 4 punch list shrinks to AAmixer state badge + TCI RX2
 channel (items 4 + 5 only).
 
+### 15.15 — AAmixer state indicator badge moved to v0.2 (DEFERRED 2026-05-13)
+
+Consensus plan §1 + §10 + Phase 4 §7 (v0.1.0) targeted a small
+visual badge consolidating the 8-way AAmixer state machine
+(``Power × MOX × diversity × PS``, plus RX2-enabled and operator-
+mute toggles) into a single at-a-glance indicator.  Plan
+rationale: Thetis makes operators infer audio-mixing state from
+a scatter of independent button states (chkPower / chkMOX /
+chkRX2 / PS button); Lyra's UX improvement is one consolidated
+badge.
+
+**Reassessed at GA pre-flight (2026-05-13) — same principle as
+§15.13 + §15.14: the badge's value emerges when there are
+multiple state axes to consolidate.  In v0.1 RX2-only, the
+state space collapses to:**
+
+| State | What the badge would show |
+|-------|---------------------------|
+| Stream stopped | ``OFF`` |
+| Stream running, single RX | ``RX1`` |
+| Stream running, SUB on | ``SUB`` |
+
+…and every one of those is already visible on existing UI:
+* "Stream running" is read from the toolbar Start/Stop button
+* "SUB on" is read from the SUB button on the TUNING panel
+  (lit when active per Phase 3.E.1 hotfix v0.16)
+
+Shipping the badge in v0.1 means putting a label saying ``SUB``
+right next to a lit button labeled ``SUB`` — redundant, not
+informative.
+
+**Scope when revived in v0.2 (and beyond):**
+
+* In v0.2 TX: badge picks up ``TX``, ``TX (split)``,
+  ``TX (RX1 muted)`` etc. — combinations operators currently
+  can't read at a glance because they involve dispatch state
+  + auto-mute rule + SPLIT toggle interactions.
+* In v0.3 PS: badge picks up ``PS-armed``, ``PS-cal``,
+  ``PS-paused (RX2 suspended)`` per consensus plan §2.2 CR-1.
+* Color coding tied to §15.9 red-on-air rule — TX-state badges
+  go red, RX-state badges stay neutral.
+
+**Placement when implemented:** small badge in the status bar
+(left side, near the connection indicator) so it stays peripheral
+but always visible.  Click to expand a tooltip explaining the
+current full dispatch state.
+
+**Data source:** ``Radio.dispatch_state_changed`` signal already
+fires on every relevant edge (MOX, ps_armed, rx2_enabled, family)
+— the badge just subscribes and renders a state-name lookup.
+No new Radio surface needed; just a UI consumer.
+
+Status: **DEFERRED to v0.2** — re-read this section alongside
+§15.9 (red on-air rule) when wiring TX visual state.  GA Phase
+4 punch list shrinks to just item 5 (TCI RX2 channel).
+
 ---
 
 *Last updated: 2026-05-11 — Round 3 amendments applied (operator
