@@ -265,6 +265,34 @@ QPushButton#stepper_btn:disabled {{
     border-color: {qss_color(BORDER)};
 }}
 
+/* CLAUDE.md §15.17 audio-out header button -- small chip on the
+   DSP+Audio panel header that pops a menu to switch audio output
+   (HL2 audio jack / PC Soundcard / future VAC).  Sits left of the
+   help "?" badge; same cyan idiom as the help button so the two
+   read as visually related "header chips". */
+QToolButton#audio_out_header_btn {{
+    color: {qss_color(ACCENT)};
+    background: transparent;
+    border: 1px solid {qss_color(ACCENT)};
+    border-radius: 9px;
+    font-family: Consolas, monospace;
+    font-weight: 700;
+    font-size: 10px;
+    padding: 0 8px;
+    margin: 0;
+}}
+QToolButton#audio_out_header_btn:hover {{
+    color: #7ff7ff;
+    background: rgba(0, 229, 255, 50);
+}}
+QToolButton#audio_out_header_btn::menu-indicator {{
+    /* Hide Qt's default indicator -- the QMenu opens on click via
+       InstantPopup, so the chevron is redundant inside the tight
+       18 px header strip. */
+    image: none;
+    width: 0;
+}}
+
 /* StepperReadout value label -- monospace so digits line up across
    the three controls (AF / Vol RX1 / Vol RX2 all read in dB), neutral
    primary text color (the cyan accent is reserved for the +/- buttons
