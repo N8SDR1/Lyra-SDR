@@ -873,6 +873,16 @@ class HL2Stream:
         self._antenna_select: int = 0        # 0=ANT1, 1=ANT2, 2=ANT3
         self._diversity_enabled: bool = False
 
+        # ── HPSDR P1 frame 18 (register 0x74) state (v0.2 Phase 1) ──
+        # Reset-on-disconnect: HL2-only safety register.  When set
+        # (default True), the gateware auto-reverts to RX state if
+        # the host TCP link drops -- prevents silent carrier on air
+        # after a Lyra crash mid-TX.  Operator can opt out via
+        # Settings (Phase 3 UI) for advanced use cases like
+        # gateware-driven CW beacons that need to survive link
+        # blips.  Defaults to True for safety.
+        self._reset_on_disconnect: bool = True
+
         # ── EP2 writer thread state (v0.0.9.2 Commit 4) ─────────────
         # Dedicated EP2 writer thread runs the host->radio frame send
         # at the codec's audio cadence (~380 Hz = 48 kHz / 126
@@ -976,6 +986,15 @@ class HL2Stream:
         # antenna select / diversity drive the wire bytes without
         # requiring a re-write of set_sample_rate or _send_config.
         self._refresh_frame_0()
+
+        # v0.2 Phase 1 (6/10): seed frame 18 (register 0x74) with
+        # reset_on_disconnect = 1 (safety default).  HL2-only
+        # register; gateware uses this to auto-revert to RX state
+        # if the host TCP link drops, preventing silent carrier
+        # on air after a Lyra crash mid-TX.  Eager registration
+        # ensures HL2 receives the safe value from cycle 1 rather
+        # than inheriting power-up state.
+        self._refresh_frame_18()
 
     def read_tx_audio_high_water(self) -> int:
         """Atomically read + reset the TX audio deque high-water mark.
@@ -1504,6 +1523,46 @@ class HL2Stream:
         with self._cc_lock:
             self._cc_registers[0x00] = (c1, c2, c3, c4)
             self._register_cc_slot(0x00)
+
+    def _compose_frame_18(self) -> tuple[int, int, int, int]:
+        """Compose HPSDR P1 frame 18 (register 0x74) -- reset-on-
+        disconnect safety control.
+
+        Layout:
+        * C1 = C2 = C3 = 0 (unused)
+        * C4 = reset_on_disconnect (1 = gateware auto-reverts to
+          RX on host TCP link loss; 0 = stay in whatever state
+          the operator left it)
+
+        HL2-only register.  Lyra defaults to 1 so a crash mid-TX
+        doesn't leave the radio transmitting silent carrier; the
+        gateware drops PTT within a few seconds of losing the host
+        connection.  Operator can opt out via Settings -> TX in
+        Phase 3 UI for advanced use cases.
+
+        Lock-free.  ``_refresh_frame_18`` is the lock-acquiring
+        sibling.
+        """
+        c4 = 1 if self._reset_on_disconnect else 0
+        return (0, 0, 0, c4)
+
+    def _refresh_frame_18(self) -> None:
+        """Recompute frame 18 and cache it in ``_cc_registers[0x74]``.
+
+        Call this when ``_reset_on_disconnect`` changes (future
+        Settings UI setter).  v0.2 Phase 1 calls this once at the
+        end of ``__init__`` for eager registration -- without it,
+        a fresh-install Lyra connecting to an HL2 with stale
+        reset-on-disconnect state could leave the radio in an
+        unsafe configuration.
+
+        Caller MUST NOT be holding ``_cc_lock`` -- this method
+        acquires it.
+        """
+        c1, c2, c3, c4 = self._compose_frame_18()
+        with self._cc_lock:
+            self._cc_registers[0x74] = (c1, c2, c3, c4)
+            self._register_cc_slot(0x74)
 
     def _send_cc(self, c0: int, c1: int, c2: int, c3: int, c4: int):
         """Send one C&C write via EP2. Thread-safe.
