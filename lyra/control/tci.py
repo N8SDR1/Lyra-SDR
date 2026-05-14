@@ -405,7 +405,13 @@ class TciServer(QObject):
             "vfo_limits:10000,55000000;",
             f"if_limits:-{r.rate // 2},{r.rate // 2};",
             "trx_count:1;",
-            "channel_count:1;",
+            # v0.1.1 §15.16 #2: HL2 has two host-side RX channels
+            # (RX1 + RX2 via DDC0 / DDC1).  Both are addressable from
+            # TCI clients (SDRLogger+ canonical) for dual-VFO logging
+            # workflows.  trx_count stays at 1 -- per TCI semantics
+            # the two RXes are CHANNELS within a single transceiver,
+            # not separate transceivers.
+            "channel_count:2;",
             f"modulations_list:{modulations};",
             "ready;",
         ]
@@ -415,6 +421,18 @@ class TciServer(QObject):
                 f"vfo:0,0,{r.freq_hz};",
                 f"modulation:0,{self._to_tci_mode(r.mode)};",
                 "trx:0,false;",
+                # v0.1.1 §15.16 #2: announce RX2 (channel 1) state so
+                # clients can populate their VFO-B / dual-VFO surface
+                # at connect time without polling.  RX2 always reports
+                # whatever ``rx2_freq_hz`` + ``mode_for_rx(2)`` say
+                # regardless of SUB-toggle state (the "shadow VFO B"
+                # exists even when RX2 audio is muted -- see CLAUDE.md
+                # §6.3).  Clients that don't care about ch1 simply
+                # ignore these lines.
+                f"dds:1,{r.rx2_freq_hz};",
+                f"vfo:0,1,{r.rx2_freq_hz};",
+                f"modulation:1,{self._to_tci_mode(r.mode_for_rx(2))};",
+                "trx:1,false;",
                 "start;" if r.is_streaming else "stop;",
             ])
         for cmd in init:
@@ -444,40 +462,81 @@ class TciServer(QObject):
         elif cmd == "STOP":
             r.stop()
         elif cmd == "DDS":
-            # Read: DDS:0;    Set: DDS:0,freq;
+            # Read: DDS:ch;    Set: DDS:ch,freq;
+            # v0.1.1 §15.16 #2: ch=0 → RX1 (set_freq_hz); ch=1 → RX2
+            # (set_rx2_freq_hz).  Channels outside {0,1} silently
+            # ignored (forward-compat for clients that probe channel
+            # counts higher than we advertise).
+            ch_idx = self._parse_channel(args[0]) if args else 0
+            if ch_idx is None:
+                return
             if len(args) >= 2:
                 try:
-                    r.set_freq_hz(int(args[1]))
+                    hz = int(args[1])
                 except ValueError:
-                    pass
+                    return
+                if ch_idx == 0:
+                    r.set_freq_hz(hz)
+                elif ch_idx == 1:
+                    r.set_rx2_freq_hz(hz)
             elif len(args) == 1:
-                ws.sendTextMessage(f"dds:{args[0]},{r.freq_hz};")
+                current = r.freq_hz if ch_idx == 0 else r.rx2_freq_hz
+                ws.sendTextMessage(f"dds:{ch_idx},{current};")
         elif cmd == "VFO":
-            # Read: VFO:0,0;   Set: VFO:0,0,freq;
+            # Read: VFO:trx,ch;   Set: VFO:trx,ch,freq;
+            # v0.1.1 §15.16 #2: route ch=0/1 to RX1/RX2 setters.
+            if len(args) < 2:
+                return
+            ch_idx = self._parse_channel(args[1])
+            if ch_idx is None:
+                return
             if len(args) >= 3:
                 try:
-                    r.set_freq_hz(int(args[2]))
+                    hz = int(args[2])
                 except ValueError:
-                    pass
-            elif len(args) >= 2:
-                ws.sendTextMessage(f"vfo:{args[0]},{args[1]},{r.freq_hz};")
+                    return
+                if ch_idx == 0:
+                    r.set_freq_hz(hz)
+                elif ch_idx == 1:
+                    r.set_rx2_freq_hz(hz)
+            else:
+                current = r.freq_hz if ch_idx == 0 else r.rx2_freq_hz
+                ws.sendTextMessage(
+                    f"vfo:{args[0]},{ch_idx},{current};")
         elif cmd == "IF":
             # IF:rx,ch,offset_hz — tune the RX passband within panorama.
-            # For single-RX operation, this is the same as VFO but relative.
-            # We treat it as an offset from current DDS.
+            # Offset is relative to the current center of the addressed
+            # channel.  v0.1.1 §15.16 #2: ch=1 routes to RX2.
             if len(args) >= 3:
+                ch_idx = self._parse_channel(args[1])
+                if ch_idx is None:
+                    return
                 try:
                     offset = int(args[2])
-                    r.set_freq_hz(r.freq_hz + offset)
                 except ValueError:
-                    pass
+                    return
+                if ch_idx == 0:
+                    r.set_freq_hz(r.freq_hz + offset)
+                elif ch_idx == 1:
+                    r.set_rx2_freq_hz(r.rx2_freq_hz + offset)
         elif cmd == "MODULATION":
+            # Read: MODULATION:ch;   Set: MODULATION:ch,mode;
+            # v0.1.1 §15.16 #2: ch=1 routes to RX2 mode.
+            ch_idx = self._parse_channel(args[0]) if args else 0
+            if ch_idx is None:
+                return
             if len(args) >= 2:
                 mode = self._from_tci_mode(args[1])
                 if mode in r.ALL_MODES:
-                    r.set_mode(mode)
+                    if ch_idx == 0:
+                        r.set_mode(mode)
+                    elif ch_idx == 1:
+                        r.set_mode(mode, target_rx=2)
             elif len(args) == 1:
-                ws.sendTextMessage(f"modulation:{args[0]},{self._to_tci_mode(r.mode)};")
+                current = (r.mode if ch_idx == 0
+                           else r.mode_for_rx(2))
+                ws.sendTextMessage(
+                    f"modulation:{ch_idx},{self._to_tci_mode(current)};")
         elif cmd == "TRX":
             # No TX yet — acknowledge with false.
             idx = args[0] if args else "0"
@@ -614,6 +673,20 @@ class TciServer(QObject):
             return "CWU"
         return {"NFM": "FM", "WFM": "FM"}.get(t, t)
 
+    # v0.1.1 §15.16 #2: parse a TCI channel-index arg.  Returns
+    # 0 for RX1, 1 for RX2, or None for anything we don't address.
+    # Centralized so DDS / VFO / IF / MODULATION dispatchers all
+    # behave identically on out-of-range or non-integer ch args.
+    @staticmethod
+    def _parse_channel(raw: str):
+        try:
+            idx = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return None
+        if idx in (0, 1):
+            return idx
+        return None
+
     # ── Broadcasting radio state changes to all clients ───────────────
     def _bind_radio_signals(self):
         r = self.radio
@@ -622,6 +695,18 @@ class TciServer(QObject):
         r.stream_state_changed.connect(self._on_stream_changed)
         r.rate_changed.connect(self._on_rate_changed)
         r.spot_activated.connect(self._on_spot_activated)
+        # v0.1.1 §15.16 #2: surface RX2 state changes so clients
+        # tracking ch1 see live updates the same way they do for
+        # ch0.  RX2 freq / mode signals exist since v0.1.0; we
+        # just plumb the broadcast lines.
+        try:
+            r.rx2_freq_changed.connect(self._on_rx2_freq_changed)
+        except Exception as exc:
+            print(f"[TCI] rx2_freq_changed bind: {exc}")
+        try:
+            r.mode_changed_rx2.connect(self._on_rx2_mode_changed)
+        except Exception as exc:
+            print(f"[TCI] mode_changed_rx2 bind: {exc}")
 
     def _on_spot_activated(self, call: str, mode: str, freq_hz: int):
         color = 0xFFFFD700
@@ -638,6 +723,18 @@ class TciServer(QObject):
     def _on_mode_changed(self, mode: str):
         self._broadcast(f"modulation:0,{self._to_tci_mode(mode)};")
 
+    # v0.1.1 §15.16 #2: RX2 broadcast handlers.  Mirror the RX1
+    # pair byte-for-byte but with ch=1 in the addressed channel
+    # slot.  Rate-limiting is per-(command, channel) tuple thanks
+    # to the key fix in ``_broadcast`` so RX1 and RX2 freq spam
+    # don't starve each other.
+    def _on_rx2_freq_changed(self, hz: int):
+        self._broadcast(f"dds:1,{hz};")
+        self._broadcast(f"vfo:0,1,{hz};")
+
+    def _on_rx2_mode_changed(self, mode: str):
+        self._broadcast(f"modulation:1,{self._to_tci_mode(mode)};")
+
     def _on_stream_changed(self, running: bool):
         self._broadcast("start;" if running else "stop;")
 
@@ -650,8 +747,28 @@ class TciServer(QObject):
         # Per-command rate limit: drop updates that arrive faster than the
         # configured rate_limit_hz for the same command type. TCI clients
         # generally implement the same protection to stop flooding.
+        #
+        # v0.1.1 §15.16 #2: key is (command, channel) instead of just
+        # command.  Without this fix, ``dds:0,X`` and ``dds:1,Y`` would
+        # share one rate bucket -- rapid RX1 tuning could starve RX2
+        # updates and vice versa.  Channel slot lives at different
+        # arg positions per command (DDS: args[0], VFO: args[1],
+        # MODULATION: args[0]); we just include the WHOLE arg list
+        # in the key after the command since rate-limit-by-channel
+        # is what matters and the additional discrimination by
+        # trx_idx for VFO is harmless overhead at TCI message rates.
         import time
-        key = msg.split(":", 1)[0]
+        head, _, body = msg.partition(":")
+        # First arg is "channel-like" for every per-channel command
+        # in v0.1.1's surface (dds, modulation, trx, tune,
+        # rit_enable, xit_enable).  For VFO we also include args[1]
+        # (the ch index) so ``vfo:0,0,X`` and ``vfo:0,1,Y`` differ.
+        first_arg = body.split(",", 1)[0].strip() if body else ""
+        if head == "vfo" and "," in body:
+            # Include trx + channel in the key: ``vfo:trx,ch``
+            parts = body.split(",")
+            first_arg = f"{parts[0].strip()},{parts[1].strip()}"
+        key = f"{head}:{first_arg}" if first_arg else head
         min_interval_ns = int(1e9 / max(self.rate_limit_hz, 1))
         now = time.monotonic_ns()
         last = self._last_broadcast_ns.get(key, 0)
