@@ -838,6 +838,41 @@ class HL2Stream:
         self._bpf_filter_bits: int = 0       # 7-bit, frame 10 C3 bits 0-6
         self._lpf_filter_bits: int = 0       # 8-bit, frame 10 C4
 
+        # ── HPSDR P1 frame 0 (register 0x00) state (v0.2 Phase 1) ───
+        # Frame 0 carries general-settings axes that span CW mode,
+        # 7-bit OC output pins (PA TX/RX relay control + BPF board
+        # selectors), ADC dither/random, BPF expansion-board input
+        # routing, antenna select, duplex, nddc, and diversity.
+        #
+        # v0.1 wrote only C1 (sample-rate code) and C4 (a static
+        # ``_config_c4 = 0x1C`` = duplex + nddc-1<<3); C2 and C3 stayed
+        # zero.  Works on HL2 fresh-install (no BPF board, single
+        # antenna, no diversity) but BLOCKER for v0.2 PA TX/RX relay
+        # work (which drives oc_output bit 0 to switch the antenna
+        # between RX and TX on PTT) and LATENT for v0.4 ANAN (which
+        # uses every byte of this register).
+        #
+        # All defaults zero/False -- matches HL2 fresh-power-up state.
+        # Fresh-install wire bytes after this refactor: C1=rate_code,
+        # C2=0x00, C3=0x00, C4=0x1C.  Identical to v0.1 wire output.
+        self._oc_output: int = 0             # 7-bit (frame 0 C2 bits 1-7)
+        self._cw_eer_enabled: bool = False   # frame 0 C2 bit 0
+        # C3 axes (BPF expansion board state; HL2 mostly ignores)
+        self._atten_10db_enabled: bool = False
+        self._atten_20db_enabled: bool = False
+        self._rx0_preamp_enabled: bool = False  # Anan; HL2 ignores
+        self._adc_dither_enabled: bool = False
+        self._adc_random_enabled: bool = False
+        self._rx_1_out_enabled: bool = False
+        # RX-input routing (mutually exclusive; priority order
+        # matches Thetis: XVTR > RX_1_In > RX_2_In, first-match wins)
+        self._xvtr_rx_in_enabled: bool = False  # C3 bits 5-6 = 0b11
+        self._rx_1_in_enabled: bool = False     # C3 bits 5-6 = 0b01
+        self._rx_2_in_enabled: bool = False     # C3 bits 5-6 = 0b10
+        # C4 axes (HL2 mostly ignores; Anan uses)
+        self._antenna_select: int = 0        # 0=ANT1, 1=ANT2, 2=ANT3
+        self._diversity_enabled: bool = False
+
         # ── EP2 writer thread state (v0.0.9.2 Commit 4) ─────────────
         # Dedicated EP2 writer thread runs the host->radio frame send
         # at the codec's audio cadence (~380 Hz = 48 kHz / 126
@@ -932,6 +967,15 @@ class HL2Stream:
         # attenuator (Phase 3 UI) MUST call both _refresh_frame_4
         # and _refresh_frame_11.
         self._refresh_frame_4()
+
+        # v0.2 Phase 1 (5/10): re-seed frame 0 via the composer so
+        # C2/C3 reflect operator state attributes instead of the
+        # v0.1 static zeros.  Fresh-install bytes for HL2 unchanged
+        # at (rate_code, 0x00, 0x00, 0x1C); structural fix lets
+        # future setters for oc_output / cw_eer / atten / dither /
+        # antenna select / diversity drive the wire bytes without
+        # requiring a re-write of set_sample_rate or _send_config.
+        self._refresh_frame_0()
 
     def read_tx_audio_high_water(self) -> int:
         """Atomically read + reset the TX audio deque high-water mark.
@@ -1370,6 +1414,96 @@ class HL2Stream:
         with self._cc_lock:
             self._cc_registers[0x1C] = (c1, c2, c3, c4)
             self._register_cc_slot(0x1C)
+
+    def _compose_frame_0(self) -> tuple[int, int, int, int]:
+        """Compose HPSDR P1 frame 0 (register 0x00) -- general settings.
+
+        Layout:
+        * C1: SampleRateIn2Bits & 3 -- HPSDR P1 sample-rate code
+              (48k=0, 96k=1, 192k=2, 384k=3 per SAMPLE_RATES)
+        * C2: cw_eer bit 0 | (oc_output << 1) bits 1-7
+              (7-bit open-collector output pins drive PA TX/RX relay
+              + BPF board selectors on HL2 expansion header)
+        * C3: 10dB-atten bit 0 | 20dB-atten bit 1 | rx0_preamp bit 2 |
+              adc_dither bit 3 | adc_random bit 4 |
+              rx-input route bits 5-6 | rx_1_out bit 7
+        * C4: antenna_select bits 0-1 | duplex bit 2 |
+              (nddc-1) << 3 | diversity bit 7
+
+        RX-input routing priority (Thetis convention): XVTR > RX_1_In
+        > RX_2_In; first-match wins.  HL2 ignores these (BPF
+        expansion-board state); Anan v0.4 uses them.
+
+        Main-loop emission ALWAYS has the duplex bit set.  Priming
+        emission uses ``_priming_c4`` (static; HL2-only) which is
+        the same byte with duplex cleared.  v0.4 work that adds
+        operator-tunable antenna select will revisit _priming_c4
+        to derive from state too.
+
+        Lock-free.  ``_refresh_frame_0`` is the lock-acquiring sibling.
+
+        v0.2 Phase 1 default wire bytes: (rate_code, 0x00, 0x00,
+        0x1C).  Identical to v0.1 output for fresh installs.
+        """
+        c1 = SAMPLE_RATES[self.sample_rate] & 0xFF
+        # C2 -- CW EER + 7-bit OC output pins
+        c2 = (1 if self._cw_eer_enabled else 0)
+        c2 |= (int(self._oc_output) << 1) & 0xFE
+        # C3 -- BPF / ADC / RX-input routing
+        c3 = 0
+        if self._atten_10db_enabled:
+            c3 |= 0x01
+        if self._atten_20db_enabled:
+            c3 |= 0x02
+        if self._rx0_preamp_enabled:
+            c3 |= 0x04
+        if self._adc_dither_enabled:
+            c3 |= 0x08
+        if self._adc_random_enabled:
+            c3 |= 0x10
+        # RX-input routing -- mutually exclusive, first-match wins
+        if self._xvtr_rx_in_enabled:
+            c3 |= 0x60   # bits 5-6 = 0b11
+        elif self._rx_1_in_enabled:
+            c3 |= 0x20   # bits 5-6 = 0b01
+        elif self._rx_2_in_enabled:
+            c3 |= 0x40   # bits 5-6 = 0b10
+        if self._rx_1_out_enabled:
+            c3 |= 0x80
+        # C4 -- antenna select + duplex + nddc + diversity
+        c4 = 0
+        if self._antenna_select == 2:
+            c4 |= 0x02   # ANT3
+        elif self._antenna_select == 1:
+            c4 |= 0x01   # ANT2
+        # antenna_select == 0 -> ANT1 -> both bits clear
+        c4 |= 0x04       # duplex (always set in main-loop emission)
+        c4 |= ((4 - 1) << 3) & 0x78  # nddc=4 -> bits 3-6 = 0x18
+        if self._diversity_enabled:
+            c4 |= 0x80
+        return (c1, c2, c3, c4)
+
+    def _refresh_frame_0(self) -> None:
+        """Recompute frame 0 and cache it in ``_cc_registers[0x00]``.
+
+        Call this whenever any frame-0 state attribute changes
+        (sample_rate change, future setters for oc_output / antenna_
+        select / atten / preamp / dither / random / diversity).
+        Future Phase 1 work wires the OC-pins setter when the
+        operator-facing PA TX/RX relay control lands.
+
+        v0.2 Phase 1 calls this once at the end of ``__init__`` so
+        the cached frame 0 reflects composed state from
+        ``self.sample_rate`` and the frame-0 axes (rather than the
+        v0.1 static C2/C3 = 0x00 hardcodes).
+
+        Caller MUST NOT be holding ``_cc_lock`` -- this method
+        acquires it.
+        """
+        c1, c2, c3, c4 = self._compose_frame_0()
+        with self._cc_lock:
+            self._cc_registers[0x00] = (c1, c2, c3, c4)
+            self._register_cc_slot(0x00)
 
     def _send_cc(self, c0: int, c1: int, c2: int, c3: int, c4: int):
         """Send one C&C write via EP2. Thread-safe.
@@ -2313,7 +2447,16 @@ class HL2Stream:
         self._keepalive_cc = (c0, c1, c2, c3, c4)
 
     def set_sample_rate(self, rate: int):
-        """Change sample rate on a running stream. Keepalive picks up the new code."""
+        """Change sample rate on a running stream.
+
+        v0.2 Phase 1: routes through ``_refresh_frame_0`` so every
+        byte of register 0x00 carries coherent state (C1=new rate
+        code, plus C2/C3/C4 from the operator's other frame-0 axes
+        -- OC pins, atten, dither, antenna select, diversity).  v0.1
+        wrote only C1 + a static C4 and zeroed C2/C3 -- works on
+        fresh installs but would trample any operator state set by
+        future setters in subsequent Phase 1 commits.
+        """
         if rate not in SAMPLE_RATES:
             raise ValueError(f"rate must be one of {list(SAMPLE_RATES)}")
         if self._sock is None:
@@ -2323,15 +2466,17 @@ class HL2Stream:
         # cadence starts clean. Without this, switching from 192 k to
         # 48 k would carry stale counter modulo state.
         self._ep6_count = 0
-        rate_code = SAMPLE_RATES[rate]
         # Path C.2 (audio-pop fix): NO direct _send_cc here -- it
         # would drain 126 audio samples without consuming a
         # semaphore signal and click the AK4951.  See _set_rx1_freq
-        # for the full rationale.
-        with self._cc_lock:
-            self._cc_registers[0x00] = (rate_code, 0x00, 0x00, self._config_c4)
-            self._register_cc_slot(0x00)
-        self._keepalive_cc = (0x00, rate_code, 0x00, 0x00, self._config_c4)
+        # for the full rationale.  Composer reads sample_rate from
+        # the just-updated attribute.
+        self._refresh_frame_0()
+        # Keepalive fallback (vestigial; Phase 1 item 10 cleans up).
+        # Synthesize from the cached register so any future reader
+        # sees consistent data.
+        c1, c2, c3, c4 = self._cc_registers.get(0x00, (0, 0, 0, 0))
+        self._keepalive_cc = (0x00, c1, c2, c3, c4)
 
     def reassert_rate_keepalive(self):
         """Vestigial — kept for callers from before the round-robin
