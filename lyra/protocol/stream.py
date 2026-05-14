@@ -35,13 +35,42 @@ by ``_config_c4`` bit-field per CLAUDE.md §3.2: 0x04 = duplex +
 nddc=1, 0x1C = duplex + nddc=4.  See ``_decode_iq_samples`` and
 the ``HL2Stream.__init__`` C4 setup comment for the rationale.
 
-C&C write register selectors (host -> radio in EP2, for later use):
-    C0=0x00: speed/config (bit 1:0 of C1 = sample rate index)
-    C0=0x02: TX NCO freq, C0=0x04: RX1 NCO freq, C0=0x06: RX2 NCO
-    freq (DDC1, Phase 1; verified against Thetis ``networkproto1.c:996``
-    ``C0 |= 6`` for case-3 RX2 -- the Thetis ``case 3`` comment
-    ``//RX2 VFO (DDC1) 0x03`` is the round-robin case-INDEX,
-    not the C0 byte; see ``_set_rx2_freq`` for full rationale).
+C&C write register selectors (host -> radio in EP2):
+    C0=0x00: general settings (C1 sample-rate code, C2 OC pins +
+             CW EER, C3 BPF/ADC/RX-input routing, C4 antenna +
+             duplex + nddc + diversity).  v0.2 Phase 1: composed
+             from state via ``_compose_frame_0``.
+    C0=0x02: TX VFO NCO freq (HL2 nddc=4 also mirrors TX freq to
+             DDC2 and DDC3 -- see C0=0x08 and 0x0a).
+    C0=0x04: RX1 NCO freq (DDC0)
+    C0=0x06: RX2 NCO freq (DDC1).  Note: the HPSDR P1 "case 3"
+             round-robin case-INDEX is sometimes mistaken for the
+             C0 byte 0x03; the actual gateware-decoded C0 byte for
+             RX2 NCO is 0x06 (sibling of RX1's 0x04).  See
+             ``_set_rx2_freq`` for the verification trail.
+    C0=0x08: DDC2 NCO freq -- HL2 nddc=4 carries TX freq here so
+             v0.3 PureSignal feedback DDCs sit at TX freq when
+             cntrl1=4 PA-coupler routing engages.
+    C0=0x0a: DDC3 NCO freq -- always TX freq on HL2.
+    C0=0x12: frame 10 -- drive_level, PA bias enable, mic/line-in
+             routing, BPF/LPF filter-board selectors.  v0.2 Phase
+             1: composed via ``_compose_frame_10``.
+    C0=0x14: frame 11 -- preamps, mic switches, line-in gain,
+             puresignal_run bit, user_dig_out pins, step
+             attenuator (MOX-gated: TX value during transmit, RX
+             value otherwise).  Composed via ``_compose_frame_11``.
+    C0=0x1C: frame 4 -- ADC routing + 5-bit redundant
+             tx_step_attn write.  Composed via ``_compose_frame_4``.
+    C0=0x2e: frame 17 -- TX latency + PTT hang time (HL2 reg 0x17,
+             per §15.7 latency-tuning work).
+    C0=0x74: frame 18 -- reset_on_disconnect safety flag.  Default
+             1 so a Lyra crash mid-TX doesn't leave silent carrier
+             on air -- gateware auto-reverts to RX on host link loss.
+
+C0 bit 0 (LSB) of EVERY emitted frame carries the operator's MOX
+intent (sourced from ``dispatch_state.mox`` via the per-datagram
+snapshot helper).  Same value applied to both USB blocks of each
+UDP datagram for per-frame coherence.
 """
 from __future__ import annotations
 
@@ -707,12 +736,6 @@ class HL2Stream:
         ]
         self._cc_rr_idx: int = 0
         self._cc_lock = threading.Lock()
-        # Legacy fallback — the old code path stored last-sent register
-        # here. Kept synchronized with the dict so any external readers
-        # (none in current codebase) still see something sensible.
-        self._keepalive_cc: tuple[int, int, int, int, int] = (
-            0x00, SAMPLE_RATES[sample_rate], 0x00, 0x00, self._config_c4
-        )
         self._send_lock = threading.Lock()
 
         # ── Phase 1: per-DDC consumer registration (v0.1) ───────────
@@ -2559,13 +2582,6 @@ class HL2Stream:
         with self._cc_lock:
             self._cc_registers[c0] = (c1, c2, c3, c4)
             self._register_cc_slot(c0)
-        # Note: NOT updating ``_keepalive_cc`` here.  Keepalive is
-        # the most-recent-RX1-tune fallback path (legacy single-RX
-        # behavior); leaving it alone preserves the v0.0.9.x
-        # invariant that RX1 freq changes drive keepalive cadence.
-        # Phase 1 RX2 may need to revisit this if RX2-only operation
-        # ever becomes a thing, but for v0.1's "RX1 always live,
-        # RX2 layered on top" model this is correct.
 
     def _set_rx1_freq(self, hz: int):
         # NOTE: this method is called on EVERY frequency change —
@@ -2598,7 +2614,6 @@ class HL2Stream:
         with self._cc_lock:
             self._cc_registers[c0] = (c1, c2, c3, c4)
             self._register_cc_slot(c0)
-        self._keepalive_cc = (c0, c1, c2, c3, c4)
 
     def _set_tx_freq(self, hz: int) -> None:
         """Write TX frequency to all three HL2 NCO registers atomically.
@@ -2640,11 +2655,6 @@ class HL2Stream:
             for c0 in (0x02, 0x08, 0x0a):
                 self._cc_registers[c0] = nco_bytes
                 self._register_cc_slot(c0)
-        # Keepalive fallback (vestigial; Phase 1 item 10 cleans up).
-        # Track the most recent TX-freq write so legacy readers see
-        # consistent data; pick 0x02 (TX VFO) as the canonical
-        # register since DDC2/DDC3 are mirrors.
-        self._keepalive_cc = (0x02, c1, c2, c3, c4)
 
     def set_sample_rate(self, rate: int):
         """Change sample rate on a running stream.
@@ -2672,19 +2682,6 @@ class HL2Stream:
         # for the full rationale.  Composer reads sample_rate from
         # the just-updated attribute.
         self._refresh_frame_0()
-        # Keepalive fallback (vestigial; Phase 1 item 10 cleans up).
-        # Synthesize from the cached register so any future reader
-        # sees consistent data.
-        c1, c2, c3, c4 = self._cc_registers.get(0x00, (0, 0, 0, 0))
-        self._keepalive_cc = (0x00, c1, c2, c3, c4)
-
-    def reassert_rate_keepalive(self):
-        """Vestigial — kept for callers from before the round-robin
-        C&C cycling landed. Now a no-op because every register
-        (including 0x00 sample rate) is re-asserted automatically
-        every ~N frames by the round-robin keepalive in _rx_loop.
-        Safe to remove once all callers are cleaned up."""
-        return
 
     def set_lna_gain_db(self, gain_db: int):
         """Set HL2 RX step attenuator (operator-facing "LNA gain") in dB.
@@ -2710,11 +2707,6 @@ class HL2Stream:
             raise RuntimeError("stream not started")
         self._rx_step_attn_db = int(gain_db)
         self._refresh_frame_11()
-        # Keepalive fallback (vestigial; v0.2 Phase 1 item 10 cleans
-        # this up).  Synthesize the legacy 5-tuple from the cached
-        # frame 11 so any future reader sees consistent data.
-        c1, c2, c3, c4 = self._cc_registers.get(0x14, (0, 0, 0, 0))
-        self._keepalive_cc = (0x14, c1, c2, c3, c4)
 
     def stop(self):
         self._stop_event.set()

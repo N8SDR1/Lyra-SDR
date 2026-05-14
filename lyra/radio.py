@@ -891,10 +891,6 @@ class Radio(QObject):
         self._config_c2 = 0x00
         self._config_c3 = 0x00
         self._config_c4 = 0x1C   # nddc=4 + duplex (Phase 1 v0.1)
-        self._keepalive_cc: tuple[int, int, int, int, int] = (
-            0x00, self._config_c1, self._config_c2,
-            self._config_c3, self._config_c4,
-        )
 
         # Per-band memory — last freq/mode/gain when each band was active.
         # Keyed by Band.name (e.g., "40m"). Populated as the operator
@@ -2238,14 +2234,22 @@ class Radio(QObject):
         """Set the MOX axis of DispatchState.  Call from Qt main thread.
 
         Wired by PTT state machine (v0.1.x onward) on every PTT /
-        MOX-button / CW-key / TUN-button edge.  Phase 0 has no live
-        consumer of the resulting state change; Phase 1 routes the
-        DDC enable mask + captured-profile pre-pass bypass off
+        MOX-button / CW-key / TUN-button edge.  Routes the HPSDR P1
+        MOX bit emission in HL2Stream's EP2 writer (via the
+        dispatch-state-provider snapshot helper), the DDC enable
+        mask, and the captured-profile pre-pass bypass off
         ``state.mox AND state.ps_armed``.
 
         Idempotent: setting MOX to its current value is a no-op (no
         signal emission, no replace).  This matters because some PTT
         callers fire on every poll cycle, not just edges.
+
+        v0.2 Phase 1 (10/10): also emits ``tx_active_changed(bool)``
+        on every MOX edge so UI consumers (FrequencyDisplay red
+        treatment, SMeter style flip, spectrum widget passband
+        rectangle color per §15.9) get a clean signal without
+        needing to subscribe to the full ``dispatch_state_changed``
+        and filter for MOX edges themselves.
         """
         new = bool(mox)
         if self._dispatch_state.mox == new:
@@ -2253,6 +2257,10 @@ class Radio(QObject):
         from dataclasses import replace
         self._dispatch_state = replace(self._dispatch_state, mox=new)
         self.dispatch_state_changed.emit(self._dispatch_state)
+        # Phase 1 (10/10): convenience edge signal for TX-active UI
+        # consumers.  Phase 3 wires set_tx_active slots on
+        # FrequencyDisplay / SMeter / spectrum widget here.
+        self.tx_active_changed.emit(new)
 
     def set_ps_armed(self, ps_armed: bool) -> None:
         """Set the PS-armed axis of DispatchState.  Call from Qt main thread.
@@ -2557,11 +2565,11 @@ class Radio(QObject):
         # reset runs between blocks (no race with worker's
         # process_block).  Single-thread mode: synchronous on main.
         self._request_dsp_reset_full()
-        # NOTE: previous version called _stream.reassert_rate_keepalive()
-        # here as a band-aid for stuck-audio after big freq jumps.
-        # That's now redundant because the stream uses round-robin
-        # C&C keepalive (every register stays fresh automatically) —
-        # see HL2Stream._cc_registers / _rx_loop. Removed for clarity.
+        # NOTE: previous versions called an explicit rate-keepalive
+        # reassert here as a band-aid for stuck-audio after big freq
+        # jumps.  No longer needed because the stream uses round-robin
+        # C&C cycling (every register stays fresh automatically) --
+        # see HL2Stream._cc_registers / _cc_cycle / _ep2_writer_loop.
         self._rebuild_notches()
         # If the band just changed and filter board is active, push the
         # new OC pattern so the N2ADR relays follow.
