@@ -120,6 +120,7 @@ from lyra.ui.smeter import SMeter, AnalogMeter, LedBarMeter, LitArcMeter
 from lyra.control.tci import TciServer, TCI_DEFAULT_PORT
 from lyra.bands import AMATEUR_BANDS, BROADCAST_BANDS, GEN_SLOTS, band_for_freq
 from lyra.ui.led_freq import FrequencyDisplay
+from lyra.ui.widgets import StepperReadout
 
 
 # ── Slider step lists ────────────────────────────────────────────────
@@ -1989,16 +1990,17 @@ class DspPanel(GlassPanel):
         # Linear dB mapping (not perceptual curve) because makeup
         # gain is naturally thought of in dB by operators: "this band
         # needs another 15 dB" is a concrete adjustment.
-        levels.addWidget(QLabel("AF"))
-        self.af_gain_slider = QSlider(Qt.Horizontal)
-        self.af_gain_slider.setObjectName("af_gain_slider")
-        self.af_gain_slider.setRange(0, 80)
-        self.af_gain_slider.setSingleStep(1)
-        self.af_gain_slider.setPageStep(5)
-        # Phase 3.C v0.1: read from focused RX (default = RX1).
-        self.af_gain_slider.setValue(int(radio.af_gain_db_for_rx()))
-        self.af_gain_slider.setFixedWidth(120)
-        self.af_gain_slider.setToolTip(
+        # CLAUDE.md §15.17: slider + value-label pair replaced with
+        # compact StepperReadout.  Range/semantics unchanged (0..+80 dB,
+        # follows focused RX).  Per-RX bidirectional sync handled by
+        # _on_af_gain_db_changed / _on_af_gain_db_changed_rx2 below.
+        # ToolTip text preserved verbatim from the slider version --
+        # the operator's mental model of AF Gain is unchanged.
+        self.af_gain_stepper = StepperReadout(
+            "AF", 0, 80, step=1, shift_step=5, unit="dB",
+            initial=int(radio.af_gain_db_for_rx()),
+            caption_width=24, value_width=56)
+        self.af_gain_stepper.setToolTip(
             "AF Gain — post-demod makeup gain, 0 to +80 dB.\n\n"
             "Use this when AGC is off (digital modes) or the AGC "
             "target is too quiet for weak signals. Set once for "
@@ -2010,33 +2012,25 @@ class DspPanel(GlassPanel):
             "running AGC off on weak signals.\n\n"
             "The tanh limiter after this stage prevents clipping "
             "at the sink, so you can't damage speakers with high "
-            "AF Gain settings — the worst case is soft saturation.")
+            "AF Gain settings — the worst case is soft saturation.\n\n"
+            "Gestures: click [-]/[+] = 1 dB, Shift+click = 5 dB, "
+            "hold = ramp, wheel over widget = step, right-click "
+            "value to type exact.")
         # Phase 3.C v0.1: write to focused RX (target_rx=None defaults
-        # to ``radio.focused_rx`` inside the setter).
-        self.af_gain_slider.valueChanged.connect(
+        # to radio.focused_rx inside the setter).
+        self.af_gain_stepper.valueChanged.connect(
             lambda v: self.radio.set_af_gain_db(int(v)))
-        levels.addWidget(self.af_gain_slider)
-        self.af_gain_label = QLabel(f"+{int(radio.af_gain_db_for_rx())} dB")
-        self.af_gain_label.setFixedWidth(50)
-        levels.addWidget(self.af_gain_label)
+        levels.addWidget(self.af_gain_stepper)
 
         levels.addSpacing(12)
 
-        # Volume slider uses a PERCEPTUAL (quadratic) curve so each
-        # 1% tick produces a roughly uniform loudness change. With a
-        # linear slider → linear multiplier mapping the bottom end of
-        # the slider was unusably sensitive (1% tick = 2x perceptual
-        # loudness at low volumes), which is why we route through a
-        # curve here rather than calling set_volume(slider/100) directly.
-        #
-        #   slider 0..100 → multiplier = (slider/100) ** 2 * VOL_MAX
-        #   VOL_MAX = 1.0  (Volume is now a pure output trim — makeup
-        #   gain lives in the AF Gain slider to the left.)
-        #   At slider=100 → ×1.0   (unity — full AF-gained signal)
-        #   At slider= 71 → ×0.5   (−6 dB)
-        #   At slider= 50 → ×0.25  (−12 dB — traditional "half")
-        #   At slider= 25 → ×0.0625(−24 dB — quiet listening)
-        #   At slider= 10 → ×0.01  (−40 dB — background)
+        # CLAUDE.md §15.17 (2026-05-14): Volume is shown as direct
+        # dB readout on a StepperReadout widget (range -60..0 dB).
+        # The prior perceptual-curve slider (slider 0..100 ->
+        # multiplier (slider/100)**2 * 1.0) is gone; +/- 1 dB steps
+        # are inherently uniform in loudness, so no curve is needed.
+        # Conversion happens at the widget boundary -- see
+        # _vol_db_to_linear / _vol_linear_to_db below.
         # Phase 3.E.1 hotfix v0.16 (2026-05-12): Vol-A + Vol-B are
         # ALWAYS visible (operator UX call -- "do you think it
         # would be better just have two volume sliders and mutes
@@ -2051,23 +2045,30 @@ class DspPanel(GlassPanel):
         # flip with SUB off" -- the mirror keeps Vol-A and Vol-B
         # tracking each other across focus flips so the audible
         # level stays put.
-        self.vol_label_caption = QLabel("Vol RX1")
-        levels.addWidget(self.vol_label_caption)
-        self.vol_slider = QSlider(Qt.Horizontal)
-        self.vol_slider.setObjectName("vol_slider")
-        self.vol_slider.setRange(0, 100)
-        self.vol_slider.setSingleStep(1)
-        self.vol_slider.setPageStep(5)
-        self.vol_slider.setToolTip(
-            "Output volume. Slider uses a perceptual curve — each tick "
-            "yields a roughly equal loudness step. ~71% = unity gain.")
-        self.vol_slider.setValue(self._volume_to_slider(radio.volume))
-        self.vol_slider.setFixedWidth(160)
-        self.vol_slider.valueChanged.connect(self._on_vol_slider)
-        levels.addWidget(self.vol_slider)
-        self.vol_label = QLabel(f"{self._volume_to_slider(radio.volume)}%")
-        self.vol_label.setFixedWidth(50)
-        levels.addWidget(self.vol_label)
+        # CLAUDE.md §15.17: slider + perceptual-curve label replaced
+        # with a StepperReadout reading dB directly.  Range -60..0 dB
+        # (-60 dB display floor; below floor is Mute-A territory).
+        # Internal Radio.volume stays float 0..1.0 linear -- the
+        # widget's valueChanged slot converts dB -> linear via the
+        # _vol_db_to_linear classmethod, and the Radio->UI sync goes
+        # back through _vol_linear_to_db.
+        self.vol_a_stepper = StepperReadout(
+            "Vol RX1", -60, 0, step=1, shift_step=5, unit="dB",
+            initial=self._vol_linear_to_db(radio.volume),
+            caption_width=58, value_width=56)
+        self.vol_a_stepper.setToolTip(
+            "RX1 output volume (left channel of the stereo split).\n"
+            "Range -60 dB (floor) to 0 dB (unity).\n\n"
+            "0 dB = full AF-gained signal passes unchanged.  Drop "
+            "below 0 dB for moment-to-moment listening comfort; "
+            "the -60 dB floor mirrors Mute-A territory (use the "
+            "MUTE button for true silence so unmute restores at "
+            "your last-set value).\n\n"
+            "Gestures: click [-]/[+] = 1 dB, Shift+click = 5 dB, "
+            "hold = ramp, wheel over widget = step, right-click "
+            "value to type exact.")
+        self.vol_a_stepper.valueChanged.connect(self._on_vol_a_stepper)
+        levels.addWidget(self.vol_a_stepper)
 
         # ── MUTE-A — sits IMMEDIATELY after Vol-A so the operator's
         # eye associates "this slider's mute is right next to it"
@@ -2098,25 +2099,18 @@ class DspPanel(GlassPanel):
         # always visible").  Wired directly to RX2.  Caption uses
         # the canonical "RX1 / RX2" naming (matches VFO LED
         # captions, dispatch state, focused_rx) per v0.17.
-        self.vol_b_label_caption = QLabel("Vol RX2")
-        levels.addWidget(self.vol_b_label_caption)
-        self.vol_b_slider = QSlider(Qt.Horizontal)
-        self.vol_b_slider.setObjectName("vol_slider")
-        self.vol_b_slider.setRange(0, 100)
-        self.vol_b_slider.setSingleStep(1)
-        self.vol_b_slider.setPageStep(5)
-        self.vol_b_slider.setToolTip(
-            "RX2 output volume (right channel of the stereo split). "
-            "Same perceptual curve as Vol-A.")
-        self.vol_b_slider.setValue(
-            self._volume_to_slider(radio.volume_for_rx(2)))
-        self.vol_b_slider.setFixedWidth(160)
-        self.vol_b_slider.valueChanged.connect(self._on_vol_b_slider)
-        levels.addWidget(self.vol_b_slider)
-        self.vol_b_label = QLabel(
-            f"{self._volume_to_slider(radio.volume_for_rx(2))}%")
-        self.vol_b_label.setFixedWidth(50)
-        levels.addWidget(self.vol_b_label)
+        # CLAUDE.md §15.17: same StepperReadout treatment as Vol RX1
+        # above, wired direct to RX2 per Phase 3.E.1 hotfix v0.16.
+        self.vol_b_stepper = StepperReadout(
+            "Vol RX2", -60, 0, step=1, shift_step=5, unit="dB",
+            initial=self._vol_linear_to_db(radio.volume_for_rx(2)),
+            caption_width=58, value_width=56)
+        self.vol_b_stepper.setToolTip(
+            "RX2 output volume (right channel of the stereo split).\n"
+            "Range -60 dB (floor) to 0 dB (unity).\n\n"
+            "Same gesture set + behavior as Vol RX1.")
+        self.vol_b_stepper.valueChanged.connect(self._on_vol_b_stepper)
+        levels.addWidget(self.vol_b_stepper)
 
         # Mute-B sits adjacent to Vol-B; same naming as the RX1
         # MUTE since position (immediately right of its Vol slider)
@@ -3046,50 +3040,65 @@ class DspPanel(GlassPanel):
         radio.muted_changed.connect(self._on_muted_changed)
         radio.lna_auto_changed.connect(self._on_lna_auto_changed)
 
-    # Perceptual volume curve — 0..100 slider → 0..VOL_MAX multiplier
-    # via a power curve, so each slider tick yields a roughly equal
-    # loudness step. Human hearing is logarithmic — a linear slider
-    # feels wildly touchy at low volumes.
+    # CLAUDE.md §15.17: perceptual slider-curve helpers
+    # (_slider_to_volume, _volume_to_slider, VOL_GAMMA) removed --
+    # the StepperReadout displays dB directly, so the perceptual
+    # amplitude-squared curve is obsolete.  Replaced with the simpler
+    # dB <-> linear conversion below.  Vol internal storage on Radio
+    # is still float 0..1.0 linear (no QSettings migration needed);
+    # the conversion lives at the panel/widget boundary.
     #
-    # Since the AF Gain split (2026-04-24, Option B), Volume is
-    # purely the FINAL OUTPUT TRIM stage. The makeup gain that was
-    # previously squeezed into Volume's 50× headroom now lives in a
-    # separate AF Gain dB slider, leaving Volume as a clean 0..1.0
-    # (unity-at-max) trim — the role it always should have had.
-    VOL_MAX = 1.0
-    VOL_GAMMA = 2.0
+    # Vol display floor is -60 dB; below floor the widget clamps and
+    # the linear value uses -60 dB == 0.001 linear (NOT 0.0, which
+    # is reserved for the Mute-A/Mute-B button).  This preserves the
+    # Radio.set_volume(0.0..1.0) invariant.
+
+    _VOL_DB_FLOOR = -60
+    _VOL_LINEAR_FLOOR = 0.001    # 10**(-60/20) = 0.001
 
     @classmethod
-    def _slider_to_volume(cls, s: int) -> float:
-        frac = max(0, min(100, int(s))) / 100.0
-        return (frac ** cls.VOL_GAMMA) * cls.VOL_MAX
+    def _vol_db_to_linear(cls, db: float) -> float:
+        """Convert -60..0 dB readout to 0.001..1.0 linear multiplier.
 
-    @classmethod
-    def _volume_to_slider(cls, v: float) -> int:
-        v = max(0.0, min(cls.VOL_MAX, float(v)))
-        frac = (v / cls.VOL_MAX) ** (1.0 / cls.VOL_GAMMA)
-        return int(round(frac * 100))
-
-    def _on_vol_slider(self, slider_val: int):
-        """User dragged the Vol-A slider → curve → RX1 volume.
-
-        Phase 3.E.1 hotfix v0.16 (2026-05-12): direct RX1
-        addressing.  Vol-A is the RX1 volume control regardless of
-        SUB state -- under "two volume sliders always visible"
-        UX, no focus-based routing is needed.  Vol-B (sibling
-        slider, also always visible) drives RX2.
+        At db <= -60: return _VOL_LINEAR_FLOOR (0.001).
+        At db >=   0: return 1.0 (unity).
+        Otherwise: 10 ** (db / 20).
         """
-        self.vol_label.setText(f"{slider_val}%")
-        self.radio.set_volume(
-            self._slider_to_volume(slider_val), target_rx=0)
+        if db <= cls._VOL_DB_FLOOR:
+            return cls._VOL_LINEAR_FLOOR
+        if db >= 0:
+            return 1.0
+        return 10.0 ** (float(db) / 20.0)
 
-    def _on_vol_b_slider(self, slider_val: int):
-        """User dragged the Vol-B slider → curve → RX2 volume.
-        Phase 3.D v0.1; Phase 3.E.1 hotfix v0.16 made the widget
-        always visible."""
-        self.vol_b_label.setText(f"{slider_val}%")
-        self.radio.set_volume(
-            self._slider_to_volume(slider_val), target_rx=2)
+    @classmethod
+    def _vol_linear_to_db(cls, linear: float) -> int:
+        """Convert 0..1.0 linear multiplier to -60..0 dB readout.
+
+        At linear <= _VOL_LINEAR_FLOOR (0.001 -> -60 dB): floor.
+        At linear >= 1.0: 0 dB (unity).
+        Otherwise: 20 * log10(linear), rounded to integer dB.
+        """
+        import math
+        v = max(0.0, min(1.0, float(linear)))
+        if v <= cls._VOL_LINEAR_FLOOR:
+            return cls._VOL_DB_FLOOR
+        if v >= 1.0:
+            return 0
+        return int(round(20.0 * math.log10(v)))
+
+    def _on_vol_a_stepper(self, db: float) -> None:
+        """User changed Vol RX1 via the stepper widget -> dB -> linear
+        -> Radio.  Phase 3.E.1 hotfix v0.16: direct RX1 addressing
+        regardless of SUB state."""
+        linear = self._vol_db_to_linear(db)
+        self.radio.set_volume(linear, target_rx=0)
+
+    def _on_vol_b_stepper(self, db: float) -> None:
+        """User changed Vol RX2 via the stepper widget -> dB -> linear
+        -> Radio.  Phase 3.D v0.1; always visible per Phase 3.E.1
+        hotfix v0.16."""
+        linear = self._vol_db_to_linear(db)
+        self.radio.set_volume(linear, target_rx=2)
 
     # ── LNA linearity zones ─────────────────────────────────────
     # AD9866 PGA linearity behaviour (HL2 community consensus):
@@ -3145,28 +3154,26 @@ class DspPanel(GlassPanel):
         self.lna_slider.setStyleSheet("")
 
     def _on_volume_changed(self, v: float):
-        """Radio RX1 volume changed elsewhere (QSettings load,
-        future CAT/TCI) — convert multiplier back to slider
-        position via inverse curve and update Vol-A slider.
-        Phase 3.E.1 hotfix v0.16: direct RX1 binding regardless
-        of SUB state."""
-        target = self._volume_to_slider(v)
-        self.vol_label.setText(f"{target}%")
-        if self.vol_slider.value() != target:
-            self.vol_slider.blockSignals(True)
-            self.vol_slider.setValue(target)
-            self.vol_slider.blockSignals(False)
+        """Radio RX1 volume changed elsewhere (QSettings load, future
+        CAT/TCI) -- convert linear multiplier back to dB and refresh
+        the Vol RX1 stepper.  CLAUDE.md §15.17: stepper widget replaces
+        the prior perceptual-curve slider.  Phase 3.E.1 hotfix v0.16:
+        direct RX1 binding regardless of SUB state."""
+        target_db = self._vol_linear_to_db(v)
+        if int(self.vol_a_stepper.value()) != target_db:
+            self.vol_a_stepper.blockSignals(True)
+            self.vol_a_stepper.setValue(target_db)
+            self.vol_a_stepper.blockSignals(False)
 
     def _on_volume_changed_rx2(self, v: float):
-        """Radio RX2 volume changed elsewhere — update Vol-B
-        slider + label.  Phase 3.E.1 hotfix v0.16: direct RX2
-        binding regardless of SUB state."""
-        target = self._volume_to_slider(v)
-        self.vol_b_label.setText(f"{target}%")
-        if self.vol_b_slider.value() != target:
-            self.vol_b_slider.blockSignals(True)
-            self.vol_b_slider.setValue(target)
-            self.vol_b_slider.blockSignals(False)
+        """Radio RX2 volume changed elsewhere -- refresh Vol RX2
+        stepper.  CLAUDE.md §15.17 sibling of _on_volume_changed;
+        Phase 3.E.1 hotfix v0.16 direct RX2 binding."""
+        target_db = self._vol_linear_to_db(v)
+        if int(self.vol_b_stepper.value()) != target_db:
+            self.vol_b_stepper.blockSignals(True)
+            self.vol_b_stepper.setValue(target_db)
+            self.vol_b_stepper.blockSignals(False)
 
     def _on_muted_changed_rx2(self, muted: bool):
         """Radio RX2 mute changed elsewhere -- mirror Mute-B
@@ -3235,30 +3242,26 @@ class DspPanel(GlassPanel):
             self.bal_slider.blockSignals(False)
 
     def _on_af_gain_db_changed(self, db: int):
-        """Radio AF Gain changed elsewhere — keep slider + label in
-        sync (e.g. QSettings load, future TCI/CAT control).
-
-        Phase 3.C: this is RX1's ``af_gain_db_changed`` signal -- only
-        refresh the slider when RX1 has focus.
-        """
+        """Radio AF Gain (RX1) changed elsewhere -- keep the stepper
+        in sync (e.g. QSettings load, future TCI/CAT control).
+        CLAUDE.md §15.17 stepper widget replaces the prior slider +
+        label pair.  Phase 3.C: only refresh when RX1 has focus."""
         if self.radio.focused_rx != 0:
             return
-        self.af_gain_label.setText(f"+{db} dB")
-        if self.af_gain_slider.value() != db:
-            self.af_gain_slider.blockSignals(True)
-            self.af_gain_slider.setValue(db)
-            self.af_gain_slider.blockSignals(False)
+        if int(self.af_gain_stepper.value()) != int(db):
+            self.af_gain_stepper.blockSignals(True)
+            self.af_gain_stepper.setValue(int(db))
+            self.af_gain_stepper.blockSignals(False)
 
     def _on_af_gain_db_changed_rx2(self, db: int):
-        """RX2 AF Gain changed -- refresh slider only when RX2 has
-        focus.  Phase 3.C v0.1."""
+        """RX2 AF Gain changed -- refresh stepper only when RX2 has
+        focus.  Phase 3.C v0.1; CLAUDE.md §15.17 stepper widget."""
         if self.radio.focused_rx != 2:
             return
-        self.af_gain_label.setText(f"+{db} dB")
-        if self.af_gain_slider.value() != db:
-            self.af_gain_slider.blockSignals(True)
-            self.af_gain_slider.setValue(db)
-            self.af_gain_slider.blockSignals(False)
+        if int(self.af_gain_stepper.value()) != int(db):
+            self.af_gain_stepper.blockSignals(True)
+            self.af_gain_stepper.setValue(int(db))
+            self.af_gain_stepper.blockSignals(False)
 
     # ── Phase 3.C v0.1: per-RX AGC slots + focus rebinding ─────────
     def _on_agc_profile_changed_rx1(self, profile: str):
@@ -3282,18 +3285,19 @@ class DspPanel(GlassPanel):
         self._update_agc_threshold(threshold_dbfs)
 
     def _on_focused_rx_changed(self, rx_id: int):
-        """Operator switched focus — re-bind the AGC profile/threshold
-        readouts and the AF Gain slider to the newly focused RX."""
+        """Operator switched focus -- re-bind the AGC profile/threshold
+        readouts and the AF Gain stepper to the newly focused RX.
+        CLAUDE.md §15.17: AF Gain stepper replaces the prior slider +
+        label."""
         # AGC profile + threshold labels.
         self._update_agc_profile(self.radio.agc_profile_for_rx())
         self._update_agc_threshold(self.radio.agc_threshold_for_rx())
-        # AF Gain slider + label.
+        # AF Gain stepper.
         db = int(self.radio.af_gain_db_for_rx())
-        self.af_gain_label.setText(f"+{db} dB")
-        if self.af_gain_slider.value() != db:
-            self.af_gain_slider.blockSignals(True)
-            self.af_gain_slider.setValue(db)
-            self.af_gain_slider.blockSignals(False)
+        if int(self.af_gain_stepper.value()) != db:
+            self.af_gain_stepper.blockSignals(True)
+            self.af_gain_stepper.setValue(db)
+            self.af_gain_stepper.blockSignals(False)
 
     def _on_muted_changed(self, muted: bool):
         """Radio RX1 mute state changed (e.g., via TCI, QSettings
