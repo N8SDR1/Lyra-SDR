@@ -806,6 +806,38 @@ class HL2Stream:
         self._tx_step_attn_db: int = 0       # operator-tunable in v0.2.x
                                              # via drive-power slider
 
+        # ── HPSDR P1 frame 10 (register 0x12) state (v0.2 Phase 1) ──
+        # Frame 10 carries PA drive + analog routing + filter-board
+        # selectors:
+        #
+        # * C1: drive_level (8-bit, 0..255) -- primary TX-power-slider
+        #       wire surface
+        # * C2: mic_boost bit 0 | line_in_route bit 1 | 0x40 constant
+        #       (HL2 carries the 0x40 bit unconditionally; it was an
+        #       Apollo-board flag on legacy hardware that HL2 inherits)
+        # * C3: bpf_filter_bits (7-bit BPF selector, bits 0-6) |
+        #       (pa_on << 7) -- PA bias enable lives at bit 7 here,
+        #       NOT in its own register
+        # * C4: lpf_filter_bits (8-bit LPF selector)
+        #
+        # v0.2 Phase 1 defaults are all zero/False -- meaning fresh
+        # install ships with PA bias OFF (pa_on=False).  This is
+        # deliberate: even when MOX bit emission lands in Phase 1
+        # item 8, the PA cannot accidentally key because its bias
+        # is off.  Operator opts into PA via Settings -> TX in
+        # Phase 3 UI work (sets _pa_on = True after they confirm
+        # the antenna / dummy-load setup).
+        self._tx_drive_level: int = 0        # 8-bit, 0..255 (operator
+                                             # TX-power slider 0..100% →
+                                             # 0..255 wire scaling)
+        self._mic_boost_enabled: bool = False     # frame 10 C2 bit 0
+        self._line_in_route_enabled: bool = False # frame 10 C2 bit 1
+        self._pa_on: bool = False            # frame 10 C3 bit 7 (PA bias
+                                             # enable; default OFF for
+                                             # safety -- no accidental RF)
+        self._bpf_filter_bits: int = 0       # 7-bit, frame 10 C3 bits 0-6
+        self._lpf_filter_bits: int = 0       # 8-bit, frame 10 C4
+
         # ── EP2 writer thread state (v0.0.9.2 Commit 4) ─────────────
         # Dedicated EP2 writer thread runs the host->radio frame send
         # at the codec's audio cadence (~380 Hz = 48 kHz / 126
@@ -882,6 +914,15 @@ class HL2Stream:
         # ``read_tx_audio_high_water()`` which atomically samples-
         # and-resets so we get rolling-window data.
         self.tx_audio_high_water: int = 0
+
+        # v0.2 Phase 1 (3/10): seed frame 10 with the fresh-install
+        # default (PA off, drive 0, no filter selections, mic-boost +
+        # line-in routing both off).  This eagerly registers 0x12 in
+        # the C&C cycle so the HL2 gateware always sees Lyra's
+        # PA-bias-OFF intent rather than inheriting power-up state.
+        # Future Phase 1 setters (drive level, pa_on toggle from
+        # Settings UI) re-call _refresh_frame_10 after mutating state.
+        self._refresh_frame_10()
 
     def read_tx_audio_high_water(self) -> int:
         """Atomically read + reset the TX audio deque high-water mark.
@@ -1203,6 +1244,64 @@ class HL2Stream:
         with self._cc_lock:
             self._cc_registers[0x14] = (c1, c2, c3, c4)
             self._register_cc_slot(0x14)
+
+    def _compose_frame_10(self) -> tuple[int, int, int, int]:
+        """Compose HPSDR P1 frame 10 (register 0x12) from current
+        state.  Returns the (C1, C2, C3, C4) tuple ready for the
+        EP2 writer's round-robin.
+
+        Layout:
+        * C1: tx_drive_level (8-bit, 0..255) -- primary PA drive
+        * C2: mic_boost bit 0 | line_in_route bit 1 | 0x40 constant
+              (HL2 inherits the 0x40 bit unconditionally from the
+              legacy Apollo-board flag position)
+        * C3: bpf_filter_bits (7-bit, bits 0-6) | (pa_on << 7) --
+              PA bias enable lives at bit 7
+        * C4: lpf_filter_bits (8-bit, low-pass filter selector)
+
+        Thread-safe to call from any thread (reads atomic int/bool
+        attributes only).  Does NOT acquire any locks itself --
+        ``_refresh_frame_10`` is the lock-acquiring sibling.
+
+        v0.2 Phase 1 defaults: drive=0, all toggles False, pa_on=False.
+        Wire output: (0x00, 0x40, 0x00, 0x00).  PA bias is OFF so
+        even when MOX bit emission lands (item 8), no RF can be
+        keyed until operator opts in via Phase 3 Settings UI.
+        """
+        c1 = self._tx_drive_level & 0xFF
+        c2 = 0x40  # HL2 constant (legacy Apollo-flag bit position)
+        if self._mic_boost_enabled:
+            c2 |= 0x01
+        if self._line_in_route_enabled:
+            c2 |= 0x02
+        c3 = self._bpf_filter_bits & 0x7F
+        if self._pa_on:
+            c3 |= 0x80
+        c4 = self._lpf_filter_bits & 0xFF
+        return (c1, c2, c3, c4)
+
+    def _refresh_frame_10(self) -> None:
+        """Recompute frame 10 and cache it in ``_cc_registers[0x12]``.
+
+        Call this from any setter that mutates frame-10 state
+        (future set_tx_drive, set_pa_on, set_mic_boost, BPF/LPF
+        setters).  Idempotent w.r.t. cycle-list membership.
+
+        v0.2 Phase 1 calls this once at the end of ``__init__`` to
+        register 0x12 in the cycle with the fresh-install default
+        bytes (0x00, 0x40, 0x00, 0x00).  Unlike frame 11 (which
+        registers lazily on first set_lna_gain_db call), frame 10
+        has no existing v0.1 setter -- eager registration ensures
+        the HL2 gateware always sees Lyra's PA-off intent rather
+        than inheriting power-up state.
+
+        Caller MUST NOT be holding ``_cc_lock`` -- this method
+        acquires it.
+        """
+        c1, c2, c3, c4 = self._compose_frame_10()
+        with self._cc_lock:
+            self._cc_registers[0x12] = (c1, c2, c3, c4)
+            self._register_cc_slot(0x12)
 
     def _send_cc(self, c0: int, c1: int, c2: int, c3: int, c4: int):
         """Send one C&C write via EP2. Thread-safe.
