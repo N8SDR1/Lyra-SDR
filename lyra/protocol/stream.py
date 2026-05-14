@@ -924,6 +924,15 @@ class HL2Stream:
         # Settings UI) re-call _refresh_frame_10 after mutating state.
         self._refresh_frame_10()
 
+        # v0.2 Phase 1 (4/10): seed frame 4 (register 0x1C) with the
+        # fresh-install default (0x00, 0x00, 0x00, 0x00).  Eagerly
+        # registers 0x1C in the cycle so the 5-bit redundant
+        # tx_step_attn write stays in sync with the 6-bit copy in
+        # frame 11 C4.  Operator-facing setter for the TX step
+        # attenuator (Phase 3 UI) MUST call both _refresh_frame_4
+        # and _refresh_frame_11.
+        self._refresh_frame_4()
+
     def read_tx_audio_high_water(self) -> int:
         """Atomically read + reset the TX audio deque high-water mark.
 
@@ -1302,6 +1311,65 @@ class HL2Stream:
         with self._cc_lock:
             self._cc_registers[0x12] = (c1, c2, c3, c4)
             self._register_cc_slot(0x12)
+
+    def _compose_frame_4(self) -> tuple[int, int, int, int]:
+        """Compose HPSDR P1 frame 4 (register 0x1C) -- the ADC
+        assignment / TX-step-attenuator register.
+
+        Layout:
+        * C1: ADC routing lower-8 bits (Orion-specific; HL2 ignores)
+        * C2: ADC routing upper bits (Orion-specific; HL2 ignores)
+        * C3: tx_step_attn & 0x1F (5-bit redundant write of the
+              TX step attenuator -- HL2 reads this in parallel with
+              the 6-bit+override copy in frame 11 C4)
+        * C4: 0
+
+        Why both frames carry tx_step_attn: HL2 firmware reads both
+        registers; the consensus behaviour is that both wire copies
+        must be coherent.  Any operator-facing setter that mutates
+        ``_tx_step_attn_db`` MUST call BOTH ``_refresh_frame_4`` and
+        ``_refresh_frame_11`` so the two encodings stay in sync.
+        Encodings differ:
+        * Frame 4 C3 -- unsigned 5-bit mask: ``db & 0x1F``
+        * Frame 11 C4 -- 6-bit + override: ``0x40 | ((db + 12) & 0x3F)``
+
+        Lock-free.  ``_refresh_frame_4`` is the lock-acquiring sibling.
+
+        v0.2 Phase 1: ``_tx_step_attn_db`` defaults to 0; frame 4
+        ships as (0x00, 0x00, 0x00, 0x00) for fresh installs.
+        """
+        # C1 / C2 ADC routing -- HL2 doesn't use; zero placeholders
+        # so the gateware sees an explicit value rather than power-up
+        # state.
+        c1 = 0
+        c2 = 0
+        # C3 -- 5-bit unsigned masking of tx_step_attn_db.  HL2 firmware
+        # reads this register in parallel with frame 11 C4's extended-
+        # range encoding.
+        c3 = int(self._tx_step_attn_db) & 0x1F
+        c4 = 0
+        return (c1, c2, c3, c4)
+
+    def _refresh_frame_4(self) -> None:
+        """Recompute frame 4 and cache it in ``_cc_registers[0x1C]``.
+
+        Call this whenever ``_tx_step_attn_db`` changes (must also
+        call ``_refresh_frame_11`` so frame-11 C4 stays coherent).
+        Future ADC-routing setters (Orion / Anan v0.4) would also
+        trigger this refresh.
+
+        v0.2 Phase 1 calls this once at the end of ``__init__`` for
+        eager registration -- frame 4 has no existing v0.1 setter,
+        so without eager registration HL2 inherits power-up ADC
+        state.
+
+        Caller MUST NOT be holding ``_cc_lock`` -- this method
+        acquires it.
+        """
+        c1, c2, c3, c4 = self._compose_frame_4()
+        with self._cc_lock:
+            self._cc_registers[0x1C] = (c1, c2, c3, c4)
+            self._register_cc_slot(0x1C)
 
     def _send_cc(self, c0: int, c1: int, c2: int, c3: int, c4: int):
         """Send one C&C write via EP2. Thread-safe.
