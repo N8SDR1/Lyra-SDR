@@ -98,7 +98,7 @@ class StepperReadout(QWidget):
 
         self._minus_btn = QPushButton("−")
         self._minus_btn.setObjectName("stepper_btn")
-        self._minus_btn.setFixedWidth(26)
+        self._minus_btn.setFixedWidth(30)
         self._minus_btn.setAutoRepeat(False)        # we own the ramp
         self._minus_btn.setCursor(Qt.PointingHandCursor)
         self._minus_btn.setFocusPolicy(Qt.NoFocus)  # don't steal Tab focus
@@ -121,7 +121,7 @@ class StepperReadout(QWidget):
 
         self._plus_btn = QPushButton("+")
         self._plus_btn.setObjectName("stepper_btn")
-        self._plus_btn.setFixedWidth(26)
+        self._plus_btn.setFixedWidth(30)
         self._plus_btn.setAutoRepeat(False)
         self._plus_btn.setCursor(Qt.PointingHandCursor)
         self._plus_btn.setFocusPolicy(Qt.NoFocus)

@@ -247,7 +247,7 @@ QPushButton#stepper_btn {{
     background: {qss_color(BG_RECESS)};
     border: 1px solid {qss_color(BORDER)};
     border-radius: 3px;
-    font-size: 16px;
+    font-size: 20px;
     font-weight: 800;
     padding: 0px;
 }}
