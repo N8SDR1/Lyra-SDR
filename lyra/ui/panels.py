@@ -1942,16 +1942,21 @@ class DspPanel(GlassPanel):
         self.auto_lna_btn.setFixedWidth(50)
         self.auto_lna_btn.setChecked(radio.lna_auto)
         self.auto_lna_btn.setToolTip(
-            "Auto-LNA — overload protection (back-off only).\n\n"
-            "When ON, Lyra drops LNA gain when the ADC peak exceeds\n"
+            "Auto-LNA — overload protection (and optional pull-up).\n\n"
+            "Back-off (always active when ON):\n"
             "  > -3 dBFS  → drop 3 dB (urgent, near clipping)\n"
             "  > -10 dBFS → drop 2 dB (hot, leave margin)\n\n"
-            "It does NOT raise gain — that's deliberate. Set your\n"
-            "baseline LNA manually for the band you're on; Auto only\n"
-            "kicks in when a strong signal threatens to overload the\n"
-            "ADC. If you've never seen Auto fire, your antenna isn't\n"
-            "delivering signals strong enough to need it (which is\n"
-            "the common-case in normal HF conditions).")
+            "Pull-up (Settings → DSP → \"Auto-LNA pull-up\", default OFF):\n"
+            "  When enabled, Auto becomes bidirectional. After the band\n"
+            "  has been sustained-quiet (RMS < -50 dBFS, peak < -25 dBFS)\n"
+            "  for ~7.5 s, Auto climbs LNA 1 dB at a time -- conservative\n"
+            "  ceiling at +24 dB -- to dig out weak signals.  Adds a\n"
+            "  third back-off rule too: drops gain when a strong\n"
+            "  passband signal pushes the AD9866 PGA toward compression,\n"
+            "  even if the wide-IQ peak still looks cool (catches the\n"
+            "  \"WWV arrives at +24 LNA\" case automatically).\n\n"
+            "Manual slider changes always win -- Auto defers 5 s after\n"
+            "any operator-driven gain change before re-engaging.")
         self.auto_lna_btn.toggled.connect(self.radio.set_lna_auto)
         levels.addWidget(self.auto_lna_btn)
 
