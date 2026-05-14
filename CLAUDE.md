@@ -3149,6 +3149,109 @@ Until then: row layout decision is final, gestures are
 locked, persistence keys reserved.  Operator can stop
 mentally tracking "we forgot RIT" — it's captured.
 
+### 15.11 — Diagnostic overlay 3-state toggle (PARKED 2026-05-13, scope: v0.1.x or v0.1.0 GA)
+
+Operator-driven UX polish (Rick, 2026-05-13).  After Brent +
+Timmy tester reports came back clean on pre3 ("very few audio
+pops" both, "sync much better" from Timmy), operator surfaced
+that the on-screen diagnostic surfaces — ADC pk/rms, AGC thr/
+gain, AUTO LNA messages, audio stream errors — are useful for
+diagnosis but visually busy for routine operating.
+
+#### What the surfaces actually cost
+
+For the record (so future sessions don't re-derive it): the
+CPU cost of these surfaces is **negligible** — well under
+0.1% of one core continuous, GPU cost is zero.  Breakdown:
+
+| Surface | Mechanism | Cost |
+|---------|-----------|------|
+| ADC pk/rms (top right) | `FrameStats` parses EP6 status bytes regardless of widget visibility; ~1 emit/sec | ~10-20 µs/sec |
+| AGC threshold + gain (top right) | `GetRXAMeter(RXA_AGC_GAIN)` throttled to ~6 Hz | ~50 µs/sec |
+| AUTO LNA messages (lower left) | Event-driven only — fires on state change | <1 µs/sec idle |
+| Audio stream errors (lower right) | Event-driven only — fires on underrun/overrun | <1 µs/sec when clean |
+
+**Implication: this is a UX feature, NOT a CPU-saving feature.**
+Hiding doesn't free measurable compute.  Frame the toggle to
+operators as "clean main window" not "save CPU."
+
+#### 3-state spec
+
+Replaces today's "always show" behavior with a 3-position
+combobox.  Default `"full"` preserves current behavior on
+upgrade.
+
+| Mode | ADC pk/rms | AGC thr/gain | AUTO LNA strip | Audio errors strip |
+|------|-----------|--------------|----------------|---------------------|
+| **Full** (default) | Visible | Visible | Persistent strip | Persistent strip |
+| **Minimal** | Visible | Visible | Toast on event | Toast on event |
+| **Off** | Hidden | Hidden | Toast on event | Toast on event |
+
+In Minimal/Off, AUTO LNA state changes + audio underrun events
+surface via the existing ``_toast_message`` mechanism (sibling
+of weather alerts + band-edge warnings) — operator still gets
+notified of events that need attention, just without persistent
+real-estate use.
+
+#### Placement
+
+Settings → Radio tab → existing ``QGroupBox("Toolbar readouts")``
+in ``lyra/ui/settings_dialog.py:985``.  Rename the group to
+**"Toolbar & diagnostic readouts"** and add one row below the
+existing ``show_cpu_chk`` checkbox:
+
+```
+┌─ Toolbar & diagnostic readouts ─────────────────┐
+│  ☐ Show CPU% on toolbar                         │
+│                                                 │
+│  Diagnostic overlays:   [Full         ▾]        │
+│                          • Full                 │
+│                          • Minimal              │
+│                          • Off                  │
+│  ⓘ Controls ADC, AGC, audio status overlays on  │
+│     the spectrum widget.                        │
+└─────────────────────────────────────────────────┘
+```
+
+Combobox over radio buttons — matches the style of other
+Settings dropdowns (Step picker, AGC profile picker) and keeps
+vertical real estate tight.
+
+#### Persistence
+
+New QSettings key under ``telemetry/`` group:
+
+* ``telemetry/overlay_mode`` (string, default ``"full"``,
+  values ``"full"`` / ``"minimal"`` / ``"off"``)
+
+Loaded at ``Radio.__init__`` startup, applied to all four
+widget surfaces on first paint, mirrored back on every
+combobox change.
+
+#### Implementation effort
+
+* ~30 minutes total:
+  * 5 min: Settings dialog combobox + signal wiring
+  * 10 min: 4 widget visibility hooks (ADC strip, AGC strip,
+    AUTO LNA strip, audio errors strip) reading
+    ``telemetry/overlay_mode`` from QSettings
+  * 10 min: toast-fallback path for AUTO LNA + audio errors in
+    Minimal/Off modes (reuse existing ``_toast_message``)
+  * 5 min: QSettings persistence + autoload
+* Zero risk to RX/audio paths — pure widget visibility + signal
+  routing change.  No protocol or DSP touched.
+* Live-switchable; no restart needed (matches existing CPU%
+  toggle behavior).
+
+#### Scope decision
+
+Either bundle into v0.1.0 GA (small enough not to risk the
+release) or ship in a v0.1.0.x patch shortly after.  Operator's
+call — neither blocks anything else.
+
+Status: **PARKED** for implementation when v0.1.0 GA scope is
+finalized.
+
 ---
 
 *Last updated: 2026-05-11 — Round 3 amendments applied (operator
