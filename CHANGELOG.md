@@ -13,6 +13,47 @@ v0.0.6, Lyra is GPL v3 or later (see `NOTICE.md`).
 
 ---
 
+## [0.1.0] — 2026-05-14 — RX2 Dual Receiver (production GA)
+
+Production GA of the v0.1 line after a three-pre-release tester
+flight (pre2 / pre3 / GA) with Brent, Timmy, and N8SDR.  All the
+pre2 RX2 work + pre3 latency + doc refresh ship in this release;
+see those entries for the per-feature detail.
+
+### New since pre3
+
+* **Diagnostic overlay 3-state toggle** (§15.11) — Settings →
+  Radio → Diagnostic overlays: Full / Minimal / Off.  Collapses
+  ADC pk/rms, stream status, and audio telemetry surfaces for a
+  clean main window during operating / screenshots / video /
+  field use.  Persists across restarts.
+* **"Show HL2 telemetry on toolbar" Settings checkbox** —
+  separate from the 3-state overlay because HL2 hardware
+  telemetry (AD9866 die temp + 12 V rail) is genuinely useful
+  during TX.  Default ON.
+* **QToolBar slot collapse fix** — capturing the QWidgetAction
+  returned by ``addWidget()`` so hiding ADC / HL2 / CPU chips
+  actually removes the slot instead of leaving a gap.
+
+### Parked for v0.2
+
+* **TX path** — v0.2 scope; this release is RX-only.
+* **SPLIT operation UX** (§15.6), **Compression chip** (§15.13),
+  **auto-mute-on-TX** (§15.14), **AAmixer state badge** (§15.15)
+  — all want TX state axes to be meaningful; deferred.
+* **TCI RX2 channel** — v0.1.0.1 patch slot for focused
+  validation.
+* **Linux / macOS §15.7 latency validation** + **HL2 TX-latency
+  below 15 ms** — pending TX bring-up + non-Windows test rigs.
+
+### Test coverage
+
+225/225 unit tests green.  Bench-confirmed 2026-05-14 across
+all three diagnostic-overlay modes + HL2 toggle paths,
+persistence across restart.
+
+---
+
 ## [0.1.0-pre3] — 2026-05-13 — RX2 Dual Receiver (latency + polish)
 
 Follow-up tester pre-release on top of v0.1.0-pre2, focused on
