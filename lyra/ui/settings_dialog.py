@@ -982,7 +982,7 @@ class RadioSettingsTab(QWidget):
         # want a load percentage on the toolbar all the time.
         # Re-enable here if you do want it.
         from PySide6.QtCore import QSettings as _QSettings
-        grp_tb = QGroupBox("Toolbar readouts")
+        grp_tb = QGroupBox("Toolbar & diagnostic readouts")
         gtb = QVBoxLayout(grp_tb)
         s = _QSettings("N8SDR", "Lyra")
         cpu_hidden = bool(s.value(
@@ -996,6 +996,54 @@ class RadioSettingsTab(QWidget):
             "is bottlenecking the audio chain).")
         self.show_cpu_chk.toggled.connect(self._on_show_cpu_toggled)
         gtb.addWidget(self.show_cpu_chk)
+
+        # Phase 4 / v0.1.0 (2026-05-13): diagnostic overlay 3-state
+        # toggle (CLAUDE.md §15.11).  Operator-driven UX polish so
+        # the main window can be cleaned up for routine operating
+        # without losing diagnostics during bench work.
+        from PySide6.QtWidgets import QHBoxLayout as _QHBoxLayout
+        diag_row = _QHBoxLayout()
+        diag_label = QLabel("Diagnostic overlays:")
+        diag_row.addWidget(diag_label)
+        self.diag_overlay_combo = QComboBox()
+        self.diag_overlay_combo.addItem("Full", userData="full")
+        self.diag_overlay_combo.addItem("Minimal", userData="minimal")
+        self.diag_overlay_combo.addItem("Off", userData="off")
+        self.diag_overlay_combo.setToolTip(
+            "Controls ADC pk/rms, stream status, and audio "
+            "telemetry overlays on the main window.\n\n"
+            "Full -- everything shown (current default).\n"
+            "Minimal -- ADC pk/rms stays visible (useful for "
+            "setting LNA without clipping); stream + audio "
+            "telemetry hidden.\n"
+            "Off -- all three hidden.  Cleanest main window for "
+            "operating / screenshots / video.\n\n"
+            "The underlying signals keep firing in every mode -- "
+            "hiding is for the eyes, not for CPU savings (the "
+            "cost is rounding-error)."
+        )
+        # Restore persisted value
+        current_mode = str(s.value(
+            "telemetry/overlay_mode", "full"))
+        for i in range(self.diag_overlay_combo.count()):
+            if self.diag_overlay_combo.itemData(i) == current_mode:
+                self.diag_overlay_combo.setCurrentIndex(i)
+                break
+        self.diag_overlay_combo.setMinimumWidth(120)
+        self.diag_overlay_combo.currentIndexChanged.connect(
+            self._on_diag_overlay_changed)
+        diag_row.addWidget(self.diag_overlay_combo)
+        diag_row.addStretch(1)
+        gtb.addLayout(diag_row)
+
+        diag_help = QLabel(
+            "Hides ADC pk/rms, stream status, and audio telemetry "
+            "readouts on the main window."
+        )
+        diag_help.setWordWrap(True)
+        diag_help.setStyleSheet("color: #8a9aac; font-size: 10px;")
+        gtb.addWidget(diag_help)
+
         v.addWidget(grp_tb)
 
         v.addStretch(1)
@@ -1146,6 +1194,32 @@ class RadioSettingsTab(QWidget):
             # QSettings write will pick up on next Lyra start.
             print(f"[settings] could not apply CPU visibility "
                   f"live: {exc}")
+
+    def _on_diag_overlay_changed(self, _idx: int) -> None:
+        """Apply the diagnostic overlay 3-state mode live.
+
+        Phase 4 / v0.1.0 (CLAUDE.md §15.11).  Same parent-chain
+        live-apply pattern as ``_on_show_cpu_toggled``; QSettings
+        write is performed inside MainWindow's
+        ``_apply_telemetry_overlay_mode`` so a single source of
+        truth handles persistence.
+        """
+        mode = str(self.diag_overlay_combo.currentData())
+        try:
+            mw = self.window().parent()
+            if hasattr(mw, "_apply_telemetry_overlay_mode"):
+                mw._apply_telemetry_overlay_mode(mode)
+        except Exception as exc:
+            # Live-apply failed — write the QSettings key directly
+            # so the choice still survives a relaunch.
+            print(f"[settings] could not apply diagnostic "
+                  f"overlay mode live: {exc}")
+            try:
+                from PySide6.QtCore import QSettings
+                QSettings("N8SDR", "Lyra").setValue(
+                    "telemetry/overlay_mode", mode)
+            except Exception:
+                pass
 
 
 class HardwareSettingsTab(QWidget):

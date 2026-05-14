@@ -2048,6 +2048,59 @@ class MainWindow(QMainWindow):
                 defaults_hidden.get(key, False), type=bool)
             if hidden:
                 self._set_readout_visible(key, False)
+        # Phase 4 / v0.1.0 (2026-05-13): diagnostic overlay 3-state mode
+        # (CLAUDE.md §15.11).  Reads telemetry/overlay_mode (default
+        # "full") and applies to the three persistent diagnostic
+        # surfaces: ADC pk/rms indicator (toolbar), stream status +
+        # audio telemetry labels (status bar).  Transient status-bar
+        # toasts (AUTO LNA changes, NTP drift, etc.) are already
+        # event-driven + auto-fading so they don't need gating.
+        try:
+            mode = str(self._settings.value(
+                "telemetry/overlay_mode", "full"))
+            self._apply_telemetry_overlay_mode(mode)
+        except Exception as exc:
+            print(f"[app] telemetry overlay mode apply: {exc}")
+
+    # ── Phase 4 / v0.1.0 diagnostic overlay 3-state toggle ────────────
+    # See CLAUDE.md §15.11.  Operator-driven UX polish so the main
+    # window can be cleaned up for routine operating / screenshots /
+    # field use without losing access to the diagnostics during bench
+    # work.  Pure visibility — the underlying signals keep firing
+    # (cost is rounding-error, ~50 µs/sec continuous).
+
+    _TELEMETRY_OVERLAY_MODES = ("full", "minimal", "off")
+
+    def _apply_telemetry_overlay_mode(self, mode: str) -> None:
+        """Show/hide the three persistent diagnostic surfaces.
+
+        Mode definitions:
+          full     -- ADC pk/rms indicator + stream status + audio
+                      telemetry all visible.  Current/default behavior.
+          minimal  -- ADC pk/rms visible (useful for setting LNA),
+                      stream status + audio telemetry hidden.
+          off      -- All three hidden.  Clean main window for
+                      screenshots / video / field operating.
+        """
+        if mode not in self._TELEMETRY_OVERLAY_MODES:
+            mode = "full"
+        show_adc = mode in ("full", "minimal")
+        show_stream = mode == "full"
+        show_telem = mode == "full"
+        try:
+            self.adc_peak_indicator.setVisible(show_adc)
+        except (AttributeError, RuntimeError):
+            pass
+        try:
+            self._stream_status_label.setVisible(show_stream)
+        except (AttributeError, RuntimeError):
+            pass
+        try:
+            self._audio_telem_label.setVisible(show_telem)
+        except (AttributeError, RuntimeError):
+            pass
+        self._settings.setValue("telemetry/overlay_mode", mode)
+        self._settings.sync()
 
     # ── Lock / unlock panels ────────────────────────────────────────
     def _on_lock_panels_toggled(self, locked: bool):
