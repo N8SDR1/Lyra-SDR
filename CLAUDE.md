@@ -3252,6 +3252,117 @@ call — neither blocks anything else.
 Status: **PARKED** for implementation when v0.1.0 GA scope is
 finalized.
 
+### 15.12 — Windows audio API expansion ladder (PARKED 2026-05-13)
+
+Operator-surfaced 2026-05-13: PC Soundcard path currently runs
+on **WASAPI Shared mode** (sounddevice / PortAudio default).
+Discussion covered ASIO, WDM-KS, WASAPI Exclusive, and Virtual
+Audio Cable.  All four are accessible via sounddevice's host-
+API selection — the work is mostly UI surface + opt-in toggles,
+not new audio infrastructure.
+
+#### Current state
+
+| Path | Audio backend | Latency |
+|------|---------------|---------|
+| HL2 audio jack (default) | EP2 → AK4951 codec (no Windows API at all) | Governed by HL2 gateware reg 0x17 — 15 ms post-§15.7 |
+| PC Soundcard | sounddevice → WASAPI Shared | ~150 ms rmatch ring + ~22 ms WASAPI host = **~172 ms** post-§15.7 |
+
+#### API expansion comparison
+
+| API | Host latency | Trade-off |
+|-----|--------------|-----------|
+| **WASAPI Shared** (current) | ~20-25 ms | Other apps share the device |
+| **WASAPI Exclusive** | ~3-5 ms | **Blocks other apps** from the device while Lyra runs |
+| **ASIO** | ~2-10 ms (driver-dependent) | Requires ASIO driver (ASIO4ALL or native pro-audio card) |
+| **WDM-KS** (Kernel Streaming) | ~5-10 ms | Less universal hardware support than WASAPI Exclusive |
+
+WASAPI Exclusive → ~15-20 ms saved on PC Soundcard path
+(172 → 155 ms total).  ASIO → similar.  WDM-KS → marginal.
+
+#### Effort estimates
+
+| Feature | Effort | Notes |
+|---------|--------|-------|
+| WASAPI Exclusive toggle | ~1-2 hr | One checkbox in Settings → Audio, pass ``WasapiSettings(exclusive=True)`` via sounddevice ``extra_settings`` |
+| Host-API grouping in device picker | ~2 hr | Group devices by ``sd.query_hostapis()`` in Settings → Audio dropdown ("WASAPI", "ASIO", "MME", etc.). Foundation for ASIO/WDM-KS without yet exposing them. |
+| ASIO support | ~4-6 hr | Enumerate ASIO host API devices, add to picker. Test with ASIO4ALL + at least one native ASIO driver. |
+| WDM-KS support | ~2-4 hr | Same pattern as ASIO, smaller payoff vs Exclusive. |
+| Virtual Audio Cable workflow | **already works** | VAC registers as a regular audio device — operator picks ``"VAC Line 1"`` in the dropdown. Worth documenting + bench-testing, no code work. |
+
+#### Honest reality checks
+
+**ASIO matters more for TX than RX.** Its killer feature is sub-3-ms
+round-trip latency for live monitoring (key-down to sidetone, mic-
+to-monitor).  For RX listening where we already have ~150 ms total
+audio path, the gap between 5 ms ASIO and 22 ms WASAPI Shared is
+mostly imperceptible.  **Defer ASIO to v0.2 TX bring-up** — do it
+once, do it well, get the monitor-while-talking latency story
+right.
+
+**WDM-KS** has the smallest win of the four.  WASAPI Exclusive
+covers the same use case with wider hardware support.  Skip
+unless a tester surfaces a specific need.
+
+**VAC is operationally the most important** — it's how operators
+bridge Lyra audio to WSJT-X / FLDigi / DM780 / etc. for digital
+modes.  Already functional today across all host APIs; needs
+documentation + a confirming bench test rather than code work.
+
+#### Prioritized ladder
+
+When the v0.1.x window opens (post-GA), pick off in this order
+based on operator/tester appetite:
+
+1. **WASAPI Exclusive toggle** — 1-2 hr, immediate ~15 ms PC
+   Soundcard win, opt-in (default off → zero regression risk).
+   Single best bang-per-hour on the list.
+2. **Document VAC digital-modes workflow** — help-doc addition
+   covering recommended VAC routing to WSJT-X / FLDigi.  Free
+   — code already works.
+3. **Host-API grouping in device picker** — 2 hr.  Lays the bones
+   for ASIO/WDM-KS without yet exposing them; operators see
+   "WASAPI: PC Speakers" / "ASIO: Focusrite Scarlett" naming
+   even today and can mentally pick the right path.
+4. **v0.2 TX-time: ASIO support** — 4-6 hr in the v0.2 window.
+   TX-side monitoring latency justifies it then; doing it
+   earlier means writing it once for RX-only benefit and again
+   when TX needs the round-trip story.
+5. **Maybe never: WDM-KS** — wait for a tester to ask.
+
+#### Settings UI placement (when implemented)
+
+Settings → Audio tab (existing).  Pattern:
+
+* Device picker grouped by host API (step 3)
+* Below picker: **"Exclusive mode (lower latency, blocks other
+  apps from this device)"** checkbox — default off (step 1)
+* ASIO-specific knobs (buffer size, dither setting) appear
+  inline below device picker IF an ASIO device is currently
+  selected — show/hide based on selected device's host API
+  (step 4)
+
+QSettings keys:
+
+* ``audio/host_api`` (string, default ``""`` = auto-pick first
+  WASAPI device)
+* ``audio/exclusive_mode`` (bool, default False)
+* ``audio/asio_buffer_size`` (int, default 0 = driver default —
+  step 4)
+
+#### Side benefit worth flagging
+
+Operators on weak machines hitting audio dropouts at 150 ms
+rmatch ring could try Exclusive mode FIRST as a remediation
+step before reverting to the 400 ms pre-§15.7 default.
+Smaller host buffer = lower jitter ceiling = potentially
+viable at the new defaults where it wasn't on Shared.  Document
+this in the troubleshooting "latency tuning" section when
+Exclusive lands.
+
+Status: **PARKED** — items 1-3 are v0.1.x patch candidates,
+item 4 is v0.2-bundled, item 5 is wait-and-see.
+
 ---
 
 *Last updated: 2026-05-11 — Round 3 amendments applied (operator
