@@ -3581,6 +3581,61 @@ it here so it survives session compaction.
 | 4 | **VAC digital-modes workflow doc** | §15.12 item 2 | ~30 min | Already functional; just document for WSJT-X / FLDigi |
 | 5 | **Host-API grouping in device picker** | §15.12 item 3 | ~2 hr | Groups devices by WASAPI / ASIO / MME; ASIO foundation |
 
+#### Discovery 2026-05-14 — item statuses corrected
+
+While starting v0.1.1 work the operator asked how to tell whether
+WASAPI is in shared or exclusive mode and noted the device list
+in Settings → Audio is unorganized.  Audit results:
+
+* **Item 3 (WASAPI Exclusive toggle):** ✅ **ALREADY DONE since
+  v0.0.9.6.**  Settings → Audio has a "PortAudio host API"
+  dropdown with seven entries (Auto / WASAPI shared / WASAPI
+  exclusive / WDM-KS / DirectSound / MME / ASIO).  Selecting
+  "WASAPI exclusive" pipes ``sd.WasapiSettings(exclusive=True)``
+  through to PortAudio via ``extra_settings`` (see
+  ``lyra/dsp/audio_sink.py`` line 547-557).  Full tooltip already
+  explains the trade-off.  Operator-perceived UX gap: the
+  dropdown is buried under a separate group titled "PortAudio
+  host API (PC Soundcard only)" and not visually paired with the
+  device list, so it doesn't read as "WASAPI exclusive checkbox"
+  from §15.12 item 1's wording -- but the functionality is there.
+
+* **Item 5 (Host-API grouping in device picker):** **PARTIAL.**
+  The host-API SELECTION (dropdown above) is fully done.  The
+  OUTPUT DEVICE list directly below it remains a flat list
+  sorted by PortAudio index, which interleaves duplicates of
+  the same physical device across host APIs (e.g.
+  ``Speakers (Realtek)`` appears once per host API).  The label
+  format ``[idx] DeviceName  (HostAPI, channels, rate)`` carries
+  the host-API name but doesn't visually group.  This is the
+  remaining v0.1.1 work item: rewrite ``_populate_devices()`` in
+  ``settings_dialog.py:AudioSettingsTab`` to emit grouped output
+  with host-API section dividers, so the operator sees:
+
+  ```
+  ─── WASAPI shared ───
+  [4] Speakers (Realtek)  2ch 48 kHz
+  ─── WASAPI exclusive ───
+  [4] Speakers (Realtek)  2ch 48 kHz
+  ─── WDM-KS ───
+  [6] Speakers (Realtek)  2ch 48 kHz
+  ─── DirectSound ───
+  [1] Speakers (Realtek)  2ch 48 kHz
+  ─── MME ───
+  [7] Speakers (Realtek)  2ch 48 kHz
+  ```
+
+  Same physical device naturally appears once per available host
+  API -- the section header makes that explicable instead of
+  confusing.
+
+  Implementation effort: ~2 hours.  Pure UI work in
+  ``_populate_devices()``; no Radio surface, audio path, or
+  QSettings schema changes needed.
+
+* **Items 2 + 4 status unchanged:** VAC doc done (commit
+  ``82a8596``); RIT and TCI RX2 still real coding work pending.
+
 **Total**: ~3–4 days of focused work + bench testing.
 
 #### Why bundle vs ship as 5 rapid-fire patches

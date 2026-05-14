@@ -2079,6 +2079,12 @@ class AudioSettingsTab(QWidget):
     distinct from the DSP tab which is about signal processing.
     """
 
+    # CLAUDE.md §15.16 (2026-05-14): device dropdown is grouped by
+    # host API with non-selectable section headers.  Header rows
+    # carry this sentinel as their userData so _on_device_picked +
+    # _sync_to_radio can distinguish them from real device entries.
+    _SEP_SENTINEL = "__section_separator__"
+
     def __init__(self, radio, parent=None):
         super().__init__(parent)
         self.radio = radio
@@ -2323,22 +2329,89 @@ class AudioSettingsTab(QWidget):
             self._dev_combo.blockSignals(False)
             return
 
-        # Step 2 — enumerate.  query_devices() / query_hostapis()
-        # can raise PortAudioError or generic Exception if the host
-        # audio system is wedged.
+        # Step 2 — enumerate, GROUPED BY HOST API per CLAUDE.md §15.16
+        # discovery 2026-05-14.  Walking devices in PortAudio-index
+        # order interleaves duplicates of the same physical device
+        # across host APIs (e.g. "Speakers (Realtek)" appears once
+        # per WASAPI / WDM-KS / DirectSound / MME).  Grouping with
+        # section-header dividers makes that explicable -- operator
+        # sees the same speakers under WASAPI shared, WASAPI exclusive,
+        # and WDM-KS, and picks the one matching their latency goal.
+        #
+        # Section dividers are added as items with userData=_SEP_SENTINEL
+        # and disabled (Qt.ItemIsEnabled removed) so they appear in the
+        # dropdown but can't be selected.  _on_device_picked guards
+        # against programmatic selection of a divider just in case.
         try:
             devices = sd.query_devices()
+            host_apis = list(sd.query_hostapis())
+            # {host_api_index: [(dev_idx, dev_dict), ...]}
+            groups: dict[int, list[tuple[int, dict]]] = {}
             for idx, dev in enumerate(devices):
                 if dev.get("max_output_channels", 0) <= 0:
                     continue
-                ha_name = sd.query_hostapis(dev["hostapi"])["name"]
-                rate = int(dev.get("default_samplerate", 0))
-                ch = dev.get("max_output_channels", 0)
-                label = (f"[{idx:>3}] {dev['name']}   "
-                         f"({ha_name}, {ch}ch, {rate} Hz)")
-                self._dev_combo.addItem(label, idx)
-            count = self._dev_combo.count() - 1
-            if count == 0:
+                ha_idx = int(dev.get("hostapi", -1))
+                if ha_idx < 0:
+                    continue
+                groups.setdefault(ha_idx, []).append((idx, dev))
+
+            # Preferred display order -- matches the host-API picker
+            # dropdown above for visual consistency.  Any host APIs
+            # not in this list (rare; usually only on Linux/macOS)
+            # land at the end in PortAudio-reported order.
+            _PREFERRED_NAMES = (
+                "Windows WASAPI",
+                "Windows WDM-KS",
+                "Windows DirectSound",
+                "MME",
+                "ASIO",
+            )
+            ordered_ha_idxs: list[int] = []
+            for pref_name in _PREFERRED_NAMES:
+                for idx, ha in enumerate(host_apis):
+                    if (ha.get("name") == pref_name
+                            and idx in groups
+                            and idx not in ordered_ha_idxs):
+                        ordered_ha_idxs.append(idx)
+                        break
+            for ha_idx in groups:
+                if ha_idx not in ordered_ha_idxs:
+                    ordered_ha_idxs.append(ha_idx)
+
+            from PySide6.QtGui import QBrush, QColor as _QColor
+            total = 0
+            for ha_idx in ordered_ha_idxs:
+                ha_name = host_apis[ha_idx].get(
+                    "name", f"Host API {ha_idx}")
+                # Section divider -- disabled, dim-colored.
+                self._dev_combo.addItem(
+                    f"───  {ha_name}  ───", self._SEP_SENTINEL)
+                sep_idx = self._dev_combo.count() - 1
+                model = self._dev_combo.model()
+                item = model.item(sep_idx) if model is not None else None
+                if item is not None:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                    item.setForeground(QBrush(_QColor("#7a90a8")))
+
+                # Sort devices within a host-API group by name so
+                # the same physical device appears in a stable
+                # position across groups (eye scans down the column
+                # and the matching "Speakers (Realtek)" row aligns).
+                for dev_idx, dev in sorted(
+                        groups[ha_idx],
+                        key=lambda kv: kv[1]["name"].lower()):
+                    rate = int(dev.get("default_samplerate", 0))
+                    ch = dev.get("max_output_channels", 0)
+                    # Drop the (host_api, …) suffix from each device
+                    # row -- the section header already carries it.
+                    # Leading two-space indent makes the visual
+                    # hierarchy obvious in a flat QComboBox.
+                    label = (f"  [{dev_idx:>3}] {dev['name']}   "
+                             f"{ch}ch, {rate} Hz")
+                    self._dev_combo.addItem(label, dev_idx)
+                    total += 1
+
+            if total == 0:
                 self._dev_status.setText(
                     "⚠  sounddevice loaded but reports zero output "
                     "devices.  Check Windows Sound Control Panel — "
@@ -2347,7 +2420,8 @@ class AudioSettingsTab(QWidget):
                     "color: #ff8c00; font-weight: 700;")
             else:
                 self._dev_status.setText(
-                    f"✓  {count} output device(s) detected")
+                    f"✓  {total} device(s) across "
+                    f"{len(ordered_ha_idxs)} host API(s)")
                 self._dev_status.setStyleSheet(
                     "color: #6acb6a; font-weight: 700;")
         except Exception as e:
@@ -2384,6 +2458,14 @@ class AudioSettingsTab(QWidget):
 
     def _on_device_picked(self, combo_idx: int):
         device = self._dev_combo.itemData(combo_idx)
+        # §15.16 device-list grouping: section-header rows carry
+        # _SEP_SENTINEL as their userData and are flagged disabled,
+        # so they don't normally fire this slot.  Belt + suspenders
+        # in case a future Qt internal change starts forwarding
+        # clicks on disabled items through the currentIndexChanged
+        # signal -- just no-op and don't poke Radio.
+        if device == self._SEP_SENTINEL:
+            return
         # device is None for "Auto", or an int for a specific index.
         self.radio.set_pc_audio_device_index(device)
 
