@@ -356,16 +356,111 @@ and PC sound card output both run noticeably cleaner — fewer
 clicks/ticks during normal listening.  Worth keeping TCI server
 on as a default even if you're not using a decoder app.
 
-### Legacy: VAC (Virtual Audio Cable)
+### Alternative: VAC (Virtual Audio Cable)
 
-For apps that don't speak TCI, install VB-Cable or similar VAC
-software, then use the **Settings → Audio → Output device** picker.
-The virtual cable appears in the device list (usually under
-WASAPI host API).  Pick it and Lyra's audio routes there for the
-decoder to consume — no hardware loopback.
+For apps that **don't** speak TCI, for **recording** Lyra's audio
+to a DAW (Audacity / Reaper / OBS), or for fanning out to **multiple
+decoders simultaneously** from one Lyra instance, a virtual audio
+cable is the right tool.  No hardware loopback, no second sound
+card, no cable between your speakers and your mic jack.
 
-VAC has higher latency than TCI audio and requires separate
-software install.  Use only when TCI isn't available.
+#### What's a virtual audio cable?
+
+A small driver that exposes itself to Windows as a pair of audio
+devices: one **output** that any app can play to, and one **input**
+that any app can record from.  Anything written to the output side
+appears on the input side, byte-perfect, with very low latency.
+Lyra plays to the output; the decoder records from the input.  Same
+PC, no physical cable, no analog conversion.
+
+#### Pick a VAC product
+
+| Product | License | Notes |
+|---|---|---|
+| **VB-Audio VB-Cable** | Free (donationware) | One cable. Most operators only need one. Easiest install. <https://vb-audio.com/Cable/> |
+| **VB-Audio VB-Cable A+B Bundle** | Paid (~$10) | Two extra cables (A, B) for multi-decoder routing. Useful if you run FT8 + JS8Call + a logger all from one Lyra. |
+| **VAC (Eugene Muzychenko)** | Paid (~$30) | The classic — 256 cable instances if you really need them. Overkill for normal ham use. |
+
+VB-Cable is the right starting point for 95% of operators.
+
+#### Set up the route (3 clicks)
+
+After the VAC product is installed (it usually needs one reboot
+to register the virtual devices):
+
+1. **Lyra side** — Settings → Audio:
+   - **Output sink** = PC Soundcard
+   - **Output device** = the VAC product's **input** half.
+     With VB-Cable this is **"CABLE Input (VB-Audio Virtual
+     Cable)"** in the device dropdown.  The host-API prefix is
+     usually `[WASAPI]`.
+2. **Decoder side** — in WSJT-X / FLDigi / etc., set the audio
+   input device to the **output** half of the same cable.  With
+   VB-Cable this is **"CABLE Output (VB-Audio Virtual Cable)"**.
+3. **Verify** — Lyra's audio meter should be moving, and your
+   decoder should be showing waterfall activity that matches
+   what Lyra is hearing.  No sound from your speakers is
+   normal in this mode — Lyra's audio is going to the cable,
+   not your speakers.  Switch the Output sink back to your
+   real speakers (or HL2 audio jack) when you want to listen.
+
+#### Per-app setup notes
+
+* **WSJT-X / JS8Call**: File → Settings → Audio → Soundcard.
+  Input = CABLE Output, Output = your normal mic chain (or
+  another VAC cable if you're doing TX modulation through Lyra
+  too — v0.2 territory).
+* **FLDigi**: Configure → Soundcard → Audio devices → PortAudio
+  → Capture: CABLE Output.  Playback: whatever you use for TX
+  audio out (irrelevant in receive-only).
+* **MSHV / WSPR / others**: same pattern — pick CABLE Output
+  as the audio input.  If the app shows multiple host APIs,
+  WASAPI is usually the lowest-latency choice.
+
+#### Why TCI is still the recommended route
+
+TCI handles **both** rig control AND audio over the same
+WebSocket — set it up once, the decoder sees both halves at
+once.  VAC handles audio only — you still need to wire up rig
+control separately (CAT serial / Hamlib).  More moving parts,
+more places for it to drift.
+
+But VAC has real uses TCI can't replace:
+
+* Apps that don't speak TCI at all (most older logging suites,
+  some commercial software).
+* Recording Lyra's audio to a DAW for later review.
+* Fanning out the same audio to two or three decoders at once
+  (one cable per decoder).  TCI's WebSocket can also fan out,
+  but VAC is a more mature pattern.
+
+#### Latency
+
+VAC adds roughly **10–20 ms** of latency on top of Lyra's
+PC-Soundcard path (~172 ms post-§15.7).  Plenty fast for FT8 /
+JS8 / RTTY / PSK — those modes have multi-second symbol periods
+where 20 ms is invisible.  Borderline for live operating-mode
+voice over a decoder, but you'd use TCI for that anyway.
+
+#### Sanity-check + troubleshooting
+
+* **"VAC cable doesn't show up in the dropdown"** — Lyra
+  enumerates audio devices at startup.  Restart Lyra after the
+  VAC installer finishes its post-install reboot.
+* **"Decoder shows silence on the waterfall"** — verify Lyra's
+  Output device is actually pointed at the cable's *input* side
+  (`CABLE Input`), and the decoder is reading from the *output*
+  side (`CABLE Output`).  Easy to mix up.
+* **"Audio is choppy"** — VAC products default to a small buffer
+  for low latency.  If your decoder is dropping samples, the VAC
+  product's control panel usually has a buffer-size slider —
+  raise it and try again.
+* **"I want to hear and decode at the same time"** — install
+  VB-Cable A+B bundle and route Lyra to cable A, then use the
+  VAC product's built-in monitor or a third tool to fan cable A
+  to both your speakers and cable B (and point the decoder at
+  cable B).  Or just use TCI, which Lyra streams to the decoder
+  while also playing through your speakers natively.
 
 ## Latency
 
