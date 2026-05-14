@@ -3363,6 +3363,108 @@ Exclusive lands.
 Status: **PARKED** — items 1-3 are v0.1.x patch candidates,
 item 4 is v0.2-bundled, item 5 is wait-and-see.
 
+### 15.13 — Compression-mode Lit-Arc chip moved to v0.2 (DEFERRED 2026-05-13)
+
+The consensus plan §7.1(c) originally targeted the Compression
+chip for the v0.1.0 polish pass.  Reviewed at GA pre-flight
+(2026-05-13) and **deferred to v0.2** for a concrete reason:
+
+The plan's RX-side signal source was ``Radio.agc_gain_db`` — but
+that name was aspirational; the actual implementation uses the
+existing ``agc_action_db`` signal (the same one that already
+drives the AGC chip).  Shipping a COMP chip in v0.1 GA would
+mean **two chips displaying the identical signal** with only a
+color/label distinction.  Operators would see them light up in
+lockstep with no functional difference — confusing UX, not a
+feature.
+
+The chip's design value emerges in v0.2 when TX bring-up adds
+``Radio.tx_comp_db_changed`` (sourced from WDSP
+``GetTXAMeter(TXA_LVLR_GAIN)``).  At that point the COMP chip
+auto-switches signal source on MOX edges per consensus-plan
+§8.4 — RX-side AGC gain on receive, TX-side leveler gain on
+transmit — and the two chips finally carry distinct meanings.
+
+**Scope when revived in v0.2:**
+
+* Add ``MODE_COMP`` to ``smeter.py`` ``AVAILABLE_MODES`` tuple
+* Cool/neutral color gradient (consensus plan §7.1(c) — distinct
+  from AGC's blue gradient so operator-distinguishable when both
+  visible)
+* Wire RX-side: existing ``agc_action_db``
+* Wire TX-side: new ``tx_comp_db_changed`` (lands with WDSP
+  ``compress.c`` cffi binding in v0.2.1 per CLAUDE.md §4.1)
+* MOX-edge auto-switch lives in the chip's signal-routing code
+  (read on the dispatch state change, swap connection target)
+* Help-doc update: ``docs/help/smeter.md`` gets a COMP section
+
+Status: **DEFERRED to v0.2** — re-read this section when wiring
+the TX leveler meter signal chain in v0.2.1.  All other v0.1
+GA Phase 4 items proceed as planned.
+
+### 15.14 — Auto-mute-on-TX rules moved to v0.2 (DEFERRED 2026-05-13)
+
+The consensus plan §8.1 / Phase 4 §7 (v0.1.0) targeted operator
+settings for ``MuteRX1OnVFOBTX`` and ``MuteRX2OnVFOATX`` — auto-
+mute rules that would fire on PTT edges so the operator doesn't
+hear their own transmit through the receiver.
+
+A pre-wire implementation landed briefly in v0.1.0 GA prep
+(commit ``b8eb8d0``, 2026-05-13) — Radio-side state + signals +
+setters + QSettings persistence + two checkboxes on Settings →
+Audio.  **Reverted same session** at operator pushback because:
+
+1. **Lyra's UX discipline says "if it's on screen, it does
+   something."**  Two checkboxes that explicitly state "doesn't
+   activate until v0.2" violate the rule we've been holding
+   ourselves to (see NR2 strength slider hidden in WDSP mode,
+   Audio Leveler deleted when WDSP AGC subsumed it, Compression
+   chip deferral §15.13).
+2. **Manual Mute-A / Mute-B buttons already cover the operating
+   case.**  Per Phase 3.E.1 hotfix v0.16 (CLAUDE.md §6.2), the
+   per-RX mute buttons are always visible on the TUNING panel.
+   Operators can manually mute either RX before keying up — the
+   auto-mute is convenience, not necessity.
+3. **The "pre-configure for v0.2" rationale is weak.** Operators
+   will configure it in v0.2 anyway; saving 10 seconds of clicks
+   isn't worth months of inert UI.
+4. **Natural home is v0.2.**  When the PTT state machine lands
+   and the AAmixer auto-mute logic is written, the Settings UI
+   + state + persistence all want to land in the same commit as
+   the behavior they drive.
+
+**Scope when revived in v0.2:**
+
+* 2 new Radio signals: ``mute_rx1_on_vfob_tx_changed``,
+  ``mute_rx2_on_vfoa_tx_changed``
+* 2 new state attributes: ``_mute_rx1_on_vfob_tx``,
+  ``_mute_rx2_on_vfoa_tx`` (defaults False)
+* 2 new setters: ``set_mute_rx1_on_vfob_tx``,
+  ``set_mute_rx2_on_vfoa_tx`` (persist immediately to
+  ``dual_rx/mute_rx*_on_vfo*_tx`` QSettings keys + emit signal)
+* 2 new ``@property`` accessors
+* ``autoload_rx2_state`` extension for both prefs
+* New "Dual-RX behavior during transmit" ``QGroupBox`` on the
+  Audio tab in ``settings_dialog.py`` (after the host API
+  picker, before ``v.addStretch(1)``)
+* Bidirectional sync (Radio signal ↔ checkbox)
+* **Plus the behavior**: AAmixer reads ``_mute_rx*_on_vfo*_tx``
+  on MOX edges (via dispatch-state subscriber pattern, NOT
+  hardcoded if/else) and routes mute accordingly
+
+Commit ``b8eb8d0`` is in git history if anyone needs to recover
+the pre-wire skeleton — it's a 183-line diff that's mostly
+correct, just needs the behavior layer added on top.  Read it
+with ``git show b8eb8d0`` when picking back up.
+
+QSettings keys ``dual_rx/mute_rx1_on_vfob_tx`` and
+``dual_rx/mute_rx2_on_vfoa_tx`` are reserved.
+
+Status: **DEFERRED to v0.2** — re-read this section when
+writing the PTT state machine + AAmixer auto-mute path.  GA
+Phase 4 punch list shrinks to AAmixer state badge + TCI RX2
+channel (items 4 + 5 only).
+
 ---
 
 *Last updated: 2026-05-11 — Round 3 amendments applied (operator
