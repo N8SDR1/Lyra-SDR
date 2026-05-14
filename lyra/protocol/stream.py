@@ -629,16 +629,36 @@ class HL2Stream:
                 self._tx_latency_ms = 15
         else:
             self._tx_latency_ms = 15
+        # ── C&C round-robin (v0.2 Phase 1 refactor) ─────────────────
+        # Authoritative cycle is ``_cc_cycle`` (an ordered list of
+        # C0-byte register addresses).  The writer at
+        # ``_ep2_writer_loop`` walks this list using ``_cc_rr_idx``
+        # to pick the next entry per UDP datagram.
+        #
+        # Why this replaces the v0.1 "sorted(_cc_registers.keys())"
+        # pattern: it lets Phase 1 add new registers in HPSDR P1
+        # case-N ordering AND it unblocks the MOX-edge jump-to-
+        # frame-2 retune behaviour (forces a DDC0 freq update on
+        # every TX/RX state edge -- impossible to express under a
+        # sorted-keys scheme since there's no notion of "case
+        # index" to jump to).  Phase 1 keeps the cycle list
+        # populated lazily (setters call ``_register_cc_slot`` to
+        # add a new C0 the first time they write it); future phases
+        # can wire the MOX-edge jump-index behaviour by inspecting
+        # ``_cc_cycle`` ordering.
         self._cc_registers: dict[int, tuple[int, int, int, int]] = {
             0x00: (SAMPLE_RATES[sample_rate], 0x00, 0x00,
                    self._config_c4),                # general settings
             0x2e: (0, 0, 12 & 0x1F,                 # TX latency (HL2 reg 0x17)
                    self._tx_latency_ms & 0x7F),
         }
-        self._cc_cycle: tuple[int, ...] = (
-            0x00,  # general
-            0x2e,  # TX latency
-        )
+        # Mutable list (was a tuple in v0.1 — never actually read by
+        # the writer; Agent L Round 3 finding 2026-05-14).  Phase 1
+        # setters extend this via ``_register_cc_slot``.
+        self._cc_cycle: list[int] = [
+            0x00,  # general settings (always first in the cycle)
+            0x2e,  # frame 17 — TX latency + ptt_hang (HL2 reg 0x17)
+        ]
         self._cc_rr_idx: int = 0
         self._cc_lock = threading.Lock()
         # Legacy fallback — the old code path stored last-sent register
@@ -1059,6 +1079,23 @@ class HL2Stream:
                 self._ep2_send_sem.release()
             return fade_n
 
+    def _register_cc_slot(self, c0: int) -> None:
+        """Ensure ``c0`` is present in ``_cc_cycle`` so the writer
+        round-robin will visit this register.  Idempotent.
+
+        Caller MUST be holding ``_cc_lock``.  Appends to the cycle
+        in insertion order -- the writer walks the list in the
+        order setters first register their slots.  When callers
+        register slots in HPSDR P1 case-N order, the resulting
+        cycle preserves that ordering for the writer.
+
+        v0.2 Phase 1 helper.  Replaces the v0.1 ``sorted(keys)``
+        anti-pattern.  See ``__init__`` block at line ~632 for
+        rationale.
+        """
+        if c0 not in self._cc_cycle:
+            self._cc_cycle.append(c0)
+
     def _send_cc(self, c0: int, c1: int, c2: int, c3: int, c4: int):
         """Send one C&C write via EP2. Thread-safe.
 
@@ -1080,8 +1117,11 @@ class HL2Stream:
             return
         # Always update the register table so the writer thread's
         # round-robin picks up the new value on the next iteration.
+        # Phase 1: also register the slot in the cycle list so the
+        # writer actually visits it.
         with self._cc_lock:
             self._cc_registers[c0] = (c1, c2, c3, c4)
+            self._register_cc_slot(c0)
         # Only do the immediate UDP emit when audio injection is
         # OFF (startup before any AK4951Sink is attached, or
         # PC Soundcard mode).  In that mode ``_build_ep2_frame``
@@ -1501,19 +1541,23 @@ class HL2Stream:
                 # send it.  All wrapped in a single try/except so a
                 # transient socket / build error does not kill the
                 # writer thread; we just log and continue.
+                #
+                # v0.2 Phase 1: cycle walks ``_cc_cycle`` (the
+                # operator-ordered list) instead of ``sorted(keys)``.
+                # Setters that mutate ``_cc_registers`` also call
+                # ``_register_cc_slot(c0)`` so the cycle stays in
+                # sync.  The writer never falls through to the
+                # "empty registers" branch in practice (the dict
+                # is seeded at __init__ with 0x00 and 0x2e), but
+                # the fallback stays as belt-and-suspenders.
                 try:
                     with self._cc_lock:
-                        # Round-robin over current dict keys (sorted
-                        # for deterministic order).  Round-9 baseline
-                        # behaviour.  Setters like ``set_lna_gain_db``
-                        # add entries dynamically (e.g. 0x14 for
-                        # LNA) and this picks them up automatically.
-                        if self._cc_registers:
-                            keys = sorted(self._cc_registers.keys())
-                            c0 = keys[self._cc_rr_idx % len(keys)]
+                        if self._cc_cycle:
+                            c0 = self._cc_cycle[
+                                self._cc_rr_idx % len(self._cc_cycle)]
                             c1, c2, c3, c4 = self._cc_registers[c0]
                             self._cc_rr_idx = (
-                                self._cc_rr_idx + 1) % len(keys)
+                                self._cc_rr_idx + 1) % len(self._cc_cycle)
                         else:
                             c0 = c1 = c2 = c3 = 0
                             c4 = self._config_c4
@@ -1951,6 +1995,7 @@ class HL2Stream:
         # rediscover it.)
         with self._cc_lock:
             self._cc_registers[c0] = (c1, c2, c3, c4)
+            self._register_cc_slot(c0)
         # Note: NOT updating ``_keepalive_cc`` here.  Keepalive is
         # the most-recent-RX1-tune fallback path (legacy single-RX
         # behavior); leaving it alone preserves the v0.0.9.x
@@ -1989,6 +2034,7 @@ class HL2Stream:
         # the gateware imperceptibly fast.
         with self._cc_lock:
             self._cc_registers[c0] = (c1, c2, c3, c4)
+            self._register_cc_slot(c0)
         self._keepalive_cc = (c0, c1, c2, c3, c4)
 
     def set_sample_rate(self, rate: int):
@@ -2009,6 +2055,7 @@ class HL2Stream:
         # for the full rationale.
         with self._cc_lock:
             self._cc_registers[0x00] = (rate_code, 0x00, 0x00, self._config_c4)
+            self._register_cc_slot(0x00)
         self._keepalive_cc = (0x00, rate_code, 0x00, 0x00, self._config_c4)
 
     def reassert_rate_keepalive(self):
@@ -2038,6 +2085,7 @@ class HL2Stream:
         # rationale.
         with self._cc_lock:
             self._cc_registers[0x14] = (0, 0, 0, c4)
+            self._register_cc_slot(0x14)
         self._keepalive_cc = (0x14, 0, 0, 0, c4)
 
     def stop(self):
