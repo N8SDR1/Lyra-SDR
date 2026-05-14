@@ -768,6 +768,44 @@ class HL2Stream:
         # initialization here ensures v0.2/v0.3 consumers can read
         # the flag without an AttributeError.
         self._puresignal_run: bool = False
+
+        # ── HPSDR P1 frame 11 (register 0x14) state (v0.2 Phase 1) ──
+        # Frame 11 carries six axes of HL2 hardware state in one
+        # register, all four bytes meaningful:
+        #
+        # * C1: rx0/rx1/rx2 preamp bits + mic-switch bits
+        #       (mic_bias/mic_ptt/mic_trs)
+        # * C2: line_in_gain (5-bit) | (puresignal_run bit 6)
+        # * C3: user_dig_out (4-bit, drives HL2 expansion-header digital
+        #       output pins)
+        # * C4: step attenuator -- TX value when MOX asserted, RX value
+        #       otherwise.  Encoded as (db + 12) & 0x3F with override
+        #       bit 6 set.  HL2 range -12..+48 dB for RX, -28..+31 dB
+        #       for TX (per capabilities.tx_attenuator_range).
+        #
+        # v0.1 wrote only C4 from set_lna_gain_db and left C1/C2/C3
+        # at zero.  That worked "by accident" because the operator's
+        # other axes (preamps, mic switches, line-in gain, dig-out)
+        # also defaulted to zero.  v0.2 Phase 1 refactors frame 11
+        # to compose all four bytes from state via _compose_frame_11()
+        # so subsequent Phase 1 commits (drive level, TX step-attn,
+        # MOX bit emission) don't trample these axes when they write
+        # the same register.
+        #
+        # All defaults zero/False -- matches HL2 fresh-power-up state
+        # and preserves v0.1 wire behaviour for fresh installs.
+        self._rx_preamp_bits: int = 0        # 3-bit: rx0/rx1/rx2 preamps
+        self._mic_bias_enabled: bool = False
+        self._mic_ptt_enabled: bool = False
+        self._mic_trs_enabled: bool = False
+        self._line_in_gain: int = 0          # 5-bit, 0..31
+        self._user_dig_out: int = 0          # 4-bit, 0..15
+        self._rx_step_attn_db: int = 0       # operator-tunable via
+                                             # set_lna_gain_db (Lyra calls
+                                             # this "LNA gain" historically)
+        self._tx_step_attn_db: int = 0       # operator-tunable in v0.2.x
+                                             # via drive-power slider
+
         # ── EP2 writer thread state (v0.0.9.2 Commit 4) ─────────────
         # Dedicated EP2 writer thread runs the host->radio frame send
         # at the codec's audio cadence (~380 Hz = 48 kHz / 126
@@ -1095,6 +1133,76 @@ class HL2Stream:
         """
         if c0 not in self._cc_cycle:
             self._cc_cycle.append(c0)
+
+    def _compose_frame_11(self) -> tuple[int, int, int, int]:
+        """Compose HPSDR P1 frame 11 (register 0x14) from current
+        state.  Returns the (C1, C2, C3, C4) tuple ready for the
+        EP2 writer's round-robin.
+
+        Layout:
+        * C1: rx0/rx1/rx2 preamp bits (bits 0-2) + mic-switch bits
+              (mic_bias bit 4, mic_ptt bit 5, mic_trs bit 6)
+        * C2: line_in_gain (5-bit) | (puresignal_run << 6)
+        * C3: user_dig_out (4-bit) -- HL2 expansion-header dig-out
+        * C4: step attenuator with override-enable bit 6 set.  TX
+              value when ``dispatch_state.mox`` asserted, RX value
+              otherwise.  Encoded as ``0x40 | ((db + 12) & 0x3F)``.
+
+        Thread-safe to call from any thread (reads atomic int/bool
+        attributes + a snapshot of the frozen dispatch_state via
+        the provider).  Does NOT acquire any locks itself -- caller
+        is responsible for taking ``_cc_lock`` if they intend to
+        write the result into ``_cc_registers``.  ``_refresh_frame_11``
+        is the lock-acquiring sibling.
+
+        v0.2 Phase 1: MOX is always False today (no PTT state
+        machine wired yet -- item 8 of Phase 1).  Composer reads
+        the live state regardless so the TX-step-attn path is
+        ready the moment MOX wires up.
+        """
+        # C1 -- preamps and mic switches
+        c1 = self._rx_preamp_bits & 0x07
+        if self._mic_bias_enabled:
+            c1 |= 0x10
+        if self._mic_ptt_enabled:
+            c1 |= 0x20
+        if self._mic_trs_enabled:
+            c1 |= 0x40
+        # C2 -- line-in gain and PureSignal run bit
+        c2 = self._line_in_gain & 0x1F
+        if self._puresignal_run:
+            c2 |= 0x40
+        # C3 -- user digital output pins
+        c3 = self._user_dig_out & 0x0F
+        # C4 -- MOX-gated step attenuator with override-enable.
+        # Read dispatch_state via the provider (set by Radio when
+        # the stream is bound; defaults None during early init).
+        mox = False
+        if self._dispatch_state_provider is not None:
+            try:
+                mox = bool(self._dispatch_state_provider().mox)
+            except Exception:
+                mox = False
+        step_attn_db = (self._tx_step_attn_db if mox
+                        else self._rx_step_attn_db)
+        c4 = 0x40 | ((int(step_attn_db) + 12) & 0x3F)
+        return (c1, c2, c3, c4)
+
+    def _refresh_frame_11(self) -> None:
+        """Recompute frame 11 and cache it in ``_cc_registers[0x14]``.
+
+        Call this from any setter that mutates frame-11 state
+        (set_lna_gain_db, future mic-bias / line-in / user-dig-out
+        setters, future TX-step-attn setter, future MOX-edge handler).
+        Idempotent w.r.t. cycle-list membership.
+
+        Caller MUST NOT be holding ``_cc_lock`` -- this method
+        acquires it.
+        """
+        c1, c2, c3, c4 = self._compose_frame_11()
+        with self._cc_lock:
+            self._cc_registers[0x14] = (c1, c2, c3, c4)
+            self._register_cc_slot(0x14)
 
     def _send_cc(self, c0: int, c1: int, c2: int, c3: int, c4: int):
         """Send one C&C write via EP2. Thread-safe.
@@ -2067,26 +2175,34 @@ class HL2Stream:
         return
 
     def set_lna_gain_db(self, gain_db: int):
-        """Set HL2 LNA gain in dB. Range -12..+48.
+        """Set HL2 RX step attenuator (operator-facing "LNA gain") in dB.
+        Range -12..+48.
 
-        HL2 gateware: C0=0x14, C4[7:6]=01 (override enable), C4[5:0]=gain_db+12.
+        Updates the cached frame 11 (HPSDR P1 register 0x14) via the
+        composer so all four bytes carry coherent state.  The C4
+        byte encodes the value as ``0x40 | ((db + 12) & 0x3F)``
+        with the override-enable bit 6 set; C1/C2/C3 carry the
+        operator's preamp / mic-switch / line-in / dig-out state
+        (defaults to zero on a fresh install).
+
+        Auto-LNA fires set_lna_gain_db roughly 1-2x per second under
+        normal band-noise variation.  Path C.2 audio-pop discipline:
+        no direct _send_cc here -- the EP2 writer thread re-emits
+        the cached register on its next round-robin tick (~few ms)
+        so the new value reaches the gateware imperceptibly fast.
+        See _set_rx1_freq for full rationale.
         """
         if not -12 <= gain_db <= 48:
             raise ValueError("gain_db must be in -12..+48")
         if self._sock is None:
             raise RuntimeError("stream not started")
-        c4 = 0x40 | ((gain_db + 12) & 0x3F)
-        # Path C.2 (audio-pop fix): NO direct _send_cc here -- it
-        # would drain 126 audio samples without consuming a
-        # semaphore signal and click the AK4951.  Auto-LNA fires
-        # set_lna_gain_db roughly 1-2x per second under normal
-        # band-noise variation, so this is the dominant pop source
-        # we observed before the fix.  See _set_rx1_freq for full
-        # rationale.
-        with self._cc_lock:
-            self._cc_registers[0x14] = (0, 0, 0, c4)
-            self._register_cc_slot(0x14)
-        self._keepalive_cc = (0x14, 0, 0, 0, c4)
+        self._rx_step_attn_db = int(gain_db)
+        self._refresh_frame_11()
+        # Keepalive fallback (vestigial; v0.2 Phase 1 item 10 cleans
+        # this up).  Synthesize the legacy 5-tuple from the cached
+        # frame 11 so any future reader sees consistent data.
+        c1, c2, c3, c4 = self._cc_registers.get(0x14, (0, 0, 0, 0))
+        self._keepalive_cc = (0x14, c1, c2, c3, c4)
 
     def stop(self):
         self._stop_event.set()
