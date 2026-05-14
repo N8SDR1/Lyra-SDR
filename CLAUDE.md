@@ -3661,6 +3661,196 @@ or wait two weeks.
 Status: **PARKED** — locked scope; ready to execute when
 operator picks it up.  v0.2 TX work waits behind this release.
 
+### 15.17 — DSP+Audio panel top-row redesign (PARKED 2026-05-14, scope: v0.1.2)
+
+Operator-proposed cosmetic redesign of the DSP+Audio panel's
+top row (2026-05-14, post v0.1.0 GA conversation).  Replaces
+the three horizontal sliders (Vol RX1, Vol RX2, AF Gain) with
+compact "[−] value [+]" stepper-readout widgets, banishes the
+"Out" audio-path picker to a small icon-button popup on the
+panel header (and ultimately to Settings → Audio for the
+set-once posture).  Net effect: DSP+Audio panel top row loses
+~150 px of horizontal real estate while gaining numeric
+precision and accidental-drag immunity.
+
+**Code is being written this session (2026-05-14) but commits
+are HELD on the feature branch until the v0.1.2 release
+window.**  No push, no build, no installer.  See "Workflow"
+below.
+
+#### Confirmed design decisions
+
+| Decision | Locked value |
+|----------|--------------|
+| Step size (1 click) | 1 unit (1 dB for Vol + AF Gain) |
+| Shift + click step | 5 units (5 dB) |
+| Vol RX1 / RX2 unit | **dB** (matches AF Gain idiom) |
+| Vol range (UI) | −60 dB ... 0 dB |
+| Vol internal storage | unchanged — float 0.0..1.0 linear (UI converts via 20·log10 for display, 10^(dB/20) for set) |
+| Vol floor display | "−60 dB" (not "−∞" — below-floor is Mute-A/Mute-B territory) |
+| AF Gain range | 0 ... +80 dB (unchanged) |
+| Reset-to-default gesture | None (operator: not needed) |
+| Mouse-wheel modifier | Single step per notch, no Shift modifier needed |
+| Click-and-hold ramp | 1 step immediately → 400 ms pause → 12 Hz repeat |
+| Right-click readout | Opens QInputDialog for exact value entry (existing AGC-threshold gesture pattern) |
+| "Out" picker placement | **Option B** — small icon-button on DSP+Audio header strip pops a 2-item menu (HL2 jack / PC Soundcard).  Future: 3-item menu when VAC support lands. |
+| Mute-A / Mute-B placement | Unchanged — always-visible buttons next to the Vol stepper widgets (per §6.2 hotfix v0.16) |
+
+#### Widget API (new file)
+
+``lyra/ui/widgets/stepper_readout.py`` — reusable Qt widget,
+roughly:
+
+```python
+class StepperReadout(QWidget):
+    valueChanged = Signal(float)          # emits on every change
+
+    def __init__(self,
+                 label: str,               # e.g. "Vol RX1"
+                 vmin: float, vmax: float,
+                 step: float = 1.0,
+                 shift_step: float = 5.0,
+                 unit: str = "dB",
+                 decimals: int = 0,
+                 parent=None): ...
+
+    # layout: [label] [−] [value]  [+]
+    # children: QPushButton("−"), QLabel(value), QPushButton("+")
+    #
+    # features:
+    #   - click [−]/[+] → step or shift_step (Shift held)
+    #   - click-and-hold → ramp (400 ms pause, 12 Hz repeat,
+    #     step accelerates after 2 sec to shift_step granularity)
+    #   - mouse-wheel over widget → step
+    #   - right-click value label → QInputDialog typed entry
+    #   - palette-aware (inherits Lyra theme)
+    #   - emits valueChanged on every step / typed entry
+    #
+    # operator-facing API:
+    #   value() -> float
+    #   setValue(float) -> None    # clamps to [vmin, vmax]
+    #   setRange(vmin, vmax) -> None
+```
+
+Three instances on the panel: Vol RX1, Vol RX2 (with linear↔dB
+shim in the wiring layer), AF Gain (direct dB pass-through).
+
+#### Files affected
+
+1. **NEW** ``lyra/ui/widgets/stepper_readout.py`` (~150 LOC) —
+   the reusable widget.
+2. ``lyra/ui/widgets/__init__.py`` — may need creating; exports
+   StepperReadout for clean imports.
+3. ``lyra/ui/panels.py`` — DspPanel top row rewrite.  Replace
+   three QSlider instances with three StepperReadout instances.
+   Replace "Out" QComboBox with a small QToolButton in the
+   header strip that pops a QMenu (HL2 jack / PC Soundcard).
+   Remove the now-unused slider/combobox slot handlers; add
+   new slot handlers calling the existing
+   ``radio.set_volume(..., target_rx=...)`` and
+   ``radio.set_af_gain_db(...)`` setters.
+4. ``lyra/ui/settings_dialog.py`` — AudioSettingsTab gets an
+   "Audio output" row at the top.  Same widget logic as the
+   header icon-button; both routes go through one shared
+   "set audio output" helper on Radio.
+5. ``docs/help/audio.md`` — screenshot refresh + paragraph
+   explaining the new stepper-readout idiom (right-click for
+   exact, Shift-click for 5 dB, click-and-hold for ramp).
+6. ``docs/help/dsp_audio_panel.md`` (if exists) — top-row
+   diagram update.
+
+Estimated effort: **~1 day** (widget ~3 hr, panel rewire ~2 hr,
+header icon-button ~1 hr, Audio Settings tab row ~30 min,
+help docs ~1 hr, bench-test pass ~2 hr).
+
+#### Linear ↔ dB conversion shim
+
+Vol RX1 / RX2 internal storage stays at float 0.0..1.0 (no
+QSettings migration, no Radio surface change).  Stepper widget
+displays dB; the wiring layer between widget and Radio handles
+the conversion:
+
+```python
+# panels.py DspPanel
+def _on_vol_rx1_db_changed(self, db: float) -> None:
+    # Floor: -60 dB clamps to 0.001 linear (-60 dB) so Radio's
+    # 0.0..1.0 invariant holds without ever hitting exact 0.0
+    # (which is Mute-A/Mute-B's job).
+    if db <= -60.0:
+        linear = 0.001
+    else:
+        linear = 10.0 ** (db / 20.0)
+    linear = min(linear, 1.0)
+    self._radio.set_volume(linear, target_rx=1)
+
+def _on_radio_vol_rx1_changed(self, linear: float) -> None:
+    # Inverse: clamp and display
+    if linear <= 0.001:
+        db = -60.0
+    else:
+        db = 20.0 * math.log10(max(linear, 1e-6))
+    self.vol_rx1_stepper.setValue(db)  # widget rounds to 1 dB
+```
+
+Mute-A / Mute-B continue to work in parallel — they set
+``_muted_rx*`` independently of ``_volume_rx*``, so muting then
+unmuting restores the pre-mute Vol value cleanly.
+
+#### Header icon-button for Out (Option B detail)
+
+Pattern: a small ``QToolButton`` with ``InstantPopup`` style on
+the DspPanel header strip (next to the existing panel title /
+help button).  Tooltip = "Audio output: [current]".  Click
+pops a ``QMenu`` with checkable actions:
+
+* ☑ HL2 audio jack
+* ☐ PC Soundcard
+* (future: ☐ Virtual Audio Cable — added in §15.12-VAC work)
+
+Icon: a small headphone / speaker glyph that subtly tints to
+reflect current output (blue for HL2 jack since it's the
+direct-codec path, amber for PC Soundcard since it's the
+host-side path).  Same idiom as the existing TCI dot.
+
+Persistence: existing ``audio/output`` QSettings key (no
+migration).
+
+#### Workflow — implement now, hold push / build
+
+Operator decision 2026-05-14: implement and commit this work
+locally during the same session as the §15.16 scope-lock, but
+**hold push to origin and hold build/installer** until the
+v0.1.2 release window opens.  Rationale:
+
+* v0.1.0 GA already shipped this morning — pushing
+  cosmetic-redesign commits to ``main`` minutes later muddies
+  the release timeline.
+* v0.1.1 is the §15.16 audio-routing batch — this redesign
+  doesn't fit that narrative.
+* v0.1.2 is the natural slot — "Polish" release where this
+  is the headline feature alongside any other §15.x
+  cosmetic items that accumulate.
+* Local commits on ``feature/v0.0.9.6-audio-foundation``
+  preserve the work + author-time without committing it to
+  the published history yet.  If v0.1.1 takes priority later,
+  this batch can wait; if v0.1.2 arrives first, push +
+  build then.
+
+When v0.1.2 release window opens: ``git push origin
+feature/v0.0.9.6-audio-foundation`` carries everything
+forward; standard release ritual per CLAUDE.md §11 applies.
+
+#### When to revisit
+
+* When v0.1.2 release window opens (after v0.1.1 ships).
+* Or sooner if a tester reports the current sliders are
+  causing accidental Vol changes — at which point this
+  becomes a v0.1.1.x patch and we re-evaluate the scope.
+
+Status: **PARKED + IN PROGRESS LOCALLY** — code being written
+2026-05-14; commits will sit on the feature branch until v0.1.2
+push window.
+
 ---
 
 *Last updated: 2026-05-14 — **v0.1.0 GA SHIPPED.**  Production
