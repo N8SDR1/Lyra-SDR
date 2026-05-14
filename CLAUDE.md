@@ -45,6 +45,48 @@ content below has been mass-renumbered to the new scheme.
 
 **Subsequent releases (2026-05-05 onward):**
 
+- **v0.1.0** "RX2 Dual Receiver — production GA"
+  (2026-05-14) — production GA of the v0.1 line after the
+  pre2/pre3 tester flight (Brent + Timmy + N8SDR).  All pre2
+  RX2 work + pre3 audio-path latency win (PC Soundcard ear-
+  lag 434 → 172 ms via §15.7 rmatch ring + HL2 TX-latency
+  register cuts) + pre3 doc refresh ship in this release.
+  GA-specific finishing touches: diagnostic overlay 3-state
+  toggle (Settings → Radio → Full/Minimal/Off) per §15.11,
+  "Show HL2 telemetry on toolbar" Settings checkbox (separate
+  from the 3-state because HL2 T/V is genuinely useful during
+  TX), QToolBar QWidgetAction-aware slot collapse fix
+  (capturing the action returned by ``addWidget()`` so hiding
+  ADC / HL2 / CPU chips actually removes the slot instead of
+  leaving a gap), robust ``_find_main_window()`` lookup
+  sidestepping the QTabWidget reparenting that quietly broke
+  live-apply in earlier attempts.  Three-push release sequence
+  hit clean for the first time since v0.0.9.5 (feature branch
+  + tag + main fast-forward — the step v0.0.9.6 through
+  v0.0.9.9 each skipped).  Test count: 225/225 green incl.
+  Phase 0 RX1 byte-identical null gate.  v0.1.1 scope locked
+  per §15.16 (RIT + TCI RX2 + WASAPI Exclusive + VAC doc +
+  host-API grouping bundled); v0.2 TX bring-up waits behind
+  that polish release.
+
+- **v0.1.0-pre3** "RX2 Dual Receiver — latency + polish"
+  (2026-05-13) — second tester pre-release.  Headline: §15.7
+  audio-path latency investigation closed.  rmatch ring
+  default 400 → 150 ms, HL2 TX-latency register 40 → 15 ms,
+  net −275 ms PC Soundcard ear-lag while holding clean under
+  heavy DSP load (NR Mode 4 + LMS + AGC Fast on voice peaks).
+  Env-var overrides retained (``LYRA_RMATCH_RING_MS``,
+  ``LYRA_HL2_TXLATENCY_MS``, ``LYRA_TIMING_DEBUG``).  Triple-
+  agent documentation audit: README + audio/shortcuts/rx2/
+  spectrum/troubleshooting help docs refreshed for v0.1
+  reality; install guide regenerated with GPL v3+ posture +
+  ``pip install -r requirements.txt`` command.  Middle-click
+  panadapter focus swap actually wired (pre2 advertised it
+  but the handler was never plumbed).  Tester Timmy Davis
+  (KC8TYK) credited as co-contributor across CONTRIBUTORS /
+  NOTICE / README / in-app help.  MultiMeterPanel Analog
+  style retired (Lit-Arc + LED-bar only).
+
 - **v0.1.0-pre2** "RX2 Dual Receiver — tester pre-release"
   (2026-05-12) — first v0.1 line pre-release.  Lands the full
   RX2 dual-receiver feature stack: second receiver on HL2
@@ -3521,9 +3563,119 @@ Status: **DEFERRED to v0.2** — re-read this section alongside
 §15.9 (red on-air rule) when wiring TX visual state.  GA Phase
 4 punch list shrinks to just item 5 (TCI RX2 channel).
 
+### 15.16 — v0.1.1 "Polish & Audio Routing" scope lock (PARKED 2026-05-14)
+
+After v0.1.0 GA shipped (2026-05-14), operator (Rick) proposed
+bundling several small parked items into a single follow-on
+release rather than spinning each as its own v0.1.0.x patch.
+Scope **locked** during the GA post-ship conversation; capture
+it here so it survives session compaction.
+
+#### Five items bundled
+
+| # | Item | From | Effort | Value |
+|---|------|------|--------|-------|
+| 1 | **RIT** (RX-only Receiver Incremental Tuning) | §15.10 | ~1 day | Operator-requested gap from every HF rig in last 40 years |
+| 2 | **TCI RX2 channel** | "Parked for v0.2" in v0.1.0 GA | ~1 day | Critical for SDRLogger+ workflow — focused validation |
+| 3 | **WASAPI Exclusive toggle** | §15.12 item 1 | ~1–2 hr | ~15 ms PC Soundcard latency win (172 → ~155 ms) |
+| 4 | **VAC digital-modes workflow doc** | §15.12 item 2 | ~30 min | Already functional; just document for WSJT-X / FLDigi |
+| 5 | **Host-API grouping in device picker** | §15.12 item 3 | ~2 hr | Groups devices by WASAPI / ASIO / MME; ASIO foundation |
+
+**Total**: ~3–4 days of focused work + bench testing.
+
+#### Why bundle vs ship as 5 rapid-fire patches
+
+* **Zero merge conflict surface** — all five touch different
+  subsystems (tuning + DDC for RIT, TCI server + spot routing,
+  sounddevice WasapiSettings for Exclusive, help-docs for VAC,
+  Settings → Audio dropdown for host-API grouping).
+* **All RX-only** — no v0.2 TX state-machine entanglement; each
+  item is mergeable without waiting on v0.2 work.
+* **Single release ritual** — one CHANGELOG entry, one version
+  bump, one build, one bench-test pass at the end vs five.
+* **Operationally coherent narrative** — "Polish & Audio
+  Routing" reads better to testers than 0.1.0.1 / 0.1.0.2 /
+  0.1.0.3 / 0.1.0.4 / 0.1.0.5.
+
+#### Explicit deferrals (NOT in v0.1.1)
+
+* **XIT** (§15.10 second half) — renders disabled-but-visible
+  in v0.1.1.  Enable lands in v0.2 when TX path exists (~2 hr
+  enable on top of v0.1.1 RIT infrastructure).
+* **ASIO support** (§15.12 item 4) — wants the TX-side
+  monitor-latency story (key-down to sidetone, mic-to-monitor)
+  to inform implementation.  Lands in v0.2 alongside TX
+  bring-up; host-API grouping (item 5 above) lays the
+  foundation so it's a small add then.
+* **WDM-KS** (§15.12 item 5) — wait for a tester to ask.
+
+#### Implementation order (suggested when work begins)
+
+1. **VAC doc first** (~30 min, zero-risk) — operator can ship
+   the doc-only change to testers immediately if useful.
+2. **WASAPI Exclusive toggle** (~1–2 hr) — single Settings
+   checkbox + sounddevice ``WasapiSettings(exclusive=True)``;
+   smallest code surface, biggest tester latency win.
+3. **Host-API grouping** (~2 hr) — Settings → Audio dropdown
+   rewrite; lays foundation for ASIO in v0.2.
+4. **TCI RX2 channel** (~1 day) — TCI server changes touch
+   the SDRLogger+ integration that's N8SDR's daily workflow;
+   focused independent validation pass.
+5. **RIT** (~1 day) — UX changes (TUNING panel button +
+   right-click popup + Shift-click zero) + central
+   ``_compute_dds_freq_hz`` offset + persistence + spectrum
+   marker shift + help-doc.
+
+Roughly sequenced low-risk → higher-risk so a tester blocker
+on the latter items doesn't gate the earlier wins.
+
+#### Implementation refs (when work begins)
+
+* **RIT**: §15.10 has the full spec — TUNING panel ``cw_pitch_row``
+  in ``lyra/ui/panels.py`` L591, lit-button idiom matching
+  AGC/NR Mode/AEPF/LMS, QSettings keys ``radio/rit_enabled``
+  + ``radio/rit_offset_hz``, central ``+ rit_offset_hz`` in
+  ``Radio._compute_dds_freq_hz``.
+* **TCI RX2**: capability-driven; route ``set_dds(channel,
+  freq_hz)`` for channel=1 (RX2) through ``Radio.set_freq_hz(
+  target_rx=2, ...)``.  SDRLogger+ source at
+  ``Y:/Claude local/hamlog/main.py`` shows current
+  RX1-only client wiring.  No protocol changes needed.
+* **WASAPI Exclusive**: ``lyra/dsp/audio_sink.py``
+  SoundDeviceSink — add ``exclusive=True`` to
+  ``sd.WasapiSettings``, gate on ``audio/exclusive_mode``
+  QSettings key.
+* **VAC doc**: extend ``docs/help/audio.md`` with a "Digital
+  modes with VAC" section.  No code.
+* **Host-API grouping**: ``lyra/ui/settings_dialog.py``
+  AudioSettingsTab device dropdown — group by
+  ``sd.query_hostapis()`` results.  ~80 LOC.
+
+#### When to revisit
+
+Any time after v0.1.0 GA settles with operators on real bands
+and we have a sense of which (if any) field reports need
+faster patching.  No external dependency; can start tomorrow
+or wait two weeks.
+
+Status: **PARKED** — locked scope; ready to execute when
+operator picks it up.  v0.2 TX work waits behind this release.
+
 ---
 
-*Last updated: 2026-05-11 — Round 3 amendments applied (operator
+*Last updated: 2026-05-14 — **v0.1.0 GA SHIPPED.**  Production
+release of the v0.1 line after pre2/pre3 tester flight with
+Brent + Timmy + N8SDR.  Headline: RX2 dual receiver +
+stereo-split audio + focused-VFO operation + post-§15.7
+audio-path latency win + GA-specific diagnostic overlay
+3-state toggle + HL2 telemetry checkbox.  Three-push sequence
+completed (feature branch + tag + main fast-forward — the step
+the v0.0.9.6→9.9 line missed got hit this time).  GitHub
+Release published with installer attached.  §15.16 v0.1.1
+scope lock added: RIT + TCI RX2 + WASAPI Exclusive + VAC doc
++ host-API grouping bundled for one polish release; XIT + ASIO
+explicitly stay deferred to v0.2.  Earlier:
+2026-05-11 — Round 3 amendments applied (operator
 chose Option A: full sweep of all 9 R3 amendments) on top of
 Round 1 synthesis.  Round 3 changes: §7 v0.4 Brick scope marked
 non-blocking for v0.1 Phase 0 (R3-8).  Companion v0.1 plan edits:
