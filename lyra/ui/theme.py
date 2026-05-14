@@ -265,30 +265,31 @@ QPushButton#stepper_btn:disabled {{
     border-color: {qss_color(BORDER)};
 }}
 
-/* CLAUDE.md §15.17 audio-out header button -- small chip on the
-   DSP+Audio panel header that pops a menu to switch audio output
-   (HL2 audio jack / PC Soundcard / future VAC).  Sits left of the
-   help "?" badge; same cyan idiom as the help button so the two
-   read as visually related "header chips". */
-QToolButton#audio_out_header_btn {{
-    color: {qss_color(ACCENT)};
-    background: transparent;
-    border: 1px solid {qss_color(ACCENT)};
-    border-radius: 9px;
-    font-family: Consolas, monospace;
-    font-weight: 700;
-    font-size: 10px;
-    padding: 0 8px;
+/* CLAUDE.md §15.17 audio-out picker -- icon-only QToolButton in the
+   DSP+Audio levels row (after Balance) that pops a menu to switch
+   audio output (HL2 audio jack / PC Soundcard / future VAC).  Same
+   visual language as dsp_btn (cyan-tinged off-state, cyan rim on
+   hover) so the levels row reads as a single coherent control row. */
+QToolButton#audio_out_btn {{
+    color: {qss_color(TEXT_PRIMARY)};
+    background: {qss_color(BG_RECESS)};
+    border: 1px solid {qss_color(BORDER)};
+    border-radius: 4px;
+    font-size: 16px;
+    padding: 0;
     margin: 0;
 }}
-QToolButton#audio_out_header_btn:hover {{
-    color: #7ff7ff;
-    background: rgba(0, 229, 255, 50);
+QToolButton#audio_out_btn:hover {{
+    border-color: {qss_color(ACCENT)};
+    background: rgba(0, 229, 255, 18);
 }}
-QToolButton#audio_out_header_btn::menu-indicator {{
-    /* Hide Qt's default indicator -- the QMenu opens on click via
-       InstantPopup, so the chevron is redundant inside the tight
-       18 px header strip. */
+QToolButton#audio_out_btn:pressed {{
+    background: rgba(0, 229, 255, 36);
+    border-color: {qss_color(ACCENT)};
+}}
+QToolButton#audio_out_btn::menu-indicator {{
+    /* InstantPopup -- chevron is redundant inside a 38 px icon
+       button.  Tooltip + QMenu carry the affordance. */
     image: none;
     width: 0;
 }}

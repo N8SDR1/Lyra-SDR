@@ -2187,17 +2187,40 @@ class DspPanel(GlassPanel):
 
         levels.addSpacing(12)
 
-        # CLAUDE.md §15.17: the "Out" picker (audio destination -- HL2
-        # audio jack vs PC Soundcard) was moved off the levels row and
-        # onto a small icon-style QToolButton anchored on the panel
-        # header (next to the help "?" badge).  Rationale: "Out" is a
-        # set-once-per-session control, not a moment-to-moment knob,
-        # so it doesn't deserve prime levels-row real estate.  The
-        # header button stays one click away and the underlying
-        # QSettings key + Radio.set_audio_output() surface are
-        # unchanged.  Same picker is also exposed in Settings ->
-        # Audio for operators who never want to touch it again after
-        # initial setup.  See _add_audio_out_header_button below.
+        # CLAUDE.md §15.17: the verbose "Out [HL2 audio jack ▾]" combo
+        # (140 px) is replaced by a compact icon-only QToolButton with
+        # an InstantPopup menu.  Sits immediately after the Balance
+        # slider so the levels row reads left-to-right:
+        #   AF -> Vol RX1 -> Mute -> Vol RX2 -> Mute -> Bal -> [OUT]
+        # The icon reflects the current output:
+        #   🎧 = HL2 audio jack (you hear through the HL2's codec jack)
+        #   🔊 = PC Soundcard (PC speaker output)
+        # Future v0.1.x: 🔁 added when VAC support lands per §15.12 #2.
+        # Tooltip carries the full label + description; QSettings key
+        # and Radio.set_audio_output() surface are unchanged.  Same
+        # picker is also exposed in Settings -> Audio for operators
+        # who never want to touch it after initial setup.
+        from PySide6.QtWidgets import QToolButton, QMenu
+        from PySide6.QtGui import QAction
+        self.audio_out_btn = QToolButton()
+        self.audio_out_btn.setObjectName("audio_out_btn")
+        self.audio_out_btn.setCursor(Qt.PointingHandCursor)
+        self.audio_out_btn.setPopupMode(QToolButton.InstantPopup)
+        self.audio_out_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.audio_out_btn.setFixedSize(38, 28)
+        _menu = QMenu(self.audio_out_btn)
+        self._audio_out_actions = {}
+        for value, label in self._AUDIO_OUT_OPTIONS:
+            _act = QAction(label, _menu)
+            _act.setCheckable(True)
+            _act.triggered.connect(
+                lambda _checked=False, v=value:
+                    self.radio.set_audio_output(v))
+            _menu.addAction(_act)
+            self._audio_out_actions[value] = _act
+        self.audio_out_btn.setMenu(_menu)
+        self._refresh_audio_out_btn(radio.audio_output)
+        levels.addWidget(self.audio_out_btn)
 
         # Phase 3.D UX move (2026-05-12): MUTE-A / MUTE-B used to live
         # here after the Out combo, and the DSP Settings button after
@@ -2978,15 +3001,12 @@ class DspPanel(GlassPanel):
         # (they used to in the old Q-slider era; that was removed).
         # Kept no-op so future UI re-exposure has a wiring point.
         radio.notch_default_width_changed.connect(lambda _w: None)
-        # CLAUDE.md §15.17: Out picker -- small header button.  Built
-        # here (after radio is fully wired) so the initial display
-        # state reads the current radio.audio_output value.
-        self._add_audio_out_header_button(radio)
-        # Sync handler refreshes the header button's checked-item +
-        # tooltip on any external change to radio.audio_output
-        # (Settings dialog, QSettings load, future CAT/TCI).
+        # CLAUDE.md §15.17: Out picker sync handler.  The button itself
+        # is constructed inline in the levels row above; this is the
+        # external-change sync (Settings -> Audio combo, QSettings
+        # load, future CAT/TCI).
         radio.audio_output_changed.connect(
-            self._refresh_audio_out_header_btn)
+            self._refresh_audio_out_btn)
         # LNA gain + Volume feedback (previously lived in GainPanel)
         radio.gain_changed.connect(self._on_gain_changed)
         radio.volume_changed.connect(self._on_volume_changed)
@@ -4690,127 +4710,53 @@ class DspPanel(GlassPanel):
             self.agc_action_lbl.setStyleSheet(self._AGC_ACTION_STYLES[bucket])
         self.agc_action_lbl.setText(f"{action_db:+.1f} dB")
 
-    # ── §15.17 Out header button ─────────────────────────────────────
-    # Small QToolButton anchored on the DspPanel header strip (left of
-    # the help "?" badge), pops a 2-item menu (HL2 audio jack / PC
-    # Soundcard).  Same pattern as GlassPanel's help button: manually
-    # positioned in resizeEvent / showEvent because the header is a
-    # painted stripe, not a layout-managed row.  Future v0.1.x: add a
-    # third item when VAC support lands per §15.12.
+    # ── §15.17 Out picker -- icon-only QToolButton + popup menu ──────
+    # Lives inline in the levels row (built in __init__ above), right
+    # after the Balance slider so the audio chain reads left-to-right
+    # AF -> Vol/Mute -> Bal -> Out.  Icon-only with InstantPopup
+    # menu; same QSettings key and Radio.set_audio_output() surface
+    # as before so no migration is needed.
 
-    # Internal QSettings values (preserved for back-compat with
-    # pre-§15.17 installs) -> operator-facing labels.
+    # Internal QSettings values (preserved for back-compat) -> labels.
     _AUDIO_OUT_OPTIONS = (
         ("AK4951",       "HL2 audio jack"),
         ("PC Soundcard", "PC Soundcard"),
     )
-    _AUDIO_OUT_SHORT = {
-        "AK4951":       "HL2",
-        "PC Soundcard": "PC",
+    # Icons reflect the audio path:
+    #   🎧 headphones - HL2 audio jack (you hear via HL2's codec jack)
+    #   🔊 speaker    - PC Soundcard (you hear via your PC's output)
+    # Future: 🔁 routing icon when VAC support lands per §15.12 #2.
+    _AUDIO_OUT_ICON = {
+        "AK4951":       "🎧",
+        "PC Soundcard": "🔊",
     }
 
-    def _add_audio_out_header_button(self, radio) -> None:
-        """Construct the header-anchored Out picker.
-
-        Manually positioned (not layout-managed) to live on the
-        painted-header stripe.  Same anchor idiom as GlassPanel's
-        help "?" button -- see _position_audio_out_header_btn.
-        """
-        from PySide6.QtWidgets import QToolButton, QMenu
-        from PySide6.QtGui import QAction
-        self.audio_out_header_btn = QToolButton(self)
-        self.audio_out_header_btn.setObjectName("audio_out_header_btn")
-        self.audio_out_header_btn.setCursor(Qt.PointingHandCursor)
-        self.audio_out_header_btn.setPopupMode(QToolButton.InstantPopup)
-        self.audio_out_header_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        # Compact header strip is HEADER_HEIGHT=20 px tall -- match
-        # the help "?" badge size pattern.
-        self.audio_out_header_btn.setFixedHeight(18)
-
-        menu = QMenu(self.audio_out_header_btn)
-        self._audio_out_actions = {}
-        for value, label in self._AUDIO_OUT_OPTIONS:
-            act = QAction(label, menu)
-            act.setCheckable(True)
-            # Default-arg trick to capture ``value`` per iteration --
-            # without it every action would carry the last loop value.
-            act.triggered.connect(
-                lambda _checked=False, v=value:
-                    self.radio.set_audio_output(v))
-            menu.addAction(act)
-            self._audio_out_actions[value] = act
-        self.audio_out_header_btn.setMenu(menu)
-
-        # Initial state -- mirror current radio.audio_output.
-        self._refresh_audio_out_header_btn(radio.audio_output)
-        # Make sure it sits above any sibling that paints after us.
-        self.audio_out_header_btn.raise_()
-
-    def _refresh_audio_out_header_btn(self, output: str) -> None:
-        """Update the header button's label + tooltip + menu check
-        state in response to a radio.audio_output change."""
-        if not hasattr(self, "audio_out_header_btn"):
-            return  # constructed before button exists -- ignore
-        short = self._AUDIO_OUT_SHORT.get(output, output)
+    def _refresh_audio_out_btn(self, output: str) -> None:
+        """Update the icon, tooltip, and menu check state in response
+        to a radio.audio_output change (from this button itself, the
+        Settings -> Audio combo, QSettings load, or future CAT/TCI)."""
+        if not hasattr(self, "audio_out_btn"):
+            return  # signal fired before button exists -- ignore
+        icon = self._AUDIO_OUT_ICON.get(output, "?")
         full = dict(self._AUDIO_OUT_OPTIONS).get(output, output)
-        # "OUT: HL2" / "OUT: PC" -- the "OUT:" prefix is redundant
-        # given the button's home on the DSP+AUDIO header, but keeps
-        # the chip readable when the panel is floated or tear-off.
-        self.audio_out_header_btn.setText(f"OUT: {short}")
-        self.audio_out_header_btn.setToolTip(
+        self.audio_out_btn.setText(icon)
+        self.audio_out_btn.setToolTip(
             f"Audio output: {full}\n"
             f"Click to switch.\n\n"
-            f"HL2 audio jack: route audio back to the HL2 over the "
-            f"network (EP2 frames) and play through the HL2's "
-            f"onboard codec headphone jack.  Single-crystal path, "
-            f"zero clock drift, recommended for HL2 hardware.\n"
+            f"🎧 HL2 audio jack: route audio back to the HL2 over the "
+            f"network (EP2 frames) and play through the HL2's onboard "
+            f"codec headphone jack.  Single-crystal path, zero clock "
+            f"drift, recommended for HL2 hardware.\n"
             f"\n"
-            f"PC Soundcard: route audio to the host PC's default "
+            f"🔊 PC Soundcard: route audio to the host PC's default "
             f"WASAPI output device.  v0.0.9.6 enables drift "
             f"compensation via WDSP-derived adaptive resampler.")
-        # Update menu check state -- block triggered signals while
-        # we change checked, so we don't re-fire set_audio_output.
+        # Update menu check state -- block triggered signals so the
+        # setChecked() doesn't re-fire set_audio_output.
         for value, act in self._audio_out_actions.items():
             act.blockSignals(True)
             act.setChecked(value == output)
             act.blockSignals(False)
-        # Re-position after text width change (HL2 vs PC differ).
-        self._position_audio_out_header_btn()
-
-    def _position_audio_out_header_btn(self) -> None:
-        """Anchor the Out picker just left of the help "?" badge on
-        the header strip.  Falls back to far-right if there's no
-        help badge for some reason."""
-        if not hasattr(self, "audio_out_header_btn"):
-            return
-        btn = self.audio_out_header_btn
-        btn.adjustSize()
-        btn_w = btn.sizeHint().width()
-        btn_h = btn.sizeHint().height()
-        margin = 6
-        # Help button is positioned by GlassPanel._position_help_btn
-        # at (width - help_w - 8); sit just left of it.
-        help_btn = getattr(self, "_help_btn", None)
-        if help_btn is not None and help_btn.isVisible():
-            x = max(0, help_btn.x() - btn_w - margin)
-        else:
-            x = max(0, self.width() - btn_w - 8)
-        y = max(1, (self.HEADER_HEIGHT - btn_h) // 2 + 1)
-        btn.move(x, y)
-        btn.raise_()
-
-    def resizeEvent(self, ev):
-        """Reposition the Out header button on every resize.  Call
-        super() first so GlassPanel re-positions the help "?" badge
-        (we anchor relative to its post-resize x())."""
-        super().resizeEvent(ev)
-        self._position_audio_out_header_btn()
-
-    def showEvent(self, ev):
-        """Same as resizeEvent -- header buttons re-anchor on show so
-        sibling content_layout widgets can't end up drawn above."""
-        super().showEvent(ev)
-        self._position_audio_out_header_btn()
 
 
 # ── S-Meter panel (wraps the SMeter widget) ─────────────────────────────
