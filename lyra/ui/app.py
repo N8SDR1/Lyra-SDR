@@ -364,6 +364,14 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             print(f"[app] RX2 state autoload error: {exc}")
 
+        # RIT (Receiver Incremental Tuning, v0.1.1) -- TUNING panel
+        # button + signed offset.  Restore offset before enabled so
+        # the toggle sees the right value on the first push.
+        try:
+            self.radio.autoload_rit_settings()
+        except Exception as exc:
+            print(f"[app] RIT autoload error: {exc}")
+
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.
         # Start/Stop lives on the toolbar below for one-click access.

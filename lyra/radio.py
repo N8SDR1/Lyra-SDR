@@ -347,6 +347,19 @@ class Radio(QObject):
     # RX BW changes so the widget can draw the translucent passband rect.
     passband_changed = Signal(int, int)    # (low_offset_hz, high_offset_hz)
     cw_pitch_changed = Signal(int)         # Hz, operator-set CW tone
+    # RIT (Receiver Incremental Tuning) — v0.1.1 feature.  RX-only
+    # frequency offset (-9999..+9999 Hz, signed) applied to the
+    # RX1 DDS while leaving the operator-displayed VFO unchanged.
+    # Classic ham-rig idiom for chasing a slightly off-frequency DX
+    # station without retuning the main VFO.  XIT (the TX mirror)
+    # lands with v0.2 TX bring-up; v0.1.1 ships RIT only.
+    # Scope: RX1 only -- per-RX RIT deferred per §15.16 v0.1.1 scope
+    # lock (RX1-only matches "no RIT in Lyra today" baseline; v0.1.2
+    # may add per-RX after stepper redesign settles).  Applied
+    # centrally inside ``_compute_dds_freq_hz`` so every freq write
+    # to the protocol layer carries the offset.
+    rit_enabled_changed = Signal(bool)
+    rit_offset_changed  = Signal(int)      # Hz, signed (-9999..+9999)
     # CW Zero (white) line offset from the VFO marker, in Hz.
     # Vertical reference line drawn at the filter center — i.e., where
     # a clicked CW signal lands and where the audio is generated.
@@ -722,6 +735,15 @@ class Radio(QObject):
             self._cw_pitch_hz = max(200, min(1500, saved_pitch))
         except (TypeError, ValueError):
             self._cw_pitch_hz = 650
+        # RIT (Receiver Incremental Tuning) -- v0.1.1.  Offset applied
+        # to RX1 DDS only when ``_rit_enabled``.  Defaults loaded from
+        # QSettings by ``autoload_rit_settings`` after the toolbar is
+        # built (so the panel sees the correct initial button state).
+        # Constructor seeds safe defaults so the centrally-applied
+        # offset in ``_compute_dds_freq_hz`` is a no-op until the
+        # operator opts in.
+        self._rit_enabled: bool = False
+        self._rit_offset_hz: int = 0
         # Volume chain — TWO stages since 2026-04-24:
         #   AF Gain (af_gain_db): makeup gain in dB, for cases where
         #     AGC is off (digital modes like FT8 run AGC off to avoid
@@ -2439,10 +2461,22 @@ class Radio(QObject):
             vfo_hz = self._rx2_freq_hz if rx_id == 2 else self._freq_hz
         m = self._mode_rx2 if rx_id == 2 else self._mode
         if m == "CWU":
-            return int(vfo_hz) - int(self._cw_pitch_hz)
-        if m == "CWL":
-            return int(vfo_hz) + int(self._cw_pitch_hz)
-        return int(vfo_hz)
+            result = int(vfo_hz) - int(self._cw_pitch_hz)
+        elif m == "CWL":
+            result = int(vfo_hz) + int(self._cw_pitch_hz)
+        else:
+            result = int(vfo_hz)
+        # RIT (v0.1.1): RX1-only frequency offset.  Operator's
+        # displayed VFO stays put; the DDC re-tunes by RIT Hz so the
+        # operator hears a slightly different frequency without
+        # disturbing the band-stack memory / dial position.  Applied
+        # AFTER the CW-pitch offset so the two compose cleanly
+        # (RIT shifts a CW carrier the same Hz amount it shifts an
+        # SSB voice).  RX2 ignores RIT in v0.1.1 -- per-RX RIT
+        # deferred per §15.16 scope lock.
+        if rx_id == 0 and self._rit_enabled and self._rit_offset_hz:
+            result += int(self._rit_offset_hz)
+        return result
 
     @property
     def dds_freq_hz(self) -> int:
@@ -10162,6 +10196,111 @@ class Radio(QObject):
         # Pitch change shifts the DDS-vs-VFO offset by the pitch
         # delta — re-emit so the spectrum's marker tracks it.
         self._emit_marker_offset()
+
+    # ── RIT (Receiver Incremental Tuning, v0.1.1) ──────────────────
+    @property
+    def rit_enabled(self) -> bool:
+        """Whether RIT is currently shifting the RX1 DDC freq."""
+        return bool(self._rit_enabled)
+
+    @property
+    def rit_offset_hz(self) -> int:
+        """RIT offset in Hz (signed, -9999..+9999)."""
+        return int(self._rit_offset_hz)
+
+    def set_rit_enabled(self, enabled: bool) -> None:
+        """Turn RIT on or off.  When toggled, the DDC re-tunes so
+        the offset takes effect immediately (not on next operator
+        freq change).  Persists across sessions via QSettings."""
+        flag = bool(enabled)
+        if flag == self._rit_enabled:
+            return
+        self._rit_enabled = flag
+        try:
+            from PySide6.QtCore import QSettings as _QS
+            _QS("N8SDR", "Lyra").setValue("radio/rit_enabled", flag)
+        except Exception:
+            pass
+        # Re-push DDS so the offset turns on/off live.  Mirrors the
+        # idiom in ``set_cw_pitch_hz`` — the operator-displayed VFO
+        # is unchanged, only the DDS-vs-VFO offset shifts.  No-op
+        # when ``_rit_offset_hz == 0`` (toggling on with zero offset
+        # produces no audible change, which is correct).
+        self._repush_rx1_dds_after_rit_change()
+        self.rit_enabled_changed.emit(flag)
+        self._emit_marker_offset()
+
+    def set_rit_offset_hz(self, offset_hz: int) -> None:
+        """Set the RIT offset (clamped to -9999..+9999 Hz).  Only
+        affects the audible DDC tuning when RIT is enabled.
+        Persists across sessions."""
+        new_off = int(max(-9999, min(9999, int(offset_hz))))
+        if new_off == self._rit_offset_hz:
+            return
+        self._rit_offset_hz = new_off
+        try:
+            from PySide6.QtCore import QSettings as _QS
+            _QS("N8SDR", "Lyra").setValue("radio/rit_offset_hz", new_off)
+        except Exception:
+            pass
+        # Only re-push DDS when RIT is actually live; otherwise the
+        # offset is stored for the next time the operator toggles RIT
+        # on but produces no audible change right now.
+        if self._rit_enabled:
+            self._repush_rx1_dds_after_rit_change()
+            self._emit_marker_offset()
+        self.rit_offset_changed.emit(new_off)
+
+    def _repush_rx1_dds_after_rit_change(self) -> None:
+        """Mirrors the DDS re-push idiom in ``set_freq_hz`` and
+        ``set_cw_pitch_hz`` -- write the corrected DDS freq to the
+        protocol layer + flush the panadapter ring so the next
+        waterfall row reflects the new center.  Audio chain reset
+        is intentionally skipped: RIT offsets are small (kHz-scale,
+        typical use within a few hundred Hz) so the full DSP-reset
+        sledgehammer that ``set_freq_hz`` uses for cross-band tuning
+        would be overkill and would briefly mute the operator just
+        for spinning RIT.  Sample ring clear gives the spectrum +
+        waterfall a clean transition without disturbing audio."""
+        if self._stream is None:
+            return
+        try:
+            self._stream._set_rx1_freq(self._compute_dds_freq_hz())  # noqa: SLF001
+        except Exception as exc:
+            print(f"[Radio] RIT DDS re-push error: {exc}")
+            return
+        with self._ring_lock:
+            self._sample_ring.clear()
+        # Reset waterfall tick counter so the next row arrives
+        # promptly at the new center rather than inheriting timing
+        # state from the pre-RIT center.
+        self._waterfall_tick_counter = 0
+
+    def autoload_rit_settings(self) -> None:
+        """Restore RIT state from QSettings on startup.  Loads the
+        offset FIRST (so when ``set_rit_enabled`` flips on it sees
+        the correct stored offset, not zero), then the enabled flag.
+        Order matters: with enabled-first, the toggle would re-push
+        DDS at offset 0 before the real offset got restored.
+
+        Defaults: RIT off, offset 0 -- matches the constructor seed
+        so this autoload is a no-op for fresh installs."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+        except Exception:
+            return
+        if s.contains("radio/rit_offset_hz"):
+            try:
+                self.set_rit_offset_hz(int(s.value("radio/rit_offset_hz")))
+            except (TypeError, ValueError):
+                pass
+        if s.contains("radio/rit_enabled"):
+            try:
+                self.set_rit_enabled(
+                    s.value("radio/rit_enabled", False, type=bool))
+            except Exception as exc:
+                print(f"[Radio] autoload radio/rit_enabled: {exc}")
 
     # ── AGC threshold (WDSP SetRXAAGCThresh parameter, dBFS) ───────
     @property
