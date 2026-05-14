@@ -3987,9 +3987,195 @@ Status: **PARKED + IN PROGRESS LOCALLY** — code being written
 2026-05-14; commits will sit on the feature branch until v0.1.2
 push window.
 
+### 15.18 — v0.2.0 "TX Bring-up" scope lock + Phase tracker (IN PROGRESS 2026-05-14)
+
+Locks the v0.2.0 sub-release scope per consensus plan §8.5
+(Round 5 verified) and tracks Phase-by-Phase progress on the
+``feature/v0.0.9.6-audio-foundation`` branch.  Pattern mirrors
+§15.16 (the v0.1.1 scope-lock entry that got "CLOSED" stamped
+when v0.1.1 shipped).
+
+#### v0.2.0 scope (locked 2026-05-14, source: consensus §8.5)
+
+SSB-only TX with the load-bearing dynamic-range bounds shipping
+in the same release as the modulator itself.  Per the Round 5
+review the original CLAUDE.md §7 cadence (which put leveler/EQ
+in v0.2.3) would have shipped SSB transmit WITHOUT splatter-
+bound limiters for two full sub-releases.  v0.2.0 now bundles:
+
+* **Modulator chain**: SSB (USB/LSB) via WDSP TXA cffi --
+  ``wdsp_tx_engine.py`` with ``TxChannel`` class mirroring
+  ``wdsp_engine.RxChannel``.  ~40 cffi entries in
+  ``wdsp_native.py`` (the v0.1 TX section had 3 stubs marked
+  "declared but unused for v0.0.9.6 RX-only PoC").
+* **MOX / PTT state machine**: Phase 0 added ``lyra/ptt.py``
+  scaffolding; Phase 3 wires the live state machine + hardware
+  PTT input forwarder (forwarded from EP6 ``FrameStats.ptt_in``
+  via QueuedConnection per CLAUDE.md §5 threading model).
+* **TX power control**: HL2 step attenuator -28..+31 dB via
+  ``capabilities.tx_attenuator_range``; Phase 1 wired the
+  protocol-layer setter (``_tx_step_attn_db`` state attribute
+  feeding frame-4 C3 5-bit + frame-11 C4 6-bit-with-override
+  redundant writes).  Phase 3 UI exposes the operator-facing
+  "TX Power 0..100%" slider that maps through the cap struct.
+* **Mic gain**: ``SetTXAPanelGain1`` with operator slider; Phase
+  2 cffi binding work.
+* **Leveler reuse**: WDSP ``wcpagc`` mode 5 cffi (shared with
+  RX AGC binding).  Defaults: 5 ms attack / 250 ms decay / 5 dB
+  maxgain per Thetis ``radio.cs``.
+* **ALC**: WDSP ``xwcpagc`` block at TXA.c:579 -- the load-
+  bearing limiter that prevents post-PA splatter.  Defaults:
+  1 ms attack / 10 ms decay / -3 dBFS threshold.  **Always on**
+  (no operator opt-out -- this is splatter protection, not a
+  taste knob).
+* **§8.2 sip1 TX I/Q tap**: ring buffer alloc + fill, no v0.3
+  consumer yet.  Mandatory in v0.2 per the Round 5 rationale
+  -- adding the tap as a no-op in v0.2 means v0.3 PureSignal
+  can focus purely on PS work without re-validating every TX
+  sub-mode.
+* **RX/TX RTA scaffolding**: audio-domain FFT widgets render
+  with live data + taps in place, no EQ yet.  v0.2.1 EQ +
+  dynamics fills in the EQ overlay.
+* **§15.9 red-on-air visual rule**: VFO LED + TX passband
+  rectangle turn red on PTT.  ``tx_active_changed`` signal
+  emitter wired in Phase 1 commit 10; Phase 3 wires the UI
+  consumers (FrequencyDisplay / SMeter / spectrum widget).
+* **§15.14 auto-mute-on-TX**: recover the 183-line skeleton
+  from reverted commit ``b8eb8d0`` + add AAmixer
+  per-stream-multiplier behavior.
+* **§15.15 AAmixer state badge** (partial): TX / TX (split) /
+  TX (RX1 muted) state strings live; PS-armed strings stay
+  placeholder until v0.3.
+
+**Explicit deferrals from v0.2.0:**
+
+* **XIT** (§15.10 second half) -- renders disabled in v0.1.1,
+  enables in v0.2.3 (~2 hr enable on top of RIT plumbing).
+* **EQ + compressor**: v0.2.1.
+* **CW + AM + FM**: v0.2.2 (CW state bits in TX I-LSB are HL2-
+  specific overwrite-style packing per §3.8 L-5; AM/FM
+  modulators have their own per-mode setter audits).
+* **CFC** (speech processor): v0.2.2.
+* **Polish + per-band EQ memory + 3-point PWR calibration UX
+  + monitor/sidetone tuning**: v0.2.3.
+* **ASIO host API support** (§15.12 item 4): deferred to v0.2
+  end alongside TX monitor-latency story.
+* **PureSignal**: v0.3 (separate release line entirely).
+
+#### Phase progression
+
+Modeled on v0.1's Phase 0..5 rollout pattern.  Effort is
+"focused hours of design + code + test", not calendar.
+
+| Phase | Goal | Effort | Status |
+|---|---|---|---|
+| **0** | Scaffolding (no behavior change) | ~30 min actual | ✅ shipped commit ``840d507`` |
+| **1** | Protocol TX surface (10 sub-items) | ~25 h actual | ✅ shipped commits ``239c721`` through ``9fe0b59`` (10 commits between 2026-05-14) |
+| 2 | DSP TX chain (wdsp_tx_engine.py, ~40 cffi entries, ALC + leveler + sip1 tap, mic-input path, 50 ms MOX-edge cos² fade) | ~30 h estimated | pending |
+| 3 | UI integration (MOX/TUN buttons, drive slider, LED-bar TX meter layout, §15.9 red-on-air, PTT state machine wiring, hardware PTT forwarder, §15.14 auto-mute) | ~14 h estimated | pending |
+| 4 | RTA scaffolding + §15.15 AAmixer badge + cal UX + help docs | ~18 h estimated | pending |
+| 5 | Release ritual (CHANGELOG / version bump / tag / build / push) | ~4 h estimated | pending |
+
+**Total estimated: ~96 h focused work** for v0.2.0 alone (Phase
+0 + Phase 1 actuals ~26 h, ~70 h remaining for Phases 2-5).
+
+#### Phase 1 deliverables (closed 2026-05-14)
+
+All 10 Phase 1 items landed in commit order matching HPSDR P1
+case-N progression where applicable:
+
+1. ``239c721`` -- Round-robin walks ``_cc_cycle`` list (was
+   ``sorted(keys)``; unblocks MOX-edge jump-to-frame-2 retune
+   behaviour for future v0.2 work)
+2. ``190a375`` -- Frame 11 (0x14) composer: all 4 bytes from
+   state (was C4-only write trampling preamps / mic switches /
+   line-in / puresignal_run / user_dig_out / step_attn)
+3. ``4ca8597`` -- Frame 10 (0x12) composer + eager registration
+   (drive_level / PA bias / mic boost / line-in route / BPF /
+   LPF; ``pa_on`` defaults False for safety)
+4. ``4f3e383`` -- Frame 4 (0x1C) composer + eager registration
+   (5-bit redundant tx_step_attn write; coherent with frame 11
+   C4's 6-bit + override copy)
+5. ``1840fc8`` -- Frame 0 (0x00) composer: full 4-byte state
+   (was 1-of-4 with C2/C3 hardcoded zeros; OC pins + atten /
+   dither / antenna select / diversity all now plumbed)
+6. ``aef0106`` -- Frame 18 (0x74) reset_on_disconnect safety
+   register (default True; HL2 auto-reverts to RX on host link
+   loss -- no silent carrier after crash mid-TX)
+7. ``9afda53`` -- ``_set_tx_freq(hz)`` writes 0x02 + 0x08 +
+   0x0a atomically (HL2 nddc=4 mirrors TX freq to DDC2 + DDC3
+   so v0.3 PS feedback DDCs sit at TX freq under cntrl1=4
+   routing)
+8. ``1e73996`` -- MOX bit emission via dispatch_state.mox
+   snapshot (was ``c0 & 0xFE`` strip-masking; load-bearing fix
+   that unblocks all v0.2 TX operation).  Per-datagram snapshot
+   so both USB blocks carry coherent MOX state.
+9. ``eb5a15f`` -- EP6 telemetry decoding: ``ptt_in`` / ``dot_in``
+   / ``dash_in`` / ``adc_overload`` fields on FrameStats; I2C-
+   response gate (``cc[0] & 0x80``) prevents mis-decode of I2C
+   readback bytes as telemetry; ADC overload uses OR-until-
+   cleared host-side semantic
+10. ``9fe0b59`` -- ``tx_active_changed`` Signal(bool) emitter
+    fires from ``Radio.set_mox()`` on every MOX edge.  Plus
+    cleanup: deleted dead ``_keepalive_cc`` (5 write sites + 2
+    declarations) and ``reassert_rate_keepalive`` no-op method;
+    refreshed ``stream.py:38`` docstring with v0.2 register
+    surface; created ``lyra/protocol/p1_hl2.py`` stub for the
+    HL2-specific forward-power formula (Phase 3 fills the cal
+    coefficients per consensus §8.4(a)).
+
+**Bench-test coverage:** items 1-7 batch + item 8 + item 9 all
+hardware-validated on N8SDR's real HL2 between 2026-05-14
+afternoon and evening.  HL2 telemetry confirmed updating
+correctly (temp 24.7-24.8°C, voltage 12.3 V matching 12.5 V
+supply with ~0.2 V cable drop -- physically sensible readings
+confirm the I2C-response gate isn't spuriously firing and the
+address-rotation decode still works).  No regressions in RX2 +
+RIT + sample-rate-switching + auto-LNA paths.
+
+**Wire-level behaviour for RX-only operation after Phase 1:**
+byte-identical to v0.1 (every additional register cycling
+defaults to HL2 fresh-power-up state values; MOX bit stays 0
+because no setter wires ``Radio.set_mox(True)`` until Phase 3
+UI lands).  The load-bearing structural fixes are all in place;
+Phase 2 begins by wiring the WDSP TXA cffi + Mic-input
+dispatcher.
+
+#### Status
+
+**Phase 0 + Phase 1: COMPLETE.**  12 commits on
+``feature/v0.0.9.6-audio-foundation`` between v0.1.1 GA
+(``0b730f2``) and current HEAD (``9fe0b59``).  Pushed to
+origin; main stays at v0.1.1.
+
+**Phase 2: PENDING.**  Resume when operator picks v0.2 work
+back up.  Reading-list pre-cached: consensus §8.5 (TX chain
+byte-for-byte match to xtxa() execution order); §8.4 (meter
+wiring + cal); §15.13/14/15 (cross-cutting v0.2 deferrals);
+``wdsp_engine.py`` (RxChannel pattern for TxChannel sibling);
+``wdsp_native.py:248`` (3 TX stubs to expand).
+
 ---
 
-*Last updated: 2026-05-14 — **v0.1.1 "Polish & Audio Routing"
+*Last updated: 2026-05-14 — **v0.2.0 Phase 0 + Phase 1
+COMPLETE on feature branch.**  12 commits between v0.1.1 GA
+(``0b730f2``) and current HEAD (``9fe0b59``) land the full
+protocol-layer surface for v0.2 TX: all 10 HPSDR P1 C&C
+register composers, ``_set_tx_freq`` writer, MOX bit emission
+gate (was strip-masking pre-Phase-1), EP6 telemetry decoding
+expanded with PTT-in / dot_in / dash_in / ADC-overload + I2C-
+response gate, ``tx_active_changed`` Signal emitter, plus
+~80 lines of dead-code cleanup (``_keepalive_cc`` deleted,
+``reassert_rate_keepalive`` no-op deleted, ``stream.py:38``
+register-map docstring refreshed).  Wire-level bytes for RX-
+only operation: byte-identical to v0.1 (MOX stays 0 because
+no Phase 3 UI yet wires the setter).  Three batched bench
+tests on N8SDR's real HL2 confirmed no regressions in RX2 +
+RIT + sample-rate + auto-LNA + HL2 telemetry decode paths.
+Phase 2 (DSP TX chain via WDSP TXA cffi + ``TxChannel`` class
++ mic-input dispatcher + ALC + leveler + §8.2 sip1 tap) is
+pending, ~30 h estimated.  See §15.18 for the full Phase
+tracker.  Earlier today: **v0.1.1 "Polish & Audio Routing"
 SHIPPED.**  Five-item §15.16 batch closed: RIT, TCI RX2 channel,
 device-list grouping by host API, VAC digital-modes doc, WASAPI
 Exclusive (audit closure — was already shipped).  Plus §15.17
@@ -3997,7 +4183,7 @@ stepper redesign rolled in (RIT's offset stepper reuses the
 widget so §15.17 became a hard dependency; original v0.1.2 hold
 retracted).  Test count: 225/225 green + 11 TCI RX2 routing
 assertions + 6 RIT-math assertions + UI bench validation.  Three-
-push sequence executed.  v0.2 TX bring-up is next.  Earlier:
+push sequence executed.  Earlier:
 2026-05-14 — **v0.1.0 GA SHIPPED.**  Production
 release of the v0.1 line after pre2/pre3 tester flight with
 Brent + Timmy + N8SDR.  Headline: RX2 dual receiver +
