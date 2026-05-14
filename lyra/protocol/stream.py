@@ -113,6 +113,20 @@ class FrameStats:
     # field instead of using addr 3). Radio's _emit_hl2_telemetry
     # uses this when the primary supply_adc slot is empty.
     supply_adc_alt: int = 0
+    # v0.2 Phase 1 (9/10): HL2 status bits from ControlBytesIn.
+    # PTT-in / dot-in / dash-in carry hardware-PTT and CW-key state
+    # at bits 0-2 of C0 of every frame's C&C status block.  ADC
+    # overload at bit 0 of C1 -- HL2 uses single-frame-assign
+    # semantics (transient may vanish before the next frame), so
+    # Lyra OR-until-cleared on the host side: the field stays True
+    # once set until the consumer reads-and-clears.  All four
+    # default False; consumers (Radio.tx_active state machine in
+    # Phase 3, Radio's 1 Hz telemetry tick) flip the field via
+    # the standard read-then-clear pattern.
+    ptt_in: bool = False
+    dot_in: bool = False
+    dash_in: bool = False
+    adc_overload: bool = False
 
 
 def _build_start_stop_packet(flags: int) -> bytes:
@@ -394,6 +408,38 @@ def _decode_hl2_telemetry(cc: bytes, stats: "FrameStats") -> None:
     """
     if len(cc) < 5:
         return
+    # v0.2 Phase 1 (9/10): I2C-response gate.  When bit 7 of C0 is
+    # set, the 5-byte block is an I2C-readback response from the
+    # HL2 expansion-header I2C bus, NOT the telemetry rotation.
+    # Low bits of C0 in that case carry I2C device-address / data
+    # bits rather than the PTT/dot/dash/address-rotation fields.
+    # Bail before any field decode to avoid mis-interpreting I2C
+    # bytes as telemetry values.
+    #
+    # Lyra doesn't currently initiate I2C reads (no expansion-board
+    # support in v0.1/v0.2 RX-only scope), so this guard fires
+    # rarely.  Becomes load-bearing when v0.4+ adds N2ADR filter
+    # board / external attenuator board / other I2C-attached
+    # peripherals.
+    if cc[0] & 0x80:
+        return
+    # v0.2 Phase 1 (9/10): always-present status bits at bits 0-2 of
+    # C0.  These fields refresh every frame (not address-rotation-
+    # gated like fwd_pwr_adc / temp_adc / etc.).
+    stats.ptt_in  = bool(cc[0] & 0x01)
+    stats.dot_in  = bool(cc[0] & 0x02)
+    stats.dash_in = bool(cc[0] & 0x04)
+    # v0.2 Phase 1 (9/10): ADC-overload bit at bit 0 of C1.  HL2
+    # uses single-frame-assign semantics (the bit clears in the
+    # gateware as soon as the overload sample passes); without
+    # OR-until-cleared on the host side, a transient overload that
+    # exists for just one frame would vanish before the 1 Hz UI
+    # tick reads it.  Lyra's consumer (Radio.tx_active state
+    # machine + UI ADC-LED indicator) reads-and-clears -- the
+    # field stays True from the moment of overload until the
+    # consumer acknowledges.
+    if cc[1] & 0x01:
+        stats.adc_overload = True
     addr = (cc[0] >> 3) & 0x1F
     # Probe tap (set by the diagnostic dialog only — None when off)
     probe = getattr(stats, "_probe_cb", None)
