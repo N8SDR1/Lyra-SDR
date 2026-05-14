@@ -1030,11 +1030,17 @@ class HL2Stream:
 
         audio_bytes = self._pack_audio_bytes(126) if self.inject_audio_tx else None
 
+        # v0.2 Phase 1 (8/10): snapshot MOX once per UDP datagram so
+        # both USB blocks carry the same C0 bit 0 value.  Today
+        # _snapshot_mox_bit returns 0 (no PTT state machine yet);
+        # Phase 3 UI wires it via Radio.set_mox().
+        mox_bit = self._snapshot_mox_bit()
+
         for block_idx, block_off in enumerate((8, 520)):
             frame[block_off + 0] = 0x7F
             frame[block_off + 1] = 0x7F
             frame[block_off + 2] = 0x7F
-            frame[block_off + 3] = c0 & 0xFE  # bit 0 = MOX (0 for RX)
+            frame[block_off + 3] = (c0 & 0xFE) | mox_bit
             frame[block_off + 4] = c1 & 0xFF
             frame[block_off + 5] = c2 & 0xFF
             frame[block_off + 6] = c3 & 0xFF
@@ -1563,6 +1569,42 @@ class HL2Stream:
         with self._cc_lock:
             self._cc_registers[0x74] = (c1, c2, c3, c4)
             self._register_cc_slot(0x74)
+
+    def _snapshot_mox_bit(self) -> int:
+        """Read the current MOX state from the dispatch-state
+        provider and return the C0 bit-0 value (0 or 1).
+
+        v0.2 Phase 1: HL2 gateware reads C0 bit 0 of every frame-0
+        emission as the operator's MOX intent.  Lyra's
+        ``dispatch_state.mox`` is the canonical source -- written
+        only by Qt main thread via ``Radio.set_mox(bool)``; readable
+        from any thread (GIL makes the frozen-dataclass attribute
+        read atomic).
+
+        Snapshot ONCE per UDP datagram and apply the same value to
+        both USB blocks of that datagram (gateware reads each
+        block's C0 independently; a partial-frame MOX mismatch
+        would corrupt state).  Callers in
+        ``_build_ep2_frame`` / ``_build_ep2_frame_with_audio`` call
+        this method once before their ``for block_idx`` loop.
+
+        Defaults to 0 (RX) when no dispatch-state provider is
+        registered (pre-Radio-binding init window) or when the
+        provider raises -- defensive against partial init order.
+
+        v0.2 Phase 1 has no live MOX setter caller (PTT state
+        machine wires in Phase 3 UI work).  Wire-level output
+        today: bit stays 0 unconditionally because
+        ``dispatch_state.mox`` defaults False.  Identical to v0.1
+        wire output -- this commit is the gate-passing fix that
+        unblocks Phase 3.
+        """
+        if self._dispatch_state_provider is None:
+            return 0
+        try:
+            return 1 if self._dispatch_state_provider().mox else 0
+        except Exception:
+            return 0
 
     def _send_cc(self, c0: int, c1: int, c2: int, c3: int, c4: int):
         """Send one C&C write via EP2. Thread-safe.
@@ -2099,11 +2141,18 @@ class HL2Stream:
         struct.pack_into(">I", frame, 4, self._tx_seq)
         self._tx_seq = (self._tx_seq + 1) & 0xFFFFFFFF
 
+        # v0.2 Phase 1 (8/10): snapshot MOX once per UDP datagram so
+        # both USB blocks carry the same C0 bit 0 value.  See
+        # _snapshot_mox_bit docstring + sibling site in
+        # _build_ep2_frame.  Today this returns 0 (no PTT state
+        # machine yet); Phase 3 UI wires it via Radio.set_mox().
+        mox_bit = self._snapshot_mox_bit()
+
         for block_idx, block_off in enumerate((8, 520)):
             frame[block_off + 0] = 0x7F
             frame[block_off + 1] = 0x7F
             frame[block_off + 2] = 0x7F
-            frame[block_off + 3] = c0 & 0xFE  # bit 0 = MOX (RX = 0)
+            frame[block_off + 3] = (c0 & 0xFE) | mox_bit
             frame[block_off + 4] = c1 & 0xFF
             frame[block_off + 5] = c2 & 0xFF
             frame[block_off + 6] = c3 & 0xFF
