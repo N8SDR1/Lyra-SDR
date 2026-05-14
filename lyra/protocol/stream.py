@@ -2505,6 +2505,52 @@ class HL2Stream:
             self._register_cc_slot(c0)
         self._keepalive_cc = (c0, c1, c2, c3, c4)
 
+    def _set_tx_freq(self, hz: int) -> None:
+        """Write TX frequency to all three HL2 NCO registers atomically.
+
+        HPSDR P1 on HL2 nddc=4 writes the TX frequency to three
+        C&C registers, all carrying the same big-endian 4-byte
+        encoding:
+        * 0x02 (case 1, TX VFO NCO)
+        * 0x08 (case 5, DDC2 -- HL2 mirrors TX freq here on nddc=4
+          so v0.3 PureSignal feedback DDCs sit at TX freq when
+          cntrl1=4 PA-coupler routing engages)
+        * 0x0a (case 6, DDC3 -- always TX freq)
+
+        All three writes happen under one ``_cc_lock`` acquisition
+        so the round-robin never sees a partial update.  Mirrors
+        ``_set_rx1_freq`` / ``_set_rx2_freq`` byte composition.
+
+        Path C.2 audio-pop discipline: no direct _send_cc here --
+        the EP2 writer thread re-emits the new registers on the
+        next round-robin tick (~few ms).  See _set_rx1_freq for
+        the full rationale.
+
+        v0.2 Phase 1 adds the wire-level setter only.  Operator-
+        facing TX freq state (Radio.tx_freq_hz with SPLIT-aware
+        routing to VFO A or VFO B) lands in Phase 3 UI work; until
+        then this method has no live caller and TX freq stays at 0
+        on the wire (frame 0 emission carries duplex bit so HL2
+        DDC2/DDC3 are wire-enabled but receive zeros from a
+        zero-tuned NCO -- harmless on RX-only).
+        """
+        hz = int(hz)
+        self._tx_freq_hz = hz
+        c1 = (hz >> 24) & 0xFF
+        c2 = (hz >> 16) & 0xFF
+        c3 = (hz >> 8) & 0xFF
+        c4 = hz & 0xFF
+        nco_bytes = (c1, c2, c3, c4)
+        with self._cc_lock:
+            for c0 in (0x02, 0x08, 0x0a):
+                self._cc_registers[c0] = nco_bytes
+                self._register_cc_slot(c0)
+        # Keepalive fallback (vestigial; Phase 1 item 10 cleans up).
+        # Track the most recent TX-freq write so legacy readers see
+        # consistent data; pick 0x02 (TX VFO) as the canonical
+        # register since DDC2/DDC3 are mirrors.
+        self._keepalive_cc = (0x02, c1, c2, c3, c4)
+
     def set_sample_rate(self, rate: int):
         """Change sample rate on a running stream.
 
