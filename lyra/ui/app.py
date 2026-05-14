@@ -1043,7 +1043,13 @@ class MainWindow(QMainWindow):
             "the reliable measurement for chain-linearity tests.\n"
             "Typical peak-RMS difference on noise: ~10-12 dB.")
         self.adc_peak_indicator.setMinimumWidth(220)
-        tb.addWidget(self.adc_peak_indicator)
+        # Capture the QWidgetAction QToolBar wraps the label in.
+        # ``widget.setVisible(False)`` alone leaves the action visible
+        # so the bar holds an empty slot for the widget; flipping
+        # ``action.setVisible(False)`` is what actually collapses the
+        # slot.  Used by ``_apply_telemetry_overlay_mode``.
+        self._adc_peak_indicator_action = tb.addWidget(
+            self.adc_peak_indicator)
         self._adc_peak_db = -160.0
         self._adc_rms_db = -160.0
         self.radio.lna_peak_dbfs.connect(self._update_adc_peak)
@@ -1192,7 +1198,11 @@ class MainWindow(QMainWindow):
             "Reads '--' until the stream is running and a few EP6\n"
             "frames have arrived — the radio rotates which telemetry\n"
             "register it reports each frame.")
-        tb.addWidget(self.hl2_telem_label)
+        # Capture the QWidgetAction (see note on adc_peak_indicator
+        # above — ``_set_readout_visible("hl2", ...)`` and the
+        # diagnostic-overlay 3-state mode both rely on flipping the
+        # action, not the widget alone).
+        self._hl2_telem_label_action = tb.addWidget(self.hl2_telem_label)
         self.radio.hl2_telemetry_changed.connect(self._update_hl2_telemetry)
 
         # ── 10. CPU usage indicator (whole-system %, matches Task
@@ -1213,7 +1223,10 @@ class MainWindow(QMainWindow):
             "Sustained values above ~15-25% on a modern multi-core\n"
             "PC suggest an FFT size / sample-rate combination that's\n"
             "heavier than your CPU comfortably handles.")
-        tb.addWidget(self.cpu_label)
+        # Capture the QWidgetAction so ``_set_readout_visible("cpu",
+        # ...)`` can collapse the slot cleanly (same pattern as ADC
+        # + HL2 chips above).
+        self._cpu_label_action = tb.addWidget(self.cpu_label)
         self._cpu_proc = None
         self._cpu_count = 1
         try:
@@ -2000,11 +2013,25 @@ class MainWindow(QMainWindow):
         """Show/hide a toolbar readout AND start/stop its driving
         timer so a hidden readout truly costs zero — no PDH polling,
         no telemetry emit, no clock tick wasted on something the
-        operator can't see."""
-        widget, timer_attr = {
-            "hl2": (self.hl2_telem_label, None),  # no per-tick UI timer; data comes from radio
-            "cpu": (self.cpu_label, "_cpu_timer"),
+        operator can't see.
+
+        QToolBar slot-collapse note: ``addWidget()`` wraps the
+        widget in a QWidgetAction; the toolbar honors the action's
+        visibility, not the widget's, when deciding whether to
+        render the slot.  We flip the action when we have one and
+        the widget itself either way.  Captured at construction
+        time as ``_<widget>_action``.
+        """
+        widget, timer_attr, action_attr = {
+            "hl2": (self.hl2_telem_label, None, "_hl2_telem_label_action"),
+            "cpu": (self.cpu_label, "_cpu_timer", "_cpu_label_action"),
         }[key]
+        action = getattr(self, action_attr, None)
+        if action is not None:
+            try:
+                action.setVisible(visible)
+            except (AttributeError, RuntimeError):
+                pass
         widget.setVisible(visible)
         if timer_attr is not None:
             timer = getattr(self, timer_attr, None)
@@ -2072,7 +2099,7 @@ class MainWindow(QMainWindow):
     _TELEMETRY_OVERLAY_MODES = ("full", "minimal", "off")
 
     def _apply_telemetry_overlay_mode(self, mode: str) -> None:
-        """Show/hide the three persistent diagnostic surfaces.
+        """Show/hide the persistent diagnostic surfaces.
 
         Mode definitions:
           full     -- ADC pk/rms indicator + stream status + audio
@@ -2081,24 +2108,42 @@ class MainWindow(QMainWindow):
                       stream status + audio telemetry hidden.
           off      -- All three hidden.  Clean main window for
                       screenshots / video / field operating.
+
+        HL2 hardware telemetry (T/V) is intentionally NOT gated here
+        — it's diagnostic AND operationally useful during TX (voltage
+        sag under key-down, temp rise on long transmits).  It has its
+        own independent show/hide checkbox in Settings → Radio →
+        Toolbar readouts and a right-click hide-from-toolbar menu on
+        the label itself (existing ``_READOUT_LABELS`` machinery).
         """
         if mode not in self._TELEMETRY_OVERLAY_MODES:
             mode = "full"
         show_adc = mode in ("full", "minimal")
         show_stream = mode == "full"
         show_telem = mode == "full"
-        try:
-            self.adc_peak_indicator.setVisible(show_adc)
-        except (AttributeError, RuntimeError):
-            pass
-        try:
-            self._stream_status_label.setVisible(show_stream)
-        except (AttributeError, RuntimeError):
-            pass
-        try:
-            self._audio_telem_label.setVisible(show_telem)
-        except (AttributeError, RuntimeError):
-            pass
+
+        def _toggle(widget, vis, action=None):
+            # Flip the wrapping QWidgetAction first (QToolBar slot
+            # collapse only honors action visibility, not the inner
+            # widget's), then the widget itself for status-bar
+            # widgets that don't have a wrapping action.
+            if action is not None:
+                try:
+                    action.setVisible(vis)
+                except (AttributeError, RuntimeError):
+                    pass
+            if widget is None:
+                return
+            try:
+                widget.setVisible(vis)
+            except (AttributeError, RuntimeError):
+                pass
+
+        _toggle(getattr(self, "adc_peak_indicator", None), show_adc,
+                getattr(self, "_adc_peak_indicator_action", None))
+        _toggle(getattr(self, "_stream_status_label", None), show_stream)
+        _toggle(getattr(self, "_audio_telem_label", None), show_telem)
+
         self._settings.setValue("telemetry/overlay_mode", mode)
         self._settings.sync()
 

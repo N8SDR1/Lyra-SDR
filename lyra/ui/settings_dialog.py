@@ -997,6 +997,26 @@ class RadioSettingsTab(QWidget):
         self.show_cpu_chk.toggled.connect(self._on_show_cpu_toggled)
         gtb.addWidget(self.show_cpu_chk)
 
+        # HL2 hardware telemetry toggle.  Default visible — voltage
+        # sag under key-down and AD9866 temperature rise on long
+        # transmits are real TX diagnostic signals operators want to
+        # be able to glance at without digging through menus.  Hide
+        # here (or via right-click on the label) if you'd rather a
+        # cleaner toolbar.
+        hl2_hidden = bool(s.value(
+            "toolbar/readout_hidden_hl2", False, type=bool))
+        self.show_hl2_chk = QCheckBox("Show HL2 telemetry on toolbar")
+        self.show_hl2_chk.setChecked(not hl2_hidden)
+        self.show_hl2_chk.setToolTip(
+            "Show or hide the HL2 hardware telemetry chip on the\n"
+            "toolbar (AD9866 temperature + 12 V supply rail).\n\n"
+            "Useful during TX to spot voltage sag (weak PSU / long\n"
+            "thin power lead) and temperature rise on extended\n"
+            "transmits.  Visible by default; hide here if you'd\n"
+            "rather a cleaner toolbar.")
+        self.show_hl2_chk.toggled.connect(self._on_show_hl2_toggled)
+        gtb.addWidget(self.show_hl2_chk)
+
         # Phase 4 / v0.1.0 (2026-05-13): diagnostic overlay 3-state
         # toggle (CLAUDE.md §15.11).  Operator-driven UX polish so
         # the main window can be cleaned up for routine operating
@@ -1171,6 +1191,33 @@ class RadioSettingsTab(QWidget):
         self.status_label.setText(
             "●  streaming" if running else "●  not connected")
 
+    def _find_main_window(self):
+        """Locate Lyra's MainWindow for live-apply of toolbar /
+        diagnostic-overlay toggles.
+
+        The earlier ``self.window().parent()`` walk worked for the
+        Settings dialog itself but the QTabWidget reparents each
+        tab into its own QStackedWidget — and the parent of THAT
+        is the QTabWidget, not the dialog.  The chain is reliable
+        as long as we walk ``parentWidget()`` until we hit a
+        ``QMainWindow``; failing that we sweep QApplication's
+        top-level widgets for one.  Belt + suspenders so a single
+        Qt internal-layout reshuffle in some future Qt release
+        doesn't silently break the live-apply path again.
+        """
+        from PySide6.QtWidgets import QApplication, QMainWindow
+        w = self.parentWidget()
+        while w is not None:
+            if isinstance(w, QMainWindow):
+                return w
+            w = w.parentWidget()
+        app = QApplication.instance()
+        if app is not None:
+            for tlw in app.topLevelWidgets():
+                if isinstance(tlw, QMainWindow):
+                    return tlw
+        return None
+
     def _on_show_cpu_toggled(self, checked: bool) -> None:
         """Toggle the toolbar CPU% readout's visibility.
 
@@ -1181,33 +1228,47 @@ class RadioSettingsTab(QWidget):
         from PySide6.QtCore import QSettings
         s = QSettings("N8SDR", "Lyra")
         s.setValue("toolbar/readout_hidden_cpu", not checked)
-        # Reach up through the dialog's parent chain to find
-        # MainWindow and apply the change live.  Settings dialogs
-        # in Lyra are constructed with parent=MainWindow so
-        # self.window().parent() resolves it.
         try:
-            mw = self.window().parent()
-            if hasattr(mw, "_set_readout_visible"):
+            mw = self._find_main_window()
+            if mw is not None and hasattr(mw, "_set_readout_visible"):
                 mw._set_readout_visible("cpu", checked)
         except Exception as exc:
-            # Live-apply failed (parent chain unexpected) — the
-            # QSettings write will pick up on next Lyra start.
+            # Live-apply failed — the QSettings write will pick up
+            # on next Lyra start.
             print(f"[settings] could not apply CPU visibility "
                   f"live: {exc}")
+
+    def _on_show_hl2_toggled(self, checked: bool) -> None:
+        """Toggle the toolbar HL2 hardware-telemetry readout.
+
+        Sibling of ``_on_show_cpu_toggled``; same persistence +
+        live-apply pattern, just targets the ``hl2`` key in the
+        existing ``_READOUT_LABELS`` machinery on MainWindow.
+        """
+        from PySide6.QtCore import QSettings
+        s = QSettings("N8SDR", "Lyra")
+        s.setValue("toolbar/readout_hidden_hl2", not checked)
+        try:
+            mw = self._find_main_window()
+            if mw is not None and hasattr(mw, "_set_readout_visible"):
+                mw._set_readout_visible("hl2", checked)
+        except Exception as exc:
+            print(f"[settings] could not apply HL2 telemetry "
+                  f"visibility live: {exc}")
 
     def _on_diag_overlay_changed(self, _idx: int) -> None:
         """Apply the diagnostic overlay 3-state mode live.
 
-        Phase 4 / v0.1.0 (CLAUDE.md §15.11).  Same parent-chain
-        live-apply pattern as ``_on_show_cpu_toggled``; QSettings
+        Phase 4 / v0.1.0 (CLAUDE.md §15.11).  Same MainWindow-
+        lookup pattern as ``_on_show_cpu_toggled``; QSettings
         write is performed inside MainWindow's
         ``_apply_telemetry_overlay_mode`` so a single source of
         truth handles persistence.
         """
         mode = str(self.diag_overlay_combo.currentData())
         try:
-            mw = self.window().parent()
-            if hasattr(mw, "_apply_telemetry_overlay_mode"):
+            mw = self._find_main_window()
+            if mw is not None and hasattr(mw, "_apply_telemetry_overlay_mode"):
                 mw._apply_telemetry_overlay_mode(mode)
         except Exception as exc:
             # Live-apply failed — write the QSettings key directly
