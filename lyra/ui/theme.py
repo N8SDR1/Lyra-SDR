@@ -234,6 +234,49 @@ QPushButton#dsp_btn:checked:hover {{
         stop:0 #ffaa44, stop:1 #ee7711);
     border-color: #ffaa44;
 }}
+
+/* StepperReadout buttons (CLAUDE.md §15.17) -- compact "[-] value [+]"
+   widget used on the DSP+Audio top row for Vol RX1, Vol RX2, AF Gain.
+   Symbol painted in ACCENT cyan so the +/- pops against the panel; dim
+   cyan border idle, brighter cyan on hover (same idiom as dsp_btn but
+   without the orange checked state -- stepper buttons are momentary,
+   not toggle).  Larger font weight on the symbol so the glyph centers
+   visually inside the small (26 px) button. */
+QPushButton#stepper_btn {{
+    color: {qss_color(ACCENT)};
+    background: {qss_color(BG_RECESS)};
+    border: 1px solid {qss_color(BORDER)};
+    border-radius: 3px;
+    font-size: 16px;
+    font-weight: 800;
+    padding: 0px;
+}}
+QPushButton#stepper_btn:hover {{
+    color: #80ddff;
+    border-color: {qss_color(ACCENT)};
+}}
+QPushButton#stepper_btn:pressed {{
+    color: #1a0f00;
+    background: {qss_color(ACCENT)};
+    border-color: {qss_color(ACCENT)};
+}}
+QPushButton#stepper_btn:disabled {{
+    color: {qss_color(TEXT_MUTED)};
+    border-color: {qss_color(BORDER)};
+}}
+
+/* StepperReadout value label -- monospace so digits line up across
+   the three controls (AF / Vol RX1 / Vol RX2 all read in dB), neutral
+   primary text color (the cyan accent is reserved for the +/- buttons
+   so the operator's eye reads "buttons are interactive, value is the
+   readout"). */
+QLabel#stepper_value {{
+    color: {qss_color(TEXT_PRIMARY)};
+    font-family: Consolas, monospace;
+    font-weight: 700;
+    padding: 0 4px;
+}}
+
 QFrame#panel {{
     background: {qss_color(BG_PANEL)};
     border: 1px solid {qss_color(BORDER)};
