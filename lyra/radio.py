@@ -8247,12 +8247,33 @@ class Radio(QObject):
                 self.status_message.emit(
                     f"RX2 initial freq push failed: {e}", 3000,
                 )
-            # v0.2 Phase 2 commit 7: open the TX WDSP channel + wire
-            # the active mic source's callback to dispatch_tx.  Both
-            # are idempotent + defensive; failure of either does NOT
-            # block stream startup (operator can still use RX-only).
-            self._open_tx_channel()
-            self._wire_mic_source()
+            # v0.2 Phase 2 commit 7.1 (regression fix 2026-05-15):
+            # TX dispatch is gated behind an opt-in env var until the
+            # threading model is correct.  The original commit 7
+            # wired _on_hl2_mic as the EP6 mic_callback which fires on
+            # the RX-loop thread; dispatch_tx -> TxChannel.process ->
+            # fexchange0(block=1) then blocks the RX-loop, starving
+            # every other RX path (audio + spectrum + telemetry).
+            # Symptom: "audio click then Lyra locks" reported by
+            # N8SDR within ~5 sec of clicking Start (14 datagrams of
+            # 38 mic samples each = 512-sample threshold for first
+            # fexchange0 call).
+            #
+            # CLAUDE.md §5 threading model: mic samples MUST queue +
+            # drain on the DSP worker thread, not run inline on the
+            # producer thread.  A future commit (Phase 2 commit 8 or
+            # later) implements the proper queue.  Until then, this
+            # path stays OFF by default so the operator can RX.
+            #
+            # To enable for development testing:
+            #     set LYRA_ENABLE_TX_DISPATCH=1
+            #     python -m lyra.ui.app
+            # Operator can also set this via Settings -> TX once the
+            # threading fix lands.
+            import os as _os
+            if _os.environ.get("LYRA_ENABLE_TX_DISPATCH") == "1":
+                self._open_tx_channel()
+                self._wire_mic_source()
         except Exception as e:
             self.status_message.emit(f"Start failed: {e}", 5000)
             self._stream = None
@@ -10621,14 +10642,19 @@ class Radio(QObject):
             _QS("N8SDR", "Lyra").setValue("radio/mic_source", new)
         except Exception:
             pass
-        # v0.2 Phase 2 commit 7: rewire active mic-source path so the
-        # change takes effect immediately (operator can switch sources
-        # while streaming without restart).  No-op when stream isn't
-        # running -- start() will call _wire_mic_source again.
-        try:
-            self._wire_mic_source()
-        except Exception as exc:
-            print(f"[Radio] mic source rewire failed: {exc}")
+        # v0.2 Phase 2 commit 7.1 (regression fix 2026-05-15):
+        # rewire is gated by the same LYRA_ENABLE_TX_DISPATCH env
+        # var as the start() path -- without it, flipping the
+        # mic-source radio button in Settings is purely a state +
+        # persistence change with no audio impact.  See start() for
+        # the full rationale (threading model not yet correct;
+        # CLAUDE.md §5 requires DSP-worker-thread dispatch).
+        import os as _os
+        if _os.environ.get("LYRA_ENABLE_TX_DISPATCH") == "1":
+            try:
+                self._wire_mic_source()
+            except Exception as exc:
+                print(f"[Radio] mic source rewire failed: {exc}")
         self.mic_source_changed.emit(new)
 
     def set_pc_mic_device(self, device: Optional[int]) -> None:
