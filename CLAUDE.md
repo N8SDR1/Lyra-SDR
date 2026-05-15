@@ -4513,6 +4513,54 @@ Status: **PARKED** -- pick these off in the gap between Phase 2
 commit 7.1 (current) and Phase 2 commit 8 (next).  Or interleave
 between Phase 2 commits if a specific bug becomes blocking.
 
+### 15.22 — Panadapter drag tuning ignores Y-axis (BUG, PARKED 2026-05-15)
+
+Operator-reported 2026-05-15 during Phase 2 commit 9 smoke test.
+Pre-existing bug (predates Phase 2 work, possibly back to v0.0.7.x
+click-to-tune era per §9.7).
+
+**Repro:** left-click + hold inside the panadapter, drag in any
+direction including UP or DOWN.  Vertical mouse movement causes
+the radio to tune as if the operator dragged horizontally by the
+same pixel delta.
+
+**Expected:** only the X-axis (horizontal) component of mouse
+drag should produce frequency changes.  Y-axis movement inside
+the panadapter is currently unbound (vertical zoom is a wheel
+gesture; vertical drag should be a no-op or reserved for a future
+gesture like reference-level adjustment).
+
+**Why it matters:** in normal operating the operator's hand
+isn't on a perfect horizontal track when click-tuning -- small
+vertical drift during a horizontal drag causes unexpected
+frequency jumps proportional to total drag distance (not just
+horizontal distance).  Compounding the operator's intended
+tuning with vertical jitter feels "twitchy" and increases the
+chance of overshooting the target.
+
+**Where to look:** the spectrum panadapter mouse handlers in
+``lyra/ui/spectrum.py`` (QPainter backend) and
+``lyra/ui/spectrum_gpu.py`` (GPU backend).  Probably the
+``mouseMoveEvent`` / drag-state logic is computing
+``delta = event.pos() - press_pos`` and using the full 2D delta
+where it should be using ``delta.x()`` only.  Cross-reference
+the Phase 3.E.1 hotfix v0.16 era code for the "press-time-latch"
+pattern (§9.7 documents the related click-to-tune snap logic).
+
+**Fix scope:** ~20 minutes of surgical edit to two widget classes
+plus a manual bench test (verify horizontal-only drag still
+tunes; vertical-only drag does nothing; diagonal drag tunes by
+horizontal component only).  No protocol or DSP touched.
+
+**Scope decision:** PARKED for a v0.2 or v0.2.x polish pass.
+Doesn't block any current Phase 2 work and operators have been
+working around it (consciously or not) since v0.0.7.x.  Pick up
+alongside other panadapter UX polish when a polish window opens
+between Phase 2 commit 10 and Phase 3 work, OR fold into the
+Phase 3 UI batch since panadapter mouse semantics will be
+revisited there anyway (§15.9 red-on-air TX rectangle, §15.6
+SPLIT TX marker).
+
 ---
 
 *Last updated: 2026-05-14 — **v0.2.0 Phase 0 + Phase 1
