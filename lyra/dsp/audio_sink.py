@@ -8,7 +8,7 @@ Two implementations:
 """
 from __future__ import annotations
 
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 
 import numpy as np
 
@@ -1088,3 +1088,205 @@ class SoundDeviceSink:
 class NullSink:
     def write(self, audio): pass
     def close(self): pass
+
+
+# ---------------------------------------------------------------------------
+# Mic-input capture from PC sound card (v0.2 Phase 2 commit 4)
+# ---------------------------------------------------------------------------
+
+class SoundDeviceMicSource:
+    """Capture mic-input audio from the PC sound card via PortAudio.
+
+    Lyra mic-input dual-path support:
+
+    * HL2+ operators (AK4951 codec):  mic samples arrive via EP6 byte
+      slots 24-25 (per CLAUDE.md §3.3).  HL2Stream's mic_callback
+      delivers them (Phase 2 commit 3).  This class is NOT used.
+
+    * Standard-HL2 operators (no AK4951): the radio has no mic input
+      hardware.  Operator plugs a mic into the PC sound card; this
+      class captures samples and hands them to the same downstream
+      TX dispatcher that the EP6 path feeds.
+
+    The operator picks which path is active via Settings -> TX -> Mic
+    input source (Phase 2 commit 5+).  Both paths deliver float32
+    mono samples to TxChannel.process; only the SOURCE differs.
+
+    Mirrors SoundDeviceSink's host-API picker + device + ring-buffer
+    pattern, just for input direction.  Threading model:
+
+    * sounddevice's audio thread calls _on_audio (PortAudio callback).
+      Cannot do heavy work; just deinterleave + apply channel-select
+      + push to consumer callback.
+    * Consumer callback (registered via start()) is responsible for
+      routing via QueuedConnection to DSP worker for any non-trivial
+      processing.
+
+    Channel select per Thetis CM-ASIO Setup tab pattern (radCMASIO_mic
+    Left/Right/Both):
+    * "L"    -- single mono mic on left channel (typical USB mic)
+    * "R"    -- single mono mic on right channel
+    * "BOTH" -- average of L+R (operator using stereo mic for
+                noise rejection)
+    """
+
+    def __init__(self,
+                 rate: int = 48_000,
+                 device: Optional[int] = None,
+                 channel_select: str = "L",
+                 blocksize: int = 512,
+                 host_api_label: str = HOST_API_LABEL_AUTO):
+        """Construct a PC mic-input capture source.
+
+        Parameters
+        ----------
+        rate : int
+            Sample rate to request from PortAudio.  Defaults to 48 kHz
+            to match the WDSP TXA in_rate (no resampling needed).
+            Future v0.4 ANAN work may need rmatch+varsamp here if
+            the PC sound card runs at a different rate than WDSP
+            wants -- mirror the SoundDeviceSink rate_match path.
+        device : Optional[int]
+            sounddevice index of the input device.  None = host-API
+            default input.
+        channel_select : str
+            "L", "R", or "BOTH" (case-insensitive).  Determines how
+            stereo input is collapsed to mono before handoff.
+        blocksize : int
+            Frames per PortAudio callback.  512 frames at 48 kHz =
+            ~10.6 ms latency.  TxChannel.cfg.in_size defaults to 512
+            so this matches.
+        host_api_label : str
+            Which PortAudio host API to use (WASAPI shared / WASAPI
+            exclusive / WDM-KS / etc.).  Matches the v0.1.1 §15.16
+            host-API grouping operator choice on the OUTPUT side.
+        """
+        self._rate = int(rate)
+        self._device = device
+        self._channel_select = channel_select.upper()
+        if self._channel_select not in ("L", "R", "BOTH"):
+            raise ValueError(
+                f"channel_select must be L / R / BOTH, got {channel_select!r}"
+            )
+        self._blocksize = int(blocksize)
+        self._host_api_label = host_api_label
+        self._stream = None
+        self._consumer = None
+        self._running = False
+
+    def start(self,
+              consumer: Callable[[np.ndarray], None]) -> None:
+        """Open the input stream and begin capture.
+
+        ``consumer`` is called once per PortAudio block (~10.6 ms at
+        48 kHz / blocksize=512) with a float32 mono ndarray.  Consumer
+        MUST hand off to DSP worker via QueuedConnection -- the
+        PortAudio callback thread has a hard real-time budget and
+        cannot do WDSP cffi work directly.
+
+        Idempotent: calling start() twice is a no-op if already
+        running (with a different consumer, the previous one is
+        retained).
+        """
+        if self._running:
+            return
+        try:
+            import sounddevice as sd
+        except ImportError as exc:
+            raise RuntimeError(
+                "SoundDeviceMicSource requires the sounddevice package"
+            ) from exc
+
+        self._consumer = consumer
+
+        # Apply host-API selection (mirror SoundDeviceSink pattern).
+        # Default channel count: 2 (stereo) so we can support both
+        # mono mic (only L populated) and stereo mic (averaging).
+        # If the device only supports 1 channel, fall back to mono.
+        # Optional WASAPI exclusive-mode flag (parity with SoundDeviceSink
+        # host_api_label handling).  PortAudio sees `extra_settings` only
+        # when set; AUTO / shared / WDM-KS / MME paths use defaults.
+        extra = None
+        if (self._host_api_label
+                and self._host_api_label != HOST_API_LABEL_AUTO
+                and "exclusive" in self._host_api_label.lower()):
+            try:
+                extra = sd.WasapiSettings(exclusive=True)
+            except Exception:
+                # Defensive: WasapiSettings unavailable -> fall back
+                # to PortAudio default.  Operator can switch in
+                # Settings if needed.
+                pass
+
+        # Try 2 channels first; fall back to 1 if device rejects.
+        try:
+            self._stream = sd.InputStream(
+                samplerate=self._rate,
+                blocksize=self._blocksize,
+                device=self._device,
+                channels=2,
+                dtype="float32",
+                callback=self._on_audio,
+                extra_settings=extra,
+            )
+        except Exception:
+            self._stream = sd.InputStream(
+                samplerate=self._rate,
+                blocksize=self._blocksize,
+                device=self._device,
+                channels=1,
+                dtype="float32",
+                callback=self._on_audio,
+                extra_settings=extra,
+            )
+        self._stream.start()
+        self._running = True
+
+    def stop(self) -> None:
+        """Stop capture + release the input stream."""
+        if not self._running:
+            return
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except Exception:
+            pass
+        self._stream = None
+        self._consumer = None
+        self._running = False
+
+    def _on_audio(self, indata, frames, time_info, status):
+        """PortAudio input callback -- runs on the audio thread.
+
+        Receives ``indata`` as a (frames, channels) float32 ndarray.
+        Reduces to mono per ``channel_select`` and hands off to the
+        consumer.
+
+        MUST stay fast -- any blocking or heavy work here causes
+        input dropouts (counted in ``status``).
+        """
+        cb = self._consumer
+        if cb is None:
+            return
+
+        try:
+            if indata.shape[1] == 1:
+                # Mono device -- pass through as-is.
+                mono = indata[:, 0].copy()
+            elif self._channel_select == "L":
+                mono = indata[:, 0].copy()
+            elif self._channel_select == "R":
+                mono = indata[:, 1].copy()
+            else:  # BOTH
+                mono = ((indata[:, 0] + indata[:, 1]) * 0.5).astype(np.float32)
+            cb(mono)
+        except Exception:
+            # Swallow exceptions -- can't risk crashing PortAudio's
+            # audio thread.  Status info would surface via PortAudio's
+            # XRun counters (visible to operator via input-level
+            # meter in Settings -> TX in commit 5+ UI).
+            pass
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
