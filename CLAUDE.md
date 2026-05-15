@@ -3821,7 +3821,33 @@ spot_activated echo back to SDRLogger+ has a logger-side
 filter gap that operator owns separately).  v0.2 TX work is
 next.
 
-### 15.17 — DSP+Audio panel top-row redesign (PARKED 2026-05-14, scope: v0.1.2)
+### 15.17 — DSP+Audio panel top-row redesign (CLOSED 2026-05-15)
+
+**CLOSED 2026-05-15 (§15.24 item B6).** The stepper redesign
+SHIPPED in v0.1.1 (8 commits `3d86b7b`..`fbcfcde` + `a43fa55`
+RIT integration; `lyra/ui/widgets/stepper_readout.py`;
+`panels.py` uses `StepperReadout` for `af_gain_stepper` /
+`vol_a_stepper` / `vol_b_stepper` ×13).  The "PARKED + IN
+PROGRESS LOCALLY / held off branch" status below was stale doc
+lag -- the §15.16 v0.1.1 entry already recorded it as shipped.
+The ~15 red UI tests were NOT a half-landed feature (A4's
+empirical finding in §15.24 corrected A2's "half-landed"
+framing): they were stale tests still asserting the removed
+`af_gain_slider` / `vol_slider` / `vol_b_slider` QSlider attrs
++ the absorbed `vol_label_caption` QLabel.  Fixed 2026-05-15 --
+all 4 test files (test_phase3c / 3d / 3e1 / phase4) updated to
+the StepperReadout API + the §15.17 dB-vs-linear semantics
+(vol now dB via `_vol_db_to_linear`/`_vol_linear_to_db`;
+af_gain stepper dB; caption via `StepperReadout._caption_label`)
+and the deliberately-removed v0.1.0-pre3 `focused_rx` autoload
+(test now guards "always lands RX1").  **177/177 UI tests
+green** -- clean Phase-3 `panels.py` baseline (no stale reds to
+mask a real Phase-3 UI regression).  Original parked spec
+retained below for archaeology.
+
+---
+
+*(historical, PARKED 2026-05-14, scope was v0.1.2)*
 
 Operator-proposed cosmetic redesign of the DSP+Audio panel's
 top row (2026-05-14, post v0.1.0 GA conversation).  Replaces
@@ -4007,7 +4033,9 @@ forward; standard release ritual per CLAUDE.md §11 applies.
   causing accidental Vol changes — at which point this
   becomes a v0.1.1.x patch and we re-evaluate the scope.
 
-Status: **PARKED + IN PROGRESS LOCALLY** — code being written
+Status: **CLOSED 2026-05-15** (see header — shipped v0.1.1,
+stale tests fixed §15.24 B6).  Historical note follows:
+Originally **PARKED + IN PROGRESS LOCALLY** — code being written
 2026-05-14; commits will sit on the feature branch until v0.1.2
 push window.
 

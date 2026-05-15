@@ -117,10 +117,25 @@ class Phase4Rx2PersistenceTest(unittest.TestCase):
         self.assertEqual(
             self.radio._rx_bw_by_mode_rx2.get("AM"), 8000)
 
-    def test_autoload_focused_rx(self) -> None:
+    def test_autoload_focused_rx_always_lands_rx1(self) -> None:
+        """§15.24 stale-test fix: v0.1.0-pre3 (2026-05-13
+        operator UX choice, radio.py ~8051) DELIBERATELY does
+        NOT apply the persisted ``radio/focused_rx`` at startup
+        -- Lyra always lands RX1-focused so the panadapter /
+        waterfall / save-restore paths (which key off RX1's
+        _freq_hz) always agree with what the operator sees.  The
+        persisted value is left intact for future flexibility.
+        This test now GUARDS that intentional behavior (the old
+        assertion `focused_rx == 2` tested the removed
+        autoload)."""
         self._seed(**{"radio/focused_rx": 2})
         self.radio.autoload_rx2_state()
-        self.assertEqual(self.radio.focused_rx, 2)
+        # Intentionally NOT restored -- always RX1 on startup.
+        self.assertEqual(self.radio.focused_rx, 0)
+        # Persisted value left intact (not wiped) for future use.
+        from PySide6.QtCore import QSettings
+        s = QSettings("N8SDR", "Lyra")
+        self.assertEqual(int(s.value("radio/focused_rx")), 2)
 
     def test_autoload_sub_enabled(self) -> None:
         self._seed(**{"dispatch/rx2_enabled": True})

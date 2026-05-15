@@ -242,24 +242,28 @@ class Phase3cDspPanelTest(unittest.TestCase):
         self.radio = Radio()
         self.panel = DspPanel(self.radio)
 
-    def test_af_gain_slider_initial_reads_rx1(self) -> None:
+    # §15.17/§15.24: AF Gain QSlider was replaced by a dB
+    # StepperReadout (af_gain_stepper).  .value() now returns
+    # float dB; int()-wrap for the int-dB comparisons.
+
+    def test_af_gain_stepper_initial_reads_rx1(self) -> None:
         self.assertEqual(
-            self.panel.af_gain_slider.value(),
+            int(self.panel.af_gain_stepper.value()),
             int(self.radio.af_gain_db_for_rx(0)),
         )
 
-    def test_focus_switch_updates_af_gain_slider(self) -> None:
+    def test_focus_switch_updates_af_gain_stepper(self) -> None:
         self.radio.set_af_gain_db(20, target_rx=0)
         self.radio.set_af_gain_db(50, target_rx=2)
         self.radio.set_focused_rx(2)
-        self.assertEqual(self.panel.af_gain_slider.value(), 50)
+        self.assertEqual(int(self.panel.af_gain_stepper.value()), 50)
         self.radio.set_focused_rx(0)
-        self.assertEqual(self.panel.af_gain_slider.value(), 20)
+        self.assertEqual(int(self.panel.af_gain_stepper.value()), 20)
 
-    def test_af_gain_slider_writes_to_focused_rx(self) -> None:
+    def test_af_gain_stepper_writes_to_focused_rx(self) -> None:
         self.radio.set_focused_rx(2)
         original_rx1 = self.radio._af_gain_db
-        self.panel.af_gain_slider.setValue(37)
+        self.panel.af_gain_stepper.setValue(37)
         self.assertEqual(self.radio._af_gain_db_rx2, 37)
         self.assertEqual(self.radio._af_gain_db, original_rx1)
 

@@ -912,51 +912,63 @@ class Phase3e1DualVolSlidersAlwaysVisibleTest(unittest.TestCase):
         self.radio = Radio()
         self.panel = DspPanel(self.radio)
 
+    # §15.17/§15.24: per-RX Vol QSliders -> dB StepperReadout
+    # (vol_a_stepper/vol_b_stepper).  The separate vol_b_label /
+    # vol_*_label_caption QLabels were absorbed into each
+    # StepperReadout's _caption_label.  _slider_to_volume /
+    # _volume_to_slider replaced by _vol_db_to_linear /
+    # _vol_linear_to_db.  Behaviors (always-visible, direct
+    # RX1/RX2 addressing, focus-flip mirror) unchanged.
+
     def test_vol_b_widgets_visible_with_sub_off(self) -> None:
-        """Both Vol-A/Vol-B + Mute-A/Mute-B widgets always exist
-        and aren't hidden when SUB is off."""
-        self.assertFalse(self.panel.vol_b_slider.isHidden())
-        self.assertFalse(self.panel.vol_b_label.isHidden())
-        self.assertFalse(self.panel.vol_b_label_caption.isHidden())
+        """Vol-A/Vol-B steppers + Mute-A/Mute-B always exist and
+        aren't hidden when SUB is off."""
+        self.assertFalse(self.panel.vol_b_stepper.isHidden())
         self.assertFalse(self.panel.mute_b_btn.isHidden())
 
     def test_vol_b_widgets_visible_with_sub_on(self) -> None:
         self.radio.set_rx2_enabled(True)
-        self.assertFalse(self.panel.vol_b_slider.isHidden())
+        self.assertFalse(self.panel.vol_b_stepper.isHidden())
         self.assertFalse(self.panel.mute_b_btn.isHidden())
 
     def test_vol_a_label_says_vol_rx1(self) -> None:
-        """Phase 3.E.1 hotfix v0.17 (2026-05-12): caption uses
-        the canonical "RX1 / RX2" naming (matches VFO LED
-        captions, dispatch state, focused_rx convention).  No
-        relabel based on SUB state."""
-        self.assertEqual(self.panel.vol_label_caption.text(), "Vol RX1")
-        self.radio.set_rx2_enabled(True)
-        self.assertEqual(self.panel.vol_label_caption.text(), "Vol RX1")
+        """Caption uses the canonical "RX1 / RX2" naming
+        (matches VFO LED captions, dispatch state, focused_rx).
+        No relabel based on SUB state.  Caption now lives in the
+        StepperReadout's _caption_label (§15.17)."""
         self.assertEqual(
-            self.panel.vol_b_label_caption.text(), "Vol RX2")
+            self.panel.vol_a_stepper._caption_label.text(), "Vol RX1")
+        self.radio.set_rx2_enabled(True)
+        self.assertEqual(
+            self.panel.vol_a_stepper._caption_label.text(), "Vol RX1")
+        self.assertEqual(
+            self.panel.vol_b_stepper._caption_label.text(), "Vol RX2")
 
-    def test_vol_a_slider_writes_rx1_always(self) -> None:
+    def test_vol_a_stepper_writes_rx1_always(self) -> None:
         """Vol-A always targets RX1, even when SUB is off and
-        focus is RX2.  The slider is just the RX1 control."""
-        # SUB off, focus RX2 (the v0.15 case that needed focus
-        # routing -- no longer needed with direct addressing).
+        focus is RX2.  The stepper is just the RX1 control."""
         self.radio.set_focused_rx(2)
         orig_rx2 = self.radio.volume_for_rx(2)
-        self.panel.vol_slider.setValue(40)
+        self.panel.vol_a_stepper.setValue(-12.0)
         self.assertAlmostEqual(
             self.radio.volume_for_rx(0),
-            self.panel._slider_to_volume(40), places=6)
+            self.panel._vol_db_to_linear(-12.0), places=6)
         # RX2 untouched.
         self.assertAlmostEqual(
             self.radio.volume_for_rx(2), orig_rx2, places=6)
 
-    def test_vol_b_slider_writes_rx2_always(self) -> None:
+    def test_vol_b_stepper_writes_rx2_always(self) -> None:
+        # This test guards ROUTING (Vol-B -> RX2 only), not the
+        # dB->linear precision: Radio.set_volume quantizes the
+        # stored multiplier to a coarse grid (e.g. -6 dB =
+        # 0.5012 -> stored 0.5), so the RX2 assertion uses
+        # places=2 to tolerate that grid.  RX1 must be strictly
+        # untouched (places=6).
         orig_rx1 = self.radio.volume_for_rx(0)
-        self.panel.vol_b_slider.setValue(75)
+        self.panel.vol_b_stepper.setValue(-6.0)
         self.assertAlmostEqual(
             self.radio.volume_for_rx(2),
-            self.panel._slider_to_volume(75), places=6)
+            self.panel._vol_db_to_linear(-6.0), places=2)
         # RX1 untouched.
         self.assertAlmostEqual(self.radio.volume_for_rx(0),
                                 orig_rx1, places=6)
@@ -980,9 +992,11 @@ class Phase3e1DualVolSlidersAlwaysVisibleTest(unittest.TestCase):
         # RX2's vol mirrored from RX1's 0.2.
         self.assertAlmostEqual(self.radio.volume_for_rx(2), 0.2,
                                 places=6)
-        # Vol-B slider updated via volume_changed_rx2 signal.
-        sval = self.panel._volume_to_slider(0.2)
-        self.assertEqual(self.panel.vol_b_slider.value(), sval)
+        # Vol-B stepper updated via volume_changed_rx2 signal.
+        # §15.17: stepper holds dB; compare in dB.
+        self.assertEqual(
+            int(self.panel.vol_b_stepper.value()),
+            self.panel._vol_linear_to_db(0.2))
 
 
 class Phase3e1WheelTuneFollowsPanadapterSourceTest(unittest.TestCase):

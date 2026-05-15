@@ -343,46 +343,58 @@ class Phase3dDspPanelConditionalUITest(unittest.TestCase):
         self.radio = Radio()
         self.panel = DspPanel(self.radio)
 
+    # §15.17/§15.24: the per-RX Vol QSliders (vol_slider /
+    # vol_b_slider, 0-100 linear) were replaced by dB
+    # StepperReadout widgets (vol_a_stepper / vol_b_stepper,
+    # -60..0 dB).  The behaviors below (RX1/RX2 direct
+    # addressing, always-visible, MUTE text) are unchanged --
+    # only the widget API + value units changed.  The separate
+    # `vol_label_caption` QLabel was absorbed into the
+    # StepperReadout's own `_caption_label` (§15.17 design).
+
     def test_per_rx_widgets_present(self) -> None:
-        self.assertTrue(hasattr(self.panel, "vol_b_slider"))
+        self.assertTrue(hasattr(self.panel, "vol_b_stepper"))
         self.assertTrue(hasattr(self.panel, "mute_b_btn"))
 
     def test_vol_b_visible_when_sub_off(self) -> None:
-        """Phase 3.E.1 hotfix v0.16 (2026-05-12): both Vol sliders +
-        MUTE buttons are now ALWAYS visible regardless of SUB
-        state.  Operator UX call: "two volume sliders and mutes
-        always visible".  Vol-A binds to RX1, Vol-B to RX2 --
-        direct addressing, no focus-based routing."""
+        """Phase 3.E.1 hotfix v0.16 (2026-05-12): both Vol
+        controls + MUTE buttons are ALWAYS visible regardless of
+        SUB state.  Vol-A binds RX1, Vol-B binds RX2 -- direct
+        addressing, no focus routing."""
         self.radio.set_rx2_enabled(False)
-        self.assertFalse(self.panel.vol_b_slider.isHidden())
+        self.assertFalse(self.panel.vol_b_stepper.isHidden())
         self.assertFalse(self.panel.mute_b_btn.isHidden())
-        self.assertEqual(self.panel.vol_label_caption.text(), "Vol RX1")
+        self.assertEqual(
+            self.panel.vol_a_stepper._caption_label.text(), "Vol RX1")
         self.assertEqual(self.panel.mute_btn.text(), "MUTE")
 
     def test_vol_b_visible_when_sub_on(self) -> None:
         self.radio.set_rx2_enabled(True)
-        self.assertFalse(self.panel.vol_b_slider.isHidden())
+        self.assertFalse(self.panel.vol_b_stepper.isHidden())
         self.assertFalse(self.panel.mute_b_btn.isHidden())
-        self.assertEqual(self.panel.vol_label_caption.text(), "Vol RX1")
+        self.assertEqual(
+            self.panel.vol_a_stepper._caption_label.text(), "Vol RX1")
         # MUTE button text stays "MUTE" in both SUB states --
-        # position (right of each Vol slider) carries the
+        # position (right of each Vol stepper) carries the
         # per-RX meaning, no -A / -B suffix needed.
         self.assertEqual(self.panel.mute_btn.text(), "MUTE")
         self.assertEqual(self.panel.mute_b_btn.text(), "MUTE")
 
-    def test_vol_a_slider_writes_rx1(self) -> None:
-        # The Vol slider always targets RX1 (target_rx=0).
+    def test_vol_a_stepper_writes_rx1(self) -> None:
+        # Vol-A stepper always targets RX1 (target_rx=0).  -12 dB
+        # -> _vol_db_to_linear(-12) ≈ 0.2512 multiplier.
         orig_rx2 = self.radio._volume_rx2
-        # Use a value that produces a recognisable slider position.
-        self.panel.vol_slider.setValue(50)
-        # 50% slider → ((50/100)**2) * 1.0 = 0.25 multiplier.
-        self.assertAlmostEqual(self.radio._volume, 0.25, places=4)
+        self.panel.vol_a_stepper.setValue(-12.0)
+        expected = self.panel._vol_db_to_linear(-12.0)
+        self.assertAlmostEqual(self.radio._volume, expected, places=4)
         self.assertAlmostEqual(self.radio._volume_rx2, orig_rx2)
 
-    def test_vol_b_slider_writes_rx2(self) -> None:
+    def test_vol_b_stepper_writes_rx2(self) -> None:
         orig_rx1 = self.radio._volume
-        self.panel.vol_b_slider.setValue(50)
-        self.assertAlmostEqual(self.radio._volume_rx2, 0.25, places=4)
+        self.panel.vol_b_stepper.setValue(-12.0)
+        expected = self.panel._vol_db_to_linear(-12.0)
+        self.assertAlmostEqual(
+            self.radio._volume_rx2, expected, places=4)
         self.assertAlmostEqual(self.radio._volume, orig_rx1)
 
     def test_mute_a_button_writes_rx1(self) -> None:
