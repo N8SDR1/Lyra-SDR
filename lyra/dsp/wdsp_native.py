@@ -87,6 +87,14 @@ void OpenChannel(int channel, int in_size, int dsp_size,
 void CloseChannel(int channel);
 int  SetChannelState(int channel, int state, int dmode);
 
+/* Channel-rate setters live in channel.c -- shared between RX and TX.
+ * Called at channel open + when the operator changes IQ rate.  v0.2
+ * Phase 2 wires these for the TX channel's 48k mic-in / 192k IQ-out
+ * configuration on HL2. */
+void SetInputSamplerate(int channel, int in_rate);
+void SetOutputSamplerate(int channel, int out_rate);
+void SetInputBuffsize(int channel, int in_size);
+
 /*
  * fexchange0: push one buffer of interleaved I/Q in, get interleaved L/R out.
  *
@@ -245,11 +253,94 @@ void SetRXAAGCHangThreshold(int channel, int hangthreshold);
  */
 double GetRXAMeter(int channel, int mt);
 
-/* ----- TX path (TXA.c) — declared but unused for v0.0.9.6 RX-only PoC ---- */
+/* ----- TX path (TXA.c) — v0.2 SSB-only surface ------------------------- */
 
+/*
+ * v0.2 Phase 2 cffi expansion (v0.2.0 SSB-only minimum).  Mirrors the
+ * pattern used by RXA: lifecycle from channel.c (already declared
+ * above), per-block setters here.  Subsequent v0.2.x sub-releases
+ * extend this section for EQ / compressor / CFC / AM / FM / CW.
+ *
+ * Signatures verified against wdsp source 2026-05-15:
+ *   - wcpagc.c lines 570-648 (ALC + Leveler)
+ *   - iir.c lines 665-708 (PHROT)
+ *   - bandpass.c lines 466-508 (TX bandpass)
+ *   - patchpanel.c lines 201-209 (panel)
+ *   - gen.c lines 784-810 (PostGen / gen0)
+ *   - cfir.c lines 233-241 (CFIR)
+ *   - meter.c line 151 (GetTXAMeter)
+ *   - TXA.c (rate setters)
+ *
+ * Critical signature notes (verified at source):
+ *   - ALC/Leveler Attack/Decay/Hang are INT (milliseconds), not
+ *     double.  Getting this wrong = register-class calling-convention
+ *     bug on Windows x86_64 (same class as v0.0.9.8.1 SetRXAAGCSlope
+ *     fix; see CLAUDE.md version-history).
+ *   - ALC/Leveler MaxGain (Top) ARE double (dB).
+ *   - There is NO SetTXAALCThresh.  The dynamic-range ceiling is
+ *     governed by SetTXAALCMaxGain alone; the "threshold" wording in
+ *     some plan drafts conflated TX ALC with RX AGC's SetRXAAGCThresh.
+ *   - PhRot setters use UPPERCASE PHROT (SetTXAPHROTRun, not
+ *     SetTXAPhRotRun).  Case-sensitive C symbol; matters for lookup.
+ */
+
+/* Mode + Bandpass */
 void SetTXAMode(int channel, int mode);
 void SetTXABandpassFreqs(int channel, double low, double high);
+void SetTXABandpassRun(int channel, int run);
+void SetTXABandpassWindow(int channel, int wintype);
+
+/* Mic-gain panel (panel.gain1 = mic linear gain; default 4.0 in WDSP,
+ * Lyra explicitly overrides to 1.0 + applies operator-set value).
+ * SetTXAPanelSelect is operator-opt-in (not called at channel init
+ * per Round 3 Agent M correction). */
+void SetTXAPanelRun(int channel, int run);
 void SetTXAPanelGain1(int channel, double gain);
+
+/* PHROT — SSB PEP-PAR reduction.  MUST be enabled for SSB modes
+ * (default OFF in create_txa; Lyra explicitly enables per
+ * consensus §8.5 IM-5 #1).  Note: case-sensitive setter names use
+ * uppercase PHROT, not PhRot. */
+void SetTXAPHROTRun(int channel, int run);
+void SetTXAPHROTCorner(int channel, double corner);
+void SetTXAPHROTNstages(int channel, int nstages);
+
+/* Leveler -- wcpagc mode 5 (TX side).  Same wcpagc engine as RX AGC,
+ * with TX-specific defaults from Thetis radio.cs:
+ *   attack = 5 ms, decay = 250 ms, hang = 500 ms, top = +5 dB. */
+void SetTXALevelerSt(int channel, int state);
+void SetTXALevelerAttack(int channel, int attack_ms);
+void SetTXALevelerDecay(int channel, int decay_ms);
+void SetTXALevelerHang(int channel, int hang_ms);
+void SetTXALevelerTop(int channel, double maxgain_db);
+
+/* ALC -- xwcpagc TXA.c:579, the load-bearing splatter limiter.  ALWAYS
+ * ON (no operator opt-out).  Thetis radio.cs defaults:
+ *   attack = 1 ms, decay = 10 ms, hang = 500 ms, maxgain = +3 dB. */
+void SetTXAALCSt(int channel, int state);
+void SetTXAALCAttack(int channel, int attack_ms);
+void SetTXAALCDecay(int channel, int decay_ms);
+void SetTXAALCHang(int channel, int hang_ms);
+void SetTXAALCMaxGain(int channel, double maxgain_db);
+
+/* Gen0 -- input-side signal generator (BEFORE mic-gain panel).
+ * Provides known-amplitude tone injection for bench tests: operator
+ * dial up a 1 kHz tone to verify modulator + ALC + leveler produce
+ * clean SSB at the antenna port without needing to talk into a mic.
+ * Used by Phase 2 bench gate.  OFF in normal operation. */
+void SetTXAPostGenRun(int channel, int run);
+void SetTXAPostGenMode(int channel, int mode);
+void SetTXAPostGenToneFreq(int channel, double freq);
+void SetTXAPostGenToneMag(int channel, double mag);
+
+/* CFIR -- Compensating FIR for P2 CIC compensation.  MUST be set 0
+ * for HL2 P1 (consensus §8.5 row 2069; meaningful only on P2 CIC
+ * paths). */
+void SetTXACFIRRun(int channel, int run);
+
+/* Meter readout -- mirrors GetRXAMeter signature.  Meter types match
+ * wdsp/TXA.h enum txaMeterType (see TxaMeterType class below). */
+double GetTXAMeter(int channel, int mt);
 
 /* ----- rmatch (rmatch.c) ------------------------------------------------ */
 
@@ -449,6 +540,67 @@ class MeterType:
     AGC_GAIN = 4   # linear gain — convert to dB with 20*log10
     AGC_PK   = 5
     AGC_AV   = 6
+
+
+# ---------------------------------------------------------------------------
+# txaMode integer enum (matches WDSP TXA.h)
+# ---------------------------------------------------------------------------
+
+class TxaMode:
+    """TXA channel-mode indices (matching wdsp/TXA.h enum txaMode).
+
+    v0.2 Phase 2 wires LSB/USB only (SSB modes).  CWL/CWU/AM/FM/AM_LSB/
+    AM_USB land in v0.2.2 with the per-mode modulator setters.  DSB
+    is the symmetric SSB variant (rare; ESSB operators use it); SAM
+    is synchronous AM; DRM and DIGU/DIGL are AM/SSB siblings.  SPEC
+    is the panadapter-only test mode (no real radio use).
+    """
+    LSB    = 0
+    USB    = 1
+    DSB    = 2
+    CWL    = 3
+    CWU    = 4
+    FM     = 5
+    AM     = 6
+    DIGU   = 7
+    SPEC   = 8
+    DIGL   = 9
+    SAM    = 10
+    DRM    = 11
+    AM_LSB = 12
+    AM_USB = 13
+
+
+# ---------------------------------------------------------------------------
+# txaMeterType integer enum (matches WDSP TXA.h)
+# ---------------------------------------------------------------------------
+
+class TxaMeterType:
+    """TXA meter type indices (matching wdsp/TXA.h enum txaMeterType).
+
+    Read via ``GetTXAMeter(channel, mt) -> double``.  Mirrors the RXA
+    MeterType pattern.  v0.2 Phase 2 wires MIC_PK / LVLR_GAIN /
+    ALC_GAIN / OUT_PK for the §8.4 LED-bar TX meter layout (Phase 3
+    UI work).  COMP_PK / COMP_AV land with the compressor in v0.2.1;
+    CFC_* land with the CFC in v0.2.2.
+    """
+    MIC_PK    = 0    # mic input peak (drives the MIC meter row)
+    MIC_AV    = 1
+    EQ_PK     = 2
+    EQ_AV     = 3
+    LVLR_PK   = 4
+    LVLR_AV   = 5
+    LVLR_GAIN = 6    # leveler gain reduction (drives §15.13 COMP chip RX-side)
+    CFC_PK    = 7
+    CFC_AV    = 8
+    CFC_GAIN  = 9
+    COMP_PK   = 10
+    COMP_AV   = 11
+    ALC_PK    = 12
+    ALC_AV    = 13
+    ALC_GAIN  = 14   # ALC gain reduction (load-bearing splatter check)
+    OUT_PK    = 15   # final TX output peak (drives the OUT meter row)
+    OUT_AV    = 16
 
 
 # ---------------------------------------------------------------------------
