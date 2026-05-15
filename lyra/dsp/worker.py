@@ -71,6 +71,7 @@ field testing.
 """
 from __future__ import annotations
 
+import threading
 from collections import deque
 from dataclasses import dataclass
 from queue import Empty, Full, Queue
@@ -216,6 +217,18 @@ class DspWorker(QObject):
         # ``radio._audio_sink``, so a main-thread sink swap can never
         # close the underlying object mid-write.
         self._audio_sink = None
+        # §15.21 bug 3 fix (§15.24 plan item B, 2026-05-15):
+        # one-shot barrier the worker SETS at the end of every
+        # _on_audio_sink_changed.  Radio.stop() clears it before
+        # emitting the NullSink swap and waits (bounded) on it
+        # afterward, so a rapid stop()->start() can't deliver the
+        # stale NullSink swap AFTER the new real sink is installed
+        # (worker would otherwise close/keep the wrong sink ->
+        # transient silence).  Non-stop emit paths (start,
+        # set_audio_output, PC device change) DON'T wait, so they
+        # never block on the worker event loop -- the worker just
+        # sets an Event nobody is waiting on (harmless).
+        self._sink_swap_done = threading.Event()
         # Phase 3.B B.8 — worker-owned sample ring + FFT cadence.
         # When worker mode is active the ring lives here (not on
         # Radio) so there's no cross-thread contention with the
@@ -438,6 +451,11 @@ class DspWorker(QObject):
                 old.close()
             except Exception as exc:
                 print(f"[DspWorker] old sink close error: {exc}")
+        # §15.21 bug 3: signal the (possibly-waiting) Radio.stop()
+        # that this swap has been fully applied on the worker
+        # thread.  Set unconditionally for every swap -- only
+        # stop() ever clears+waits on it; other callers ignore it.
+        self._sink_swap_done.set()
 
     # ── Run loop (worker thread) ───────────────────────────────
 

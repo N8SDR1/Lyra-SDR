@@ -8389,7 +8389,28 @@ class Radio(QObject):
             # between blocks.  Avoids close-while-writing race.
             new_sink = NullSink()
             self._audio_sink = new_sink
+            # §15.21 bug 3 fix (§15.24 plan item B): synchronously
+            # barrier on the worker applying THIS swap before stop()
+            # returns.  Without it, a rapid stop()->start() could
+            # leave the stale NullSink swap queued and delivered
+            # AFTER the next start()'s real sink -> worker keeps the
+            # NullSink -> silent audio until the next swap.  This is
+            # the ONLY emit site that clears+waits; start() /
+            # set_audio_output / PC-device-change deliberately do
+            # NOT (they must not block on the worker event loop).
+            # Bounded 1.0 s wait -> never hangs stop() even if the
+            # worker loop is wedged (it then proceeds to tear the
+            # worker down anyway).
+            try:
+                self._dsp_worker._sink_swap_done.clear()  # noqa: SLF001
+            except Exception:
+                pass
             self.worker_audio_sink_changed.emit(new_sink)
+            try:
+                self._dsp_worker._sink_swap_done.wait(  # noqa: SLF001
+                    timeout=1.0)
+            except Exception:
+                pass
         else:
             try:
                 self._audio_sink.close()
