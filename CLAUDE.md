@@ -4704,7 +4704,99 @@ and tested -- they're wired and ready; this defect is upstream
 of all of them in `wdsp_tx_engine.py` (commit 2 `135ccbb` /
 `3777506` era).
 
-**Status: OPEN, top priority, blocks Phase 3.**
+**3-agent investigation 2026-05-15 -- results + new evidence:**
+
+Spawned 2 of 3 planned agents (cmaster-open-path diff;
+rate/sizing audit).  BOTH independently converged on the
+`upslew0` BEGIN-state input gate as prime suspect.  **Empirically
+DISPROVED:**
+
+* DC mic block (constant 0.3, never zero-crosses → `upslew0`
+  BEGIN advances on first sample): STILL all-zero, 80 blocks.
+* Zero slew envelope (`TxConfig(tdelayup=0.0, tslewup=0.0)` →
+  BEGIN→ON immediately): STILL all-zero, 80 blocks.
+* => `upslew0`/`slew.upflag` is NOT the gate.  Both agents'
+  primary hypothesis is dead.
+
+**Agent B EXONERATED rate/sizing with HIGH confidence** (full
+arithmetic trace): `OpenChannel(48000/96000/48000, type=1)`
+yields dsp_insize=2048, r1_outsize=2048, out_size=512, rsmpin
+correctly upsamples 2048→4096; structurally identical to the
+working RX path.  No SetInputSamplerate/dsp_insize fix applies.
+A `TxConfig` rate change toward 48/48/48 would make it WORSE
+(xresample no-ops at run=0).
+
+**`SetTXAPanelSelect` inspection-weak:** `create_txa` creates
+the panel with inselect=2, copy=0 (TXA.c).  `xpanel` case 0
+(patchpanel.c): `I = in[2i+0]*(inselect>>1)` = `in_I * (2>>1=1)`
+= mic; `Q = in[2i+1]*(inselect&1)` = `in_Q * 0` = 0.  The
+DEFAULT panel already passes mic-from-I correctly with no
+SetTXAPanelSelect call.  (Worth a brute-force confirm but the
+math says it's not the §14.10-class miss here.)
+
+**NEW EVIDENCE -- reframes the whole defect (2026-05-15):**
+`scratch/test_tx_dsp_bench.py` (a prior DSP bench from the
+commit 1-2 era, FFT-analyzes TX output per SSB mode) ALSO
+fails, confirming the defect predates ALL Phase 2 plumbing
+(it's in `wdsp_tx_engine.py` commits 1-2).  Its FFT output is
+the key new clue -- **the modulator is MISCONFIGURED, not
+dead:**
+
+* USB mode, real 1 kHz mic tone, filter (+200,+3100): wanted
+  peak -223 dBFS (truly silent).
+* LSB mode, same tone, filter (-3100,-200): unwanted sideband
+  at +999 Hz = **-14.3 dBFS** (strong REAL signal, ~206 dB
+  above the USB noise floor), wanted -802 Hz = -82.9 dBFS.
+* => Output energy EXISTS in LSB (wrong sideband, wrong place)
+  but USB is dead.  A dead input path would give zero in BOTH.
+  This is a sideband/bandpass/sign-convention defect, not a
+  "samples never arrive" defect.
+
+* **gen0 inconsistency:** the gen0 "chain works" proof may be
+  MISLEADING.  Per `test_tx_dsp_bench.py` docstring, gen0
+  emits a COMPLEX exp(-j2πft) at -freq (gen.c:221-239) --
+  LSB-shaped.  A USB bp0 at (+200,+3100) should REJECT it →
+  ~zero.  Yet the earlier gen0 probe used USB filter and
+  showed max 0.5 (full pass).  That contradiction means
+  either set_filter/set_mode ordering didn't apply to bp0, or
+  bp0 isn't the filter the call configured (the RX §14.2
+  "wrong bandpass" gotcha may have a TX mirror), or gen0
+  bypasses bp0.  The "WDSP TXA chain works" claim above needs
+  re-examination under this light.
+
+**Redirected next-investigation focus (supersedes the 3
+candidate surfaces above):**
+  1. **set_mode / set_filter / TXASetupBPFilters ordering &
+     sign convention.**  `wdsp_tx_engine.py` `_apply_init_setters`
+     calls `SetTXAMode(USB)` then `SetTXABandpassFreqs(200,3100)`
+     + `SetTXABandpassRun(1)`.  But `SetTXAMode` and
+     `SetTXABandpassFreqs` BOTH call `TXASetupBPFilters` which
+     reconfigures bp0/bp1/bp2 from `txa.mode` + `txa.f_low/
+     f_high`.  Trace the exact final bp0 passband for USB after
+     our init order.  Is `SetTXABandpassRun` even the right
+     setter (RX §14.2: SSB selection lives in NBP0/bp0, and
+     calling the wrong bandpass setter is silently ignored)?
+     LSB-produces-wrong-sideband + USB-dead smells exactly like
+     this.
+  2. **Real-mic-tone vs complex-exp spectrum interaction.**
+     A real sine has energy at ±f; WDSP TXA's SSB selection +
+     the HL2 mirrored-baseband convention (CLAUDE.md §14.2
+     "USB filter selects NEGATIVE baseband" on RX -- the TX
+     analogue must be derived, not assumed).  The operator-
+     facing low/high → SetTXABandpassFreqs sign mapping
+     (negate for LSB/CWL/DIGL per console.cs:8079-8118) may be
+     applied at the wrong layer or not at all in
+     `_apply_init_setters`.
+  3. Re-verify the gen0 "chain works" claim under the bandpass-
+     sign lens before trusting it as a chain-vs-input
+     bisection.
+
+**Status: OPEN, top priority, blocks Phase 3.**  Root cause is
+more subtle than the agents' first pass -- it's a TX SSB
+bandpass/sign-convention misconfiguration (TX mirror of the
+RX §14.2 gotcha), NOT a dead input path.  Deserves a fresh
+focused dig on the set_mode/set_filter/TXASetupBPFilters
+ordering + the HL2 TX mirrored-baseband sign convention.
 
 ---
 
