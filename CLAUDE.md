@@ -4148,12 +4148,75 @@ dispatcher.
 (``0b730f2``) and current HEAD (``9fe0b59``).  Pushed to
 origin; main stays at v0.1.1.
 
-**Phase 2: PENDING.**  Resume when operator picks v0.2 work
-back up.  Reading-list pre-cached: consensus §8.5 (TX chain
-byte-for-byte match to xtxa() execution order); §8.4 (meter
-wiring + cal); §15.13/14/15 (cross-cutting v0.2 deferrals);
-``wdsp_engine.py`` (RxChannel pattern for TxChannel sibling);
-``wdsp_native.py:248`` (3 TX stubs to expand).
+**Phase 2: IN PROGRESS 2026-05-15.**  Commit 1 (cffi expansion)
+shipped ``135ccbb``; ~25 new TXA cffi entries declared + verified
+against bundled ``wdsp.dll``; ``TxaMode`` + ``TxaMeterType`` enums
+added.  Remaining: ``TxChannel`` class in new ``wdsp_tx_engine.py``,
+mic-input dispatcher, EP2 I/Q packing, ALC + leveler init with
+Thetis defaults, §8.2 sip1 ring buffer, 50 ms MOX-edge fade,
+IM-5 6-setter audit, bench gate.
+
+#### Pre-cdef audit discipline (NEW 2026-05-15)
+
+**Consensus plan §8.5 contained THREE setter-name defects** that
+the row-by-row source verification during commit ``135ccbb``
+caught before any cffi could be emitted:
+
+1. ``SetTXAALCThresh`` — does not exist in WDSP.  ALC's dynamic-
+   range ceiling is governed by ``SetTXAALCMaxGain`` alone.
+   Earlier plan drafts conflated TX ALC (MaxGain-only) with RX
+   AGC's ``SetRXAAGCThresh`` (which DOES exist).
+2. ``SetTXAPhRotRun`` / ``SetTXAPhRotFreq`` / ``SetTXAPhRotNstages``
+   — actual WDSP symbols are ``SetTXAPHROTRun`` / ``SetTXAPHROTCorner``
+   / ``SetTXAPHROTNstages`` (UPPERCASE PHROT).  Case-sensitive C
+   symbols; case-mismatched names would fail symbol resolution
+   at first call.
+3. ``SetTXAInRate`` / ``SetTXAOutRate`` — do not exist; rate
+   setters are shared with RX in ``channel.c``:
+   ``SetInputSamplerate`` / ``SetOutputSamplerate``.
+
+All three defects were fixed in ``v0.1_rx2_consensus_plan.md``
+§8.5 commit (2026-05-15) so the doc no longer poisons future
+readers.
+
+**Discipline going forward**: before each v0.2.x sub-release adds
+new WDSP setters (v0.2.1 EQ + compressor, v0.2.2 AM/FM/CW + CFC,
+v0.2.3 polish + XIT), do a row-by-row audit of consensus §8.5
+setter names + signatures against the WDSP source files cited
+in §8.5.  The shell pattern that catches the three classes of
+defect:
+
+```sh
+# Check setter exists (catches "Thresh" / "InRate" class):
+grep -rn "^void <setter_name>" \
+    "$THETIS_SRC/Project Files/Source/wdsp/"
+
+# Check exact casing (catches "PhRot" vs "PHROT" class):
+grep -rni "<setter_name_lowercase>" \
+    "$THETIS_SRC/Project Files/Source/wdsp/" | head -3
+
+# Check parameter signature (catches "int vs double" class --
+# the v0.0.9.8.1 SetRXAAGCSlope register-class bug):
+grep -A1 "^void <setter_name>" \
+    "$THETIS_SRC/Project Files/Source/wdsp/<file>.c"
+```
+
+Where ``$THETIS_SRC = D:\sdrprojects\OpenHPSDR-Thetis-2.10.3.13``.
+
+Audit cost: ~30-60 min per sub-release worth of new setters.
+Catches defects at the cdef stage (cheapest fix point) instead
+of dlopen / first-call / runtime-bench (each progressively
+more expensive).
+
+The pattern is: **every prior audit pass reviewed an adjacent
+surface but the row-by-row consensus-vs-source check was a gap.**
+Adding it explicitly fills the gap.
+
+Reading-list anchors for Phase 2 resume (unchanged):
+consensus §8.5 (TX chain byte-for-byte match to xtxa() execution
+order); §8.4 (meter wiring + cal); §15.13/14/15 (cross-cutting
+v0.2 deferrals); ``wdsp_engine.py`` (RxChannel pattern for
+TxChannel sibling).
 
 ---
 
