@@ -39,9 +39,18 @@ class Sip1Tap:
     progress sees either the pre-write or post-write state, never
     a partial write.
 
-    Default capacity: 8192 complex64 samples = ~170 ms at 48 kHz.
-    Plenty of headroom for PureSignal's typical 50-100 ms PA
-    round-trip + correlation window.
+    Default capacity: 8192 complex64 samples ≈ 170 ms of TX I/Q.
+
+    The 170 ms figure assumes the HL2 TX I/Q wire rate of 48 kHz
+    (gateware-fixed by the AK4951 codec lock per CLAUDE.md §3.5;
+    NOT the operator-selectable RX IQ rate of 96k/192k/384k --
+    those are two independent rates).  WDSP TXA emits at
+    out_rate=48000 to match the wire, so what the tap captures is
+    48 kHz regardless of what RX is doing.
+
+    8192 samples / 48 kHz ≈ 170 ms.  Plenty of headroom for
+    PureSignal's typical 50-100 ms PA round-trip + correlation
+    window.
 
     Memory cost at default capacity:
         8192 samples × 8 bytes (complex64) ≈ 65 KB
