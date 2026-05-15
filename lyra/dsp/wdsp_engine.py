@@ -17,14 +17,23 @@ Sits on top of `wdsp_native` and gives Lyra a clean Python interface:
     audio_lr = rx.process(iq_block)   # iq_block: complex64 [in_size]
                                        # audio_lr: float32   [in_size, 2]
 
-The channel index space is shared with WDSP's internal model:
+The channel index space is shared with WDSP's internal model + the
+locked host-channel-ID convention from consensus plan §2.2:
 
-    0  — RX1 (main)
-    1  — RX2 (sub-receiver)
-    2  — TX
-    ...
+    0  — RX1 main
+    1  — RX1 sub-receiver (reserved, post-v0.3)
+    2  — RX2 main
+    3  — (HL2: PS-feedback alias) / (5-DDC ANAN: RX2-sub)
+    4  — TX main (TXA)               -- see wdsp_tx_engine.TxChannel
+    5  — PS feedback A on 5-DDC ANAN (future)
+    6  — PS feedback B on 5-DDC ANAN (future)
 
-For now this module exposes RX channels only.
+(Corrected 2026-05-15: earlier comment listed "2 — TX" which was wrong
+per consensus §2.2 Round 2 verification.  Channel 2 is RX2, channel 4
+is TX.  Agent M Round 3 audit flagged the stale comment.)
+
+This module exposes RX channels only.  TxChannel sibling lives in
+``wdsp_tx_engine.py``.
 
 Buffer layout
 -------------
