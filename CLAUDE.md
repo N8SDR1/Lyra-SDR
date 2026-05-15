@@ -4230,8 +4230,39 @@ Reading-list anchors for Phase 2 resume (unchanged):
 consensus §8.5 (TX chain byte-for-byte match to xtxa() execution
 order); §8.4 (meter wiring + cal); §15.13/14/15 (cross-cutting
 v0.2 deferrals); §15.19 (operator-locked TX feature scope -- see
-below); ``wdsp_engine.py`` (RxChannel pattern for TxChannel
-sibling).
+below); §15.20 (TX safety timeout design lock -- replaces the
+HL2-side `reset_on_disconnect` approach that wedged the gateware);
+``wdsp_engine.py`` (RxChannel pattern for TxChannel sibling).
+
+#### Phase 1 commit 6 follow-up: reset_on_disconnect default flip (2026-05-15)
+
+`aef0106` (Phase 1 commit 6) defaulted `_reset_on_disconnect = True`.
+Operator-bench-confirmed 2026-05-15 via clean bisect against
+installed v0.1.1 GA (pre-`aef0106`): v0.1.1 stop+restart rock solid
+across 5+ rapid cycles with no delay; DEV (post-`aef0106`) hangs
+after first stop with `"EP2 writer: no EP6 received within 5s"`
+cascade.  Root cause: HL2 gateware treats ANY loss of EP2
+keepalive as "disconnect" -- including our deliberate stop() --
+and with `reset_on_disconnect=1` armed it enters a non-
+deterministic internal reset that wedges the next START_IQ.
+
+Fix landed in `ec636d7` (Phase 1 commit 6.1): default flipped to
+`False`.  Composer + cycle slot + eager registration stay in place
+for the Phase 3 opt-in path (see §15.20 final posture).  Wire
+behavior reverts to v0.1.1-parity for RX-only stop+restart.
+
+The crash-safety motivation behind `aef0106` is now covered
+differently:
+* **Operator-visible failure modes** (stuck PTT, fell asleep,
+  software bug latches MOX) -- covered by host-side TX safety
+  timeout per §15.20 (lands in Phase 3 alongside the MOX/PTT
+  state machine).
+* **True Lyra hard crash mid-TX** -- covered by HL2 community
+  gateware's own internal watchdog (no EP2 keepalive for N sec
+  → drop PA bias).  v0.0.x/v0.1.x shipped for months with
+  `reset_on_disconnect` never written and no tester ever
+  reported a stuck-carrier post-crash; the gateware was already
+  safe on its own.
 
 ### 15.19 — v0.2 TX feature scope (operator-locked 2026-05-15)
 
@@ -4274,6 +4305,7 @@ front of the radio.
 | **VOX** (toggle + threshold + open/close hang times) | v0.2.3 | Voice-operated TX subscriber on PttStateMachine.  Anti-VOX (suppress when speaker output active) included.  Threshold slider in dBFS; hang times in ms. |
 | **Pre-EQ vs post-EQ compressor ordering** | v0.2.1 | Settings toggle "Compressor position: pre-EQ / post-EQ".  ESSB ops typically want comp BEFORE EQ to preserve EQ shape; default is post-EQ (consensus §8.5 order). |
 | **Noise gate** (mic side, operator-tunable threshold / hang / muted-gain) | v0.2.2 | WDSP `amsq` block already in TXA chain -- expose via Settings -> TX with operator sliders. |
+| **TX safety timeout** (configurable 1-20 min + bypass) | v0.2.0 Phase 3 | Host-side QTimer armed on MOX=1 edge, cancelled on MOX=0, fires `radio.set_mox(False)` + toast on expiry.  Bypass checkbox for long AM/CW operating (operator does 15-20 min AM keydowns).  Default 10 min, range 1-20.  Replaces the `reset_on_disconnect` HL2-side approach (which wedged the gateware on clean stop -- see §15.20).  See §15.20 for full design lock. |
 
 **Explicitly EXCLUDED (operator NO 2026-05-15):**
 
@@ -4327,6 +4359,99 @@ state values.  Setting a profile applies all values atomically.
 Settings UI: profile list + Save / Load / Delete buttons.
 Default profile recalled on Lyra restart.  Profile data persisted
 under `qsettings.beginGroup('tx_profiles')`.
+
+### 15.20 — TX safety timeout (LOCKED 2026-05-15, scope: v0.2.0 Phase 3)
+
+Replaces the HL2-side `reset_on_disconnect` approach (Phase 1
+commit 6 `aef0106`) that wedged the gateware on clean stop+restart
+cycles.  Host-side timer caught the operator-visible failure modes
+that the gateware-watchdog approach was meant to address, without
+introducing the wedge.  See §15.18 trailer for the bisect that
+confirmed `aef0106` as the wedge trigger.
+
+#### What it covers (vs `reset_on_disconnect`)
+
+| Failure | TX timeout | reset_on_disconnect |
+|---|---|---|
+| Stuck PTT (foot switch jammed, hardware fault) | ✅ | ❌ |
+| Operator falls asleep / steps away keyed | ✅ | ❌ |
+| Software bug latches MOX | ✅ | ❌ |
+| Lyra hard crash mid-TX | ❌ Lyra is dead | ✅ HL2 self-rescue |
+| OS bluescreen / power loss mid-TX | ❌ | ✅ |
+
+The crash cases are covered by the HL2 community gateware's own
+internal watchdog (no EP2 keepalive for N seconds → drop PA bias).
+v0.0.x and v0.1.x shipped for months with `reset_on_disconnect`
+never written and no operator ever reported stuck-carrier after a
+Lyra crash -- the gateware was already being safe on its own.
+
+So the TX timeout is the **only** Lyra-side safety net we need.
+
+#### Spec
+
+* **Default**: 10 minutes
+* **Range**: 1-20 minutes
+* **Bypass**: checkbox.  When checked, no timer ever armed (for AM
+  ragchews where N8SDR routinely does 15-20 min keydowns, slow CW
+  in beacon-style operation, etc.).
+* **Behavior**:
+  * MOX=1 edge → arm QTimer for `timeout_minutes * 60` sec
+  * MOX=0 edge → cancel timer
+  * Timer fire → call `radio.set_mox(False)` + toast:
+    `"TX timeout reached after N min.  Adjust or bypass in
+    Settings -> TX."`
+  * Bypass=True → never arm; existing operator MOX state honored
+* **NOT mode-aware**.  Per §15.19 explicit exclusions ("no per-mode
+  auto-switch"), the operator picks bypass or extends the minutes
+  for long-form modes -- no algorithmic mode detection.
+
+#### Placement
+
+Settings → TX (new section, lands in Phase 3 alongside the MOX/PTT
+state machine UI):
+
+```
+TX safety timeout
+  [X] Stop transmit after  [10 ▾] minutes of continuous keydown
+  [ ] Bypass timeout (for AM ragchews, long CW, etc.)
+```
+
+Spin box range 1-20.  Bypass disables the spin box visually when
+checked.
+
+#### Implementation surface
+
+* `Radio._tx_timeout_seconds: int = 600`
+* `Radio._tx_timeout_bypass: bool = False`
+* `Radio._tx_timeout_timer: QTimer` (or `_tx_timeout_deadline_mono`
+  if pure-Python timer preferred)
+* 2 setters: `set_tx_timeout_seconds(int)`, `set_tx_timeout_bypass(bool)`
+* 2 signals: `tx_timeout_seconds_changed`, `tx_timeout_bypass_changed`
+* 2 QSettings keys: `tx/timeout_seconds`, `tx/timeout_bypass`
+* MOX-edge hooks: arm/cancel in `Radio.set_mox()` + the PTT state
+  machine entry/exit
+* Settings UI: spin box + checkbox in a "TX safety" QGroupBox
+* ~80 LOC total including UI
+
+#### `reset_on_disconnect` posture (final)
+
+Stays in the codebase but defaults `False` forever.  The composer
+(`_compose_frame_18`), cycle slot (`0x74` in `_cc_cycle`), and
+eager registration in `__init__` stay in place -- they cost
+nothing dormant.  Phase 3 Settings → TX will expose an
+**opt-in** checkbox for the one weird use case the original
+commit message called out: "gateware-driven CW beacons that need
+to survive link blips."  Tooltip will warn it interacts badly
+with rapid stop+restart cycles.  Default OFF, operator-visible
+trade-off, advanced-user escape hatch.
+
+#### Status
+
+**LOCKED 2026-05-15** -- operator-confirmed (Option B path) after
+bisect confirmed `aef0106` as the HL2 wedge trigger.  Code lands
+in v0.2.0 Phase 3 alongside the MOX/PTT state machine + MOX button
++ §15.9 red-on-air visual rule + §15.14 auto-mute-on-TX recovery.
+Estimated ~2 hr of the Phase 3 budget (~14 h total per §15.18).
 
 ---
 
