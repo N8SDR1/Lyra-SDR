@@ -969,14 +969,23 @@ class HL2Stream:
         self._diversity_enabled: bool = False
 
         # ── HPSDR P1 frame 18 (register 0x74) state (v0.2 Phase 1) ──
-        # Reset-on-disconnect: HL2-only safety register.  When set
-        # (default True), the gateware auto-reverts to RX state if
-        # the host TCP link drops -- prevents silent carrier on air
-        # after a Lyra crash mid-TX.  Operator can opt out via
-        # Settings (Phase 3 UI) for advanced use cases like
-        # gateware-driven CW beacons that need to survive link
-        # blips.  Defaults to True for safety.
-        self._reset_on_disconnect: bool = True
+        # Reset-on-disconnect: HL2-only safety register.  When set,
+        # the gateware auto-reverts to RX state if the host TCP link
+        # drops -- prevents silent carrier on air after a Lyra crash
+        # mid-TX.
+        #
+        # DEFAULT FLIPPED TO FALSE 2026-05-15 (Phase 1 commit 6.1):
+        # operator-bench-confirmed that True wedges the HL2 on clean
+        # stop+restart cycles.  Gateware treats our deliberate stop()
+        # as a "disconnect" and enters reset, ignoring the next
+        # START_IQ until reset completes (non-deterministic timing).
+        # Bisect: v0.1.1 (pre-aef0106) stop+restart rock solid; DEV
+        # (post-aef0106) hangs after first stop.  Composer + cycle
+        # slot + eager registration stay in place; Phase 3 will wire
+        # the Settings UI toggle + a "write 0 before stop()" handshake
+        # so the safety can be re-enabled without the wedge.  Until
+        # then, RX-only v0.2.0 doesn't need the safety (no TX yet).
+        self._reset_on_disconnect: bool = False
 
         # ── EP2 writer thread state (v0.0.9.2 Commit 4) ─────────────
         # Dedicated EP2 writer thread runs the host->radio frame send
