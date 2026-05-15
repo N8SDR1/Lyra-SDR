@@ -2902,6 +2902,32 @@ class HL2Stream:
         # event here lets it observe _stop_event and exit cleanly
         # rather than waiting out its 5 s timeout.
         self._first_ep6_event.set()
+        # §15.21 bug 1 + 2 fix (§15.24 plan item B, 2026-05-15).
+        # Teardown order is RACE-CRITICAL:
+        #   1. send STOP (socket still open);
+        #   2. join the EP2 writer FIRST -- it is timer-driven and
+        #      self-exits within one cadence tick (~3 ms) of
+        #      _stop_event (woken via _first_ep6_event if blocked
+        #      pre-stream).  It must die BEFORE we close the socket,
+        #      else its guarded `sendto` (stream.py ~2291) could
+        #      fire on a freed/None socket -- a race the OLD
+        #      close-after-all-joins order avoided and that a naive
+        #      close-first reorder would REINTRODUCE;
+        #   3. close + null the socket -- this is the bug-1 win:
+        #      the RX loop is blocked in `recvfrom` (settimeout
+        #      0.5 s); closing makes it raise OSError immediately,
+        #      caught by `_rx_loop`'s existing `except OSError:
+        #      break` (~stream.py:2978 -- A5's "must widen except"
+        #      prerequisite was verified ALREADY met, the break
+        #      predates this fix), so the RX thread exits at once
+        #      instead of the main thread waiting out the join /
+        #      recv timeout;
+        #   4. join + null the RX thread (bug 2: clear the stale
+        #      ref the old code never nulled).
+        # Pre-7-redo this whole path was effectively never hit
+        # (env-gated TX dispatch); post-7-redo TX teardown is
+        # unconditional so every stop() runs it -- hence the
+        # promotion from §15.21 "latent/parked" to this fix.
         if self._sock is not None:
             try:
                 self._sock.sendto(
@@ -2909,17 +2935,21 @@ class HL2Stream:
                 )
             except OSError:
                 pass
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
         if self._ep2_writer_thread is not None:
-            # Writer thread is timer-driven so it self-exits within
-            # one cadence tick (~3 ms) of _stop_event being set.
-            # Bounded join in case it's mid-sleep.
             self._ep2_writer_thread.join(timeout=1.0)
             self._ep2_writer_thread = None
         if self._sock is not None:
-            self._sock.close()
-            self._sock = None
+            # Writer is now dead; safe to close.  Unblocks the RX
+            # recvfrom immediately (bug 1).
+            with self._send_lock:
+                try:
+                    self._sock.close()
+                except OSError:
+                    pass
+                self._sock = None
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None          # bug 2: clear stale ref
 
     # -- internal -----------------------------------------------------------
     def _rx_loop(self) -> None:
