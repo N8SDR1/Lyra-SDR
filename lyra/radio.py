@@ -1098,18 +1098,26 @@ class Radio(QObject):
         # convention (Round 2 verified Thetis source: TX is 2*2=4
         # for CMrcvr=2, CMsubrcvr=2 on HL2).
         self._tx_channel = None
-        # Mic-input accumulator -- mic samples arrive in 38-sample
-        # int16 blocks per EP6 datagram (HL2+ AK4951 path) or
-        # in operator-blocksize float32 blocks per PortAudio
-        # callback (PC sound card path).  TxChannel.process() takes
-        # whatever length the caller passes and buffers internally
-        # until it has full in_size=512 blocks.  This Radio-side
-        # accumulator is just a thread-safety boundary so the mic
-        # callback (RX-loop thread or PortAudio audio thread) can
-        # hand off cleanly to TxChannel.process (DSP worker thread
-        # in the final wiring; today commit 7 calls it inline for
-        # POC -- see commit notes).
-        self._tx_iq_latest = None  # complex64 ndarray of latest I/Q
+        # v0.2 Phase 2 commit 7-redo (2026-05-15): dedicated TX DSP
+        # worker thread.  Replaces the broken inline-dispatch path
+        # from commit 7 + the env-var gate from commit 7.1.
+        #
+        # Mic samples arrive in 38-sample int16 blocks per EP6
+        # datagram (HL2+ AK4951 path) or operator-blocksize float32
+        # blocks per PortAudio callback (PC sound card path).  Both
+        # producer paths call ``TxDspWorker.submit`` (non-blocking
+        # queue put) and the worker thread drains, runs
+        # ``TxChannel.process`` (which blocks ~10 ms per in_size=512
+        # block on WDSP's ``fexchange0``), then pushes the resulting
+        # complex64 I/Q to ``HL2Stream.queue_tx_iq`` -- gated by
+        # ``HL2Stream.inject_tx_iq`` which Phase 3 PTT state machine
+        # flips on MOX=1 edge.
+        #
+        # Lifecycle tied to stream start/stop: worker is constructed
+        # + started in ``start()`` (after ``_open_tx_channel``),
+        # stopped + dropped in ``stop()`` (before
+        # ``_close_tx_channel``).
+        self._tx_dsp_worker = None
         # Phase 2 v0.1 (2026-05-11): second WDSP RX channel for RX2.
         # Mirrors ``_wdsp_rx`` lifecycle (created/recreated together
         # in ``_open_wdsp_rx``).  RX2's mode/filter/AGC follow RX1
@@ -8247,33 +8255,32 @@ class Radio(QObject):
                 self.status_message.emit(
                     f"RX2 initial freq push failed: {e}", 3000,
                 )
-            # v0.2 Phase 2 commit 7.1 (regression fix 2026-05-15):
-            # TX dispatch is gated behind an opt-in env var until the
-            # threading model is correct.  The original commit 7
-            # wired _on_hl2_mic as the EP6 mic_callback which fires on
-            # the RX-loop thread; dispatch_tx -> TxChannel.process ->
-            # fexchange0(block=1) then blocks the RX-loop, starving
-            # every other RX path (audio + spectrum + telemetry).
-            # Symptom: "audio click then Lyra locks" reported by
-            # N8SDR within ~5 sec of clicking Start (14 datagrams of
-            # 38 mic samples each = 512-sample threshold for first
-            # fexchange0 call).
+            # v0.2 Phase 2 commit 7-redo (2026-05-15): open TX channel
+            # + start the dedicated TX DSP worker thread.  Replaces
+            # the broken inline-dispatch path from commit 7 and the
+            # LYRA_ENABLE_TX_DISPATCH env var from commit 7.1.
             #
-            # CLAUDE.md §5 threading model: mic samples MUST queue +
-            # drain on the DSP worker thread, not run inline on the
-            # producer thread.  A future commit (Phase 2 commit 8 or
-            # later) implements the proper queue.  Until then, this
-            # path stays OFF by default so the operator can RX.
-            #
-            # To enable for development testing:
-            #     set LYRA_ENABLE_TX_DISPATCH=1
-            #     python -m lyra.ui.app
-            # Operator can also set this via Settings -> TX once the
-            # threading fix lands.
-            import os as _os
-            if _os.environ.get("LYRA_ENABLE_TX_DISPATCH") == "1":
-                self._open_tx_channel()
-                self._wire_mic_source()
+            # The worker absorbs the ~10 ms blocking cost of every
+            # ``fexchange0`` call on its own thread, so the producer
+            # threads (RX-loop for HL2 jack, PortAudio for PC sound
+            # card) never block.  Mic data flows continuously even
+            # on RX (keeps WDSP TXA chain in steady state); the I/Q
+            # output is dropped on the floor until Phase 3 PTT state
+            # machine flips ``HL2Stream.inject_tx_iq=True`` on MOX=1
+            # edge.  Wire bytes are byte-identical to v0.1.1 until
+            # that PTT flip lands.
+            self._open_tx_channel()
+            if self._tx_channel is not None:
+                try:
+                    from lyra.dsp.tx_dsp_worker import TxDspWorker
+                    self._tx_dsp_worker = TxDspWorker(
+                        self._tx_channel, self._stream,
+                    )
+                    self._tx_dsp_worker.start()
+                    self._wire_mic_source()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[Radio] TxDspWorker start failed: {exc}")
+                    self._tx_dsp_worker = None
         except Exception as e:
             self.status_message.emit(f"Start failed: {e}", 5000)
             self._stream = None
@@ -8346,17 +8353,40 @@ class Radio(QObject):
                 self._usb_bcd_cable.write_byte(0)
             except Exception:
                 pass
-        # v0.2 Phase 2 commit 7: stop PC mic source if running + close
-        # TX channel.  Done BEFORE _stream.stop so the PortAudio thread
-        # has a chance to drain cleanly.
+        # v0.2 Phase 2 commit 7-redo (2026-05-15): tear down TX path
+        # in producer -> worker -> consumer order so nothing fires
+        # into a freed object.
+        #
+        #   1. Clear the HL2 mic_callback so the RX-loop stops
+        #      submitting (RX-loop itself is still alive until
+        #      _stream.stop() below).
+        #   2. Stop the PC mic source so PortAudio stops submitting.
+        #   3. Stop + join the TX DSP worker (drains remaining queue,
+        #      worker can no longer call TxChannel.process or
+        #      HL2Stream.queue_tx_iq).
+        #   4. Close TX channel (now safe -- no producer of
+        #      .process() calls remains).
+        #   5. _stream.stop() further down handles RX-loop teardown
+        #      + final STOP_IQ + socket close (the HL2 wedge fix is
+        #      orthogonal to TX teardown -- see Phase 1 commit 6.1).
+        if self._stream is not None:
+            try:
+                self._stream.register_mic_consumer(None)
+            except Exception:
+                pass
         if (self._pc_mic_source is not None
                 and self._pc_mic_source.is_running):
             try:
                 self._pc_mic_source.stop()
             except Exception as exc:
                 print(f"[Radio] PC mic stop failed: {exc}")
+        if self._tx_dsp_worker is not None:
+            try:
+                self._tx_dsp_worker.stop(timeout=1.0)
+            except Exception as exc:
+                print(f"[Radio] TxDspWorker stop failed: {exc}")
+            self._tx_dsp_worker = None
         self._close_tx_channel()
-        self._tx_iq_latest = None
         if self._stream:
             self._stream.stop()
             self._stream = None
@@ -9002,38 +9032,46 @@ class Radio(QObject):
             if _rd_dt_ms > self._dbg_samples_max_ms:
                 self._dbg_samples_max_ms = _rd_dt_ms
 
-    # ── WDSP TX engine integration (v0.2 Phase 2 commit 7) ────────────
+    # ── WDSP TX engine integration (v0.2 Phase 2 commits 7 + 8) ────────
     #
     # ``_tx_channel`` is a ``lyra.dsp.wdsp_tx_engine.TxChannel`` instance,
     # sibling of ``_wdsp_rx``.  Lazy-opened when the stream starts, closed
     # when the stream stops.  Channel index = 4 per consensus §2.2.
     #
+    # ``_tx_dsp_worker`` is a ``lyra.dsp.tx_dsp_worker.TxDspWorker`` --
+    # a dedicated DSP thread that absorbs the blocking cost of
+    # ``TxChannel.process`` (~10 ms per in_size=512 block via WDSP
+    # ``fexchange0``) so producer threads never block.
+    #
     # Mic-source-aware dispatch wiring:
     #
-    # * mic_source = "hl2_jack": HL2Stream's mic_callback (Phase 2 commit 3
-    #   hook) fires per UDP datagram with int16 BE-decoded mic samples.
-    #   Adapter ``_on_hl2_mic`` converts to float32 mono [-1, 1] and routes
-    #   to ``dispatch_tx``.
-    # * mic_source = "pc_soundcard": ``SoundDeviceMicSource`` (Phase 2
-    #   commit 4) fires per PortAudio callback with float32 mono samples
-    #   already in the right format.  Consumer = ``dispatch_tx`` directly.
+    # * ``mic_source = "hl2_jack"``: HL2Stream's mic_callback fires per
+    #   UDP datagram on the RX-loop thread with int16 BE-decoded mic
+    #   samples.  Adapter ``_on_hl2_mic`` converts to float32 mono
+    #   [-1, 1] and calls ``_tx_dsp_worker.submit`` (non-blocking).
+    # * ``mic_source = "pc_soundcard"``: ``SoundDeviceMicSource`` fires
+    #   per PortAudio callback with float32 mono samples already in
+    #   the right format.  Consumer = ``_tx_dsp_worker.submit`` directly.
     #
-    # Both paths converge on ``dispatch_tx(mic_float32)`` which calls
-    # ``TxChannel.process(mic)`` and stashes the complex64 I/Q output in
-    # ``_tx_iq_latest`` for the EP2 writer to drain in Phase 2 commit 8.
+    # Both producer paths cross only one thread boundary
+    # (producer -> worker via ``queue.Queue``).  The worker thread
+    # itself drains the queue, calls ``TxChannel.process``, and pushes
+    # the resulting complex64 I/Q to ``HL2Stream.queue_tx_iq`` -- gated
+    # by ``HL2Stream.inject_tx_iq`` which Phase 3 PTT state machine
+    # flips on MOX=1 edge.
     #
-    # Threading caveat (deferred to Phase 2 commit 8+):
-    # ``dispatch_tx`` is currently called from whichever thread fires
-    # the mic callback -- RX-loop thread (HL2 path) or PortAudio audio
-    # thread (PC path).  TxChannel.process invokes WDSP cffi
-    # ``fexchange0`` which is per-channel-thread-safe in WDSP itself
-    # (each channel has its own ``CRITICAL_SECTION``); since TxChannel
-    # is channel 4 and RxChannel uses 0/2, there's no cross-channel
-    # contention.  But the right architectural answer per CLAUDE.md §5
-    # threading model is: queue mic samples + drain them on the DSP
-    # worker thread.  v0.2 Phase 2 commit 7 takes the simpler direct-
-    # call path for proof-of-concept; a future commit will move
-    # dispatch_tx to a worker-thread invocation.
+    # During RX (``inject_tx_iq=False``, default), mic data flows
+    # through the worker continuously, ``TxChannel.process`` runs to
+    # keep the WDSP TXA chain in steady state, and the resulting I/Q
+    # is silently dropped on the floor by the worker -- cheap, and
+    # avoids ALC/leveler integrator surprises at the first PTT edge
+    # after long idle.
+    #
+    # Replaced Phase 2 commit 7's direct-call dispatch (RX-loop thread
+    # blocked for the duration of every ``fexchange0``, starving RX
+    # audio + spectrum + telemetry) and Phase 2 commit 7.1's
+    # ``LYRA_ENABLE_TX_DISPATCH`` env-var gate (which kept commit 7's
+    # broken path in tree but disabled by default).
 
     def _open_tx_channel(self) -> None:
         """Lazy-construct the TX WDSP channel on stream start.
@@ -9043,9 +9081,9 @@ class Radio(QObject):
         TxConfig defaults (in_size=512, in_rate=48000, dsp_rate=
         96000, out_rate=48000 -- HL2 EP2 audio path).
 
-        Called by ``start()`` after the stream is established;
-        also called on first dispatch_tx if not yet open (defensive
-        recovery from any init-order surprises).
+        Called by ``start()`` after the stream is established.
+        ``_tx_dsp_worker`` start happens immediately after this
+        method returns (when ``_tx_channel`` is not None).
         """
         if self._tx_channel is not None:
             return
@@ -9053,86 +9091,68 @@ class Radio(QObject):
             from lyra.dsp.wdsp_tx_engine import TxChannel, TxConfig
             self._tx_channel = TxChannel(channel=4, cfg=TxConfig())
             self._tx_channel.start()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             print(f"[Radio] TxChannel open failed: {exc}")
             self._tx_channel = None
 
     def _close_tx_channel(self) -> None:
-        """Tear down the TX channel on stream stop.  Idempotent."""
+        """Tear down the TX channel on stream stop.  Idempotent.
+
+        Caller MUST have already stopped + joined ``_tx_dsp_worker``
+        (so no in-flight ``TxChannel.process`` calls remain).  See
+        ``stop()`` for the full teardown order.
+        """
         if self._tx_channel is None:
             return
         try:
             self._tx_channel.close()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             print(f"[Radio] TxChannel close failed: {exc}")
         self._tx_channel = None
-
-    def dispatch_tx(self, mic: "np.ndarray") -> None:
-        """Push mic samples through the TX WDSP chain.
-
-        Accepts float32 mono samples (any length).  TxChannel.process
-        buffers internally and emits I/Q in in_size=512 blocks; this
-        method just routes whatever comes back and stashes it in
-        ``_tx_iq_latest`` for the EP2 writer.
-
-        v0.2 Phase 2 commit 7: called directly from mic callbacks
-        (RX-loop thread for HL2 jack path, PortAudio audio thread
-        for PC sound card path).  Future commit moves this to DSP
-        worker via QueuedConnection per CLAUDE.md §5 threading
-        contract.
-
-        v0.2 Phase 2 commit 8: ``_tx_iq_latest`` becomes the source
-        for EP2 byte packing (replaces today's hardcoded zeros at
-        ``_pack_audio_bytes``).  Until commit 8 lands, the I/Q is
-        computed but not sent on the wire -- no air emission yet.
-        """
-        if self._tx_channel is None:
-            # Defensive: shouldn't happen if stream is running, but
-            # don't crash the mic callback if it does.
-            return
-        try:
-            iq = self._tx_channel.process(mic)
-        except Exception as exc:
-            print(f"[Radio] TxChannel.process failed: {exc}")
-            return
-        if iq.size > 0:
-            self._tx_iq_latest = iq
 
     def _on_hl2_mic(self, mic_int16: "np.ndarray", stats) -> None:
         """HL2 mic_callback adapter.
 
         Converts int16 BE-decoded mic samples (from EP6 byte slot
         24-25 via HL2Stream's mic_callback hook) to float32 mono
-        [-1, 1] and forwards to ``dispatch_tx``.
+        [-1, 1] and submits to the TX DSP worker (non-blocking).
 
         Runs on the RX-loop thread.  Mic samples arrive in 38-sample
         blocks per UDP datagram at 48 kHz wire rate (HL2 codec).
+        Submit is a ``queue.Queue.put_nowait`` -- O(1), no blocking;
+        the worker thread does the heavy lifting on its own context.
         """
         if mic_int16.size == 0:
+            return
+        if self._tx_dsp_worker is None:
             return
         # int16 BE -> float32 [-1, 1].  Sample slot is 16-bit signed,
         # full-scale = ±32767.  Use 32768.0 divisor for symmetric
         # range; the 1-LSB asymmetry is below operator hearing
         # threshold.
         mic_f32 = (mic_int16.astype("float32") / 32768.0)
-        self.dispatch_tx(mic_f32)
+        self._tx_dsp_worker.submit(mic_f32)
 
     def _wire_mic_source(self) -> None:
-        """Wire (or rewire) the active mic-source path to dispatch_tx.
+        """Wire (or rewire) the active mic-source path to the TX worker.
 
-        Called when mic_source changes (via set_mic_source) or when
-        the stream starts.  Idempotent: re-wiring with the same
-        source is a no-op at the wire-level (just clears + re-sets
-        the callbacks).
+        Called when mic_source changes (via ``set_mic_source``) or when
+        the stream starts.  Idempotent: re-wiring with the same source
+        is a no-op at the wire-level (just clears + re-sets the
+        callbacks).
 
         Routing matrix:
-        * source = "hl2_jack":
-          - HL2Stream.register_mic_consumer(_on_hl2_mic)
-          - PcMicSource stopped if running (handled by set_mic_source
-            tear-down logic)
-        * source = "pc_soundcard":
-          - HL2Stream.register_mic_consumer(None) -- clears HL2 path
-          - PcMicSource.start(dispatch_tx)
+
+        * ``source = "hl2_jack"``:
+          - ``HL2Stream.register_mic_consumer(_on_hl2_mic)``
+          - PC mic source stopped (handled by ``set_mic_source``
+            tear-down)
+        * ``source = "pc_soundcard"``:
+          - ``HL2Stream.register_mic_consumer(None)`` -- clears HL2 path
+          - ``PcMicSource.start(_tx_dsp_worker.submit)``
+
+        Both paths submit to the same TX worker, which is the single
+        threading boundary between producers and the WDSP TXA chain.
         """
         if self._stream is None:
             return
@@ -9141,10 +9161,12 @@ class Radio(QObject):
             self._stream.register_mic_consumer(self._on_hl2_mic)
         else:
             self._stream.register_mic_consumer(None)
-            if self._pc_mic_source is not None and not self._pc_mic_source.is_running:
+            if (self._pc_mic_source is not None
+                    and not self._pc_mic_source.is_running
+                    and self._tx_dsp_worker is not None):
                 try:
-                    self._pc_mic_source.start(self.dispatch_tx)
-                except Exception as exc:
+                    self._pc_mic_source.start(self._tx_dsp_worker.submit)
+                except Exception as exc:  # noqa: BLE001
                     print(f"[Radio] PC mic start failed: {exc}")
 
     # ── WDSP RX engine integration (v0.0.9.6) ─────────────────────────
@@ -10642,19 +10664,18 @@ class Radio(QObject):
             _QS("N8SDR", "Lyra").setValue("radio/mic_source", new)
         except Exception:
             pass
-        # v0.2 Phase 2 commit 7.1 (regression fix 2026-05-15):
-        # rewire is gated by the same LYRA_ENABLE_TX_DISPATCH env
-        # var as the start() path -- without it, flipping the
-        # mic-source radio button in Settings is purely a state +
-        # persistence change with no audio impact.  See start() for
-        # the full rationale (threading model not yet correct;
-        # CLAUDE.md §5 requires DSP-worker-thread dispatch).
-        import os as _os
-        if _os.environ.get("LYRA_ENABLE_TX_DISPATCH") == "1":
-            try:
-                self._wire_mic_source()
-            except Exception as exc:
-                print(f"[Radio] mic source rewire failed: {exc}")
+        # v0.2 Phase 2 commit 7-redo (2026-05-15): rewire the mic
+        # source now that producer paths feed the dedicated TX DSP
+        # worker thread.  No env-var gate needed -- the worker
+        # absorbs the blocking cost of TxChannel.process on its
+        # own thread, so dispatch is safe at any time the stream
+        # is running.  Skips silently when the stream isn't running
+        # (state + persistence still update; the rewire happens on
+        # next start()).
+        try:
+            self._wire_mic_source()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Radio] mic source rewire failed: {exc}")
         self.mic_source_changed.emit(new)
 
     def set_pc_mic_device(self, device: Optional[int]) -> None:
