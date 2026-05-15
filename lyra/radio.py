@@ -1144,6 +1144,15 @@ class Radio(QObject):
         # Constructed alongside TxDspWorker on stream start; cleared
         # + dropped on stream stop.
         self._tx_iq_tap = None
+        # v0.2 Phase 2 commit 10 (consensus §8.5): 50 ms cos² MOX-edge
+        # fade.  Anti-click envelope applied to TX I/Q at PTT
+        # keydown/keyup transitions so the gateware doesn't produce
+        # spectral splatter from hard amplitude steps.  Constructed
+        # alongside TxDspWorker on stream start; dropped on stop().
+        # Phase 3 PTT state machine calls start_fade_in() /
+        # start_fade_out() at MOX edges.  v0.2 keeps the fade in OFF
+        # state permanently since no caller flips it.
+        self._mox_edge_fade = None
         # Phase 2 v0.1 (2026-05-11): second WDSP RX channel for RX2.
         # Mirrors ``_wdsp_rx`` lifecycle (created/recreated together
         # in ``_open_wdsp_rx``).  RX2's mode/filter/AGC follow RX1
@@ -8298,17 +8307,21 @@ class Radio(QObject):
             self._open_tx_channel()
             if self._tx_channel is not None:
                 try:
+                    from lyra.dsp.mox_edge_fade import MoxEdgeFade
                     from lyra.dsp.tx_dsp_worker import TxDspWorker
                     from lyra.dsp.tx_iq_tap import Sip1Tap
                     # v0.2 Phase 2 commit 9: construct sip1 TX I/Q
-                    # tap and hand to the worker.  Producer-only
-                    # for v0.2 (no consumer yet); v0.3 PS calcc
-                    # thread will read snapshots.  See
-                    # lyra/dsp/tx_iq_tap.py for capacity rationale.
+                    # tap.  Producer-only for v0.2; v0.3 PS calcc
+                    # thread will read snapshots.
                     self._tx_iq_tap = Sip1Tap()
+                    # v0.2 Phase 2 commit 10: construct MOX-edge
+                    # fade.  Stays in OFF state until Phase 3 PTT
+                    # state machine calls start_fade_in().
+                    self._mox_edge_fade = MoxEdgeFade()
                     self._tx_dsp_worker = TxDspWorker(
                         self._tx_channel, self._stream,
                         iq_tap=self._tx_iq_tap,
+                        mox_edge_fade=self._mox_edge_fade,
                     )
                     self._tx_dsp_worker.start()
                     self._wire_mic_source()
@@ -8316,6 +8329,7 @@ class Radio(QObject):
                     print(f"[Radio] TxDspWorker start failed: {exc}")
                     self._tx_dsp_worker = None
                     self._tx_iq_tap = None
+                    self._mox_edge_fade = None
         except Exception as e:
             self.status_message.emit(f"Start failed: {e}", 5000)
             self._stream = None
@@ -8431,6 +8445,10 @@ class Radio(QObject):
             except Exception:
                 pass
             self._tx_iq_tap = None
+        # v0.2 Phase 2 commit 10: drop the MOX-edge fade.  Worker
+        # has stopped so no apply() calls remain.  State will
+        # reset to OFF on next construction in start().
+        self._mox_edge_fade = None
         self._close_tx_channel()
         if self._stream:
             self._stream.stop()

@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 
 if TYPE_CHECKING:
+    from lyra.dsp.mox_edge_fade import MoxEdgeFade
     from lyra.dsp.tx_iq_tap import Sip1Tap
     from lyra.dsp.wdsp_tx_engine import TxChannel
     from lyra.protocol.stream import HL2Stream
@@ -87,6 +88,7 @@ class TxDspWorker:
         tx_channel: "TxChannel",
         hl2_stream: "HL2Stream",
         iq_tap: "Optional[Sip1Tap]" = None,
+        mox_edge_fade: "Optional[MoxEdgeFade]" = None,
         queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
     ) -> None:
         self._tx_channel = tx_channel
@@ -99,6 +101,14 @@ class TxDspWorker:
         # went on the air" history).  Consumer (v0.3 PS calcc
         # thread) reads via tap.snapshot().
         self._iq_tap = iq_tap
+        # v0.2 Phase 2 commit 10: optional MOX-edge fade.  When set,
+        # applies a 50 ms cos² envelope to TX I/Q at MOX state
+        # transitions (driven by Phase 3 PTT state machine).
+        # Suppresses click + spectral splatter at hard PTT-keydown /
+        # keyup amplitude steps.  Applied BEFORE both queue_tx_iq
+        # (wire) and iq_tap.write (PS history) so the operator's
+        # monitor receiver and v0.3 PureSignal see identical samples.
+        self._mox_edge_fade = mox_edge_fade
         self._queue: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(
             maxsize=queue_maxsize,
         )
@@ -214,6 +224,19 @@ class TxDspWorker:
             # edge, and the I/Q starts flowing to the EP2 writer
             # AND to the sip1 tap (when present).
             if iq.size > 0 and self._hl2_stream.inject_tx_iq:
+                # v0.2 Phase 2 commit 10: apply MOX-edge fade BEFORE
+                # both the wire forward and the sip1 tap write, so
+                # PureSignal calibration aligns against identical
+                # samples to what the gateware actually transmitted
+                # (the envelope is part of the on-air signal, not
+                # cosmetic post-processing).  In OFF state this is a
+                # no-op return of zeros (defensive); in ON state it's
+                # a passthrough of the input; only mid-fade does it
+                # apply the per-sample curve.  v0.2 keeps the fade in
+                # OFF state permanently (no caller flips it -- Phase
+                # 3 PTT will).
+                if self._mox_edge_fade is not None:
+                    iq = self._mox_edge_fade.apply(iq)
                 try:
                     self._hl2_stream.queue_tx_iq(iq)
                     self.queued_iq_blocks += 1
