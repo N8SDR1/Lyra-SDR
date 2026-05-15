@@ -4561,7 +4561,72 @@ Phase 3 UI batch since panadapter mouse semantics will be
 revisited there anyway (§15.9 red-on-air TX rectangle, §15.6
 SPLIT TX marker).
 
-### 15.23 — TX mic-input path produces zero I/Q (BUG, BLOCKS Phase 3, found 2026-05-15)
+### 15.23 — TX SSB silent/wrong-sideband (RESOLVED 2026-05-15)
+
+**RESOLUTION (2026-05-15, 3-agent convergence + verified fix):**
+
+Root cause: `wdsp_tx_engine.py` called `SetTXABandpassRun(ch, 1)`
+in `_apply_init_setters` and `set_filter`.  In WDSP that toggles
+**`bp1.run`** (wdsp/bandpass.c:466), NOT `bp0`.  `bp0` is the
+always-on SSB sideband selector (create_bandpass run=1 +
+TXASetupBPFilters, TXA.c:829).  `bp1` is a compressor-only aux
+bandpass whose impulse stays FROZEN at create-time defaults
+`(-5000,-100)` (a positive-baseband-only filter) because
+TXASetupBPFilters only recomputes it when the TX compressor runs
+(it doesn't in v0.2.0).  `xtxa` runs `bp1` in series AFTER `bp0`
+(TXA.c:573-575).  Forcing `bp1` ON cascaded that stale filter
+after the correct `bp0` -> killed USB (negative-baseband content
+rejected) and passed LSB on the wrong sideband.  **Thetis never
+calls `SetTXABandpassRun` anywhere** (zero call sites in the
+entire tree -- verified by 2 independent agents).  Same bug-family
+as the §14.10 `SetRXAPanelBinaural` defect.
+
+The fix (commit on feature/v0.0.9.6-audio-foundation 2026-05-15):
+
+1. Removed both `SetTXABandpassRun(ch,1)` calls.  `bp0` needs no
+   run setter; `SetTXAMode` + `SetTXABandpassFreqs` fully
+   configure it via TXASetupBPFilters -- exactly as Thetis does.
+2. Centralized the per-mode SSB sign convention in `TxChannel`
+   (new `_signed_edges` + `_push_bandpass_locked`, mirror of the
+   proven RX §14.2 resolution in radio.py `_wdsp_filter_for`).
+   Callers now pass POSITIVE operator Hz; the engine negates for
+   LSB/CWL/DIGL, symmetrizes for DSB/AM/SAM/FM, per Thetis
+   console.cs:8079-8118 `UpdateTXLowHighFilterForMode`.  `set_mode`
+   re-pushes the bandpass so mode+sign are atomically consistent
+   regardless of caller order.
+3. Fixed `scratch/test_tx_dsp_bench.py` expected sideband signs:
+   WDSP TXA emits the wanted sideband on the OPPOSITE baseband
+   sign (USB->-f, LSB->+f) -- the TX analogue of RX §14.2; the
+   HL2 mirrored TX baseband supplies the second flip (two flips
+   cancel, correct on air, Thetis ships it).  The old bench
+   asserted RF-sense signs so a CORRECT chain failed it -- that
+   false-fail is what misdirected the early diagnosis.
+4. Renamed `set_gen0`->`set_postgen` (kept back-compat alias):
+   it drives `SetTXAPostGen*` = WDSP **gen1** (output-side TUN/
+   two-tone, AFTER bp0), NOT the input gen.  That's why the
+   "gen0 probe works" result was misleading -- it injected
+   downstream of the broken bp1.  True input gen0 needs
+   `SetTXAPreGen*` cffi cdefs (deferred -- §15.18 pre-cdef audit
+   required; bench-tooling nicety, not on the signal path).
+
+**Verified:** Tier-A bench (`scratch/test_tx_chain_bench.py`)
+GREEN -- WDSP TXA non-zero I/Q peak 0.545 (was ~0), analytic
+mean|Q| 0.258 (was 0).  FFT bench (`scratch/test_tx_dsp_bench.py`)
+OVERALL PASS -- USB+LSB mirror-symmetric, wanted -19.8 dBFS,
+sideband suppression 69 dB, carrier suppression 63 dB.  60/60 TX
+unit tests green.  Family-independent fix (HL2 P1 / HL2+ P1 /
+ANAN P1+P2 / Brick-SDR P2 -- bp0 math is shared, no protocol
+coupling).
+
+Phase 2 TX chain Tier-A gate is GREEN.  Phase 3 PTT is unblocked.
+The full diagnostic trail (what was ruled out + how) is preserved
+below for archaeology.
+
+---
+
+#### Original defect report + diagnostic trail (historical)
+
+### TX mic-input path produces zero I/Q (was: BUG, BLOCKED Phase 3, found 2026-05-15)
 
 The Phase 2 commit 11 Tier-A bench gate caught this on first
 run -- which is exactly what the gate exists to do: surface a
@@ -4791,12 +4856,15 @@ candidate surfaces above):**
      sign lens before trusting it as a chain-vs-input
      bisection.
 
-**Status: OPEN, top priority, blocks Phase 3.**  Root cause is
-more subtle than the agents' first pass -- it's a TX SSB
-bandpass/sign-convention misconfiguration (TX mirror of the
-RX §14.2 gotcha), NOT a dead input path.  Deserves a fresh
-focused dig on the set_mode/set_filter/TXASetupBPFilters
-ordering + the HL2 TX mirrored-baseband sign convention.
+**Status: RESOLVED 2026-05-15 -- see the RESOLUTION block at the
+top of §15.23.**  The "bandpass/sign misconfig" reframe was on
+the right subsystem; the precise mechanism (3-agent convergence)
+was the extraneous `SetTXABandpassRun(ch,1)` call forcing the
+stale compressor-only `bp1` into the SSB path -- NOT a sign
+error in Lyra's config (the sign was Thetis-faithful) and NOT a
+dead input path.  The bench's inverted expected-sideband-sign
+(§14.2 TX mirror) was a separate false-fail that masked the real
+cause early on.  All three issues fixed + verified.
 
 ---
 

@@ -171,6 +171,16 @@ class TxChannel:
         self.channel = int(channel)
         self.cfg = cfg or TxConfig()
 
+        # v0.2.0 Phase 2 §15.23 fix: operator-facing TX filter is stored
+        # as POSITIVE Hz + a mode; the engine owns the per-mode sign
+        # convention (mirror of the proven RX §14.2 resolution in
+        # radio.py _wdsp_filter_for).  Callers pass positive low/high;
+        # _push_bandpass derives the signed edges WDSP TXA needs.
+        # Defaults = USB 200..3100.
+        self._mode: int = wdsp_native.TxaMode.USB
+        self._filt_low: float = 200.0
+        self._filt_high: float = 3100.0
+
         self._lib = wdsp_native.load()
         self._ffi = wdsp_native.ffi()
 
@@ -246,10 +256,26 @@ class TxChannel:
             self._lib.SetTXAPanelRun(ch, 1)
             # 2. Default mode = USB.  Operator can change via set_mode.
             self._lib.SetTXAMode(ch, wdsp_native.TxaMode.USB)
-            # 3. Bandpass for USB (positive freqs per WDSP mirrored-
-            #    baseband convention; LSB negates).
-            self._lib.SetTXABandpassFreqs(ch, 200.0, 3100.0)
-            self._lib.SetTXABandpassRun(ch, 1)
+            # 3. Bandpass (SSB sideband selection) -- §15.23 ROOT-CAUSE
+            #    FIX (2026-05-15, 3-agent convergence).  bp0 is the
+            #    always-on SSB selector (create_bandpass run=1 +
+            #    TXASetupBPFilters, wdsp/TXA.c:829); it is configured
+            #    SOLELY by SetTXAMode + SetTXABandpassFreqs.  Do NOT
+            #    call SetTXABandpassRun -- it toggles bp1
+            #    (wdsp/bandpass.c:466), the compressor-only aux
+            #    bandpass whose impulse is FROZEN at create-time
+            #    defaults (-5000,-100) when COMP is off, and which
+            #    runs in series after bp0 (xtxa, TXA.c:573-575).
+            #    Forcing bp1 ON cascaded a stale positive-baseband-
+            #    only filter after bp0 -> killed USB (negative
+            #    baseband) and passed LSB on the wrong sideband.
+            #    Thetis NEVER calls SetTXABandpassRun anywhere (zero
+            #    call sites in the entire tree).  Same bug-family as
+            #    the §14.10 SetRXAPanelBinaural defect.
+            #    _push_bandpass applies the per-mode sign (mirror of
+            #    the proven RX §14.2 resolution); _mode is already
+            #    set to USB by setter #2 above.
+            self._push_bandpass_locked()
             # 4. PHROT enable for SSB PEP-PAR -- consensus IM-5 #1.
             #    Skipping = ~3-4 dB worse PEP-PAR than industry
             #    baseline.  Default Corner 338 Hz / 8 stages per
@@ -281,6 +307,60 @@ class TxChannel:
             # 7. CFIR OFF for HL2 P1 -- consensus row 2069.  CFIR is
             #    for P2 CIC compensation; meaningful only on P2 paths.
             self._lib.SetTXACFIRRun(ch, 0)
+
+    # -- bandpass sign convention (§15.23 fix, mirrors RX §14.2) ---------
+
+    # Mode classes per Thetis Console/console.cs:8079-8118
+    # UpdateTXLowHighFilterForMode (the ships-and-works recipe,
+    # source-proven by the 3-agent 2026-05-15 investigation):
+    #
+    #   USB-class  -> SetTXABandpassFreqs(+low, +high)
+    #   LSB-class  -> SetTXABandpassFreqs(-high, -low)   [negated+swapped]
+    #   DSB-class  -> SetTXABandpassFreqs(-high, +high)  [symmetric]
+    #
+    # WDSP TXA's fir_bandpass shifts the passband to -w_osc
+    # (wdsp/fir.c:217-279), so positive operator freqs select the
+    # NEGATIVE baseband -- the exact TX analogue of the RX §14.2
+    # gotcha.  The HL2 mirrored TX baseband supplies the second flip;
+    # the two cancel, so this recipe is correct on air (Thetis ships
+    # it).  Family-independent: bp0 math is shared across HL2 P1 /
+    # HL2+ P1 / ANAN P1+P2 / Brick-SDR P2 (P2 differs only in CFIR,
+    # not bp0).
+    _LSB_CLASS = frozenset({
+        wdsp_native.TxaMode.LSB,
+        wdsp_native.TxaMode.CWL,
+        wdsp_native.TxaMode.DIGL,
+    })
+    _DSB_CLASS = frozenset({
+        wdsp_native.TxaMode.DSB,
+        wdsp_native.TxaMode.AM,
+        wdsp_native.TxaMode.SAM,
+        wdsp_native.TxaMode.FM,
+    })
+
+    def _signed_edges(self) -> tuple[float, float]:
+        """Map (positive operator low/high, current mode) to the
+        signed (f_low, f_high) WDSP TXA expects.  Pure; no lock.
+        """
+        lo = float(self._filt_low)
+        hi = float(self._filt_high)
+        if self._mode in self._LSB_CLASS:
+            return (-hi, -lo)
+        if self._mode in self._DSB_CLASS:
+            return (-hi, hi)
+        return (lo, hi)  # USB-class
+
+    def _push_bandpass_locked(self) -> None:
+        """Push the signed bandpass edges for the current mode/filter.
+
+        Caller MUST hold ``self._lock``.  Configures bp0 (the
+        always-on SSB selector) via SetTXABandpassFreqs ->
+        TXASetupBPFilters.  Deliberately does NOT call
+        SetTXABandpassRun -- see _apply_init_setters #3 for the
+        full §15.23 root-cause rationale.
+        """
+        f_low, f_high = self._signed_edges()
+        self._lib.SetTXABandpassFreqs(self.channel, f_low, f_high)
 
     def start(self) -> None:
         """Begin processing on this channel."""
@@ -321,29 +401,42 @@ class TxChannel:
     def set_mode(self, mode: str | int) -> None:
         """Set TXA mode (USB/LSB/etc.)  v0.2.0 wires SSB only; other
         modes land with their respective modulator setters in v0.2.x.
+
+        §15.23 fix: after SetTXAMode, the bandpass is RE-PUSHED with
+        the new mode's signed edges.  SetTXAMode internally calls
+        TXASetupBPFilters which reconfigures bp0 from the CURRENT
+        txa.f_low/f_high -- if those still carry the previous mode's
+        sign, bp0 ends up wrong-sideband until the next set_filter.
+        Re-pushing here makes mode + sign atomically consistent
+        regardless of caller order (mirror of the proven RX §14.2
+        resolution -- callers pass positive Hz, the engine owns the
+        sign).
         """
         m = _MODE_BY_NAME[mode.upper()] if isinstance(mode, str) else int(mode)
         with self._lock:
+            self._mode = m
             self._lib.SetTXAMode(self.channel, m)
-            # For SSB modes, bandpass sign convention follows WDSP
-            # mirrored-baseband (consensus §8.5 IM-5 #2):
-            #   USB -> positive freqs  (e.g. +200, +3100)
-            #   LSB -> negative freqs  (e.g. -3100, -200)
-            # We don't auto-flip here -- callers manage via set_filter()
-            # so they can pick non-default bandwidths.  Init defaults
-            # to USB positive freqs.
+            self._push_bandpass_locked()
 
     def set_filter(self, low: float, high: float) -> None:
-        """Set TX bandpass filter cutoffs in Hz.
+        """Set TX bandpass filter cutoffs.
 
-        WDSP mirrored-baseband sign convention applies (consensus §8.5
-        IM-5 #2): USB uses positive freqs (e.g. +200..+3100), LSB
-        uses negative (e.g. -3100..-200).  Get this wrong → wrong
-        sideband transmitted.
+        ``low``/``high`` are the operator-facing POSITIVE passband
+        edges in Hz (e.g. 200, 3100) -- the SAME convention the RX
+        side uses.  The engine derives the WDSP-signed edges per the
+        current mode (§15.23 fix; see _signed_edges).  Callers never
+        deal with sign -- pass positive Hz, the engine flips for
+        LSB/CWL/DIGL and symmetrizes for DSB/AM/SAM/FM.
         """
+        # Normalize to positive low <= high so callers can pass
+        # either (200, 3100) or legacy pre-signed (-3100, -200) and
+        # get the right passband -- the engine re-derives the sign
+        # from mode.  abs() then min/max collapses both conventions.
+        a, b = abs(float(low)), abs(float(high))
         with self._lock:
-            self._lib.SetTXABandpassFreqs(self.channel, float(low), float(high))
-            self._lib.SetTXABandpassRun(self.channel, 1)
+            self._filt_low = min(a, b)
+            self._filt_high = max(a, b)
+            self._push_bandpass_locked()
 
     def set_mic_gain(self, gain: float) -> None:
         """Set mic-input panel gain (linear, not dB).
@@ -412,23 +505,43 @@ class TxChannel:
             self._lib.SetTXAPHROTNstages(self.channel, int(nstages))
             self._lib.SetTXAPHROTRun(self.channel, 1 if running else 0)
 
-    def set_gen0(self,
-                 running: bool,
-                 mode: int = 0,
-                 tone_freq_hz: float = 1000.0,
-                 tone_mag: float = 0.5) -> None:
-        """Set input-side signal generator (gen0) state.
+    def set_postgen(self,
+                    running: bool,
+                    mode: int = 0,
+                    tone_freq_hz: float = 1000.0,
+                    tone_mag: float = 0.5) -> None:
+        """Set the OUTPUT-side signal generator (gen1 / TUN + two-tone).
 
-        Used for bench-test self-test routes -- operator dials up a
-        1 kHz known-amplitude tone and verifies the modulator + ALC
-        + leveler chain produces clean SSB at the antenna port
-        without needing to talk into a mic.  OFF in normal operation.
+        §15.23 CORRECTION (2026-05-15, 3-agent finding): this method
+        was previously named ``set_gen0`` and documented as the
+        "input-side" generator -- WRONG.  ``SetTXAPostGen*`` drives
+        WDSP's **gen1** (wdsp/gen.c:784-814), which xtxa runs at
+        TXA.c:583 -- AFTER bp0 / leveler / ALC, i.e. the output-side
+        TUN / two-tone generator.  It BYPASSES the entire SSB
+        modulator chain, so it is NOT a valid "is the SSB chain
+        working?" bisection tool.  The earlier "gen0 probe works"
+        result that misled the §15.23 diagnosis was this output gen
+        injecting downstream of the broken bp1 cascade.
+
+        The true input-side generator is WDSP **gen0** (xtxa
+        TXA.c:560, before xpanel), driven by ``SetTXAPreGen*`` --
+        NOT yet bound in wdsp_native.py cffi cdefs.  Adding it
+        requires the §15.18 pre-cdef audit; deferred (it's a
+        bench-tooling nicety, not on the TX signal path).
+
+        This method is retained for TUN (tune carrier) + two-tone
+        IMD test use in v0.2.x, which is genuinely an output-side
+        injection.  OFF in normal operation.
         """
         with self._lock:
             self._lib.SetTXAPostGenMode(self.channel, int(mode))
             self._lib.SetTXAPostGenToneFreq(self.channel, float(tone_freq_hz))
             self._lib.SetTXAPostGenToneMag(self.channel, float(tone_mag))
             self._lib.SetTXAPostGenRun(self.channel, 1 if running else 0)
+
+    # Back-compat alias: the bench scripts + earlier diagnosis called
+    # this set_gen0.  Keep the name working but it is the OUTPUT gen.
+    set_gen0 = set_postgen
 
     # -- meter accessors -------------------------------------------------
 
