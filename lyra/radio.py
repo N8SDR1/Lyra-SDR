@@ -790,6 +790,24 @@ class Radio(QObject):
         # set_mic_source("pc_soundcard"), torn down when switching
         # back to hl2_jack.  None when not active.
         self._pc_mic_source = None
+        # v0.2 Phase 2 commit 7.2 (polish): log-once latch for PC mic
+        # start failures.  Without this, every Radio.start() with a
+        # stale/invalid PC mic device floods the console with the
+        # same "PC mic start failed" message.  With it, operator sees
+        # ONE toast + ONE console line per session per device config;
+        # subsequent stream restarts silently retry so hot-plug
+        # recovery (operator plugs headset back in) works without
+        # status-bar churn.  Reset to False on successful start, on
+        # set_pc_mic_device, and on set_pc_mic_channel -- any config
+        # change re-arms the log so a new failure is visible.
+        #
+        # Note: we never silently fall back to hl2_jack on PC mic
+        # failure.  Standard HL2 (no AK4951 codec) operators have NO
+        # mic on the radio at all; falling back would route mic to
+        # a path that physically can't carry voice.  The operator's
+        # hardware-source choice always wins; we just surface the
+        # error gracefully.
+        self._pc_mic_failure_logged: bool = False
         # Volume chain — TWO stages since 2026-04-24:
         #   AF Gain (af_gain_db): makeup gain in dB, for cases where
         #     AGC is off (digital modes like FT8 run AGC off to avoid
@@ -9159,15 +9177,37 @@ class Radio(QObject):
         source = self._mic_source
         if source == "hl2_jack":
             self._stream.register_mic_consumer(self._on_hl2_mic)
-        else:
-            self._stream.register_mic_consumer(None)
-            if (self._pc_mic_source is not None
-                    and not self._pc_mic_source.is_running
-                    and self._tx_dsp_worker is not None):
-                try:
-                    self._pc_mic_source.start(self._tx_dsp_worker.submit)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[Radio] PC mic start failed: {exc}")
+            return
+        # source == "pc_soundcard" -- the operator's hardware choice
+        # stands.  Standard HL2 operators (no AK4951 codec) MUST be
+        # here; we never silently fall back to hl2_jack on failure.
+        self._stream.register_mic_consumer(None)
+        if (self._pc_mic_source is None
+                or self._pc_mic_source.is_running
+                or self._tx_dsp_worker is None):
+            return
+        try:
+            self._pc_mic_source.start(self._tx_dsp_worker.submit)
+            # Success: reset the log-once latch so a future failure
+            # (e.g., USB headset unplugged mid-session) gets a fresh
+            # toast.
+            self._pc_mic_failure_logged = False
+        except Exception as exc:  # noqa: BLE001
+            # Log ONCE per session per device config -- don't flood
+            # the console on every stop/start cycle.  Operator sees
+            # one toast on first failure; silent retries afterward
+            # let hot-plug recovery work without status-bar churn.
+            # Flag is reset to False on successful start (above) and
+            # in set_pc_mic_device / set_pc_mic_channel so a config
+            # change re-arms the log path.
+            if not self._pc_mic_failure_logged:
+                self.status_message.emit(
+                    f"PC mic unavailable: {exc}. "
+                    f"Check Settings -> Audio -> Mic input.",
+                    8000,
+                )
+                print(f"[Radio] PC mic start failed: {exc}")
+                self._pc_mic_failure_logged = True
 
     # ── WDSP RX engine integration (v0.0.9.6) ─────────────────────────
     #
@@ -10688,6 +10728,10 @@ class Radio(QObject):
         if device == self._pc_mic_device:
             return
         self._pc_mic_device = device
+        # Re-arm the PC-mic failure log latch: the operator just
+        # picked a new device, so if the new one also fails we want
+        # the toast to fire again (see commit 7.2 polish notes).
+        self._pc_mic_failure_logged = False
         # Restart the source if running on the pc_soundcard path so
         # the new device takes effect.  Stop -> rebuild -> caller
         # starts again at next MOX edge.
@@ -10726,6 +10770,8 @@ class Radio(QObject):
         if new == self._pc_mic_channel:
             return
         self._pc_mic_channel = new
+        # Re-arm the PC-mic failure log latch (see set_pc_mic_device).
+        self._pc_mic_failure_logged = False
         # Same rebuild dance as device-change.
         if self._pc_mic_source is not None:
             try:
