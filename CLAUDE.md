@@ -4561,6 +4561,98 @@ Phase 3 UI batch since panadapter mouse semantics will be
 revisited there anyway (§15.9 red-on-air TX rectangle, §15.6
 SPLIT TX marker).
 
+### 15.23 — TX mic-input path produces zero I/Q (BUG, BLOCKS Phase 3, found 2026-05-15)
+
+The Phase 2 commit 11 Tier-A bench gate caught this on first
+run -- which is exactly what the gate exists to do: surface a
+non-functional TX chain BEFORE Phase 3 PTT gets built on top of
+dead air.  This is a gate success, not a gate failure.
+
+**Symptom:** `TxChannel.process(mic)` returns correctly-sized
+I/Q blocks (512 samples, dtype complex64) that are **all zero**
+(~1e-10 numerical noise floor).  `fexchange0` error code is 0
+(the output-memcpy path is taken, the data is just zero).
+
+**Definitively established (do NOT re-derive -- start the fix
+from here):**
+
+1. **The WDSP TXA chain itself WORKS.**  Feeding WDSP's internal
+   `gen0` tone (`tx.set_gen0(running=True, tone_freq_hz=1000,
+   tone_mag=0.5)`) with mic=silence produces correct output:
+   104/120 nonzero blocks, peak exactly 0.5 (= the tone_mag set).
+   gen0 injects into `midbuff` AFTER `xresample(rsmpin)` but
+   before `xpanel` in the `xtxa` chain -- so panel → phrot →
+   bp0 (SSB select) → ALC → output resampler → out is all
+   proven functional.
+2. **The break is the mic INPUT path:**
+   `_in_buff` → `fexchange0` → r1 ring → `dexchange` →
+   `txa[channel].inbuff` → `xresample(rsmpin)` → `midbuff`.
+   Samples we put in `_in_buff` never reach `midbuff` where the
+   working chain operates.
+3. **Ruled out:**
+   * Buffer layout: mic in I-only (`v[1::2]=0`) AND mic in
+     both-I-and-Q (Thetis `combinebuff` style) BOTH produce zero.
+   * Resampler rate: tested 48/48/48 (rsmpin.run=0, in==dsp) AND
+     48/96/48 (rsmpin.run=1, in!=dsp) -- BOTH produce zero.
+     Note `xresample` with `run==0` does NOTHING (doesn't even
+     copy in→out), which explains the 48/48/48 case in isolation,
+     but the 48/96/48 case (rsmpin.run=1) ALSO failing means
+     there's a deeper input-path issue beyond just the resampler
+     run flag.
+   * fexchange0 err: 0 in all cases (not the `*error += -2`
+     starve path -- output memcpy IS happening, data is zero).
+   * IM-5 init sequence: audited clean against WDSP source
+     2026-05-15 (all 17 setters present, correct signatures,
+     PHROT uppercase, ALC int-ms, no SetTXAALCThresh, cffi
+     cdefs match byte-for-byte).
+   * Buffer machinery is structurally identical to the WORKING
+     RxChannel (same OpenChannel/SetChannelState/fexchange0
+     pattern; only `type` arg differs 0→1).
+
+**Leading hypotheses for the fix investigation (untested):**
+
+* **`upslew0` input gating.**  fexchange0 has two input paths:
+  `if (slew.upflag) upslew0(a, in); else memcpy(...)`.
+  `SetChannelState(ch,1,0)` sets `slew.upflag`.  If `upslew0`
+  for a TX-type channel mishandles real-mic-in-I (vs the complex
+  IQ a working RX channel feeds), the input could be zeroed
+  during/after the slew.  Inspect `upslew0` in slew.c +
+  whether the upflag ever clears for our open/start sequence.
+* **A missing TX input-priming setter.**  Same bug-class as the
+  RX §14.10 right-channel-silent defect (Lyra skipped a setter
+  Thetis calls at channel init).  Diff Lyra's
+  `_apply_init_setters` against Thetis's TXA channel-open path
+  in `ChannelMaster/cmaster.c` + `Console/radio.cs` for input-
+  path setters (panel select / panel run / a TX input-enable /
+  an `XCM`-layer call) that we don't make.  Note the module
+  docstring's claim that "WDSP's default TXA panel-select reads
+  I as mic" is an ASSUMPTION (Agent M Round 3) -- verify it
+  empirically: try explicit `SetTXAPanelSelect` values.
+* **`dsp_size` / `in_size` / dsp_insize ring sizing.**  TX
+  cfg has in_size=512, dsp_size=4096.  Confirm the r1 ring
+  feeds dexchange→inbuff at the size xtxa/rsmpin expects;
+  a mismatch could leave inbuff stale (zero) while the chain
+  runs on it.
+
+**Diagnostic harness already exists:** the probes used to
+establish the above are reproducible via `scratch/
+test_tx_chain_bench.py` (Tier A) plus the inline gen0 / I+Q /
+rate-matrix snippets in the 2026-05-15 session transcript.
+`tx.set_gen0(...)` is the key bisection tool -- it isolates
+"chain works" from "input path works".
+
+**Scope / priority:** BLOCKS Phase 3 (no point wiring PTT to a
+TX chain that emits silence).  This is the next thing to fix
+before any further Phase 2/3 work.  Deserves a focused
+investigation commit (possibly a multi-agent dig like the
+2026-05-15 stop/restart diagnosis), NOT a rushed patch.  The
+Phase 2 plumbing commits (7-redo/7.2/8/9/10) are all correct
+and tested -- they're wired and ready; this defect is upstream
+of all of them in `wdsp_tx_engine.py` (commit 2 `135ccbb` /
+`3777506` era).
+
+**Status: OPEN, top priority, blocks Phase 3.**
+
 ---
 
 *Last updated: 2026-05-14 — **v0.2.0 Phase 0 + Phase 1
