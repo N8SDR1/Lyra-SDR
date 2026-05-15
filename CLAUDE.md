@@ -4641,6 +4641,59 @@ rate-matrix snippets in the 2026-05-15 session transcript.
 `tx.set_gen0(...)` is the key bisection tool -- it isolates
 "chain works" from "input path works".
 
+**Operator hint 2026-05-15 (HIGH VALUE -- cracked the search):**
+Thetis only RECENTLY added CMASIO (`cmasio.c` / `asioIN` /
+`combinebuff`).  That's the ASIO PC-soundcard path and is a
+RED HERRING for Lyra (Lyra's case is HL2-codec mic via EP6,
+and `asioIN()` early-returns when `audioCodecId != ASIO`).
+The CANONICAL HL2 mic->TX path is in
+`ChannelMaster/networkproto1.c:400-413` (and the nddc=4 variant
+at :560-579):
+
+```c
+prn->TxReadBufp[2*i + 0] = const_1_div_2147483648_ * mic;  // I = mic (32-bit-scaled)
+prn->TxReadBufp[2*i + 1] = 0.0;                            // Q = 0
+Inbound (inid(1, 0), mic_sample_count, prn->TxReadBufp);    // NOT fexchange0 directly
+```
+
+`Inbound()` (cmbuffs.c:89) writes into a ChannelMaster CMB ring
+`pcm->pebuff[id]` + releases `Sem_BuffReady`; a cmaster pump
+thread drains it and calls
+`fexchange0(chid(stream,0), pcm->in[stream], ...)` (cmaster.c:389).
+
+So Thetis HL2 TX = EP6 mic -> TxReadBufp(I=mic,Q=0) -> Inbound
+-> CMB ring -> cmaster pump -> fexchange0 -> WDSP TXA.
+
+**Buffer LAYOUT matches Lyra (I=mic, Q=0) -- confirms our
+interleave is right.**  The divergence is the LAYER: Lyra's
+TxChannel calls `fexchange0` directly (no ChannelMaster).  BUT:
+**Lyra's RxChannel ALSO calls fexchange0 directly and WORKS**
+(RX is operator-confirmed since v0.0.9.6), and Thetis routes
+RX through the SAME Inbound/cmaster layer too (network.c:650-
+651).  So "direct fexchange0 vs cmaster layer" is NOT by itself
+the bug -- RX disproves that.
+
+**This sharpens the question to:** what TX-channel-specific
+priming/enable does Thetis's path establish (somewhere between
+OpenChannel and the first fexchange0) that Lyra's direct-
+fexchange0 TxChannel skips, AND that RxChannel does not need?
+Candidate surfaces to diff, in priority order:
+  1. The `XCM`/cmaster TX-channel open path
+     (`ChannelMaster/cmaster.c`, `cmsetup.c`, `XCMSetTX*`) for
+     a TX input-enable / channel-key / output-unmute setter
+     called at TX-channel-open that has NO RX equivalent.
+  2. WDSP rate setters: §15.18 notes the rate setters are
+     `SetInputSamplerate` / `SetOutputSamplerate` (channel.c,
+     shared RX/TX).  Verify TxChannel's OpenChannel actually
+     establishes `dsp_insize` such that `rsmpin` (inbuff->
+     midbuff) produces output -- the 48/96/48 rsmpin.run=1
+     case still failing points here or at #1.
+  3. The `slew.upflag` / `upslew0` input path in fexchange0
+     for a freshly-opened TX-type channel (does the upflag ever
+     clear for our open(state=0)->start(SetChannelState 1,0)
+     sequence?  RX clears it because RX feeds complex IQ that
+     upslew0 ramps; mic-in-I through upslew0 may differ).
+
 **Scope / priority:** BLOCKS Phase 3 (no point wiring PTT to a
 TX chain that emits silence).  This is the next thing to fix
 before any further Phase 2/3 work.  Deserves a focused
