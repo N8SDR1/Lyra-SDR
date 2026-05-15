@@ -833,6 +833,37 @@ class HL2Stream:
         # Opt-in: pack audio into EP2 frames. When False (default), the TX
         # audio slots are left at zero. Turn this on only for AK4951 output.
         self.inject_audio_tx = False
+
+        # ── v0.2 Phase 2 commit 8: TX I/Q queue (EP2 bytes 4..7 per slot) ──
+        # Sibling of _tx_audio above.  Complex64 samples at 48 kHz; EP2
+        # frames consume 126 samples per cadence tick (~381 Hz).  Producer
+        # is Radio.dispatch_tx → TxChannel.process → queue_tx_iq, currently
+        # gated behind LYRA_ENABLE_TX_DISPATCH=1 (see Phase 2 commit 7.1).
+        #
+        # The consumer side (_pack_audio_bytes_pairs columns 2..3 packing)
+        # is wired even when no producer feeds the queue -- when the queue
+        # is empty AND inject_tx_iq is False (default), columns stay zero
+        # so wire-level RX-only behavior is byte-identical to v0.1.  Phase
+        # 2 commit 7-redo flips inject_tx_iq=True on PTT edges.
+        #
+        # maxlen=48000 = ~1 sec at 48 kHz, same cap as _tx_audio.
+        self._tx_iq: deque = deque(maxlen=48000)
+        self._tx_iq_lock = threading.Lock()
+        self.tx_iq_gain: float = 1.0
+        # Opt-in: pack TX I/Q into EP2 frame columns 2..3.  When False
+        # (default), columns stay zero regardless of queue contents.
+        # Flipped True on MOX=1 edge by Phase 2 commit 7-redo / Phase 3
+        # PTT state machine.
+        self.inject_tx_iq: bool = False
+        # Diagnostics counters (mirror tx_audio_*).  Underrun: EP2 wanted
+        # 126 IQ samples and the queue had fewer; padded with zeros (=
+        # baseband silence on the TX I/Q wire, harmless during RX since
+        # MOX=0, audible spectral glitch during TX).  Overrun: producer
+        # pushed faster than EP2 cadence drains; deque silently dropped
+        # the OLDEST samples.  Both counters surface in the UI status bar
+        # once Phase 3 wires the readout.
+        self.tx_iq_underruns: int = 0
+        self.tx_iq_overruns: int = 0
         # AK4951 sink diagnostics — each is a frame-level event counter.
         # Underrun: EP2 frame builder asked for N audio samples and the
         # tx_audio deque had fewer; we padded with zeros (= silent
@@ -1339,6 +1370,85 @@ class HL2Stream:
             for _ in range(n_signals):
                 self._ep2_send_sem.release()
             return fade_n
+
+    # ── v0.2 Phase 2 commit 8: TX I/Q queue API ──────────────────────
+    # Sibling of queue_tx_audio / clear_tx_audio / _pack_audio_bytes.
+    # Complex64 samples at 48 kHz feed EP2 frame columns 2..3 (TX I,
+    # TX Q) at the writer's ~381 Hz cadence (126 samples per frame).
+    # Producer side comes online in Phase 2 commit 7-redo (queue-based
+    # DSP worker thread crossing replacing today's env-gated direct
+    # call); until then queue_tx_iq is callable but inject_tx_iq stays
+    # False by default so the consumer ignores the queue and EP2 bytes
+    # 4..7 stay zero (wire-identical to v0.1 RX-only behavior).
+
+    def queue_tx_iq(self, iq) -> None:
+        """Push complex IQ samples into the EP2 TX I/Q queue.
+
+        Accepts a 1D ndarray convertible to ``dtype=np.complex64``
+        (real and imag in [-1, 1]; values outside are clipped at
+        quantization time).  EP2 frames drain 126 samples per
+        cadence tick; queue is capped at ``maxlen=48000`` (~1 sec
+        at 48 kHz).  Overflow drops the OLDEST samples and bumps
+        ``tx_iq_overruns``.
+
+        Threading: producer-safe.  Holds ``_tx_iq_lock`` for the
+        deque mutation.  Mirror of ``queue_tx_audio``.
+        """
+        import numpy as np
+        arr = np.asarray(iq, dtype=np.complex64).ravel()
+        with self._tx_iq_lock:
+            free = (self._tx_iq.maxlen or 0) - len(self._tx_iq)
+            if arr.size > free:
+                self.tx_iq_overruns += int(arr.size - free)
+            self._tx_iq.extend(arr)
+
+    def clear_tx_iq(self) -> None:
+        """Drop all queued TX I/Q samples.
+
+        Called on PTT release / mode change / sink swap to prevent
+        stale baseband samples from leaking into the next TX cycle.
+        Mirror of ``clear_tx_audio``.
+        """
+        with self._tx_iq_lock:
+            self._tx_iq.clear()
+
+    def _drain_tx_iq_be(self, n_samples: int):
+        """Pop up to ``n_samples`` complex64 from ``_tx_iq``, zero-pad
+        on underrun, return (i_be, q_be) BE int16 component arrays.
+
+        Caller: ``_pack_audio_bytes_pairs`` (the EP2 frame composer).
+        Both component arrays are shape ``(n_samples,)`` dtype ``'>i2'``
+        so they slot directly into the BE int16 (126, 4) frame view
+        used for the L/R columns.
+
+        Threading: drains ``_tx_iq`` under ``_tx_iq_lock``.
+
+        On underrun (queue had < n_samples), increments
+        ``tx_iq_underruns`` and pads with ``0+0j`` so the EP2 frame
+        is always full-length.  Padding bytes quantize to 0x0000
+        (baseband DC, harmless on RX since MOX=0 keeps the PA off).
+        """
+        import numpy as np
+        with self._tx_iq_lock:
+            avail = min(len(self._tx_iq), n_samples)
+            pulled = [self._tx_iq.popleft() for _ in range(avail)]
+        if avail < n_samples:
+            self.tx_iq_underruns += 1
+            pulled.extend([complex(0.0, 0.0)] * (n_samples - avail))
+        iq = np.asarray(pulled, dtype=np.complex64)
+        # Apply scalar gain to both components.
+        iq = iq * np.complex64(self.tx_iq_gain)
+        # Clip per-component then quantize round-to-nearest.  No TPDF
+        # dither here -- the L/R path uses TPDF because the AK4951
+        # codec output goes to a human ear and quantization grain is
+        # audible at low volumes.  TX I/Q feeds the HL2 modulator /
+        # upsampler / RF DAC; -96 dBFS quantization stairsteps are
+        # buried below typical TX SNR and don't merit the extra ~10
+        # us per frame.
+        real = np.clip(iq.real, -1.0, 1.0) * 32767.0
+        imag = np.clip(iq.imag, -1.0, 1.0) * 32767.0
+        return (np.round(real).astype(">i2"),
+                np.round(imag).astype(">i2"))
 
     def _register_cc_slot(self, c0: int) -> None:
         """Ensure ``c0`` is present in ``_cc_cycle`` so the writer
@@ -2296,12 +2406,25 @@ class HL2Stream:
         int16_be = _quantize_to_int16_be(lr)             # (126, 2)
 
         # Build the 8-byte slot directly as a (126, 4) BE-int16 view:
-        # column 0 = L, column 1 = R, columns 2..3 = TX I/Q (stay 0).
+        # column 0 = L, column 1 = R, columns 2 = TX I, column 3 = TX Q.
         # Row-major .tobytes() gives the exact 1008-byte layout the
         # gateware expects with zero per-row Python work.
         out_arr = np.zeros((126, 4), dtype=">i2")
         out_arr[:, 0] = int16_be[:, 0]
         out_arr[:, 1] = int16_be[:, 1]
+
+        # v0.2 Phase 2 commit 8: TX I/Q packing.  When inject_tx_iq is
+        # True (flipped by Phase 3 PTT state machine on MOX=1 edge),
+        # drain 126 complex samples from the _tx_iq queue, quantize
+        # per-component to BE int16, write into columns 2..3.  When
+        # False (default), columns stay zero -- wire-identical to v0.1
+        # RX-only behavior.  Underrun pads with zeros + bumps
+        # tx_iq_underruns counter (see _drain_tx_iq_be docstring).
+        if self.inject_tx_iq:
+            iq_real_be, iq_imag_be = self._drain_tx_iq_be(126)
+            out_arr[:, 2] = iq_real_be
+            out_arr[:, 3] = iq_imag_be
+
         return out_arr.tobytes()
 
     def _send_config(self):
