@@ -93,21 +93,26 @@ validation story.
 
 ## Current status (2026-05-15)
 
-**Tier A: RED.** The bench gate caught a real defect on first
-run — see CLAUDE.md §15.23. The WDSP TXA chain itself works
-(gen0 internal-tone path produces correct output), and all
-integration glue passes, but the **mic input path produces zero
-I/Q**. This is exactly what the gate exists to catch: a
-non-functional TX chain found *before* Phase 3 PTT was built on
-top of it. The defect is parked with a full diagnostic trail in
-§15.23 for a focused fix investigation.
+**Tier A: GREEN.** All 7 checks pass. Resolved 2026-05-15 per
+CLAUDE.md §15.23 — root cause was an extraneous
+`SetTXABandpassRun(ch,1)` call toggling WDSP's stale
+compressor-only `bp1` into the SSB path (NOT a dead input path;
+the early "mic input produces zero I/Q" framing was the
+misdiagnosis the §15.23 trail documents). Fix: removed the
+call + centralized the per-mode sign in
+`TxChannel._signed_edges`/`_push_bandpass_locked`. Verified:
+non-zero I/Q peak 0.545, analytic mean|Q| 0.258; FFT bench
+(`test_tx_dsp_bench.py`) OVERALL PASS — USB/LSB mirror-symmetric,
+69 dB sideband / 63 dB carrier suppression; 60/60 TX unit tests
+green.
 
-Tier A checks currently green: TxChannel open + IM-5 init,
-MoxEdgeFade ramp, Sip1Tap round-trip, EP2 packing, v0.1.1
-wire-parity. Red: "WDSP TXA produces non-zero I/Q from tone"
-and "TX I/Q is analytic" (both blocked by the §15.23 mic-input
-defect — note these would pass if the gate fed gen0 instead of
-mic, confirming the chain vs input-path split).
+> *Archaeology trailer:* this section read "Tier A: RED — mic
+> input path produces zero I/Q" from 2026-05-15 morning until
+> the §15.23 3-agent investigation root-caused it that
+> afternoon. The gate did its job — it caught a non-functional
+> TX chain *before* Phase 3 was built on it. Kept here so a
+> future reader who finds an old reference to "Tier A RED"
+> knows it was resolved, not abandoned.
 
 Tier B + the PS A/B: deferred to Phase 3 PTT (cannot key without
 it) and v0.3 respectively.

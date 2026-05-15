@@ -2686,8 +2686,10 @@ v0.1 plan §7 (Phase 4).
 Plus: in SPLIT, a **TX marker + BW rectangle** drawn on the
 existing single panadapter (distinct color from the RX
 marker — proposed cyan or amber, NOT red since red is
-reserved for TX-active per Phase 3.E
-`FrequencyDisplay.set_tx_active`).
+reserved for TX-active per the `tx_active_changed` signal
+(wired Phase 1 commit 10 `9fe0b59`; the "Phase 3.E"
+attribution in earlier drafts predates the Phase renumber)
++ `FrequencyDisplay.set_tx_active`).
 
 **Rationale for tri-state instead of separate SPLIT button:**
 the three configurations (single RX, dual RX listening, SPLIT
@@ -3062,15 +3064,22 @@ could indicate TX state.  Operator's peripheral vision latches
 onto whatever is red and reads "I am transmitting" without
 needing to track multiple cues.
 
-This rule extends the existing Phase 3.E
+This rule extends the existing
 ``FrequencyDisplay.set_tx_active`` red treatment (the VFO LED
-goes red on PTT) into a project-wide convention.
+goes red on PTT) into a project-wide convention.  (NOTE
+2026-05-15 §15.24: the ``tx_active_changed`` signal this
+depends on was wired in **Phase 1 commit 10 `9fe0b59`**, not
+"Phase 3.E" as earlier drafts said -- the attribution predates
+the Phase renumber.  `radio.tx_bw_for(mode)` already exists
+(radio.py:2010); `radio.tx_freq_hz` does NOT yet exist and is
+an explicit Phase 3 deliverable -- the red-passband-rectangle
+width-change behavior below depends on it.)
 
 #### What turns red on PTT
 
 | Element | Color while RX | Color while TX-active |
 |---------|----------------|------------------------|
-| VFO LED (the transmitting VFO) | Normal | **Red** (Phase 3.E, already wired) |
+| VFO LED (the transmitting VFO) | Normal | **Red** (`set_tx_active`; `tx_active_changed` wired Phase 1 commit 10 `9fe0b59`) |
 | Passband rectangle (TX VFO) | Cyan (RX BW) | **Red** (TX BW; see below) |
 | Audio meter readouts | S-meter | PWR / SWR / ALC |
 | SPLIT TX marker (when SPLIT enabled) | Cyan/amber (per §15.6) | **Red** (overrides §15.6 idle color) |
@@ -3119,9 +3128,10 @@ makes the steady-state-vs-active transition explicit.
    a "TX active" branch that reads ``radio.tx_bw_for(mode)``
    and renders red instead of cyan.  ~20 LOC across both
    widget classes plus the GPU shader uniform.
-2. Wire `radio.tx_active_changed` signal (Phase 3.E already
-   defines it) into the spectrum panels so the repaint fires
-   on PTT edges, not just on next FFT tick.
+2. Wire `radio.tx_active_changed` signal (defined in Phase 1
+   commit 10 `9fe0b59` -- NOT "Phase 3.E"; §15.24) into the
+   spectrum panels so the repaint fires on PTT edges, not just
+   on next FFT tick.
 3. SPLIT TX marker color logic: extend the existing color
    uniform to flip to red on `tx_active_changed`.
 4. Palette in `lyra/ui/palettes.py`: add semantic names
@@ -4379,13 +4389,27 @@ confirmed `aef0106` as the wedge trigger.
 | Lyra hard crash mid-TX | ❌ Lyra is dead | ✅ HL2 self-rescue |
 | OS bluescreen / power loss mid-TX | ❌ | ✅ |
 
-The crash cases are covered by the HL2 community gateware's own
-internal watchdog (no EP2 keepalive for N seconds → drop PA bias).
-v0.0.x and v0.1.x shipped for months with `reset_on_disconnect`
-never written and no operator ever reported stuck-carrier after a
-Lyra crash -- the gateware was already being safe on its own.
+The crash cases are *believed* covered by the HL2 community
+gateware's own internal watchdog (no EP2 keepalive for N seconds
+→ drop PA bias).  **CAUTION (§15.24, 2026-05-15): this is
+TX-UNVERIFIED.** The "v0.0.x/v0.1.x shipped for months with
+`reset_on_disconnect` never written, no stuck-carrier reports"
+evidence is *negative evidence that only ever exercised RX
+disconnect* -- no operator transmitted in those versions (TX
+doesn't exist until v0.2).  With `reset_on_disconnect=False`
+the permanent default (Phase 1 6.1), this UNVERIFIED watchdog is
+the SOLE crash-mid-TX safety, guarding the project's
+worst-consequence failure (stuck carrier transmitting into the
+band = FCC/spectrum-pollution event).  **Mandatory Phase-3-EXIT
+gate before any real-antenna keying:** kill Lyra (`taskkill /F`)
+mid-TX into a dummy load, scope/confirm HL2 drops PA bias within
+N sec.  ~15 min, cheapest possible insurance on the worst
+outcome.  Until that bench test passes, treat the gateware
+watchdog as assumption-pending, NOT established fact.
 
-So the TX timeout is the **only** Lyra-side safety net we need.
+So the TX timeout is the only Lyra-side safety net for the
+operator-visible cases (stuck PTT / asleep / software latch);
+the crash case rides on the to-be-verified gateware watchdog.
 
 #### Spec
 
@@ -4460,15 +4484,35 @@ During diagnosis of the `aef0106` HL2 wedge (resolved per §15.20 +
 stop+restart path.  All four converged on the HL2 wedge as the
 **proximate** cause, but each surfaced a real latent bug in the
 Lyra-side teardown that was masked by the HL2 wedge dominating the
-failure signature.  None are currently operator-visible (v0.1.1 GA
-ships with these latent bugs and operates cleanly), but all are
-worth fixing before Phase 2 commit 8 (EP2 I/Q packing) lands actual
-TX wire traffic and tightens the timing budget.
+failure signature.
+
+**REVISED 2026-05-15 (§15.24 5-agent reconciliation):** the
+original "fix before Phase 2 commit 8" framing is OBSOLETE
+(commit 8 shipped; the gap closed without these landing).  The
+"v0.1.1 ships latent / no-op (channel is None)" rationale is also
+INVALIDATED: Phase 2 commit 7-redo removed the
+`LYRA_ENABLE_TX_DISPATCH` gate, so TxChannel + TxDspWorker +
+Sip1Tap + MoxEdgeFade are now built on **every** stream start and
+torn down on **every** stop -- the teardown path runs every RX
+session, not "never".  Re-scoped per §15.24: these are a
+**Phase-2→Phase-3 gap hygiene** commit (NOT a hard Phase-3-start
+gate -- 3 of 5 agents corrected the earlier over-statement).
+Bug 5 below is **already fixed** by commit 7-redo's symmetric
+guarded teardown -- struck.  Bug 1's "up to 3 sec" is WRONG: the
+RX loop has `settimeout(0.5)` so the worst case is a bounded
+≤2 s join, not a 3 s hang.  Corrected locations: real
+`HL2Stream.stop()` is **`stream.py:2898-2922`** (the cited
+`stream.py:2766` is inside `_set_rx2_freq`); real `Radio.stop()`
+TX teardown is **`radio.py:8432-8452`**.  **A5 critical
+addition the 4-agent round missed:** fixing Bug 1 (close socket
+before join) REQUIRES widening `_rx_loop`'s recvfrom except to
+catch `OSError` (currently only `socket.timeout`) or every
+stop() spams a traceback.
 
 | # | Bug | Location | Effort | Risk if unfixed |
 |---|---|---|---|---|
-| 1 | `socket.close()` after `thread.join()` -- RX loop sits in `recvfrom` for up to 3 sec waiting for socket timeout, blocking Qt main thread.  Should close socket FIRST so `recvfrom` unblocks immediately. | `stream.py:2766` `HL2Stream.stop()` | ~20 min | Stop UI freezes up to 3 sec when network goes south; harmless today but noticeable under flaky link. |
-| 2 | `self._thread = None` missing after join -- pre-existing latent ref.  Restart path can see stale ref; defensive coding gap. | `stream.py:2766` (same method) | ~5 min | Currently inert; could mask a real bug if join() ever silently fails. |
+| 1 | `socket.close()` after `thread.join()` -- RX loop sits in `recvfrom` until its `settimeout(0.5)` fires (bounded ≤2 s with the join timeout, NOT 3 s), blocking Qt main thread.  Close socket FIRST so `recvfrom` raises immediately.  **Requires widening `_rx_loop` recvfrom except to catch `OSError`** (A5 catch). | `stream.py:2898-2922` `HL2Stream.stop()` + `_rx_loop` except clause | ~25 min | Stop UI stalls ≤2 s on a dead link; now runs every stop (teardown unconditional post-7-redo). |
+| 2 | `self._thread = None` missing after join -- pre-existing latent ref.  Restart path can see stale ref; defensive gap. | `stream.py:2898-2922` (same method) | ~5 min | Inert; could mask a real bug if join() ever silently fails. |
 | 3 | Async sink swap during stop -- `worker_audio_sink_changed` delivered via `QueuedConnection` so worker close() can race a freshly-opened sink on rapid stop+restart. | `radio.py` worker signal wiring + `dsp/worker.py` sink swap handler | ~1-2 hr | Race-window today; would have been the dominant failure mode if the HL2 wedge weren't there. |
 | 4 | WASAPI exclusive close grace pause -- `Pa_CloseStream` under exclusive-mode takes 50-200 ms vs 5-10 ms shared.  No post-close pause means rapid reopen can fail device acquisition. | `dsp/audio_sink.py` SoundDeviceSink.close() | ~30 min | Currently masked by HL2 wedge dominating the stop+restart symptom set.  Operator runs in shared mode today so this is dormant; switching back to exclusive would re-expose it. |
 | 5 | `_close_tx_channel()` + PC mic stop unconditional in `Radio.stop()` -- open side is `LYRA_ENABLE_TX_DISPATCH`-gated but close side is not.  Asymmetric guard. | `radio.py:8349-8362` `Radio.stop()` | ~10 min | No-op today (channel is None), but a stale QSettings `radio/mic_source=pc_soundcard` could expose it via the `set_mic_source` autoload constructing a `SoundDeviceMicSource` that close() then tries to tear down. |
@@ -4509,9 +4553,15 @@ cadence becomes load-bearing during TX), so cleaning up the
 teardown first means Phase 2 bench tests don't get muddied by
 latent-bug noise.
 
-Status: **PARKED** -- pick these off in the gap between Phase 2
-commit 7.1 (current) and Phase 2 commit 8 (next).  Or interleave
-between Phase 2 commits if a specific bug becomes blocking.
+Status: **IN PROGRESS 2026-05-15 (§15.24 plan item B)** --
+bugs 1+2 (+ the A5 `_rx_loop` OSError-widen) land as one
+`stream.py` commit; bug 3 via A5's sync-Event barrier (NOT the
+heavier "watchdog" the 4-agent round proposed) gated behind a
+`final_teardown` kwarg.  Bug 5 STRUCK (already fixed by commit
+7-redo's symmetric guarded teardown).  Bug 4 (WASAPI-exclusive
+close pause) stays deferred to v0.2-end (dormant -- operator
+runs Shared mode).  This is Phase-2→Phase-3 gap hygiene, not a
+Phase-3-start gate (§15.24).
 
 ### 15.22 — Panadapter drag tuning ignores Y-axis (BUG, PARKED 2026-05-15)
 
@@ -4865,6 +4915,118 @@ error in Lyra's config (the sign was Thetis-faithful) and NOT a
 dead input path.  The bench's inverted expected-sideband-sign
 (§14.2 TX mirror) was a separate false-fail that masked the real
 cause early on.  All three issues fixed + verified.
+
+### 15.24 — Pre-Phase-3 plan reconciliation (5-agent synthesis, LOCKED 2026-05-15)
+
+After §15.23 resolved, two audit agents swept the rest of the v0.2
+plan + §15.x backlog for more bp1-class landmines ("no more
+surprises").  Three further review agents independently
+validated/refuted/severity-tested those findings + built the
+resolution plan.  All 5 reconciled (every dissent settled by
+source evidence or empirical test, not vote).  This entry is the
+LOCKED converged plan; execute it before Phase 3.
+
+**Convergence outcomes:**
+
+* **F3 / consensus §8.5 (UNANIMOUS, the one true pre-Phase-3
+  blocker):** `v0.1_rx2_consensus_plan.md` §8.5 still literally
+  prescribes `SetTXABandpassRun(ch,1)` (the §15.23 SSB-killer) at
+  line 2064 + chain ASCII 1969-70, and still inverts gen0/gen1
+  (lines 1941-44, 2051, 2074 label `SetTXAPostGen*` as input
+  "gen0"; it is WDSP gen1, output-side, TXA.c:583).  §8.5 is the
+  §15.18 locked Phase-3 reading anchor -- a dev following it
+  re-detonates §15.23.  Doc-only fix, must precede Phase 3.
+* **§15.21 stop/restart bugs (A2 OVER-STATED; A3+A4+A5 converged):**
+  NOT a hard Phase-3-start gate -- gap hygiene.  Bug 5 already
+  fixed by commit 7-redo.  Bug 1 worst case is a bounded ≤2 s
+  stall on a dead link (RX loop has settimeout(0.5)), not a 3 s
+  hang (§15.21's "3 sec" is wrong).  Bug 2 inert.  Only Bug 3
+  has real Phase-3 surface and it's a recoverable transient,
+  schedulable within early Phase 3.  §15.21's own line refs are
+  stale: real `HL2Stream.stop()` is `stream.py:2898-2922` (NOT
+  2766 -- that's `_set_rx2_freq`); real `Radio.stop()` TX
+  teardown is `radio.py:8432-8452`.  **A5 critical addition the
+  other 4 missed:** fixing Bug 1 (close socket before join)
+  REQUIRES widening `_rx_loop`'s recvfrom except clause to catch
+  `OSError` (currently only `socket.timeout`), else every stop()
+  spams a traceback.
+* **§15.20 crash-mid-TX (A3 said LOW, A4 ESCALATED; RECONCILED):**
+  not a Phase-3-START blocker but a mandatory **Phase-3-EXIT
+  gate** before any real-antenna keying.  The "HL2 gateware
+  watchdog covers crash-mid-TX" claim is TX-unverified (no TX
+  existed in v0.0.x/v0.1.x; negative evidence only covers RX-
+  disconnect) and is load-bearing because `reset_on_disconnect
+  =False` (Phase 1 6.1).  Cheapest insurance on the project's
+  worst failure (stuck carrier on-band): a 15-min dummy-load
+  kill-test.
+* **§15.17 (A2 vs A4 DIRECT CONFLICT, resolved EMPIRICALLY):**
+  §15.17 stepper IS fully shipped on-branch (8 commits
+  `3d86b7b`..`fbcfcde`+`a43fa55`; `lyra/ui/widgets/
+  stepper_readout.py` exists; `panels.py` uses StepperReadout
+  ×13).  A2's "half-landed/held-off-branch" is FALSE.  But the
+  ~15 red UI tests are REAL -- they `AttributeError` on
+  `af_gain_slider`/`vol_a_slider`, the QSlider attrs §15.17
+  *replaced*, never updated for the widget swap.  A4's "225/225
+  green / premise false / ignore" is wrong for the current
+  branch.  Truth: feature done, tests stale -> a small Phase-3
+  baseline-hygiene risk (a real Phase-3 UI regression in those
+  test files could hide behind the existing reds).
+* **REFUTED -- struck from concern:** F2 (compressor→bp1
+  "splatter" -- `compress.c:106` calls `TXASetupBPFilters`
+  itself; WDSP self-heals); F5 (`SetTXAPanelSelect` §14.10 trap
+  -- create-default inselect=2 is correct per xpanel case-0
+  math; Thetis has zero call-sites; A5: add a one-line comment
+  documenting the deliberate omission so a future audit doesn't
+  add the harmful `select=1`).  F1 (idempotent bp0 stale) ->
+  v0.2.3 profile-picker only, NOT Phase 3.
+
+**LOCKED action plan (execution order):**
+
+A. Pre-Phase-3 BLOCKING (doc-only, zero code risk):
+   1. Patch §8.5: drop `SetTXABandpassRun(ch,1)` (lines 2064,
+      1969-70), add bp1-frozen note (2066), fix gen0/gen1
+      (1941-44, 2051, 2074).
+   2. tx_bench_gate.md Tier-A RED→GREEN (keep RED as archaeology
+      trailer).
+   3. CLAUDE.md stale-xref cleanup: §15.21 line refs +
+      invalidated "fix between 7.1 and 8" rationale; §15.20
+      watchdog claim softened to TX-unverified; §15.9/14/6/10
+      "Phase 3.E" → "Phase 1 commit 10 (`9fe0b59`)";
+      `radio.tx_freq_hz` marked unbuilt-Phase-3-deliverable
+      (note `radio.tx_bw_for(mode)` DOES already exist,
+      radio.py:2010 -- A2/A4 corrected).
+B. Phase-2→3 gap hygiene (code, not a Phase-3-start gate):
+   4. §15.21 bugs 1+2 + `_rx_loop` OSError-widen (one
+      `stream.py` commit).
+   5. §15.21 bug 3 via A5's sync-Event barrier (NOT §15.21's
+      heavier "watchdog"); gate behind a `final_teardown` kwarg
+      so `set_audio_output`/device-change emit paths don't
+      block.
+   6. Update/retire the ~15 stale QSlider UI tests to the
+      StepperReadout API; re-stamp §15.17 header CLOSED.
+C. Phase-3-EXIT gate (before real-antenna keying): §15.20
+   15-min dummy-load kill-test + the ~80 LOC host TX timeout
+   (already in the Phase-3 budget; design per §15.20).
+D. Scheduled w/ preventive notes embedded now: v0.2.1
+   compressor/bp1 tripwire + FM `SetTXAFMEmphPosition(1)` on
+   FM-entry + §15.19↔§8.5 reconciliation (additive pre-
+   `fexchange0` stage, architecturally identical to RX §14.6 --
+   NOT a CR-5 violation) + profile-picker dB-vs-linear unit
+   tagging + iqc cdef audit; v0.2.2 amsq threshold; v0.2-end
+   §15.21 bug 4 (WASAPI-exclusive close pause, dormant) + §6.7
+   CFIR-family capability gating.
+
+Verification gate (proves A+B done): Tier-A bench all-green +
+FFT bench OVERALL PASS + 60/60 TX unit tests + scripted 20×
+stop/restart smoke (each stop <100 ms, zero stderr tracebacks,
+post-start sink is live) + doc-lint (§8.5 has no
+`SetTXABandpassRun` *prescription* + no bare `SetTXAGen*`;
+CLAUDE.md has no stale `tx_active_changed`-context "Phase 3.E"
+attribution -- the legit "Phase 3.E.1 hotfix v0.16" RX2-history
+refs are intentionally retained; tx_bench_gate Tier-A GREEN) +
+RX/RX2 225-test regression null.
+
+**Status: LOCKED 2026-05-15, executing.**
 
 ---
 
