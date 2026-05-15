@@ -770,6 +770,32 @@ class HL2Stream:
             Callable[[], DispatchState]
         ] = None
 
+        # v0.2 Phase 2 (3/N): mic-input callback.  EP6 datagrams carry
+        # mic samples in the 24..25 byte slot of each 26-byte sample
+        # slot (per CLAUDE.md §3.3).  ``_parse_iq_frame`` extracts the
+        # full mic block (38 int16 samples per datagram at nddc=4) and
+        # returns it as the third tuple element.  Phase 0 / Phase 1
+        # discarded those samples; Phase 2 plumbs them to the TX path:
+        #
+        #   HL2Stream._rx_loop  (this thread)
+        #     -> mic_callback(int16 ndarray, FrameStats)
+        #     -> Radio.dispatch_tx  (via QueuedConnection: DSP worker)
+        #     -> TxChannel.process(float32 mono)
+        #     -> queue_tx_iq(complex64)
+        #     -> HL2Stream EP2 writer (Thread 4)
+        #     -> EP2 frame TX I/Q bytes (commit 4 wires this end)
+        #
+        # Callback receives the raw mic samples as int16 BE-decoded
+        # ndarray + the current FrameStats so consumers can read
+        # ``ptt_in`` / ``adc_overload`` for the same datagram in one
+        # callback rather than racing through a separate signal.
+        # Consumers MUST treat the callback as RX-loop-thread context
+        # and hand off to DSP-worker-thread via QueuedConnection if
+        # they do any non-trivial processing.
+        self._mic_callback: Optional[
+            Callable[[np.ndarray, "FrameStats"], None]
+        ] = None
+
         # TX audio queue. Demod pipeline pushes float samples [-1, 1] at
         # 48 kHz. The AK4951 codec on the HL2+ is hard-locked at 48 kHz
         # fs regardless of EP6 IQ rate. To keep the codec from being
@@ -2333,6 +2359,35 @@ class HL2Stream:
             )
         self._consumers[consumer_id] = callback
 
+    def register_mic_consumer(
+        self,
+        callback: Optional[Callable[[np.ndarray, "FrameStats"], None]],
+    ) -> None:
+        """Register (or clear) the mic-samples callback.
+
+        Sibling of ``register_consumer`` but for the mic-input path
+        (which is NOT a DDC -- it's a separate byte slot in every EP6
+        datagram).  Per CLAUDE.md §3.3 + ``_parse_iq_frame``
+        deconstruction: each datagram carries 38 mic samples at
+        nddc=4 (one per 26-byte slot, two USB blocks per datagram x
+        19 slots per block).  HL2 mic rate is fixed at 48 kHz by
+        the AK4951 codec.
+
+        Callback signature:
+            mic_callback(samples: np.ndarray[int16], stats: FrameStats)
+
+        Pass ``callback=None`` to clear.  Threading model identical
+        to ``register_consumer``: dict-attribute write is GIL-atomic
+        under CPython; worst case is one extra datagram on the old
+        callback during a hot-swap.
+
+        v0.2 Phase 2: Radio's TX-dispatcher hooks here in commit 5+
+        once TxChannel mic-input path is wired end-to-end.  Until
+        then, default is None and mic samples continue to drop on
+        the floor (preserves v0.1 behaviour).
+        """
+        self._mic_callback = callback
+
     def set_dispatch_state_provider(
         self,
         provider: Optional[Callable[[], DispatchState]],
@@ -2777,7 +2832,10 @@ class HL2Stream:
             parsed = _parse_iq_frame(data)
             if parsed is None:
                 continue
-            seq, per_ddc, _mic, cc0, cc1 = parsed
+            # v0.2 Phase 2 (3/N): mic samples are now consumed.  Earlier
+            # phases discarded with ``_mic`` underscore-prefix; now
+            # routed to the registered mic_callback below.
+            seq, per_ddc, mic, cc0, cc1 = parsed
 
             # First valid EP6 received -- release the writer thread
             # to enter its cadence loop.  Idempotent (Event.set on
@@ -2806,6 +2864,22 @@ class HL2Stream:
             # to the next refresh of any given field.
             _decode_hl2_telemetry(cc0, self.stats)
             _decode_hl2_telemetry(cc1, self.stats)
+
+            # v0.2 Phase 2 (3/N): fire the mic-input callback per
+            # datagram.  Runs BEFORE dispatch_ddc_samples so consumers
+            # can read ptt_in / adc_overload from the same FrameStats
+            # that the just-completed telemetry decode populated.
+            # Independent of dispatch_state -- mic is always present in
+            # every datagram regardless of mox / ps_armed / rx2_enabled.
+            # Wrapped in try/except so a broken consumer (raising or
+            # taking too long) doesn't kill the RX loop -- worst case,
+            # one datagram's mic samples are dropped.
+            mic_cb = self._mic_callback
+            if mic_cb is not None:
+                try:
+                    mic_cb(mic, self.stats)
+                except Exception as exc:
+                    _log.warning("mic_callback raised: %s", exc)
 
             # Snapshot the dispatch state ONCE per datagram per the
             # plan §4.2.x "Reader semantics" contract.  Mid-datagram
