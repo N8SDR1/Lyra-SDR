@@ -4453,6 +4453,66 @@ in v0.2.0 Phase 3 alongside the MOX/PTT state machine + MOX button
 + §15.9 red-on-air visual rule + §15.14 auto-mute-on-TX recovery.
 Estimated ~2 hr of the Phase 3 budget (~14 h total per §15.18).
 
+### 15.21 — Latent stop/restart bugs surfaced by 4-agent diagnostic (PARKED 2026-05-15)
+
+During diagnosis of the `aef0106` HL2 wedge (resolved per §15.20 +
+§15.18 trailer), four parallel diagnostic agents audited the
+stop+restart path.  All four converged on the HL2 wedge as the
+**proximate** cause, but each surfaced a real latent bug in the
+Lyra-side teardown that was masked by the HL2 wedge dominating the
+failure signature.  None are currently operator-visible (v0.1.1 GA
+ships with these latent bugs and operates cleanly), but all are
+worth fixing before Phase 2 commit 8 (EP2 I/Q packing) lands actual
+TX wire traffic and tightens the timing budget.
+
+| # | Bug | Location | Effort | Risk if unfixed |
+|---|---|---|---|---|
+| 1 | `socket.close()` after `thread.join()` -- RX loop sits in `recvfrom` for up to 3 sec waiting for socket timeout, blocking Qt main thread.  Should close socket FIRST so `recvfrom` unblocks immediately. | `stream.py:2766` `HL2Stream.stop()` | ~20 min | Stop UI freezes up to 3 sec when network goes south; harmless today but noticeable under flaky link. |
+| 2 | `self._thread = None` missing after join -- pre-existing latent ref.  Restart path can see stale ref; defensive coding gap. | `stream.py:2766` (same method) | ~5 min | Currently inert; could mask a real bug if join() ever silently fails. |
+| 3 | Async sink swap during stop -- `worker_audio_sink_changed` delivered via `QueuedConnection` so worker close() can race a freshly-opened sink on rapid stop+restart. | `radio.py` worker signal wiring + `dsp/worker.py` sink swap handler | ~1-2 hr | Race-window today; would have been the dominant failure mode if the HL2 wedge weren't there. |
+| 4 | WASAPI exclusive close grace pause -- `Pa_CloseStream` under exclusive-mode takes 50-200 ms vs 5-10 ms shared.  No post-close pause means rapid reopen can fail device acquisition. | `dsp/audio_sink.py` SoundDeviceSink.close() | ~30 min | Currently masked by HL2 wedge dominating the stop+restart symptom set.  Operator runs in shared mode today so this is dormant; switching back to exclusive would re-expose it. |
+| 5 | `_close_tx_channel()` + PC mic stop unconditional in `Radio.stop()` -- open side is `LYRA_ENABLE_TX_DISPATCH`-gated but close side is not.  Asymmetric guard. | `radio.py:8349-8362` `Radio.stop()` | ~10 min | No-op today (channel is None), but a stale QSettings `radio/mic_source=pc_soundcard` could expose it via the `set_mic_source` autoload constructing a `SoundDeviceMicSource` that close() then tries to tear down. |
+
+**Triggering agent reports** (output files retained for reference):
+- Agent 1 (HL2Stream stop ordering): identified bugs 1 + 2
+- Agent 2 (Phase 2 commits 1-7.1 audit): identified bug 5 plus
+  the construct-without-gate path in `set_mic_source`
+- Agent 3 (WASAPI close timing): identified bug 4
+- Agent 4 (Qt + thread cleanup ordering): identified bugs 1 + 3 +
+  validated bug 4
+
+**Recommended approach when picking these up:**
+
+Land as **5 small, individually testable commits** rather than one
+big patch.  Each one is independent.  Commits 1+2 are cheapest
+and most universally beneficial; commit 4 is bench-test-validated
+only when an operator runs WASAPI exclusive mode; commit 5 is
+trivial.
+
+Order:
+1. **Bug 2** (5 min) -- defensive `_thread = None` after join.  Free.
+2. **Bug 1** (20 min) -- close socket before join.  Real win on
+   flaky links.  Validate by `iperf`-style network pull-test that
+   stop() returns immediately even when packets are dropping.
+3. **Bug 5** (10 min) -- symmetric env-var gate on close side.
+   No-op today, defense-in-depth.
+4. **Bug 4** (30 min) -- 75 ms post-close pause when host_api_label
+   resolves to a WASAPI-exclusive device.  Validate by switching
+   to exclusive mode and running 10× rapid stop+restart cycles.
+5. **Bug 3** (1-2 hr) -- sync sink-swap during stop with watchdog.
+   The biggest one.  Land last because it's the most invasive.
+
+**Scope decision**: target before Phase 2 commit 8 (EP2 I/Q
+packing) lands actual TX wire traffic.  Phase 2 commits 8-11
+exercise the stop/start path harder than RX-only does (EP2 writer
+cadence becomes load-bearing during TX), so cleaning up the
+teardown first means Phase 2 bench tests don't get muddied by
+latent-bug noise.
+
+Status: **PARKED** -- pick these off in the gap between Phase 2
+commit 7.1 (current) and Phase 2 commit 8 (next).  Or interleave
+between Phase 2 commits if a specific bug becomes blocking.
+
 ---
 
 *Last updated: 2026-05-14 — **v0.2.0 Phase 0 + Phase 1
