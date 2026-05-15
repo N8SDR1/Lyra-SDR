@@ -1613,10 +1613,24 @@ sound card despite having a codec).
   through HL2 codec, exactly as planned in §6.1.  The
   `aamix.c` port for v0.0.9.6 is the prerequisite that makes
   RX2 work when it lands.
-- **TX (v0.2):** No change.  Default mic input is HL2 mic jack
-  via EP6 (single crystal, no drift).  PC mic becomes opt-in
-  for ANAN-class hardware in v0.4 — that path uses the same
-  rmatch+varsamp from v0.0.9.6 for input-side rate matching.
+- **TX (v0.2):** Lyra supports TWO mic-input paths because the
+  HL2 family has TWO variants (CORRECTED 2026-05-15 -- prior
+  draft of this bullet incorrectly claimed PC mic was deferred
+  to v0.4):
+  * **HL2+ (AK4951 codec)**: mic samples arrive via EP6 byte
+    slot 24-25 (CLAUDE.md §3.3).  Default for "+" operators
+    including N8SDR.  Single crystal, no drift; no rmatch
+    needed on the input side.
+  * **Standard HL2 (no codec)**: no mic input on the radio
+    hardware.  Operator plugs mic into PC sound card; Lyra's
+    `SoundDeviceMicSource` (lyra/dsp/audio_sink.py, Phase 2
+    commit 4) captures samples and feeds the same downstream
+    TxChannel path.  Operator selects in Settings -> Audio ->
+    Mic input section (Phase 2 commit 6).
+  ANAN-class hardware (v0.4) lacks any radio-side mic
+  regardless of variant, so the PC sound card path the standard-
+  HL2 operators use ALSO covers ANAN.  No additional architecture
+  work needed for v0.4 mic input.
 - **PureSignal (v0.3):** No change.  HL2 PS feedback is on
   DDC2/DDC3 at `rx1_rate` per §3.8 — single crystal, no drift.
   Different DDC rates (e.g., ANAN's 192 kHz `ps_rate` vs the
@@ -4215,8 +4229,104 @@ Adding it explicitly fills the gap.
 Reading-list anchors for Phase 2 resume (unchanged):
 consensus §8.5 (TX chain byte-for-byte match to xtxa() execution
 order); §8.4 (meter wiring + cal); §15.13/14/15 (cross-cutting
-v0.2 deferrals); ``wdsp_engine.py`` (RxChannel pattern for
-TxChannel sibling).
+v0.2 deferrals); §15.19 (operator-locked TX feature scope -- see
+below); ``wdsp_engine.py`` (RxChannel pattern for TxChannel
+sibling).
+
+### 15.19 — v0.2 TX feature scope (operator-locked 2026-05-15)
+
+Locks the operator-curated TX feature list for v0.2.0 through
+v0.2.3.  Per discussion 2026-05-15 with N8SDR, Lyra's TX scope
+extends BEYOND consensus §8.5's Thetis-parity baseline to include
+ESSB-rack-style processors that Lyra ships natively rather than
+forcing operators to wire external rack gear or X-Air mixers in
+front of the radio.
+
+**Standard Thetis-parity features (consensus §8.5 baseline):**
+
+* SSB modulator (USB/LSB) -- WDSP TXA chain (v0.2.0 commit 2)
+* WDSP leveler + ALC (v0.2.0 commit 2)
+* WDSP bandpass + PHROT (v0.2.0 commit 2)
+* Mode-aware bandpass per §8.5 IM-5 (v0.2.0)
+* RTA TX + RX scaffolding (v0.2.0 commit 9+)
+* PWR / SWR / MIC / COMP / ALC meter readouts (§8.4) (v0.2.0+)
+* CW + AM + FM modulators (v0.2.2)
+* Per-band frequency / mode / filter memory (existing v0.1 RX
+  features extend to TX)
+
+**Lyra-native TX features added beyond consensus §8.5
+(operator-curated 2026-05-15):**
+
+| Feature | Sub-release | Implementation approach |
+|---|---|---|
+| Voice keyer / message memory | v0.2.3 | Python-level recorder + playback queue feeding TxChannel |
+| Operator-curated TX profile picker | v0.2.3 | QSettings JSON profile dicts.  Manual select only -- NO auto-detect by call.  Profile bundles: EQ + comp + leveler + mic gain + combinator + tube plating + speech enhancements + bandwidth.  Default profile recalled on Lyra restart. |
+| Hot-mic monitor / SSB sidetone | v0.2.3 | Tap post-TXA pre-EP2, route to operator-selectable monitor output |
+| Separate monitor output device | v0.2.3 | Settings -> Audio -> Monitor device picker (independent of main output device) |
+| 3 or 5-band PARAMETRIC EQ (replaces WDSP 10-band graphic) | v0.2.1 | Lyra-native IIR cascade (operator-tunable freq + gain + Q per band).  Replaces consensus §8.5 default; WDSP `SetTXAEQRun` stays cdef-declared for fallback compat but Lyra TxChannel calls Python-native pre-processor instead. |
+| X-Air-style **Combinator** (multiband compressor) | v0.2.1 | Lyra-native Python pre-processor before WDSP TXA.  4-band split (Linkwitz-Riley crossovers, operator-adjustable defaults ~250/1500/4000 Hz), per-band threshold/ratio/attack/release/makeup, optional top-band harmonic exciter ("polish").  Modeled on Behringer X-Air XR12 Combinator effect that N8SDR uses on his bench rack today.  Replaces consensus §8.5 CFC (operator preference -- doesn't like Thetis CFC's "phasey" sound). |
+| **Tube Plating effect** | v0.2.1 | Lyra-native Python pre-processor.  Soft tube-saturation transfer function (tanh-based waveshaper with even-order harmonic emphasis) + top-end harmonic exciter for "shine."  Operator-tunable amount slider; default OFF.  Sits before parametric EQ in chain. |
+| **Formant boost** (toggle) | v0.2.1 | Targeted boost ~700 / 1200 / 2500 Hz to emphasize vowel formants for clearer voice copy.  Pre-EQ stage. |
+| **Sibilance / consonant emphasis** (toggle) | v0.2.1 | High-shelf boost ~5-8 kHz with operator-tunable amount.  Punches consonants through noise. |
+| **DX cut-through** processor (toggle) | v0.2.1 | Aggressive multi-stage compressor + EQ profile bundle tuned for pile-up readability.  Different goal from speech intelligibility -- this is a "be heard in the crowd" preset. |
+| **De-esser** (toggle) | v0.2.1 | Targeted high-freq compressor to tame sibilance overload (opposite direction from sibilance enhancement).  Default OFF; operator enables when wideband EQ pushes 4-6 kHz hard. |
+| **Auto-AGC on mic input** (toggle + user gain) | v0.2.1 | Pre-WDSP-leveler Python-side AGC.  Default OFF (operator may prefer raw mic for clean dynamic range to feed the WDSP chain); when on, gain slider for makeup. |
+| **VOX** (toggle + threshold + open/close hang times) | v0.2.3 | Voice-operated TX subscriber on PttStateMachine.  Anti-VOX (suppress when speaker output active) included.  Threshold slider in dBFS; hang times in ms. |
+| **Pre-EQ vs post-EQ compressor ordering** | v0.2.1 | Settings toggle "Compressor position: pre-EQ / post-EQ".  ESSB ops typically want comp BEFORE EQ to preserve EQ shape; default is post-EQ (consensus §8.5 order). |
+| **Noise gate** (mic side, operator-tunable threshold / hang / muted-gain) | v0.2.2 | WDSP `amsq` block already in TXA chain -- expose via Settings -> TX with operator sliders. |
+
+**Explicitly EXCLUDED (operator NO 2026-05-15):**
+
+* Loudness-war / aggressive multi-stage psychoacoustic processors
+  -- operator preference, sounds unnatural in casual QSOs
+* TX audio history / replay buffer -- not wanted
+* Auto-detect EQ by call signature -- operator picks their own
+  profile manually; no algorithmic selection
+* Per-mode TX profiles (auto-switch on USB/LSB/etc.) -- operator
+  chooses their own profile + bandwidth from the manual picker
+
+**ESSB architecture flags (baked into v0.2 throughout):**
+
+* TX BW operator-adjustable up to 8 kHz (HL2 wire path supports
+  it; UI surface must allow without warnings unless cutoff goes
+  below 50 Hz where AC-mains harmonics start to bite)
+* EQ band range extends to 8 kHz so upper-band "shine" lands
+  above standard SSB cutoff
+* Combinator crossovers operator-tunable; default ESSB-friendly
+  preset (200/1500/4000 Hz)
+* TX RTA spectrum displays full 0-12 kHz so ESSB ops see actual
+  passband, not truncated 0-4 kHz view
+* 50 Hz low-cutoff bandpass allowed (warning surfaced for <100 Hz
+  due to mains harmonics; not blocked)
+
+**Tooling / dependency notes:**
+
+* Combinator + tube plating + formant boost + sibilance +
+  DX cut-through + de-esser are all **Lyra-native Python
+  pre-processors** that sit before WDSP TXA's `fexchange0`.
+  None of these require new WDSP cffi setters.
+* Voice keyer is pure Python -- numpy buffer + state machine.
+* Monitor output device is sounddevice OutputStream sibling of
+  the existing SoundDeviceSink.
+* VOX is a PttStateMachine subscriber -- no DSP work.
+* Operator-curated profile picker is QSettings JSON serialization
+  of TX state attributes -- no new cffi.
+
+#### Status
+
+**SCOPE LOCKED 2026-05-15** -- operator-confirmed by N8SDR.
+v0.2.0 ships the basic SSB chain.  v0.2.1 lands the EQ + dynamics
++ Lyra-native processors (Combinator + Tube Plating + Speech
+enhancements + Pre/Post-EQ comp + Auto-AGC + De-esser).  v0.2.2
+adds CW + AM + FM modulators + noise gate exposure.  v0.2.3
+polishes with voice keyer + profile picker + monitor device +
+VOX + per-band TX BW memory.
+
+Profile-picker design note: profile = dict of all relevant TX
+state values.  Setting a profile applies all values atomically.
+Settings UI: profile list + Save / Load / Delete buttons.
+Default profile recalled on Lyra restart.  Profile data persisted
+under `qsettings.beginGroup('tx_profiles')`.
 
 ---
 
