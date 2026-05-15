@@ -2260,6 +2260,128 @@ class AudioSettingsTab(QWidget):
         # See git history for the deleted profile + threshold +
         # ratio + makeup sliders if anyone needs to recover them.
 
+        # ── Mic input (v0.2 Phase 2 commit 6) ──────────────────────
+        # Lyra supports two mic-input paths because the HL2 hardware
+        # family has two variants:
+        # * HL2+ (AK4951 codec) -- mic input on the radio, samples
+        #   arrive via EP6 byte slot 24-25.  "HL2 mic jack" path.
+        # * Standard HL2 (no codec) -- no mic on the radio; operator
+        #   plugs into PC sound card.  "PC sound card" path.
+        # Set-and-forget configuration per operator's hardware --
+        # lives on the Audio tab rather than its own TX tab so
+        # operators find it where they look for audio routing.
+        grp_mic = QGroupBox("Mic input")
+        gm = QVBoxLayout(grp_mic)
+
+        mic_help = QLabel(
+            "Standard HL2 has no mic input on the radio; use PC "
+            "sound card.\n"
+            "HL2+ (AK4951 codec) has a mic jack -- use HL2 mic "
+            "jack for that path.\n"
+            "Set once per install -- Lyra remembers your choice."
+        )
+        mic_help.setStyleSheet("color: #8a9aac; font-size: 10px;")
+        gm.addWidget(mic_help)
+
+        # Source picker (radio buttons -- mutually exclusive, clearer
+        # at a glance than a 2-item dropdown).
+        src_row = QHBoxLayout()
+        src_row.addWidget(QLabel("Source:"))
+        self._mic_src_group = QButtonGroup(self)
+        self._mic_src_hl2 = QRadioButton("HL2 mic jack")
+        self._mic_src_hl2.setToolTip(
+            "Mic samples come from the radio's AK4951 codec via EP6.\n"
+            "Use this for HL2+ (with AK4951 chip).\n"
+            "Standard HL2 has no radio-side mic; use PC sound card "
+            "instead."
+        )
+        self._mic_src_pc = QRadioButton("PC sound card")
+        self._mic_src_pc.setToolTip(
+            "Mic samples come from a microphone plugged into your "
+            "PC's sound card input.\n"
+            "Use this for standard HL2 (no codec) or if you prefer "
+            "a USB / Bluetooth mic regardless of HL2 variant."
+        )
+        self._mic_src_group.addButton(self._mic_src_hl2, 0)
+        self._mic_src_group.addButton(self._mic_src_pc, 1)
+        # Initial selection from Radio state
+        if radio.mic_source == "hl2_jack":
+            self._mic_src_hl2.setChecked(True)
+        else:
+            self._mic_src_pc.setChecked(True)
+        src_row.addWidget(self._mic_src_hl2)
+        src_row.addWidget(self._mic_src_pc)
+        src_row.addStretch(1)
+        gm.addLayout(src_row)
+
+        # PC sound card sub-section -- only meaningful when PC source
+        # is active.  Always editable so operators can pre-configure
+        # before switching.
+        self._pc_mic_subframe = QWidget()
+        pc_layout = QVBoxLayout(self._pc_mic_subframe)
+        pc_layout.setContentsMargins(20, 4, 0, 0)
+
+        dev_row = QHBoxLayout()
+        dev_row.addWidget(QLabel("Input device:"))
+        self._mic_dev_combo = QComboBox()
+        self._mic_dev_combo.setMinimumWidth(360)
+        dev_row.addWidget(self._mic_dev_combo, 1)
+        mic_refresh = QPushButton("Refresh")
+        mic_refresh.setFixedWidth(80)
+        mic_refresh.clicked.connect(self._populate_mic_devices)
+        dev_row.addWidget(mic_refresh)
+        pc_layout.addLayout(dev_row)
+
+        ch_row = QHBoxLayout()
+        ch_row.addWidget(QLabel("Channel:"))
+        self._mic_ch_group = QButtonGroup(self)
+        self._mic_ch_l = QRadioButton("Left")
+        self._mic_ch_r = QRadioButton("Right")
+        self._mic_ch_both = QRadioButton("Both (averaged)")
+        self._mic_ch_group.addButton(self._mic_ch_l, 0)
+        self._mic_ch_group.addButton(self._mic_ch_r, 1)
+        self._mic_ch_group.addButton(self._mic_ch_both, 2)
+        # Initial selection from Radio state
+        if radio.pc_mic_channel == "L":
+            self._mic_ch_l.setChecked(True)
+        elif radio.pc_mic_channel == "R":
+            self._mic_ch_r.setChecked(True)
+        else:
+            self._mic_ch_both.setChecked(True)
+        ch_row.addWidget(self._mic_ch_l)
+        ch_row.addWidget(self._mic_ch_r)
+        ch_row.addWidget(self._mic_ch_both)
+        ch_row.addStretch(1)
+        pc_layout.addLayout(ch_row)
+
+        gm.addWidget(self._pc_mic_subframe)
+        v.addWidget(grp_mic)
+
+        # Source picker wiring
+        self._mic_src_hl2.toggled.connect(self._on_mic_src_changed)
+        # Channel + device wired in _populate_mic_devices + handlers
+        self._mic_ch_l.toggled.connect(self._on_mic_channel_changed)
+        self._mic_ch_r.toggled.connect(self._on_mic_channel_changed)
+        self._mic_ch_both.toggled.connect(self._on_mic_channel_changed)
+        self._mic_dev_combo.currentIndexChanged.connect(
+            self._on_mic_device_changed)
+
+        # Initial PC mic sub-section enabled-state
+        self._refresh_pc_mic_subframe_enabled()
+
+        # Bidirectional sync from Radio side
+        try:
+            radio.mic_source_changed.connect(self._on_radio_mic_source_changed)
+            radio.pc_mic_device_changed.connect(
+                self._on_radio_pc_mic_device_changed)
+            radio.pc_mic_channel_changed.connect(
+                self._on_radio_pc_mic_channel_changed)
+        except Exception:
+            pass
+
+        # Populate mic device list
+        self._populate_mic_devices()
+
         v.addStretch(1)
 
         # Initial population. Done after layout so the combo is sized
@@ -2468,6 +2590,194 @@ class AudioSettingsTab(QWidget):
             return
         # device is None for "Auto", or an int for a specific index.
         self.radio.set_pc_audio_device_index(device)
+
+    # ── Mic input slots (v0.2 Phase 2 commit 6) ────────────────────
+
+    def _refresh_pc_mic_subframe_enabled(self):
+        """Dim the PC mic sub-section when HL2 jack is the active
+        source -- the device + channel widgets stay editable so
+        operators can pre-configure before switching, but visual
+        affordance hints "these don't apply right now"."""
+        enabled = self._mic_src_pc.isChecked()
+        self._pc_mic_subframe.setEnabled(enabled)
+
+    def _on_mic_src_changed(self, _checked: bool):
+        """Operator clicked one of the source radio buttons."""
+        new = "hl2_jack" if self._mic_src_hl2.isChecked() else "pc_soundcard"
+        if new != self.radio.mic_source:
+            self.radio.set_mic_source(new)
+        self._refresh_pc_mic_subframe_enabled()
+
+    def _on_mic_channel_changed(self, checked: bool):
+        """One of the L / R / BOTH radio buttons toggled.  Fires
+        twice per click (off-edge + on-edge); skip the off-edge."""
+        if not checked:
+            return
+        if self._mic_ch_l.isChecked():
+            new = "L"
+        elif self._mic_ch_r.isChecked():
+            new = "R"
+        else:
+            new = "BOTH"
+        if new != self.radio.pc_mic_channel:
+            self.radio.set_pc_mic_channel(new)
+
+    def _on_mic_device_changed(self, combo_idx: int):
+        """Operator picked a different input device."""
+        device = self._mic_dev_combo.itemData(combo_idx)
+        if device == self._SEP_SENTINEL:
+            return
+        # device is None for "Auto" (host-API default), or an int
+        # for a specific device index.
+        if device != self.radio.pc_mic_device:
+            self.radio.set_pc_mic_device(device)
+
+    def _populate_mic_devices(self):
+        """Enumerate PortAudio INPUT devices via sounddevice and
+        populate the mic-source device picker.  Same grouping logic
+        as _populate_devices (the output side, §15.16) but filtered
+        to devices that report ``max_input_channels > 0``.
+
+        Falls back gracefully if sounddevice import fails -- the
+        list shows just "Auto" and operator can still use the HL2
+        mic jack path.
+        """
+        self._mic_dev_combo.blockSignals(True)
+        self._mic_dev_combo.clear()
+        self._mic_dev_combo.addItem(
+            "Auto  (host-API default input device)", None)
+
+        try:
+            import sounddevice as sd
+        except Exception as exc:
+            self._mic_dev_combo.addItem(
+                f"(sounddevice unavailable: {exc})", None)
+            self._mic_dev_combo.blockSignals(False)
+            return
+
+        try:
+            devices = list(sd.query_devices())
+            host_apis = list(sd.query_hostapis())
+        except Exception as exc:
+            self._mic_dev_combo.addItem(
+                f"(device query failed: {exc})", None)
+            self._mic_dev_combo.blockSignals(False)
+            return
+
+        # Group by host API, same convention as §15.16 output device
+        # grouping.  Only show devices that have input channels.
+        input_devs_by_api: dict[int, list[tuple[int, dict]]] = {}
+        for idx, d in enumerate(devices):
+            if d.get("max_input_channels", 0) <= 0:
+                continue
+            hostapi_idx = d.get("hostapi", -1)
+            input_devs_by_api.setdefault(hostapi_idx, []).append((idx, d))
+
+        # Preferred order matches the output-side §15.16 list.
+        _PREFERRED = (
+            "Windows WASAPI", "Windows WDM-KS",
+            "Windows DirectSound", "MME", "ASIO",
+        )
+        ordered_apis: list[int] = []
+        seen = set()
+        for name in _PREFERRED:
+            for api_idx, api_info in enumerate(host_apis):
+                if api_info.get("name") == name and api_idx in input_devs_by_api:
+                    ordered_apis.append(api_idx)
+                    seen.add(api_idx)
+                    break
+        # Catch any remaining APIs not in the preferred list
+        for api_idx in input_devs_by_api:
+            if api_idx not in seen:
+                ordered_apis.append(api_idx)
+
+        total = 0
+        for api_idx in ordered_apis:
+            api_name = (host_apis[api_idx]["name"]
+                        if 0 <= api_idx < len(host_apis) else "Unknown")
+            # Section divider (non-selectable header)
+            hdr_idx = self._mic_dev_combo.count()
+            self._mic_dev_combo.addItem(f"───  {api_name}  ───",
+                                         self._SEP_SENTINEL)
+            from PySide6.QtCore import Qt as _Qt
+            # Make header non-selectable
+            model = self._mic_dev_combo.model()
+            item = model.item(hdr_idx)
+            if item is not None:
+                item.setFlags(item.flags() & ~_Qt.ItemIsEnabled)
+                from PySide6.QtGui import QColor as _QC
+                item.setForeground(_QC("#7a90a8"))
+            # Actual device entries, sorted alphabetically within the
+            # API group
+            sorted_devs = sorted(input_devs_by_api[api_idx],
+                                  key=lambda t: t[1].get("name", ""))
+            for idx, d in sorted_devs:
+                label = (f"[{idx}] {d.get('name', '?')}  "
+                         f"({d.get('max_input_channels', 0)}ch)")
+                self._mic_dev_combo.addItem(label, idx)
+                total += 1
+                # If this matches the operator's stored choice, select
+                # it.
+                if (self.radio.pc_mic_device is not None
+                        and idx == self.radio.pc_mic_device):
+                    self._mic_dev_combo.setCurrentIndex(
+                        self._mic_dev_combo.count() - 1)
+
+        self._mic_dev_combo.blockSignals(False)
+        if total == 0:
+            # No input devices found -- HL2-only setup, or PortAudio
+            # mis-configured.  Combo still has "Auto" as the only
+            # entry; operator's set_pc_mic_device defaults to None
+            # which is the right answer.
+            pass
+
+    # Radio -> UI sync slots ────────────────────────────────────────
+
+    def _on_radio_mic_source_changed(self, source: str):
+        """Mic source flipped from elsewhere (autoload, future CAT/
+        TCI) -- mirror UI without re-firing."""
+        target_hl2 = (source == "hl2_jack")
+        # Block both buttons' signals so toggling doesn't cascade
+        for btn in (self._mic_src_hl2, self._mic_src_pc):
+            btn.blockSignals(True)
+        try:
+            self._mic_src_hl2.setChecked(target_hl2)
+            self._mic_src_pc.setChecked(not target_hl2)
+        finally:
+            for btn in (self._mic_src_hl2, self._mic_src_pc):
+                btn.blockSignals(False)
+        self._refresh_pc_mic_subframe_enabled()
+
+    def _on_radio_pc_mic_device_changed(self, device):
+        """Device changed elsewhere -- mirror combo selection."""
+        target_idx = -1
+        for i in range(self._mic_dev_combo.count()):
+            if self._mic_dev_combo.itemData(i) == device:
+                target_idx = i
+                break
+        if target_idx >= 0 and target_idx != self._mic_dev_combo.currentIndex():
+            self._mic_dev_combo.blockSignals(True)
+            try:
+                self._mic_dev_combo.setCurrentIndex(target_idx)
+            finally:
+                self._mic_dev_combo.blockSignals(False)
+
+    def _on_radio_pc_mic_channel_changed(self, channel: str):
+        """Channel changed elsewhere -- mirror radio button."""
+        target = {
+            "L": self._mic_ch_l,
+            "R": self._mic_ch_r,
+            "BOTH": self._mic_ch_both,
+        }.get(channel.upper())
+        if target is None or target.isChecked():
+            return
+        for btn in (self._mic_ch_l, self._mic_ch_r, self._mic_ch_both):
+            btn.blockSignals(True)
+        try:
+            target.setChecked(True)
+        finally:
+            for btn in (self._mic_ch_l, self._mic_ch_r, self._mic_ch_both):
+                btn.blockSignals(False)
 
     # NOTE: Audio Leveler section slot implementations
     # (_on_lev_radio_toggled, _on_lev_thr_slider, _on_lev_ratio_slider,
