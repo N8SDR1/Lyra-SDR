@@ -360,6 +360,14 @@ class Radio(QObject):
     # to the protocol layer carries the offset.
     rit_enabled_changed = Signal(bool)
     rit_offset_changed  = Signal(int)      # Hz, signed (-9999..+9999)
+    # v0.2 Phase 2 (5/N) -- mic-input source selection.  Payload is
+    # the new source string ("hl2_jack" or "pc_soundcard").  Settings
+    # UI subscribes to mirror the radio-button state without firing
+    # a feedback loop.  Future status-bar badge could also subscribe
+    # to display the active path.
+    mic_source_changed       = Signal(str)
+    pc_mic_device_changed    = Signal(object)   # int index or None
+    pc_mic_channel_changed   = Signal(str)      # "L" / "R" / "BOTH"
     # v0.2.0 Phase 0: TX-active edge signal.  Emitted True when the
     # PTT state machine (``lyra.ptt.PttStateMachine``) transitions
     # out of RX into ANY TX state (MOX_TX / TUN_TX / CW_TX / VOX_TX),
@@ -756,6 +764,32 @@ class Radio(QObject):
         # operator opts in.
         self._rit_enabled: bool = False
         self._rit_offset_hz: int = 0
+        # v0.2 Phase 2 (5/N) -- mic-input source selection.
+        # Lyra supports two mic paths because the HL2 hardware family
+        # has two variants:
+        #   * HL2+ (AK4951 codec) -- mic input on the radio, samples
+        #     arrive via EP6 byte slot 24-25 per CLAUDE.md §3.3.
+        #     Default in the field for "+" operators including N8SDR.
+        #   * Standard HL2 (no codec) -- no mic on the radio; operator
+        #     plugs a mic into the PC sound card.
+        # Operator picks via Settings -> TX -> Mic input.  Default
+        # "hl2_jack" matches the canonical-dev-target (N8SDR's setup);
+        # standard-HL2 operators switch to "pc_soundcard" on first
+        # setup.  Persisted to QSettings under radio/mic_source.
+        # Future v0.4 ANAN-class hardware lacks any radio-side mic so
+        # the default will need a per-family override via the
+        # capabilities struct (see CLAUDE.md §6.7 discipline #4).
+        self._mic_source: str = "hl2_jack"
+        # PC mic device + channel-select stored separately so they
+        # survive the operator toggling between mic sources -- they're
+        # operator-tunable independently of which source is currently
+        # active.
+        self._pc_mic_device: Optional[int] = None    # None = host-API default
+        self._pc_mic_channel: str = "L"              # "L" / "R" / "BOTH"
+        # SoundDeviceMicSource instance -- created lazily on first
+        # set_mic_source("pc_soundcard"), torn down when switching
+        # back to hl2_jack.  None when not active.
+        self._pc_mic_source = None
         # Volume chain — TWO stages since 2026-04-24:
         #   AF Gain (af_gain_db): makeup gain in dB, for cases where
         #     AGC is off (digital modes like FT8 run AGC off to avoid
@@ -10321,6 +10355,198 @@ class Radio(QObject):
                     s.value("radio/rit_enabled", False, type=bool))
             except Exception as exc:
                 print(f"[Radio] autoload radio/rit_enabled: {exc}")
+
+    # ── Mic input source (v0.2 Phase 2 commit 5) ───────────────────
+    @property
+    def mic_source(self) -> str:
+        """Current mic-input source: 'hl2_jack' or 'pc_soundcard'."""
+        return self._mic_source
+
+    @property
+    def pc_mic_device(self) -> Optional[int]:
+        """PortAudio input device index for PC mic; None = host-API
+        default device."""
+        return self._pc_mic_device
+
+    @property
+    def pc_mic_channel(self) -> str:
+        """PC mic channel select: 'L' / 'R' / 'BOTH'."""
+        return self._pc_mic_channel
+
+    def set_mic_source(self, source: str) -> None:
+        """Switch between HL2 mic-jack and PC sound card input.
+
+        ``source`` must be ``'hl2_jack'`` (AK4951 codec via EP6) or
+        ``'pc_soundcard'`` (sounddevice InputStream).  Idempotent --
+        setting the current value is a no-op.
+
+        Side effects:
+        * When switching TO 'pc_soundcard': lazily creates a
+          ``SoundDeviceMicSource`` configured with the operator's
+          stored device + channel + host-API choices.  Does NOT
+          start capture -- caller (TX dispatcher in commit 7) starts
+          it when the TX path activates.
+        * When switching AWAY from 'pc_soundcard': stops the
+          ``SoundDeviceMicSource`` if running and clears the
+          reference.
+        * The HL2 EP6 ``mic_callback`` registration is symmetric --
+          when source is 'hl2_jack' the callback gets wired by the
+          TX dispatcher; on 'pc_soundcard' the callback gets cleared
+          so EP6 mic samples drop on the floor (preserving v0.1
+          behaviour for standard-HL2 operators who don't have a
+          radio mic input anyway).
+
+        Persisted to ``radio/mic_source`` QSettings.  Emits
+        ``mic_source_changed`` signal so Settings UI can mirror.
+        """
+        new = str(source)
+        if new not in ("hl2_jack", "pc_soundcard"):
+            raise ValueError(
+                f"mic_source must be 'hl2_jack' or 'pc_soundcard', "
+                f"got {source!r}"
+            )
+        if new == self._mic_source:
+            return
+        self._mic_source = new
+        # Tear down PC mic source if leaving the pc_soundcard path.
+        if new != "pc_soundcard" and self._pc_mic_source is not None:
+            try:
+                self._pc_mic_source.stop()
+            except Exception as exc:
+                print(f"[Radio] PC mic source stop failed: {exc}")
+            self._pc_mic_source = None
+        # Lazily build the source object when entering pc_soundcard
+        # path.  Capture is NOT started here -- TX dispatcher (commit
+        # 7) starts when operator keys up.  Construction must succeed
+        # before we persist + emit so a sounddevice-import failure
+        # rolls the operator's choice back.
+        if new == "pc_soundcard" and self._pc_mic_source is None:
+            try:
+                from lyra.dsp.audio_sink import SoundDeviceMicSource
+                self._pc_mic_source = SoundDeviceMicSource(
+                    rate=48_000,
+                    device=self._pc_mic_device,
+                    channel_select=self._pc_mic_channel,
+                )
+            except Exception as exc:
+                print(f"[Radio] PC mic source construction failed: {exc}")
+                # Roll back to hl2_jack on construction failure --
+                # better to leave operator on a working path than
+                # silently fail.
+                self._mic_source = "hl2_jack"
+                new = "hl2_jack"
+        try:
+            from PySide6.QtCore import QSettings as _QS
+            _QS("N8SDR", "Lyra").setValue("radio/mic_source", new)
+        except Exception:
+            pass
+        self.mic_source_changed.emit(new)
+
+    def set_pc_mic_device(self, device: Optional[int]) -> None:
+        """Set the PortAudio input device index for PC mic capture.
+
+        ``device=None`` means "use the host-API default input device".
+        Idempotent; persists to QSettings.  If a PC mic source is
+        currently running, restart it with the new device.
+        """
+        if device == self._pc_mic_device:
+            return
+        self._pc_mic_device = device
+        # Restart the source if running on the pc_soundcard path so
+        # the new device takes effect.  Stop -> rebuild -> caller
+        # starts again at next MOX edge.
+        if self._pc_mic_source is not None:
+            try:
+                self._pc_mic_source.stop()
+            except Exception:
+                pass
+            try:
+                from lyra.dsp.audio_sink import SoundDeviceMicSource
+                self._pc_mic_source = SoundDeviceMicSource(
+                    rate=48_000,
+                    device=device,
+                    channel_select=self._pc_mic_channel,
+                )
+            except Exception as exc:
+                print(f"[Radio] PC mic rebuild failed: {exc}")
+                self._pc_mic_source = None
+        try:
+            from PySide6.QtCore import QSettings as _QS
+            _QS("N8SDR", "Lyra").setValue(
+                "radio/pc_mic_device",
+                device if device is not None else -1,
+            )
+        except Exception:
+            pass
+        self.pc_mic_device_changed.emit(device)
+
+    def set_pc_mic_channel(self, channel: str) -> None:
+        """Set PC mic channel select: 'L', 'R', or 'BOTH'."""
+        new = str(channel).upper()
+        if new not in ("L", "R", "BOTH"):
+            raise ValueError(
+                f"pc_mic_channel must be 'L', 'R', or 'BOTH', got {channel!r}"
+            )
+        if new == self._pc_mic_channel:
+            return
+        self._pc_mic_channel = new
+        # Same rebuild dance as device-change.
+        if self._pc_mic_source is not None:
+            try:
+                self._pc_mic_source.stop()
+            except Exception:
+                pass
+            try:
+                from lyra.dsp.audio_sink import SoundDeviceMicSource
+                self._pc_mic_source = SoundDeviceMicSource(
+                    rate=48_000,
+                    device=self._pc_mic_device,
+                    channel_select=new,
+                )
+            except Exception as exc:
+                print(f"[Radio] PC mic rebuild failed: {exc}")
+                self._pc_mic_source = None
+        try:
+            from PySide6.QtCore import QSettings as _QS
+            _QS("N8SDR", "Lyra").setValue("radio/pc_mic_channel", new)
+        except Exception:
+            pass
+        self.pc_mic_channel_changed.emit(new)
+
+    def autoload_mic_source_settings(self) -> None:
+        """Restore mic-source state from QSettings on startup.
+
+        Loads device + channel FIRST so when set_mic_source flips to
+        pc_soundcard it builds the source with the operator's stored
+        choices.  Defaults: hl2_jack source, no device override,
+        channel=L -- matches the constructor seed so this autoload
+        is a no-op for fresh installs.
+        """
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+        except Exception:
+            return
+        if s.contains("radio/pc_mic_device"):
+            try:
+                v = int(s.value("radio/pc_mic_device", -1))
+                self._pc_mic_device = v if v >= 0 else None
+            except (TypeError, ValueError):
+                pass
+        if s.contains("radio/pc_mic_channel"):
+            try:
+                ch = str(s.value("radio/pc_mic_channel", "L")).upper()
+                if ch in ("L", "R", "BOTH"):
+                    self._pc_mic_channel = ch
+            except Exception:
+                pass
+        if s.contains("radio/mic_source"):
+            try:
+                src = str(s.value("radio/mic_source", "hl2_jack"))
+                if src in ("hl2_jack", "pc_soundcard"):
+                    self.set_mic_source(src)
+            except Exception as exc:
+                print(f"[Radio] autoload radio/mic_source: {exc}")
 
     # ── AGC threshold (WDSP SetRXAAGCThresh parameter, dBFS) ───────
     @property

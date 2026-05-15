@@ -372,6 +372,16 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             print(f"[app] RIT autoload error: {exc}")
 
+        # Mic-input source (v0.2 Phase 2) -- HL2 mic jack (AK4951
+        # codec on HL2+) vs PC sound card.  Restored from QSettings
+        # so operator's choice survives across launches.  Default
+        # hl2_jack matches N8SDR's HL2+ setup; standard-HL2 operators
+        # configure pc_soundcard in Settings -> TX once per install.
+        try:
+            self.radio.autoload_mic_source_settings()
+        except Exception as exc:
+            print(f"[app] mic source autoload error: {exc}")
+
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.
         # Start/Stop lives on the toolbar below for one-click access.
