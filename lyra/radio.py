@@ -1136,6 +1136,14 @@ class Radio(QObject):
         # stopped + dropped in ``stop()`` (before
         # ``_close_tx_channel``).
         self._tx_dsp_worker = None
+        # v0.2 Phase 2 commit 9 (consensus §8.2): sip1 TX I/Q tap.
+        # Bounded ring buffer of recent outgoing TX I/Q samples for
+        # v0.3 PureSignal calibration to align against the DDC0+DDC1
+        # feedback path.  Producer side wired in v0.2 (TxDspWorker
+        # writes each on-air I/Q block); consumer added in v0.3.
+        # Constructed alongside TxDspWorker on stream start; cleared
+        # + dropped on stream stop.
+        self._tx_iq_tap = None
         # Phase 2 v0.1 (2026-05-11): second WDSP RX channel for RX2.
         # Mirrors ``_wdsp_rx`` lifecycle (created/recreated together
         # in ``_open_wdsp_rx``).  RX2's mode/filter/AGC follow RX1
@@ -8291,14 +8299,23 @@ class Radio(QObject):
             if self._tx_channel is not None:
                 try:
                     from lyra.dsp.tx_dsp_worker import TxDspWorker
+                    from lyra.dsp.tx_iq_tap import Sip1Tap
+                    # v0.2 Phase 2 commit 9: construct sip1 TX I/Q
+                    # tap and hand to the worker.  Producer-only
+                    # for v0.2 (no consumer yet); v0.3 PS calcc
+                    # thread will read snapshots.  See
+                    # lyra/dsp/tx_iq_tap.py for capacity rationale.
+                    self._tx_iq_tap = Sip1Tap()
                     self._tx_dsp_worker = TxDspWorker(
                         self._tx_channel, self._stream,
+                        iq_tap=self._tx_iq_tap,
                     )
                     self._tx_dsp_worker.start()
                     self._wire_mic_source()
                 except Exception as exc:  # noqa: BLE001
                     print(f"[Radio] TxDspWorker start failed: {exc}")
                     self._tx_dsp_worker = None
+                    self._tx_iq_tap = None
         except Exception as e:
             self.status_message.emit(f"Start failed: {e}", 5000)
             self._stream = None
@@ -8404,6 +8421,16 @@ class Radio(QObject):
             except Exception as exc:
                 print(f"[Radio] TxDspWorker stop failed: {exc}")
             self._tx_dsp_worker = None
+        # v0.2 Phase 2 commit 9: clear + drop the sip1 tap.  Worker
+        # is already stopped above, so no producer remains.  Any
+        # v0.3 PS consumer that reads after this point will see an
+        # empty snapshot (which is correct -- stream is stopping).
+        if self._tx_iq_tap is not None:
+            try:
+                self._tx_iq_tap.clear()
+            except Exception:
+                pass
+            self._tx_iq_tap = None
         self._close_tx_channel()
         if self._stream:
             self._stream.stop()

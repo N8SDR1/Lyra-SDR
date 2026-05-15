@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 
 if TYPE_CHECKING:
+    from lyra.dsp.tx_iq_tap import Sip1Tap
     from lyra.dsp.wdsp_tx_engine import TxChannel
     from lyra.protocol.stream import HL2Stream
 
@@ -85,10 +86,19 @@ class TxDspWorker:
         self,
         tx_channel: "TxChannel",
         hl2_stream: "HL2Stream",
+        iq_tap: "Optional[Sip1Tap]" = None,
         queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
     ) -> None:
         self._tx_channel = tx_channel
         self._hl2_stream = hl2_stream
+        # v0.2 Phase 2 commit 9: optional sip1 TX I/Q tap for v0.3
+        # PureSignal calibration.  When set, the worker writes each
+        # processed I/Q block into the tap's ring buffer (after the
+        # HL2Stream.queue_tx_iq forward, gated on the same
+        # inject_tx_iq flag so the tap only contains "what actually
+        # went on the air" history).  Consumer (v0.3 PS calcc
+        # thread) reads via tap.snapshot().
+        self._iq_tap = iq_tap
         self._queue: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(
             maxsize=queue_maxsize,
         )
@@ -103,6 +113,7 @@ class TxDspWorker:
         self.processed: int = 0     # successful tx_channel.process calls
         self.errors: int = 0        # exceptions caught in run loop
         self.queued_iq_blocks: int = 0  # I/Q chunks forwarded to HL2Stream
+        self.tap_writes: int = 0    # I/Q chunks written to sip1 tap
 
     @property
     def is_running(self) -> bool:
@@ -200,7 +211,8 @@ class TxDspWorker:
             # When False (default, RX-only), the WDSP chain stayed
             # warm but the result is dropped on the floor.  Phase 3
             # PTT state machine flips inject_tx_iq=True on MOX=1
-            # edge, and the I/Q starts flowing to the EP2 writer.
+            # edge, and the I/Q starts flowing to the EP2 writer
+            # AND to the sip1 tap (when present).
             if iq.size > 0 and self._hl2_stream.inject_tx_iq:
                 try:
                     self._hl2_stream.queue_tx_iq(iq)
@@ -208,3 +220,17 @@ class TxDspWorker:
                 except Exception as exc:  # noqa: BLE001
                     self.errors += 1
                     print(f"[TxDspWorker] queue_tx_iq error: {exc}")
+                # v0.2 Phase 2 commit 9: sip1 tap (when wired) gets
+                # a copy of the same I/Q that went on the wire.  v0.3
+                # PS calcc thread snapshots this for time-alignment
+                # against the DDC0+DDC1 feedback path.  Tap writes
+                # are independent of queue_tx_iq success/failure so
+                # a transient HL2Stream queue overrun doesn't
+                # corrupt the PS calibration history.
+                if self._iq_tap is not None:
+                    try:
+                        self._iq_tap.write(iq)
+                        self.tap_writes += 1
+                    except Exception as exc:  # noqa: BLE001
+                        self.errors += 1
+                        print(f"[TxDspWorker] iq_tap.write error: {exc}")
