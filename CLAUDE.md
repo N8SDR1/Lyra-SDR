@@ -749,8 +749,10 @@ States: RX → MOX_TX (UI button or CAT) → CW_TX (key down) → TUN_TX
 - RX-mute fade ~50 ms when MOX→TX (no clicks).
 - Hardware PTT input via HL2 EP6 status bytes (`prn->ptt_in =
   ControlBytesIn[0] & 0x1`).
-- State machine in `lyra/radio/ptt.py`.  Qt signal `mox_changed
-  (bool)` for UI.
+- State machine SHIPPED at `lyra/ptt.py` (NOT `lyra/radio/
+  ptt.py` -- see §8 note + the ptt.py docstring).  Edge signal
+  is `Radio.tx_active_changed(bool)` (Phase 1 commit 10
+  `9fe0b59`); FSM emits `state_changed(PttState)`.
 
 ### 6.7 Hardware abstraction discipline (for v0.4 ANAN work)
 
@@ -1046,8 +1048,15 @@ lyra/
 │   ├── ps_iqc.py                  # NEW v0.2 — port from iqc.c
 │   ├── ps_xbuilder.py             # NEW v0.2 — cubic-spline coef builder
 │   └── delay_line.py              # NEW v0.2
-├── radio/
-│   └── ptt.py                     # NEW v0.1 — PTT state machine
+├── ptt.py                        # PTT/MOX FSM -- SHIPPED v0.2.0
+│                                  #   Phase 3 commit 3a `8222422`.
+│                                  #   AT lyra/ptt.py (sibling
+│                                  #   module), NOT lyra/radio/ptt.py
+│                                  #   -- Python can't have both
+│                                  #   lyra/radio.py + lyra/radio/;
+│                                  #   see the ptt.py docstring.
+│                                  #   (Aspirational layout below is
+│                                  #   historical -- do not "fix".)
 ├── ui/
 │   ├── panels.py                  # extend for RX2/TX/PS controls
 │   ├── spectrum.py                # add split-vertical mode for dual pan
@@ -5352,12 +5361,53 @@ dead 50Ω dummy-load noise floor to max gain -> any transient
 surges -- environmental, NOT the §9.6 per-sample-pop bug.
 Bisect plan: run the C:\ v0.1.1 GA installer under identical
 settings -- if it also surges -> environmental (AGC tuning,
-not revert); if clean -> bisect the 6 commits (prime suspect
-3c `_on_hl2_mic`, the only RX-loop change).  Operator testing
-with a real antenna to confirm dead-air hypothesis.  2 audit
-agents spawned 2026-05-16 to independently (a) verify Phase-3
-TX path as-built vs Thetis and (b) confirm RX-path integrity /
-refute any RX perturbation from this session.**
+not revert); if clean -> bisect the 6 commits.  Operator
+testing with a real antenna to confirm dead-air hypothesis.
+
+**RESOLVED (2-agent independent audit, 2026-05-16):**
+
+* **Agent A -- Phase-3 TX path as-built vs Thetis: CLEAN.**
+  All 7 audit questions CORRECT-vs-Thetis with citations in
+  both trees; ZERO defects, no §15.23-class divergence.
+  Confirmed: `tx_freq_hz` genuinely RIT-free (bypasses
+  `_compute_dds_freq_hz`); keydown TX-freq-before-MOX owned
+  solely by commit 2 (FSM does NOT duplicate `_set_tx_freq`);
+  keyup wire-MOX-bit clears ONLY after `MoxEdgeFade.is_off()`
+  (no live-stream bypass; the non-blocking poll-gate is the
+  correct analogue of Thetis's blocking dmode=1 downslew
+  flush); HW-PTT forwarder behaviorally == Thetis shared-not-
+  OR'd chkMOX, no data race; retune-while-TX == Thetis
+  UpdateTXDDSFreq-every-dial.  "No code change recommended;
+  faithfully reproduces Thetis 2.10.3.13, Lyra-native."  The
+  plan-before-code + §15.25 ground-truth discipline produced a
+  first-pass-correct build.
+* **Agent B -- RX-path integrity: surge is ENVIRONMENTAL,
+  RX path PROVABLY UNTOUCHED.**  Per-commit clearance with
+  citations: 32f0473 read-only property; eef2218 both adds
+  gated (set_mox `if new`, set_freq_hz `if dispatch_state.mox`
+  -- never fires at RX rest, pre-existing _set_rx1_freq +
+  reset byte-identical to v0.1); 8222422 FSM self-contained
+  (poll-timer never .start() at RX rest, dormant); d1e9cf9
+  idle QObject; 2295524 `_on_hl2_mic` is the mic/TX path ONLY
+  (not RX audio), the added code at RX rest is a pure bool
+  compare (ptt_in=0 == _last_hw_ptt=False every datagram, zero
+  alloc/signal/invoke).  Prior-session e783821/6501cdb affect
+  stop() teardown only.  Surge = WDSP RXA AGC Fast + LNA Auto
+  pulling gain toward max on a signal-less 50Ω dummy load (any
+  thermal/birdie transient then surges); NOT the §9.6
+  per-sample-pop class (that code path no longer exists -- AGC
+  is all WDSP cffi now).  Nearby-AM 5th harmonic = 7.250 MHz
+  (40m) -> ruled out (operator on 20m + dummy load).  Cheapest
+  confirms: AGC Off/Slow kills the surge; antenna normalizes
+  it; C:\ v0.1.1 GA surges identically.  "No code fix or guard
+  recommended."
+
+Net: BOTH audits clean.  No revert, no fix, no guard.  The
+surge is expected AGC-chasing-dead-air; operator's antenna
+test will confirm.  Doc nit fixed (stale `lyra/radio/ptt.py`
+-> `lyra/ptt.py` in §8 + §6.6).  Phase 3 continues at commit
+3.4 (TxPanel + TxSettingsTab) once the operator confirms the
+antenna test.**
 
 ---
 
