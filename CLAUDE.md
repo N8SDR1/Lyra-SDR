@@ -5681,7 +5681,24 @@ Operator clean-build bench: PART B core PASSED (RX silent
 on MOX, restores, Mute-A/B intact); pops/"stumbling" were a
 mid-edit artifact (GONE on clean build, ruled out); mic-
 whistle panadapter spike = expected TX-modulation display.
-keyup-rush v2 (cos² fade) awaiting re-verify.  **Remaining bench-verify
+keyup artifact iterations: v1 `8f86be5` AGC-reset (no
+change, reverted) → v2 `212c080` cos² fade (no change) →
+operator described it precisely as "a quick fast sweep of a
+bristle broom" = a BROADBAND filter/IQ transient, NOT a
+volume swell (envelope tools were the wrong category).
+Root-caused from `ptt.py`: HL2 TrSequencing all-0 → keyup
+tail fully inline → `_on_tx_state_changed(False)` fires the
+instant the wire MOX clears (T/R mid-switch, DDC re-
+acquiring) → WDSP filters/decimator ring across the IQ
+discontinuity.  v3 `59ebf5e` = the real fix: on keyup stay
+gated, `_request_dsp_reset_full()` (discard the ring), hold
+muted 50 ms while the flushed chain re-primes on clean post-
+T/R IQ, then `_finish_tx_rx_resume` un-gates with the cos²
+fade.  Lyra-native equivalent of stop-RX-DSP/restart-after-
+settle.  Adds ~50 ms+fade RX-return delay (correct trade).
+343/0.  Awaiting operator re-verify; if residual →
+`LYRA_AUDIO_DEBUG=1` (§9.6 `_diagnose_audio_step`) for hard
+evidence, NOT a 5th guess.  **Remaining bench-verify
 gate (before ANY keying/power):** press+release MOX into a
 DUMMY LOAD → RX silent instantly on key, and on un-key it
 returns to the prior listening state with NO delayed rush
