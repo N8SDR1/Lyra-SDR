@@ -2622,6 +2622,49 @@ class Radio(QObject):
                     - self._compute_dds_freq_hz(target_rx=2))
         return int(self._freq_hz) - self._compute_dds_freq_hz()
 
+    # ── TX frequency (v0.2.0 Phase 3 commit 1, §15.25) ──────────────
+    # The TX-NCO frequency Lyra writes to HL2 C&C 0x02/0x08/0x0a via
+    # HL2Stream._set_tx_freq on the MOX=1 edge (commit 2 wires the
+    # call site).  This is DELIBERATELY a separate computation from
+    # _compute_dds_freq_hz -- it must NOT inherit RIT.
+    #
+    # §15.25 NEW FINDING #1 (Thetis 2-agent verify 2026-05-16,
+    # HIGH trap §15.24 missed): Thetis applies RIT to rx_freq ONLY
+    # (console.cs:32502-32503; :22310 "RIT is rx1-only when not
+    # txing") and XIT to tx_freq ONLY (:32508-32509).  Lyra's
+    # _compute_dds_freq_hz adds _rit_offset_hz (rx_id==0 path) --
+    # reusing it for TX would put every RIT-engaged transmission
+    # off-frequency.  So tx_freq_hz is computed from the raw VFO,
+    # NOT routed through _compute_dds_freq_hz.
+    #
+    # Phase-3 scope = SSB-only, non-SPLIT, no XIT:
+    #   * value = focused/active VFO carrier.  Non-SPLIT (SPLIT is
+    #     §15.6 deferred) the TX VFO is always VFOA == self._freq_hz
+    #     (Thetis console.cs:11402-11417: non-RX2 non-SPLIT ->
+    #     VFOAFreq).
+    #   * NO RIT (the trap above).
+    #   * NO XIT yet -- v0.2.3 (§15.10) adds `+ xit_offset_hz` here.
+    #   * NO CW-pitch offset -- Phase 3 is USB/LSB; CW TX (v0.2.2)
+    #     needs Thetis's `cw_fw_keyer`-GATED pitch handling
+    #     (console.cs:32553-32588), NOT the RX unconditional path,
+    #     so it gets added here as an explicit gated branch then,
+    #     deliberately not by reusing _compute_dds_freq_hz.
+    #   * SPLIT (VFO-B as TX) extends this when §15.6 lands.
+    @property
+    def tx_freq_hz(self) -> int:
+        """Operator TX carrier frequency in Hz (the value
+        ``HL2Stream._set_tx_freq`` loads into the HL2 TX NCO).
+
+        RIT-free by design (see the block comment above / §15.25):
+        RIT is an RX-only offset and must never shift TX.  Phase-3
+        SSB-only non-SPLIT value = the main VFO carrier
+        (``self._freq_hz``).  XIT (v0.2.3), CW-pitch-gated TX
+        (v0.2.2), and SPLIT VFO-B (§15.6) extend this later --
+        each as an explicit branch here, never via
+        ``_compute_dds_freq_hz`` (which carries RIT).
+        """
+        return int(self._freq_hz)
+
     def _emit_marker_offset(self) -> None:
         """Re-emit the marker offset.  Call from any state change
         that shifts the DDS-vs-VFO relationship — freq, mode,
