@@ -6159,6 +6159,57 @@ deliberate action; document the hot-switch risk in the
 Settings tooltip).  Forward: external-PA/QSK sequencing in
 v0.2.x must preserve this invariant.
 
+#### INDEPENDENT VERIFICATION 2026-05-16 (2nd agent red-team — caught a plan defect)
+
+CONFIRMED: Claim 1 (PA=C2 bit3 0x08 ApolloTuner, case-10/
+0x12; `netInterface.c:578-584,623-635`; `networkproto1.c:
+747-751`,`1079-1080`), Claim 2 (ApolloFilt=C2 bit2 0x04,
+`netInterface.c:569-574`; operator has BOTH → PA-on
+`c2=0x40|0x08|0x04=0x4C`), Claim 4 (rf_delay after HW-MOX
+before TX-DSP-on `console.cs:30332-30346`; Lyra
+`rf_delay_ms=0` = amp-hot-switch bug; Thetis dflt 30, op 50),
+Claim 5 (EP6 C0-rot 0x10 C3:C4 user_adc0 `networkproto1.c:
+346-353/510-517`; `convertToAmps` HL2 `console.cs:25114-25131`
+byte-exact; Lyra never decodes it — `stream.py` 0x10 case
+reads rev_power only), Claim 6 (one `chkFullDuplex`, op
+False, sole HL2 effect = RX-shutdown-on-TX; Lyra already
+matches).
+
+**REFUTED — the prior plan's Commit-C frame-11 TX-att
+encoding was WRONG (caught pre-code):**
+* `tx_step_attn` reaches the wire ONLY via **case-4 / reg
+  0x1C, C3 = `(31 - signed_db) & 0x1F`** (5-bit, truncates —
+  HL2 protocol, replicate don't "fix").  `networkproto1.c:
+  687-690`.  `SetTxAttenData` HL2 = `31 - x`
+  (`console.cs:10657`), m_bATTonTX off → 0.
+* **case-11 / reg 0x14, C4 = `rx_step_attn & 0x1F | 0x20`**
+  (`networkproto1.c:770`) — RX step-att, 5-bit, enable bit
+  **0x20**, **NOT tx, NOT 0x40, NOT MOX-gated**.  The prior
+  plan AND Lyra's current `_compose_frame_11` C4
+  (`0x40|((db+12)&0x3F)`, mox-gated) are fabricated on
+  multiple axes.
+* The TX/XmitBit-gated step-att forcing is a SEPARATE
+  register: **case-12 / reg 0x16** (`networkproto1.c:
+  773-788`) forces adc[1]/adc[2] `rx_step_attn`→0x1F while
+  XmitBit.  tx_step_attn itself is NOT mox-gated anywhere —
+  it only ever appears in case-4 C3.
+=> Commit C must be RE-PLANNED with this corrected truth.
+**Caution:** Lyra's RX-LNA path also uses
+`_compose_frame_11` C4 and RX has worked in production since
+v0.0.9.6 — so either Lyra's RX encoding is correct via a
+different effective path or the HL2 LNA range differs.  DO
+NOT blind-rewrite the RX C4 encoding; a focused
+RX-step-att-encoding verification (Lyra working RX vs Thetis
+`rx_step_attn&0x1F|0x20`, incl. the override/0x20 vs 0x40
+bit + the +12 bias + the -12..+48 vs 0..31 range) is
+required before touching C.  TX side (case-4 0x1C C3 =
+`(31-db)&0x1F`) is the clear, safe part.
+
+**REVISED LADDER:** A (verified) → B (verified, amp-safety)
+→ C-reverify (RX-att encoding) → C (corrected) → D (verified,
+hard RF gate).  A+B are GO now.  Independent agent id
+`a3e37ee1d8729b19d` (SendMessage to continue if needed).
+
 **COMMIT LADDER (locked; A/B/C are RF-safe, D is first RF):**
 * **A — PA-current EP6 decode + readout.** stream.py decode
   C0-rot 0x10 C3:C4 → FrameStats; radio.py `pa_current_amps`
