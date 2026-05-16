@@ -5078,6 +5078,109 @@ kill-test) remains a Phase-3-EXIT hardware gate before
 real-antenna keying.  Item D preventive notes embedded in
 §8.5 + §15.24.  **Phase 3 is unblocked.**
 
+### 15.25 — Phase 3 Thetis ground-truth (2-agent verification, LOCKED 2026-05-16)
+
+Before writing any Phase 3 (PTT/MOX state machine + on-air SSB)
+code, two parallel agents deep-dived Thetis 2.10.3.13 for the
+EXACT correct RX↔TX sequencing, so Lyra implements it Lyra-native
+(CLAUDE.md §2: study Thetis, write native, no Console/
+ChannelMaster copy).  Both cross-consistent.  This entry is the
+LOCKED ground-truth; Phase 3 commits must match it.
+
+**Protocol layer is COMPLETE + byte-exact Thetis-faithful.**
+`HL2Stream._set_tx_freq` writing C&C 0x02 + 0x08 + 0x0a matches
+`networkproto1.c:974-1044` (HL2 nddc!=5: 0x08/0x0a both load
+`prn->tx[0].frequency`; "DDC3 is TX frequency always").  MOX bit
+OR'd into every C0 (`(c0 & 0xFE) | mox_bit`, stream.py:1178) ==
+Thetis `C0=(unsigned char)XmitBit` (networkproto1.c:896).  Phase
+3 is PURELY `radio.py` operator-state + MOX-edge wiring.
+
+**🔴 NEW FINDING #1 — RIT-leak-into-TX (HIGH trap §15.24
+missed):** Lyra's `_compute_dds_freq_hz` adds `_rit_offset_hz`
+(radio.py ~2593-2594).  Thetis EXPLICITLY forbids RIT touching
+TX: console.cs:32502-32503 (RIT→rx_freq ONLY) vs :32508-32509
+(XIT→tx_freq ONLY); :22310 "RIT is rx1-only when not txing".
+**`Radio.tx_freq_hz` MUST be a SEPARATE RIT-free computation --
+NOT a reuse of `_compute_dds_freq_hz`.**  §15.24-C5's naive
+"non-SPLIT = focused VFO via the existing helper" would put
+every RIT-engaged transmission off-frequency.  Minimal correct
+Phase-3 value = focused/active VFO carrier (= `self._freq_hz`
+non-SPLIT), NO RIT, NO XIT (v0.2.3), NO CW-pitch offset (CW TX =
+v0.2.2, and it needs Thetis's `cw_fw_keyer`-GATED offset
+console.cs:32553-32588, NOT the RX unconditional path).
+
+**🟢 FINDING #2 — ordering simpler than feared:** Thetis does
+NOT co-sequence the TX-freq write with the MOX bit (different
+threads/cadences; HL2 gateware holds `tx[0].frequency`
+persistent).  Same-frame atomicity NOT required.  HL2-specific:
+the MOX-edge freq re-prime jump (networkproto1.c:886-891) only
+fires `nddc==2` (Hermes-II) -- on HL2 nddc=4 it's a no-op; HL2
+relies purely on persistent `tx[0].frequency` + the duplex bit
+(already `_config_c4=0x1C`).  Sufficient + correct discipline:
+**call `_set_tx_freq(tx_freq_hz)` BEFORE `set_mox(True)` flips
+the dispatch MOX bit**, so the TX-NCO regs are in the EP2
+round-robin before the first MOX=1 frame.  Also: `set_freq_hz`
+while MOX active must re-push `_set_tx_freq` (Thetis calls
+`UpdateTXDDSFreq()` on every dial change independent of MOX).
+
+**Verified keydown (RX→TX) order** (console.cs
+`chkMOX_CheckedChanged2`:30058+): internal mox flag → RX DSP
+stop (dmode=1 BLOCKING flush) → set RX+TX DDS freqs (TX freq
+set INSIDE HdwMOXChanged BEFORE SetPttOut(1)) → TRX relay →
+PTT/MOX bit on wire → router bit RX→TX → RX-audio mute/AF swap
+→ TX DSP channel start (WDSP cos² up-ramp LAST).
+
+**Verified keyup (TX→RX) order** (console.cs:30350+): stop TX
+DSP channel `SetChannelState(id(1,0),0,1)` dmode=1 **BLOCKS
+until WDSP TX downslew flush completes** → `mox_delay` ~10 ms
+drain → clear MOX/PTT bit (SetPttOut(0)) → restore RX freq →
+router→RX → `ptt_out_delay` settle → RX DSP restart.  **MOX bit
+clears ONLY AFTER the TX I/Q down-ramp fully completes** ==
+confirms `MoxEdgeFade`'s two-stage release was designed
+correctly.  Clearing MOX before ramp-done = key-click/splatter
+(trap).
+
+**Single-state FSM:** MOX/HW-PTT/CAT/TCI/VOX/CW/TUN/2TONE all
+funnel through ONE state (Thetis `chkMOX.Checked`).  HW PTT
+(EP6 `ControlBytesIn[0]&0x1`, networkproto1.c:332/496; no C-side
+debounce; level-driven per C&C frame cadence) SHARES that state
+-- NOT OR'd at the bit level.  → `lyra/ptt.py` = one-state FSM,
+not parallel paths.  Model PTT-out vs MOX-bit separately
+(Thetis SetPttOut vs SetTRXrelay are distinct).  TR-sequencing
+delay knobs (`mox_delay`/`ptt_out_delay`/`rf_delay`/
+`space_mox_delay`; CW uses `key_up_delay`) -- HL2 typically 0
+but the structure must exist for ANAN/external-PA.
+
+**Ranked §15.23-class traps for Phase 3:** (1) RIT leaking into
+TX [NEW, HIGH] -- TX freq via RIT-free path; (2) stale-freq
+first burst -- `_set_tx_freq` before MOX flip (Lyra's LIVE trap:
+TX freq stays 0 today); (3) start TX DSP before router/audio
+switched; (4) restart RX before relay/PTT settled; (5)
+non-blocking RX stop bleeds tail into TX; (6) CW-pitch mis-
+applied on TX [v0.2.2 landmine]; (7) DDC2/DDC3 not mirrored
+[handled by `_set_tx_freq`; keep the 3-reg atomic write].
+
+**Phase 3 commit plan (locked):**
+1. `Radio.tx_freq_hz` -- RIT-free property (focused VFO; no
+   RIT/XIT/CW for SSB Phase 3) + tests proving RIT engaged does
+   NOT shift it.
+2. MOX-edge `_set_tx_freq` wiring: `set_mox(True)` calls
+   `_set_tx_freq(self.tx_freq_hz)` BEFORE the dispatch MOX
+   flip; `set_freq_hz` re-pushes if MOX active.
+3. `lyra/ptt.py` single-state FSM + HW-PTT-in forwarder (EP6
+   `FrameStats.ptt_in` via QueuedConnection per §5) -- design
+   via Plan agent grounded in commits 1+2.
+4. MoxEdgeFade two-stage release wiring (keydown inject+fade-in;
+   keyup fade-out → block-until-OFF → clear MOX).
+5. MOX/TUN buttons + TX drive slider + LED-bar TX meter
+   (panels.py; clean baseline -- §15.17 stale tests fixed).
+6. §15.20 host TX-timeout + §15.9 red-on-air + §15.14 auto-mute
+   + §15.15 AAmixer badge.
+Phase-3-EXIT hardware gate (unchanged): kill-Lyra-mid-TX
+dummy-load PA-bias-drop test (§15.20 / §15.24-C).
+
+**Status: LOCKED 2026-05-16, executing (commit 1 next).**
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-15 EOD)
