@@ -284,6 +284,26 @@ class PttFsmTest(unittest.TestCase):
         fsm.release_mox()
         self.assertEqual(fsm.current_state, PttState.RX)
 
+    def test_unbind_while_keyed_forces_safe_rx(self) -> None:
+        """SAFETY-CRITICAL (2026-05-16): stopping the stream while
+        keyed must NOT leave the FSM in MOX_TX with a held source
+        -- otherwise a restart resumes transmitting.  unbind must
+        clear sources, snap to RX, and emit state_changed(RX)."""
+        fsm, _r, _s, _f, _e, states = self._bound()
+        fsm.request_mox()
+        self.assertEqual(fsm.current_state, PttState.MOX_TX)
+        self.assertTrue(fsm._active_sources)         # source held
+        states.clear()
+        fsm.unbind_runtime()                          # = Radio.stop()
+        self.assertEqual(fsm.current_state, PttState.RX)
+        self.assertFalse(fsm._active_sources)        # all cleared
+        self.assertEqual(states, [PttState.RX])      # UI mirror fired
+        # A subsequent rebind+resolve cannot resume TX.
+        fsm.bind_runtime(
+            radio=_r, stream=_s, mox_edge_fade=_f,
+            on_tx_state_changed=lambda *a: None)
+        self.assertEqual(fsm.current_state, PttState.RX)
+
 
 if __name__ == "__main__":
     unittest.main()

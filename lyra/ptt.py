@@ -203,9 +203,16 @@ class PttStateMachine(QObject):
         self._on_tx_state_changed = on_tx_state_changed
 
     def unbind_runtime(self) -> None:
-        """Drop runtime refs (Radio.stop(), commit 3b).  FSM
-        outlives the stream; subsequent transitions still emit
-        ``state_changed`` but skip DSP/protocol calls."""
+        """Drop runtime refs (Radio.stop()) AND force a safe idle
+        state.  SAFETY-CRITICAL (operator-reported 2026-05-16): the
+        FSM object outlives the stream, so if it is left holding a
+        TX source / ``MOX_TX`` state when the stream stops, a later
+        start() would resume transmitting -- a radio that comes up
+        keyed on restart.  A stream stop unconditionally means "not
+        transmitting": clear every held source and snap back to RX
+        (emitting ``state_changed`` so UI mirrors un-key), drop the
+        releasing flag + poll timer.  There is no valid
+        resume-TX-on-restart case."""
         self._radio = None
         self._stream = None
         self._mox_edge_fade = None
@@ -213,6 +220,10 @@ class PttStateMachine(QObject):
         if self._fade_poll_timer.isActive():
             self._fade_poll_timer.stop()
         self._releasing = False
+        self._active_sources.clear()
+        if self._state != PttState.RX:
+            self._state = PttState.RX
+            self.state_changed.emit(PttState.RX)
 
     # ── queries ────────────────────────────────────────────────────
     @property

@@ -47,6 +47,20 @@ class TxPanelTest(unittest.TestCase):
         self.assertTrue(self.radio._tx_rx_muted)     # RX stood down
         self.assertFalse(self.radio._muted)          # operator mute UNTOUCHED
 
+    def test_auto_lna_frozen_during_tx(self) -> None:
+        """Auto-LNA must NOT touch the RX front-end gain while
+        transmitting (operator-reported 2026-05-16: LNA was
+        adjusting in TX)."""
+        self.radio._lna_auto = True
+        self.radio._lna_peaks = [0.99, 0.99, 0.99]   # 'overload'
+        g0 = self.radio.gain_db
+        self.radio.set_mox(True)                      # keyed
+        self.radio._adjust_lna_auto()                 # would back off
+        self.assertEqual(self.radio.gain_db, g0)      # frozen in TX
+        self.radio.set_mox(False)                     # back to RX
+        self.radio._adjust_lna_auto()                 # now allowed
+        self.assertLess(self.radio.gain_db, g0)       # backed off
+
     def test_keydown_stops_rx_channel_keyup_starts_it(self) -> None:
         """Thetis-faithful: keydown STOPS the WDSP RX channel
         (blocking flush) so it never processes the keyed period;

@@ -6728,6 +6728,16 @@ class Radio(QObject):
         restoring band memory)."""
         if not self._lna_auto or not self._lna_peaks:
             return
+        # SAFETY/correctness (operator-reported 2026-05-16): never
+        # touch the RX front-end gain while transmitting.  During
+        # MOX the ADC sees the transmit-coupled signal, not the
+        # band -- letting Auto-LNA "react" to that would slam the
+        # RX attenuator on every key.  Freeze the loop for the
+        # whole transmit period (mirrors the reference rig
+        # freezing RX preamp/ATT on TX); it resumes on return to
+        # receive with the operator's pre-TX gain intact.
+        if self._dispatch_state.mox:
+            return
         # Use MAX of recent window — we want the worst case for
         # overload protection, not a percentile (percentiles hide
         # exactly the spikes we care about).
@@ -9040,14 +9050,25 @@ class Radio(QObject):
         #   5. _stream.stop() further down handles RX-loop teardown
         #      + final STOP_IQ + socket close (the HL2 wedge fix is
         #      orthogonal to TX teardown -- see Phase 1 commit 6.1).
+        # SAFETY-CRITICAL (operator-reported 2026-05-16): a stream
+        # stop must force the dispatch MOX bit OFF.  If the operator
+        # stops while keyed, a stale ``_dispatch_state.mox=True``
+        # would otherwise be re-emitted on the next start() and the
+        # radio would come up TRANSMITTING.  set_mox(False) is the
+        # authoritative funnel -- it flips the dispatch bit, emits
+        # tx_active_changed(False) (so the MOX button un-lights),
+        # and cancels the §15.20 timeout.  No-op if already RX.
+        try:
+            self.set_mox(False)
+        except Exception:
+            pass
         # v0.2.0 Phase 3 commit 3b (§15.25): unbind the FSM runtime
-        # FIRST -- it stops the keyup fade-poll QTimer, clears
-        # _releasing, and drops the radio/stream/fade refs so the
-        # FSM cannot drive a half-torn-down chain.  FSM object
-        # itself survives stop() (owned in __init__); a later
-        # start() re-binds.  Does NOT clear the wire MOX bit --
-        # the full _stream.stop() below stops the wire entirely
-        # (+ STOP_IQ per Phase 1 6.1).
+        # -- now ALSO resets the FSM to a safe RX idle (clears held
+        # sources + snaps state to RX, §15.26).  Together with the
+        # set_mox(False) above this guarantees a stopped/restarted
+        # stream ALWAYS comes up in receive, never auto-keyed.
+        # FSM object itself survives stop() (owned in __init__);
+        # a later start() re-binds.
         try:
             self._ptt_fsm.unbind_runtime()
         except Exception:
