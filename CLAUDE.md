@@ -529,6 +529,50 @@ the rest.
 - **PS auto-attenuate recalibrate trigger**: `FeedbackLevel > 181 ||
   (FeedbackLevel <= 128 && cur_att > -28)`.
 
+### 3.9 Protocol-byte consumption discipline (LOCKED 2026-05-16)
+
+**Class-fix for the 2026-05-16 HW-PTT-in regression (§15.25
+RESOLVED-CORRECTION).**  That bug was NOT a wrong byte layout —
+the `ptt_in = ControlBytesIn[0]&0x01` decode is correct and
+HL2-bench-verified.  It was an *integration-discipline* failure:
+commit 3c shipped a consumer that silently depended on §10 open
+empirical question #1 ("HL2 EP6 control bytes with AK4951 active
+— value or zero?") resolving favorably, and a mechanistic agent
+audit then laundered that unanswered known-unknown into a closed
+assumption ("ptt_in=0 at rest → RX-inert").  N8SDR's HL2+
+disproved the assumption → phantom-TX surge.
+
+**THE RULE (enforce on every PR that touches `radio.py` /
+`stream.py` / any EP6/EP2 consumer):**
+
+> No code may *act on* an EP6 status byte or EP2 control byte
+> whose **at-rest value and/or per-family value is not
+> bench-verified** unless it is BOTH (a) behind a default-safe
+> gate (operator opt-in, default OFF — the `ff5f128`
+> `_hw_ptt_input_enabled` pattern) AND (b) cross-referenced to
+> an explicit entry in the protocol-map dossier
+> (`docs/architecture/hpsdr_protocol_map.md`, pending) tagged
+> `[spec] / [verified-reference] / [bench-verified] /
+> [UNVERIFIED]`.
+
+Corollaries:
+- **Decoding ≠ consuming.**  The protocol layer may *decode* a
+  byte into `FrameStats` freely (inert).  The moment any code
+  *branches on* that value, this rule applies.
+- **An open §10 empirical question is a hard blocker, not a
+  footnote.**  A consumer that depends on a §10 answer is
+  incomplete until that question is bench-answered for the
+  target family, OR shipped default-OFF behind a gate with the
+  dependency named in the code comment.
+- **Audits may not close an empirical question by reasoning.**
+  Only hardware (or the reference-implementation source for a
+  family Lyra cannot bench) closes a §10 item.  An audit that
+  says "X is inert *assuming* byte Y is Z at rest" must treat
+  that as UNVERIFIED, not as clearance.
+- **Operator empirical data outranks a mechanistic audit.**
+  Recorded twice this session.  On conflict: re-open, bisect,
+  do not defend the audit.
+
 ## 4. WDSP port strategy (concrete)
 
 ### 4.1 Port directly with attribution
