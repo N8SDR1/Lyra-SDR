@@ -6090,6 +6090,103 @@ and VDD" (VDD = PA drain V = the PA-bias readout), "TX
 profiles…Tune-Drive-Mic gain-Source-TX Filter", "DSP Buffers
 we are missing this", "AGC and ALC".
 
+#### RECONCILED PLAN — Thetis-ground-truth verified (Plan-agent 2026-05-16, LOCKED)
+
+Whole-surface verification (DB export + Thetis source + Lyra)
+complete.  DECISIVE FINDINGS (file:line = provenance, NOT for
+shipped code):
+
+* **HL2 PA-enable = C2 bit 3 (0x08 ApolloTuner) of the
+  0x12-class / case-10 frame** (`networkproto1.c:751`,`:1080`;
+  `netInterface.c:629` `EnableApolloTuner(!bit)` on HL2;
+  `:578-584` sets global `ApolloTuner=0x8`).  The C3-bit-7
+  `pa` path is the legacy/non-functional one on HL2.  **Lyra
+  `_compose_frame_10` hardcodes `c2=0x40` (stream.py:1564) —
+  never sets bit 3 → CANNOT produce RF on Apollo-gated
+  gateware.**  Operator DB: `chkApolloTuner=True`,
+  `chkApolloFilter=True`(→ also OR C2 bit2 0x04),
+  `chkApolloPresent=False`.  THE RF gap.
+* **TX-att wire encoding WRONG.** HL2 convention =
+  `wire = 31 - signed_db`, then frame-0x1C C3 = `wire & 0x1F`
+  (5-bit, truncates — Thetis ships this, do NOT "fix"),
+  frame-0x0a/0x14 C4 = `(wire & 0x3F)|0x40` MOX-gated (TX
+  `tx_step_attn` while XmitBit else `rx_step_attn`)
+  (`networkproto1.c:690/1019`,`:1099-1102`;
+  `console.cs:10657`).  Lyra frame-4 C3 = `_tx_step_attn_db
+  & 0x1F` (no 31-x) and frame-11 C4 = `0x40|((db+12)&0x3F)`
+  (wrong `+12` bias) — BOTH wrong; and this is the shared
+  v0.3 PS auto-attenuator actuator → fix byte-correct now.
+* **ATT-on-TX (`m_bATTonTX`)** keydown force/save + keyup
+  restore (`console.cs:30293-30327`/`30391-30410`;
+  setter `:19148-19175`; QSK `:13044-13091`); force-31 clause
+  gated by `chkFWCATUBypass` (operator=True → clause off in
+  SSB, still forces 31 on CW).  Lyra has NO ATT-on-TX layer.
+* **PS-A actuator funnel** (`console.cs:21402-21416`
+  `_auto_attTX_when_not_in_ps`): PS, QSK, manual all funnel
+  through the one `ATTOnTX`/`SetTxAttenData` actuator.  v0.2
+  MUST keep `stream.set_tx_step_attn_db(signed_db)` as the
+  SINGLE writer; v0.3 PS just swaps the source.  No inline
+  TX-att math anywhere = PS-corner discipline.
+* **TR delays** (keydown `console.cs:30339-30348`: rf_delay
+  between MOX-bit and TX-DSP-on; keyup `:30350-30384`:
+  space_mox→TX-off→mox_delay→clear-MOX→ptt_out_delay→RX-on).
+  Operator working values: mox 15 / rf **50** / space_mox 13
+  / GenPTTOut 5 / key_up 10.  Lyra `TrSequencing` rf=0 (BIG
+  gap), mox=10, ptt_out=20 — hardcoded frozen dataclass →
+  must become capability-sourced + operator-configurable.
+* **PA-current/VDD readout:** EP6 C0-rot **0x10** C3:C4 =
+  `user_adc0` = HL2 PA current (`networkproto1.c:346-353/
+  510-517`; `getUserADC0` `netInterface.c:327`).
+  `convertToAmps` HL2: `((3.26*(raw/4096))/50)/0.04 /
+  (1000/1270)` (`console.cs:25114-25131`); volts
+  `(raw/4095)*5*(23/1.1)`; temp `(3.26*(raw/4096)-0.5)/0.01`.
+  Lyra FrameStats does NOT decode user_adc0 — add it.
+* **Full-duplex:** only `chkFullDuplex` exists (operator DB
+  =False); its sole HL2 effect = RX-shutdown-on-TX, which
+  Lyra already does (`4ce07b9`).  No conflict; defer
+  RX-during-TX as non-Phase-3.
+
+**COMMIT LADDER (locked; A/B/C are RF-safe, D is first RF):**
+* **A — PA-current EP6 decode + readout.** stream.py decode
+  C0-rot 0x10 C3:C4 → FrameStats; radio.py `pa_current_amps`
+  (+volts/temp) via the verified HL2 formulas; meter/telemetry
+  readout.  DECODE-ONLY, no wire change (§3.9-safe).  Makes
+  the kill-test observable.  Ship first.
+* **B — TrSequencing reconcile.** Add `tr_sequencing` to
+  `RadioCapabilities` (HL2 = mox 15/rf 50/space_mox 13/
+  ptt_out 5/key_up 10); `ptt.py` reads injected values
+  (stays hardware-agnostic, §6.7); Settings→TX operator-
+  config (no-inert-UI).  No RF.
+* **C — TX-att `31-x` encoding fix + single-actuator + ATT-
+  on-TX policy.**  `_compose_frame_4`/`_compose_frame_11`
+  → `wire=31-signed_db`, C3 `&0x1F`, C4 `(wire&0x3F)|0x40`
+  MOX-gated.  `set_tx_step_attn_db(signed_db)` the ONLY
+  writer (encoder centralised in protocol; policy in
+  radio.py).  ATT-on-TX master toggle + per-band save/
+  restore + CW/PS-off force-31 floor honouring
+  `chkFWCATUBypass` semantics.  PA still OFF → no RF; bench-
+  verify the att value on the Commit-A meter.  Dossier
+  entry.  ⚠ PS-entangled — byte-correct, no inline math.
+* **D — ⚠ HARD OPERATOR GATE: Apollo-I²C PA-enable (first
+  real RF).**  `_compose_frame_10` c2 |= 0x08 when `_pa_on`
+  (|0x04 if Apollo-filter cap); keep C3-bit-7 too (harmless
+  HL2 / correct classic).  Behind the shipped default-OFF
+  `set_pa_enabled` gate; `pa_enable_uses_apollo_i2c=True`
+  already present; auto-disarm via force_release_all already
+  wired.  Dossier ([verified] C2-bit-3 / [UNVERIFIED]
+  gateware-variant + Apollo-filter companion).  Tooltip keeps
+  the dual-path warning.  Do NOT land/enable without explicit
+  operator go-ahead + dummy-load + the §15.20/§15.24-C
+  Phase-3-EXIT kill-test (now observable via Commit A).
+
+RISKS: Apollo-gateware-variant [UNVERIFIED bench-only] (may
+need C2 bit2 companion — operator `chkApolloFilter=True`
+suggests yes; include under the gate); `user_adc0` VDD-vs-
+current ambiguity (operator self-cal, §10 Q#4-class);
+`udHermesStepAttenuatorDelay=100`/`udPSMoxDelay=0.2` are
+v0.3-PS knobs — flagged, do not paint out; the 5-bit C3
+truncation of `31-x` is HL2 protocol, replicate don't "fix".
+
 **RE-PRIORITISED NEXT (was deferred): Apollo-tuner I²C
 side-channel.**  Required for RF on N8SDR's gateware.  §3.9:
 it is a NEW emitted EP2 I²C surface → needs default-safe gate
