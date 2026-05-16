@@ -5719,7 +5719,82 @@ v3 `59ebf5e` flush+settle is a CANDIDATE realization but must
 be reconciled to the verified Thetis mechanism (true channel
 stop vs reset-between-blocks) before it's trusted.  Next
 session: do the Thetis read FIRST, then a clean single
-implementation replacing the v1/v2/v3 stack.  **Remaining bench-verify
+implementation replacing the v1/v2/v3 stack.
+
+#### THETIS GROUND TRUTH — verified 2026-05-16 (console.cs
+`chkMOX_CheckedChanged2`, the keyup path 30350-30384, keydown
+30274-30348; defaults at 19807).  This is the authoritative
+mechanism; implement Lyra-native, no attribution in shipped
+code.
+
+**Keydown (RX→TX):** compute which RX to shut down (the
+§15.14 VFOA/B-TX / mute-rx*-on-* policy) → **STOP the RX DSP
+channel: `SetChannelState(id(0,0), 0, 1)` — state OFF,
+dmode=1 = BLOCKING flush** (RX2 id(2,0) `0,1`; sub id(0,1)
+`0,0`).  Then ATT-on-TX, UpdateAAudioMixerStates, UpdateDDCs,
+HdwMOXChanged (flip HW MOX) → if not CW: `rf_delay` →
+AudioMOXChanged → **turn TX channel ON `SetChannelState(
+id(1,0), 1, 0)`**.
+
+**Keyup (TX→RX):** `space_mox_delay`(0) → `_mox=false` →
+**TX channel OFF `SetChannelState(id(1,0), 0, 1)` dmode=1
+BLOCKING** (waits for TX downslew flush) → **`mox_delay`
+sleep (DEFAULT 10 ms** — "allows in-flight samples to clear")
+→ UpdateDDCs, UpdateAAudioMixerStates → AudioMOXChanged(RX)
+→ HdwMOXChanged (clear HW MOX bit) → Display/cmaster Mox →
+**`ptt_out_delay` sleep (DEFAULT 20 ms** — "time for HW to
+switch", wcp 2018-12-24) → **THEN turn RX channel back ON
+`SetChannelState(id(0,0), 1, 0)`** (RX2 id(2,0), sub id(0,1)
+likewise) → HL2: `AutoTuningHL2(Idle)` → ATT restore.
+
+**THE TWO ROOT FACTS:**
+1. **Thetis STOPS the RX DSP channel for the entire TX
+   period** (blocking-flush OFF on keydown) and **RESTARTS it
+   only AFTER the HW-T/R settle on keyup** (`ptt_out_delay`
+   *after* HdwMOXChanged).  The RX chain NEVER processes the
+   keyed-period or the T/R-transition IQ → there is no filter
+   ring to hear.  Lyra keeps the WDSP RX channel running the
+   whole time and only gates audio (+v3 flush) → it rings →
+   the "bristle-broom sweep".  This is THE divergence.
+2. **`mox_delay` default = 10 ms, `ptt_out_delay` default =
+   20 ms — NOT zero.**  CLAUDE.md §15.25/§15.26's "HL2
+   all-zero TrSequencing defaults" is WRONG vs Thetis: Thetis
+   uses 10/20 ms regardless of model (they are operator
+   "TR sequencing" prefs, not capability-zero on HL2).  The
+   RX-restart-after-settle window literally does not exist in
+   Lyra because Lyra zeroed these.  FIX the TrSequencing HL2
+   defaults to mox_delay=10, ptt_out_delay=20 (operator-
+   tunable later) and correct the §15.25 "all-zero" claim.
+
+**LOCKED REIMPLEMENTATION (replaces v1 8f86be5 / v2 212c080 /
+v3 59ebf5e — REVERT all three's keyup-specific code):**
+- Keep PART B's `_tx_rx_muted` audio gate ONLY as cheap
+  belt-and-suspenders (or drop if the channel-stop makes it
+  redundant — decide after checking what `_wdsp_rx.process()`
+  returns with the channel stopped).
+- Add a WDSP RX-channel **stop/start** to `wdsp_engine.py`
+  RxChannel (SetChannelState equivalent: stop=blocking-flush
+  OFF, start=ON) if not already present; investigate the
+  worker-mode path (`_do_demod_wdsp` / DspWorker) for how to
+  stop/restart the RX channel mid-stream without a race.
+- Keydown (`_on_tx_state_changed(True)` or the FSM `_enter_tx`
+  slot): STOP the RX DSP channel (blocking flush).  Keyup: the
+  FSM keyup tail must become TX-off(blocking) → mox_delay(10)
+  → clear MOX bit → ptt_out_delay(20) → **RX channel ON**.
+  i.e. the RX restart must move to AFTER the ptt_out settle
+  (today `_on_tx_state_changed(False)` fires at `_clear_mox_
+  tail` BEFORE ptt_out_delay — RX restart belongs in
+  `_end_keyup`/after the settle, not at the current hook).
+- Remove the cos² resume-fade + `_tx_resume_fade_pos` +
+  `_TX_RESUME_FADE_SAMPLES` + `_apply_tx_resume_fade` +
+  `_finish_tx_rx_resume`/`_TX_RX_RESUME_SETTLE_MS` machinery
+  (v2/v3) and the standalone reset (v1) — the channel
+  stop/restart-after-real-settle is the correct mechanism;
+  envelope band-aids were the wrong category.
+- Net: Lyra-native realization of "RX DSP stopped through TX,
+  restarted only after the T/R has physically settled."
+  Update §15.25 keydown/keyup ground-truth note + the
+  TrSequencing-defaults correction.  **Remaining bench-verify
 gate (before ANY keying/power):** press+release MOX into a
 DUMMY LOAD → RX silent instantly on key, and on un-key it
 returns to the prior listening state with NO delayed rush
