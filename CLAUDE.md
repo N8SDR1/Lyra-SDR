@@ -5326,8 +5326,38 @@ TX-Power section) → 3.5 (§15.20 timeout + Safety/Advanced
 sections) → 3.6 (§15.9 + §15.14 + §15.15).
 
 **Status: LOCKED 2026-05-16.  Commits 1 (`32f0473`) + 2
-(`eef2218`) SHIPPED + verified (293/0).  Executing commit 3a
-next.**
+(`eef2218`) + the FSM commit 3 -- 3a (`8222422` core) + 3b
+(`d1e9cf9` Radio ownership/facade) + 3c (`2295524` HW-PTT
+forwarder + §15.20 hook) -- ALL SHIPPED + verified.  Full
+suite 318/0 (was 280 pre-Phase-3; +38 TX/FSM tests, zero
+regressions).  Every commit wire-safe: RX-only bytes
+byte-identical -- nothing keys MOX until the commit-3.4 UI.
+
+NEXT: commit 3.4 -- `Radio.set_tx_power_pct` + the dockable
+`TxPanel` (MOX/TUN buttons, TX-drive StepperReadout, LedBarMeter
+w/ AGC-row→ALC-on-TX swap per decision #1) + `TxSettingsTab`
+(TX Power section).  First operator-visible + first commit that
+can key the radio.  No-inert-UI enforced.
+
+OPEN -- RX-audio-surge investigation (operator-reported
+2026-05-16, HL2 jack, ~3x surge, dummy load / no antenna,
+AGC Fast, LNA Auto, USB 20m RX1-no-SUB).  Mechanistic review:
+NONE of commits 1/2/3a/3b/3c touch the RX audio / AGC / gain /
+AK4951 path (TX-freq is RX-inert; set_mox MOX-edge only fires
+mox=True; FSM dormant at RX with poll-timer unstarted; the
+only RX-loop-thread change is a per-datagram bool compare in
+`_on_hl2_mic` commit 3c).  Leading hypothesis (operator concurs,
+was their first thought too): AGC-Fast + LNA-Auto chasing a
+dead 50Ω dummy-load noise floor to max gain -> any transient
+surges -- environmental, NOT the §9.6 per-sample-pop bug.
+Bisect plan: run the C:\ v0.1.1 GA installer under identical
+settings -- if it also surges -> environmental (AGC tuning,
+not revert); if clean -> bisect the 6 commits (prime suspect
+3c `_on_hl2_mic`, the only RX-loop change).  Operator testing
+with a real antenna to confirm dead-air hypothesis.  2 audit
+agents spawned 2026-05-16 to independently (a) verify Phase-3
+TX path as-built vs Thetis and (b) confirm RX-path integrity /
+refute any RX perturbation from this session.**
 
 ---
 
