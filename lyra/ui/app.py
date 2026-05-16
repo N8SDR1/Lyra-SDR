@@ -684,13 +684,20 @@ class MainWindow(QMainWindow):
                              self.docks["meters"], Qt.Vertical)
 
         self.addDockWidget(Qt.BottomDockWidgetArea, self.docks["dsp"])
-        # TX — compact transmit panel; tabbed with DSP+Audio at the
-        # bottom so it's one click away without consuming a new row.
-        # New dock (not in any pre-3.4 saved layout): Qt keeps
-        # unrecognised docks at this programmatic position + visible
-        # on restoreState(), so it appears for upgrading operators.
+        # TX — compact transmit panel, tabbed with DSP+Audio at the
+        # bottom so it's one click away.  It is tabified for correct
+        # placement but starts HIDDEN: a translucent glass panel that
+        # is always visible participates in every dock-area repaint,
+        # and that extra per-repaint compositor + main-thread work
+        # lengthens event-loop / GIL stalls enough to jitter the EP2
+        # writer + audio-sink cadence (audible as occasional RX
+        # underrun pops).  Hidden, it costs nothing until the
+        # operator opens it via the View menu / toolbar toggle — at
+        # which point Qt re-adds its tab in this tabified position.
+        # A hidden dock paints nothing and shows no tab, so RX audio
+        # delivery is unperturbed in the steady state.
         self.tabifyDockWidget(self.docks["dsp"], self.docks["tx"])
-        self.docks["dsp"].raise_()        # DSP stays the active tab
+        self.docks["tx"].hide()
         # Propagation — slim status panel near the top, defaults to
         # below Meters where it's glance-readable without competing
         # for primary control real estate.  Operator can drag it
