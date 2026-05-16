@@ -6207,8 +6207,15 @@ required before touching C.  TX side (case-4 0x1C C3 =
 
 **REVISED LADDER:** A (verified) → B (verified, amp-safety)
 → C-reverify (RX-att encoding) → C (corrected) → D (verified,
-hard RF gate).  A+B are GO now.  Independent agent id
-`a3e37ee1d8729b19d` (SendMessage to continue if needed).
+hard RF gate).  Independent agent id `a3e37ee1d8729b19d`
+(SendMessage to continue / for the C-reverify).
+
+**Commit A SHIPPED `4b4170a` 2026-05-16:** HL2 PA-current
+decode (EP6 slot 0x10 C3:C4 → FrameStats.pa_current_adc) +
+`Radio.pa_current_amps` (verified HL2 sense-amp math) +
+`pa_a` in hl2_telemetry payload.  Decode-only, no wire change,
+371/0.  Operator PA-bias readout + the kill-test observable
+are now in place.  NEXT = Commit B.
 
 **COMMIT LADDER (locked; A/B/C are RF-safe, D is first RF):**
 * **A — PA-current EP6 decode + readout.** stream.py decode
