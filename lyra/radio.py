@@ -889,6 +889,20 @@ class Radio(QObject):
         # thread / written on Qt-main -- GIL-atomic bool, same
         # single-writer discipline as _muted.
         self._tx_rx_muted = False
+        # cos² fade-in applied to receive audio on the TX->RX edge
+        # (smooths the un-key "rush" -- see _on_tx_state_changed).
+        # -1 = inactive; >=0 = current sample index into the
+        # raised-cosine resume curve.  Read on the DSP worker /
+        # written on Qt-main -- GIL-atomic int, single-writer.
+        self._tx_resume_fade_pos = -1
+        # ~80 ms raised-cosine ramp (0->1), click-free, at the HL2
+        # fixed 48 kHz audio rate.  Long enough to dissolve the
+        # un-key swell, short enough that no usable content is lost.
+        self._TX_RESUME_FADE_SAMPLES = 3840
+        _trt = np.linspace(0.0, 1.0, self._TX_RESUME_FADE_SAMPLES,
+                           dtype=np.float32)
+        self._tx_resume_curve = (
+            0.5 * (1.0 - np.cos(np.pi * _trt))).astype(np.float32)
         # Auto-LNA loop: periodically adjust _gain_db to keep the ADC
         # peak near a target headroom. Engaged only when the operator
         # enables it; manual LNA is the default.
@@ -2660,20 +2674,21 @@ class Radio(QObject):
         """
         self._tx_rx_muted = bool(is_tx)
         if not is_tx:
-            # TX -> RX edge.  The receive DSP kept running through
-            # the keyed period (only the output was gated to
-            # silence), so its AGC wound its gain up against the
-            # silent/transmit-folded input.  Un-gating raw would
-            # dump that wound-up gain as a delayed loud "rush"
-            # until the AGC time-constant recovers.  Treat the
-            # return-to-receive as exactly what it is -- a
-            # legitimate audio discontinuity -- and run the same
-            # full RX-DSP reset used for a freq/mode change
-            # (re-inits the in-DLL AGC, S-meter average, binaural)
-            # so receive resumes fresh with no gain blast.  Worker
-            # mode applies it between blocks, around the RX-resume
-            # boundary -- no race.
-            self._request_dsp_reset_full()
+            # TX -> RX edge.  Arm a short cos² fade-in on the
+            # resumed receive audio.  Un-gating raw snaps the
+            # receiver back to full level after the keyed-silent
+            # period -- heard as a "rush"/swell regardless of the
+            # exact source (AGC re-attack, engine/buffer flush,
+            # T/R-settle transient).  Ramping the resumed output
+            # 0 -> full over ~80 ms removes the abrupt edge while
+            # keeping content (a key-up is a deliberate listening-
+            # state change, so a brief smooth ramp reads as natural,
+            # not lost audio).  Applied per-block in the audio
+            # output gate; -1 = inactive, 0 = (re)arm from the
+            # start of the curve.  GIL-atomic int, written here on
+            # Qt-main / read on the DSP worker -- single-writer,
+            # same discipline as _tx_rx_muted.
+            self._tx_resume_fade_pos = 0
         # §15.14 (deferred): replace the blanket base behaviour
         # with the per-RX MuteRX*OnVFOBTX policy keyed off
         # (is_tx, state) + the operator's per-RX prefs.  No inert
@@ -10288,6 +10303,27 @@ class Radio(QObject):
     # pipeline, exactly where Pratt designed it; no Python-side
     # gate can match that integration.
 
+    def _apply_tx_resume_fade(self, audio):
+        """Per-block cos² fade-in on the TX->RX edge (smooths the
+        un-key "rush").  Armed by ``_on_tx_state_changed(False)``
+        setting ``_tx_resume_fade_pos = 0``.  No-op when inactive
+        (-1) -- one int compare on the normal RX path, no cost.
+        Runs on the DSP worker thread; the only writer of the
+        position from here, Qt-main only re-arms it (sets 0)."""
+        pos = self._tx_resume_fade_pos
+        if pos < 0 or audio is None or audio.size == 0:
+            return audio
+        n = audio.size
+        N = self._TX_RESUME_FADE_SAMPLES
+        idx = np.arange(pos, pos + n)
+        ramp = np.ones(n, dtype=np.float32)
+        inwin = idx < N
+        if inwin.any():
+            ramp[inwin] = self._tx_resume_curve[idx[inwin]]
+        nxt = pos + n
+        self._tx_resume_fade_pos = nxt if nxt < N else -1
+        return audio * ramp
+
     def _do_demod_wdsp(self, iq):
         """WDSP-engine RX audio path (v0.0.9.6).
 
@@ -10454,6 +10490,9 @@ class Radio(QObject):
             v = float(self._volume)
             if v != 1.0:
                 audio = audio * np.float32(v)
+            # cos² fade-in on return from TX (no-op unless armed by
+            # the keyup edge) -- dissolves the un-key swell.
+            audio = self._apply_tx_resume_fade(audio)
 
         # ── Phase 3.D safety clamp (2026-05-12) ─────────────────
         # Hard-clamp the post-volume audio to [-1.0, +1.0] so any

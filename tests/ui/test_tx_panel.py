@@ -47,19 +47,36 @@ class TxPanelTest(unittest.TestCase):
         self.assertTrue(self.radio._tx_rx_muted)     # RX stood down
         self.assertFalse(self.radio._muted)          # operator mute UNTOUCHED
 
-    def test_keyup_resets_rx_dsp_keydown_does_not(self) -> None:
-        """The TX->RX edge must reset the RX DSP (kills AGC
-        wound-up-gain so resume has no delayed 'rush').  The
-        RX->TX edge must NOT (output is gated; nothing to reset
-        and a reset there would be wasted)."""
+    def test_keyup_arms_resume_fade_keydown_does_not(self) -> None:
+        """The TX->RX edge arms the cos² resume fade-in (smooths
+        the un-key 'rush'); the RX->TX edge does NOT (output is
+        gated to silence -- a fade there is meaningless).  -1 =
+        inactive, 0 = armed at curve start."""
         from lyra.ptt import PttState
-        calls: list[bool] = []
-        self.radio._request_dsp_reset_full = (          # type: ignore
-            lambda: calls.append(True))
+        self.assertEqual(self.radio._tx_resume_fade_pos, -1)     # idle
         self.radio._on_tx_state_changed(True, PttState.MOX_TX)   # key down
-        self.assertEqual(calls, [])                     # no reset on keydown
+        self.assertEqual(self.radio._tx_resume_fade_pos, -1)     # NOT armed
         self.radio._on_tx_state_changed(False, PttState.RX)      # key up
-        self.assertEqual(calls, [True])                 # reset on keyup only
+        self.assertEqual(self.radio._tx_resume_fade_pos, 0)      # armed
+
+    def test_resume_fade_ramps_then_releases(self) -> None:
+        """The fade ramps 0->1 across blocks then self-disarms
+        (-1), and the first resumed sample is heavily attenuated
+        (curve starts at 0) so there is no abrupt edge."""
+        import numpy as np
+        self.radio._tx_resume_fade_pos = 0
+        N = self.radio._TX_RESUME_FADE_SAMPLES
+        blk = np.ones(N // 2, dtype=np.float32)
+        out1 = self.radio._apply_tx_resume_fade(blk.copy())
+        self.assertLess(float(out1[0]), 0.05)            # ~silent at start
+        self.assertGreater(self.radio._tx_resume_fade_pos, 0)    # mid-fade
+        # second block finishes the curve -> disarms
+        self.radio._apply_tx_resume_fade(blk.copy())
+        self.assertEqual(self.radio._tx_resume_fade_pos, -1)
+        # inactive -> pass-through unchanged
+        same = np.full(64, 0.7, dtype=np.float32)
+        out = self.radio._apply_tx_resume_fade(same.copy())
+        self.assertTrue(np.allclose(out, 0.7))
 
     def test_keyup_restores_rx_and_preserves_operator_mute(self) -> None:
         from lyra.ptt import PttState
