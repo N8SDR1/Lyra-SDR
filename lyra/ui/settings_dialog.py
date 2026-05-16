@@ -236,6 +236,7 @@ from lyra.control.tci import TciServer, TCI_DEFAULT_PORT
 from lyra.hardware.oc import format_bits
 from lyra.hardware.usb_bcd import list_devices as list_ftdi_devices
 from lyra.ui.toggle import ToggleSwitch
+from lyra.ui.widgets.stepper_readout import StepperReadout
 
 
 class TciSettingsTab(QWidget):
@@ -2785,6 +2786,78 @@ class AudioSettingsTab(QWidget):
     # _on_lev_ratio_signal, _on_lev_makeup_signal,
     # _update_lev_sliders_enabled) removed in Phase 4 of legacy-DSP
     # cleanup along with the Audio Leveler UI section.
+
+
+class TxSettingsTab(QWidget):
+    """Transmit configuration — the Settings home for everything
+    that shapes or governs the transmit path.
+
+    v0.2.0 Phase 3 commit 3.4 ships the TX Power & Drive section
+    only.  The remaining sections land WITH their behavior in
+    later sub-releases (no inert UI): they are documented insertion
+    anchors below, not empty group boxes, so the tab grows in a
+    fixed order without a reorganise.
+    """
+
+    def __init__(self, radio, parent=None):
+        super().__init__(parent)
+        self.radio = radio
+        v = QVBoxLayout(self)
+
+        # ── TX Power & Drive ────────────────────────────────────────
+        pwr_grp = QGroupBox("TX Power & Drive")
+        pwr_v = QVBoxLayout(pwr_grp)
+        row = QHBoxLayout()
+        self.tx_drive_stepper = StepperReadout(
+            "TX Drive", 0, 100, step=7, shift_step=20, unit="%",
+            initial=int(radio.tx_power_pct),
+            caption_width=70, value_width=56)
+        self.tx_drive_stepper.setToolTip(
+            "Transmit output level, 0–100 %.  Maps onto the "
+            "transmitter's stepped gain attenuator (quantised to "
+            "the hardware's discrete steps).  Shares state with "
+            "the TX panel's drive control — changing either moves "
+            "both.  Set BEFORE keying into an antenna.")
+        self.tx_drive_stepper.valueChanged.connect(
+            self._on_tx_drive_changed)
+        row.addWidget(self.tx_drive_stepper)
+        row.addStretch(1)
+        pwr_v.addLayout(row)
+        v.addWidget(pwr_grp)
+
+        # Bidirectional sync with the TX panel via the shared Radio
+        # setter/signal; the blockSignals guard breaks the loop.
+        self.radio.tx_power_pct_changed.connect(
+            self._on_radio_tx_power_changed)
+
+        # ── Future sections (land WITH behavior — no inert UI) ──────
+        # Ordered insertion anchors so the tab grows without reorg:
+        #   • v0.2.0 Phase 3 commit 3.5 — "TX Safety": continuous-
+        #     keydown timeout (minutes + bypass).
+        #   • v0.2.0 Phase 3 commit 3.5 — "Advanced": gateware
+        #     reset-on-link-loss opt-in (default OFF) + the
+        #     hardware-PTT-input opt-in (default OFF) surfaced here.
+        #   • v0.2.1 — "Speech Processing": parametric EQ, multiband
+        #     combinator, tube-plating, formant/sibilance, de-esser,
+        #     compressor position, mic auto-AGC + mic gain.
+        #   • v0.2.3 — "Voice Keyer & Profiles": message memory,
+        #     operator-curated TX profile picker, VOX, monitor
+        #     output device.
+        # (Mic *gain* deferred: no Radio mic-gain setter exists yet
+        #  — it arrives with the v0.2.1 speech-processing chain.)
+        v.addStretch(1)
+
+    # ── operator → Radio ────────────────────────────────────────────
+    def _on_tx_drive_changed(self, pct: float) -> None:
+        self.radio.set_tx_power_pct(int(round(pct)))
+
+    # ── Radio → display (guarded against re-fire) ───────────────────
+    def _on_radio_tx_power_changed(self, pct: int) -> None:
+        if int(self.tx_drive_stepper.value()) == int(pct):
+            return
+        self.tx_drive_stepper.blockSignals(True)
+        self.tx_drive_stepper.setValue(int(pct))
+        self.tx_drive_stepper.blockSignals(False)
 
 
 class VisualsSettingsTab(QWidget):
@@ -6516,6 +6589,9 @@ class SettingsDialog(QDialog):
 
         self.tab_audio = AudioSettingsTab(radio)
         self.tabs.addTab(self.tab_audio, "Audio")
+
+        self.tab_tx = TxSettingsTab(radio)
+        self.tabs.addTab(self.tab_tx, "TX")
 
         self.tab_visuals = VisualsSettingsTab(radio)
         self.tabs.addTab(self.tab_visuals, "Visuals")

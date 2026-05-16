@@ -387,6 +387,11 @@ class Radio(QObject):
     # spuriously keyed MOX (loud phantom-TX surge).  Bidirectional
     # sync to the future Settings -> TX toggle (commit 3.6).
     hw_ptt_input_enabled_changed = Signal(bool)
+    # v0.2.0 Phase 3 commit 3.4: operator TX drive level, 0..100 %.
+    # Mapped to the HL2 TX step attenuator via the capability
+    # struct.  Bidirectional sync between the dockable TxPanel
+    # drive stepper and the Settings -> TX power section.
+    tx_power_pct_changed = Signal(int)
     # CW Zero (white) line offset from the VFO marker, in Hz.
     # Vertical reference line drawn at the filter center — i.e., where
     # a clicked CW signal lands and where the audio is generated.
@@ -771,6 +776,19 @@ class Radio(QObject):
         # operator opts in.
         self._rit_enabled: bool = False
         self._rit_offset_hz: int = 0
+        # v0.2.0 Phase 3 commit 3.4 -- operator TX drive, 0..100 %.
+        # Mapped to the TX gain-stage step attenuator: 100 % = full
+        # gain (most-negative dB), 0 % = full attenuation (least
+        # output), quantised to the gateware's 16 discrete steps.
+        # __init__ seeds a safe placeholder; autoload establishes
+        # the real default = the percent that quantises to 0 dB,
+        # which keeps fresh installs byte-identical to the Phase-1
+        # _tx_step_attn_db=0 wire default (frame 4 ships (0,0,0,0)).
+        # Same seed-then-autoload pattern as RIT.  Only reaches the
+        # wire under MOX for frame-11 C4; frame-4 C3 is un-gated but
+        # is the TX attenuator the gateware acts on only while
+        # transmitting -- RX operation is unaffected either way.
+        self._tx_power_pct: int = 0
         # v0.2 Phase 2 (5/N) -- mic-input source selection.
         # Lyra supports two mic paths because the HL2 hardware family
         # has two variants:
@@ -2438,6 +2456,19 @@ class Radio(QObject):
         only after the TX I/Q down-ramp completes (§15.25)."""
         self._ptt_fsm.release_mox()
 
+    def request_tun(self) -> None:
+        """Operator TUN-button press.  Drives the FSM into the
+        low-power tune source the same way ``request_mox`` drives
+        the MOX source -- the FSM resolves the held source set to
+        one state and runs the identical keydown ordering.  UI
+        never reaches into ``_ptt_fsm`` (the facade boundary)."""
+        self._ptt_fsm.request_tun()
+
+    def release_tun(self) -> None:
+        """Operator TUN-button release.  FSM keyup, same gated
+        down-ramp path as ``release_mox``."""
+        self._ptt_fsm.release_tun()
+
     def force_release_all(self) -> None:
         """Force every held TX source off and run a normal gated
         keyup.  §15.20 TX-safety-timeout HOOK (commit 3c) -- the
@@ -2494,6 +2525,101 @@ class Radio(QObject):
             on = False
         self._hw_ptt_input_enabled = bool(on)
         self.hw_ptt_input_enabled_changed.emit(self._hw_ptt_input_enabled)
+
+    # ── TX drive / power (v0.2.0 Phase 3 commit 3.4) ──────────────
+    # Operator "TX power" is a 0..100 % control.  The HL2 transmit
+    # gain stage is a step attenuator whose range comes from the
+    # capability struct (hardware-agnostic -- no isinstance, §6.7);
+    # negative dB is gain, positive dB is attenuation.  More output
+    # = more gain = the most-negative dB.  The gateware exposes the
+    # attenuator as a small number of discrete steps, so the map is
+    # quantised to that grid rather than a smooth continuum.
+
+    # Number of discrete attenuator steps the gateware honours.
+    _TX_ATTN_STEPS = 16
+
+    @classmethod
+    def _tx_pct_to_attn_db(cls, pct: int, lo: int, hi: int) -> int:
+        """percent (0..100) -> attenuator dB on the 16-step grid.
+
+        pct=100 -> ``lo`` (most gain / max output);
+        pct=0   -> ``hi`` (most attenuation / min output).
+        """
+        pct = max(0, min(100, int(pct)))
+        n = cls._TX_ATTN_STEPS - 1
+        idx = round(pct / 100.0 * n)              # 0..n
+        return int(round(hi - (hi - lo) * idx / n))
+
+    @classmethod
+    def _tx_unity_pct(cls, lo: int, hi: int) -> int:
+        """The percent whose quantised dB is closest to 0 (unity).
+
+        Used as the fresh-install default so frame-4 C3 stays
+        (0,0,0,0) -- byte-identical to the Phase-1 wire default.
+        """
+        best_pct, best_err = 0, None
+        for p in range(0, 101):
+            err = abs(cls._tx_pct_to_attn_db(p, lo, hi))
+            if best_err is None or err < best_err:
+                best_pct, best_err = p, err
+        return best_pct
+
+    @property
+    def tx_power_pct(self) -> int:
+        """Operator TX drive level, 0..100 %."""
+        return int(self._tx_power_pct)
+
+    def set_tx_power_pct(self, pct: int) -> None:
+        """Set the operator TX drive (0..100 %).  Maps to the TX
+        step attenuator via the capability range, quantises to the
+        gateware step grid, pushes it to the stream (no-op if not
+        started), persists, and emits ``tx_power_pct_changed`` for
+        the panel<->Settings bidirectional sync.  Idempotent."""
+        pct = max(0, min(100, int(pct)))
+        if pct == self._tx_power_pct:
+            return
+        self._tx_power_pct = pct
+        try:
+            lo, hi = self.capabilities.tx_attenuator_range
+        except Exception:
+            lo, hi = -28, 31
+        db = self._tx_pct_to_attn_db(pct, lo, hi)
+        if self._stream is not None:
+            try:
+                self._stream.set_tx_step_attn_db(db)  # noqa: SLF001
+            except Exception as exc:  # noqa: BLE001
+                self.status_message.emit(
+                    f"TX power set failed: {exc}", 3000)
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue("tx/power_pct", pct)
+        except Exception:
+            pass
+        self.tx_power_pct_changed.emit(pct)
+
+    def autoload_tx_power_settings(self) -> None:
+        """Restore TX drive from QSettings on startup.  Default =
+        the unity percent (quantises to 0 dB) so a fresh install is
+        byte-identical to the Phase-1 _tx_step_attn_db=0 wire
+        state.  Called once at app build alongside the other
+        ``autoload_*`` restores."""
+        try:
+            lo, hi = self.capabilities.tx_attenuator_range
+        except Exception:
+            lo, hi = -28, 31
+        default_pct = self._tx_unity_pct(lo, hi)
+        try:
+            from PySide6.QtCore import QSettings
+            raw = QSettings("N8SDR", "Lyra").value(
+                "tx/power_pct", default_pct)
+            pct = int(raw)
+        except Exception:
+            pct = default_pct
+        pct = max(0, min(100, pct))
+        # Force a push even if pct == seed (seed is a placeholder;
+        # bypass the idempotent early-return by clearing it first).
+        self._tx_power_pct = -1
+        self.set_tx_power_pct(pct)
 
     def _on_tx_state_changed(self, is_tx: bool,
                              state: "PttState") -> None:

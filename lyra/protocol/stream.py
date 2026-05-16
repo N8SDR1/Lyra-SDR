@@ -2895,6 +2895,33 @@ class HL2Stream:
         self._rx_step_attn_db = int(gain_db)
         self._refresh_frame_11()
 
+    def set_tx_step_attn_db(self, db: int):
+        """Set the HL2 TX-side step attenuator, in dB (range
+        -28..+31; negative values are gain, positive attenuation).
+
+        This is the transmit gain stage ahead of the PA driver.
+        The gateware reads the value from TWO redundant register
+        copies in parallel -- the 5-bit field in HPSDR P1 register
+        0x1C (frame 4, C3) and the 6-bit override-enabled field in
+        register 0x14 (frame 11, C4) -- so a write that updated
+        only one would leave the gateware acting on a stale copy.
+        Per the coherence contract documented at _compose_frame_4,
+        a change to the TX step attenuator MUST refresh BOTH cached
+        frames; this method is the single public entry that does.
+
+        No direct _send_cc: the EP2 writer thread re-emits the
+        cached registers on its next round-robin tick (a few ms),
+        same imperceptible-latency discipline as set_lna_gain_db /
+        _set_rx1_freq -- avoids a synchronous C&C burst mid-audio.
+        """
+        if not -28 <= db <= 31:
+            raise ValueError("db must be in -28..+31")
+        if self._sock is None:
+            raise RuntimeError("stream not started")
+        self._tx_step_attn_db = int(db)
+        self._refresh_frame_4()
+        self._refresh_frame_11()
+
     def stop(self):
         self._stop_event.set()
         # Wake the EP2 writer thread if it's blocked waiting for

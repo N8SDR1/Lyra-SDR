@@ -102,7 +102,7 @@ from PySide6.QtWidgets import (
 from lyra.radio import Radio
 from lyra.ui import theme
 from lyra.ui.panels import (
-    TuningPanel, ModeFilterPanel, DspPanel,
+    TuningPanel, ModeFilterPanel, DspPanel, TxPanel,
     SMeterPanel, SpectrumPanel, WaterfallPanel, TciPanel, BandPanel,
     ViewPanel,
 )
@@ -380,6 +380,14 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             print(f"[app] HW-PTT autoload error: {exc}")
 
+        # TX drive / power (v0.2.0 Phase 3 commit 3.4) -- restores
+        # the operator's TX % (default = unity, byte-identical to
+        # the Phase-1 wire state) and pushes it to the stream.
+        try:
+            self.radio.autoload_tx_power_settings()
+        except Exception as exc:
+            print(f"[app] TX-power autoload error: {exc}")
+
         # Mic-input source (v0.2 Phase 2) -- HL2 mic jack (AK4951
         # codec on HL2+) vs PC sound card.  Restored from QSettings
         # so operator's choice survives across launches.  Default
@@ -415,6 +423,7 @@ class MainWindow(QMainWindow):
         # panel is .hide()'d, only invisible. We must not construct
         # it at all.
         self.pnl_dsp        = DspPanel(self.radio)
+        self.pnl_tx         = TxPanel(self.radio)
         self.pnl_smeter     = SMeterPanel(self.radio)
         self.pnl_spectrum   = SpectrumPanel(self.radio)
         self.pnl_waterfall  = WaterfallPanel(self.radio)
@@ -636,6 +645,8 @@ class MainWindow(QMainWindow):
             "meters", "Meters", self.pnl_smeter)
         self.docks["dsp"] = self._make_dock(
             "dsp_audio", "DSP + Audio", self.pnl_dsp)
+        self.docks["tx"] = self._make_dock(
+            "tx_panel", "TX", self.pnl_tx)
         self.docks["propagation"] = self._make_dock(
             "propagation", "Propagation", self.pnl_propagation)
         # GainPanel removed entirely — see comment at construction site.
@@ -673,6 +684,13 @@ class MainWindow(QMainWindow):
                              self.docks["meters"], Qt.Vertical)
 
         self.addDockWidget(Qt.BottomDockWidgetArea, self.docks["dsp"])
+        # TX — compact transmit panel; tabbed with DSP+Audio at the
+        # bottom so it's one click away without consuming a new row.
+        # New dock (not in any pre-3.4 saved layout): Qt keeps
+        # unrecognised docks at this programmatic position + visible
+        # on restoreState(), so it appears for upgrading operators.
+        self.tabifyDockWidget(self.docks["dsp"], self.docks["tx"])
+        self.docks["dsp"].raise_()        # DSP stays the active tab
         # Propagation — slim status panel near the top, defaults to
         # below Meters where it's glance-readable without competing
         # for primary control real estate.  Operator can drag it

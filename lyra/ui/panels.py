@@ -4909,6 +4909,131 @@ class DspPanel(GlassPanel):
             act.blockSignals(False)
 
 
+# ── TX panel (MOX / TUN + TX drive) ─────────────────────────────────────
+class TxPanel(GlassPanel):
+    """Transmit control: MOX keying, TUN (reserved), TX drive.
+
+    v0.2.0 Phase 3 commit 3.4 — the first operator surface that
+    can put the radio on the air.  MOX press/release funnels
+    through the Radio facade into the PTT state machine, which
+    runs the keydown/keyup ordering (TX carrier loaded before the
+    transmit bit; the bit cleared only after the I/Q down-ramp
+    completes).  The button is a slave display of true TX state —
+    it mirrors ``tx_active_changed`` so a hardware foot-switch (or
+    any future TX source) keeps it truthful.
+
+    TUN is rendered but disabled: a tune press needs a low-power
+    carrier/tone source that does not exist until a later v0.2.x
+    sub-release.  Shipping it live now would transmit a silent
+    dead carrier — useless for ATU tuning and a UX trap — so it
+    is present (final row layout, no reflow when it lands) but
+    disabled with an explanatory tooltip, the same discipline used
+    for not-yet-live controls elsewhere.
+    """
+
+    def __init__(self, radio: Radio, parent=None):
+        super().__init__("TX", parent)
+        self.radio = radio
+
+        # ── Row 1 — MOX / TUN ───────────────────────────────────────
+        keys = QHBoxLayout()
+
+        self.mox_btn = QPushButton("MOX")
+        self.mox_btn.setObjectName("dsp_btn")   # lit when active
+        self.mox_btn.setCheckable(True)
+        self.mox_btn.setFixedWidth(64)
+        self.mox_btn.setChecked(radio.is_tx if hasattr(radio, "is_tx")
+                                else False)
+        self.mox_btn.setToolTip(
+            "MOX — manual transmit.  Press to key the transmitter, "
+            "press again to return to receive.\n\n"
+            "Keying runs the safe TX sequence: the transmit carrier "
+            "is loaded before the on-air bit is set, and on release "
+            "the on-air bit clears only after the transmit audio has "
+            "ramped down — no key-clicks, no splatter, no stuck "
+            "carrier.\n\n"
+            "This button reflects the true on-air state, so it also "
+            "lights if transmit is started by any other source.")
+        self.mox_btn.toggled.connect(self._on_mox_toggled)
+        keys.addWidget(self.mox_btn)
+
+        self.tun_btn = QPushButton("TUN")
+        self.tun_btn.setObjectName("dsp_btn")
+        self.tun_btn.setCheckable(True)
+        self.tun_btn.setFixedWidth(64)
+        self.tun_btn.setEnabled(False)          # see class docstring
+        self.tun_btn.setToolTip(
+            "TUN — steady tune carrier for ATU / amplifier "
+            "adjustment.\n\nActivates in a later v0.2.x sub-release "
+            "once the low-power tune-carrier generator is in place. "
+            "Disabled until then so a tune press can't transmit a "
+            "silent dead carrier.")
+        keys.addWidget(self.tun_btn)
+        keys.addStretch(1)
+        self.content_layout().addLayout(keys)
+
+        # ── Row 2 — TX drive ────────────────────────────────────────
+        # The transmit gain stage is a stepped attenuator (a small
+        # number of discrete dB steps), so a numeric stepper is the
+        # honest control surface — one click ≈ one hardware step,
+        # no false illusion of continuous resolution.  Shares the
+        # Radio setter/signal with the Settings → TX power section
+        # (bidirectional, no feedback loop via the blockSignals
+        # guard in the radio-side handler).
+        drive = QHBoxLayout()
+        self.tx_drive_stepper = StepperReadout(
+            "TX Drive", 0, 100, step=7, shift_step=20, unit="%",
+            initial=int(radio.tx_power_pct),
+            caption_width=64, value_width=56)
+        self.tx_drive_stepper.setToolTip(
+            "TX Drive — transmit output level, 0–100 %.\n\n"
+            "Maps onto the transmitter's stepped gain attenuator "
+            "(quantised to the hardware's discrete steps).  100 % = "
+            "maximum drive, 0 % = minimum.  Set this BEFORE keying "
+            "into an antenna.\n\n"
+            "Gestures: click [-]/[+] = one step, Shift+click = "
+            "coarse, hold = ramp, wheel over widget = step, "
+            "right-click value to type exact.")
+        self.tx_drive_stepper.valueChanged.connect(
+            self._on_tx_drive_changed)
+        drive.addWidget(self.tx_drive_stepper)
+        drive.addStretch(1)
+        self.content_layout().addLayout(drive)
+
+        # Slave the button + stepper to authoritative Radio state.
+        self.radio.tx_active_changed.connect(self._on_tx_active)
+        self.radio.tx_power_pct_changed.connect(
+            self._on_radio_tx_power_changed)
+
+    # ── operator → Radio ────────────────────────────────────────────
+    def _on_mox_toggled(self, checked: bool) -> None:
+        """MOX button → Radio facade.  The bool must branch (a
+        direct toggled→request_mox connection would pass the bool
+        as a positional arg)."""
+        if checked:
+            self.radio.request_mox()
+        else:
+            self.radio.release_mox()
+
+    def _on_tx_drive_changed(self, pct: float) -> None:
+        self.radio.set_tx_power_pct(int(round(pct)))
+
+    # ── Radio → display (slave; guarded against re-fire) ────────────
+    def _on_tx_active(self, is_tx: bool) -> None:
+        if self.mox_btn.isChecked() == bool(is_tx):
+            return
+        self.mox_btn.blockSignals(True)
+        self.mox_btn.setChecked(bool(is_tx))
+        self.mox_btn.blockSignals(False)
+
+    def _on_radio_tx_power_changed(self, pct: int) -> None:
+        if int(self.tx_drive_stepper.value()) == int(pct):
+            return
+        self.tx_drive_stepper.blockSignals(True)
+        self.tx_drive_stepper.setValue(int(pct))
+        self.tx_drive_stepper.blockSignals(False)
+
+
 # ── S-Meter panel (wraps the SMeter widget) ─────────────────────────────
 class SMeterPanel(GlassPanel):
     """Meter panel with switchable visual style.
