@@ -5080,7 +5080,74 @@ real-antenna keying.  Item D preventive notes embedded in
 
 ---
 
-*Last updated: 2026-05-14 — **v0.2.0 Phase 0 + Phase 1
+## ▶ NEXT SESSION STARTS HERE (2026-05-15 EOD)
+
+**State:** v0.2.0 Phase 2 COMPLETE + §15.23 TX SSB defect FIXED
++ §15.24 pre-Phase-3 reconciliation (items A+B) DONE & verified.
+Branch `feature/v0.0.9.6-audio-foundation` HEAD = `26a8e1d`.
+Working tree clean (only untracked docs/*.pdf + screenshots --
+not source).  Backup: `_backups/lyra-2026-05-15-eod.bundle`
+(+ earlier `lyra-2026-05-15-phase2-tx-fix.bundle`).  Full suite
+280 passed / 0 failed.  NOT pushed to origin (operator batches
+pushes -- main stays at v0.1.1).
+
+**Tomorrow = Phase 3 (v0.2.0): PTT/MOX state machine + on-air
+SSB.**  Per §15.18 Phase tracker + §15.24.  Start checklist:
+
+1. **First, the Phase-3 minimum TX-freq plumbing** (§15.24 C5,
+   ~½ day): add `Radio.tx_freq_hz` (non-SPLIT = focused VFO) +
+   wire `_set_tx_freq()` into the MOX=1 edge in `set_mox()`.
+   Without it Phase 3 transmits at freq 0.  Note
+   `radio.tx_bw_for(mode)` ALREADY exists (radio.py:2010);
+   only `tx_freq_hz` is missing.
+2. PTT/MOX state machine in `lyra/ptt.py` (Phase 0 left
+   scaffolding only) — RX→MOX_TX, hardware-PTT forwarder from
+   EP6 FrameStats.ptt_in via QueuedConnection (CLAUDE.md §5).
+3. MOX/TUN buttons + TX drive slider + LED-bar TX meter row in
+   `panels.py` (clean baseline now — §15.17 stale tests fixed,
+   177/177 UI green; a real regression can't hide).
+4. On MOX=1: flip `HL2Stream.inject_tx_iq=True` +
+   `MoxEdgeFade.start_fade_in()`; on MOX=0: `start_fade_out()`
+   then flip inject False AFTER fade reaches OFF (the two-stage
+   release the MoxEdgeFade docstring describes).
+5. §15.20 host TX-timeout (~80 LOC, in Phase-3 budget) +
+   §15.9 red-on-air + §15.14 auto-mute + §15.15 AAmixer badge.
+
+**Phase-3-EXIT gate (before ANY real-antenna keying — do NOT
+skip):** §15.24 item C — `taskkill /F` Lyra mid-TX into a
+dummy load, scope/confirm HL2 PA bias drops within N sec.
+This verifies the §15.20 gateware-watchdog assumption that is
+currently UNVERIFIED for TX and load-bearing (the project's
+worst failure = stuck carrier on-band).
+
+**Scheduled w/ preventive notes already embedded** (don't
+re-derive — see §8.5 + §15.24 item D): v0.2.1 compressor/bp1
+auto-pairing (F2: SetTXACompressorRun self-heals, just call
+it), FM `SetTXAFMEmphPosition(1)` on FM-entry, §15.19↔§8.5
+pre-`fexchange0` stage reconciliation, profile-picker
+dB-vs-linear unit tagging, iqc cdef audit; v0.2.2 amsq
+threshold; v0.2-end §15.21 bug 4 (WASAPI-exclusive, dormant)
++ §6.7 CFIR capability gating.
+
+**Bench reminders:** Tier-A (`python -m
+scratch.test_tx_chain_bench`) + FFT
+(`scratch/test_tx_dsp_bench.py`) must stay green through Phase
+3.  Operator hardware: rapid stop/restart ×5+ should be
+v0.1.1-parity (the §15.21 bugs 1+2+3 fixes need real-HL2
+confirmation — verified clean in unit/smoke only so far).
+
+---
+
+*Last updated: 2026-05-15 EOD — **§15.24 pre-Phase-3
+reconciliation COMPLETE.**  Day arc: §15.23 TX SSB defect
+root-caused (5-agent: extraneous `SetTXABandpassRun` toggling
+stale `bp1`) + fixed (`86ac228`); 2-agent forward audit then
+3-agent review reconciled all findings; §15.24 plan executed —
+consensus §8.5 de-landmined, §15.21 bugs 1+2+3 fixed, 15 stale
+§15.17 UI tests repaired, §15.17 CLOSED, docs reconciled;
+verification gate GREEN (280/0).  Phase 3 unblocked; start
+pointer above.  Earlier:
+2026-05-14 — **v0.2.0 Phase 0 + Phase 1
 COMPLETE on feature branch.**  12 commits between v0.1.1 GA
 (``0b730f2``) and current HEAD (``9fe0b59``) land the full
 protocol-layer surface for v0.2 TX: all 10 HPSDR P1 C&C
