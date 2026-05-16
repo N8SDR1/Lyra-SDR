@@ -6056,6 +6056,40 @@ Output: one reconciled plan that does NOT paint v0.3 PS into
 a corner.  Operator standing directive: verify-first, no
 guessing.
 
+#### N8SDR THETIS DB EXPORT 2026-05-16 (authoritative values)
+
+`Y:\hold\screenshots\Thetis_database_export_Default_5_16_2026
+_6_54 PM.xml` (ADO.NET DataSet, `<Key>`/`<Value>` rows) +
+~20 tab JPGs.  Verified key values from his WORKING HL2+:
+* **`chkApolloTuner` = True**  ← THIS is his "Enable PA".  The
+  HL2 PA-enable UI is the re-tooltipped Apollo-tuner checkbox
+  driving `EnableApolloTuner` (I²C).  CONFIRMS: the Apollo-I²C
+  side-channel is MANDATORY for RF on his gateware (frame-10
+  bit alone never keys it).  `chkApolloPresent`/`chkApolloFilter`
+  also present — check.
+* `chkFullDuplex` = **False** (general).  The PA-tab "Enable
+  Full Duplex" must be a different/HL2 key — resolve in source.
+* `chkATTOnTX`=True, `udATTOnTX`=**31**, `chkForceATTwhenPSAoff`
+  =True, `chkForceATTwhenOutPowerChanges`=True(_decreased=False)
+  — PS-entangled forced-31 confirmed live.
+* TR delays: `udMoxDelay`=**15**, `udRFDelay`=**50**,
+  `udSpaceMoxDelay`=**13**, `udGenPTTOutDelay`=**5**,
+  `udPTTHang`=**10**, `udHermesStepAttenuatorDelay`=**100**,
+  `udPSMoxDelay`=**0.2 s**.  (Lyra: rf_delay=0 BIG gap;
+  mox_delay=10 vs 15; ptt_out=20 vs GenPTTOut 5.)  Screenshot
+  UI labels (RX/MOX/RF/PTT-Delay) ≠ DB keys → MUST map via
+  source before changing Lyra TrSequencing.
+* `udHermesStepAttenuatorData`(RX1)=**-26**, RX2=-26 (his LNA).
+* EER: `chkDSPEERon`=False (EER off; params present).
+* MicGain range -90..+40 (`udMicGainMin/Max`).
+Screens to mine (multimodal, this session): "HL2 PA and full
+duplex", "metering for SWR and ATT on TX and Force ATT",
+"Puresignal options", "PA settings for output power", "PTT
+Hangtime", "EER", "See multi meter…PO-SWR-ID-Compression-ALC
+and VDD" (VDD = PA drain V = the PA-bias readout), "TX
+profiles…Tune-Drive-Mic gain-Source-TX Filter", "DSP Buffers
+we are missing this", "AGC and ALC".
+
 **RE-PRIORITISED NEXT (was deferred): Apollo-tuner I²C
 side-channel.**  Required for RF on N8SDR's gateware.  §3.9:
 it is a NEW emitted EP2 I²C surface → needs default-safe gate
