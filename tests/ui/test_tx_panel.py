@@ -47,59 +47,52 @@ class TxPanelTest(unittest.TestCase):
         self.assertTrue(self.radio._tx_rx_muted)     # RX stood down
         self.assertFalse(self.radio._muted)          # operator mute UNTOUCHED
 
-    def test_keyup_holds_gated_through_flush_then_finish_releases(self):
-        """TX->RX must NOT un-gate at the hook (the wire MOX bit
-        just cleared; the RX chain rings across the T/R IQ
-        discontinuity).  It stays gated + flushes the RX DSP; only
-        the deferred settle-end (_finish_tx_rx_resume, fired by a
-        single-shot QTimer in the live app) un-gates + arms the
-        cos² fade.  Keydown does not arm the fade."""
+    def test_keydown_stops_rx_channel_keyup_starts_it(self) -> None:
+        """Thetis-faithful: keydown STOPS the WDSP RX channel
+        (blocking flush) so it never processes the keyed period;
+        the keyup hook (which the FSM fires only at _end_keyup,
+        AFTER the HW-T/R settle) STARTS it again on clean antenna
+        IQ.  No envelope fade machinery -- the channel itself is
+        off through TX."""
         from lyra.ptt import PttState
-        resets: list[bool] = []
-        self.radio._request_dsp_reset_full = (          # type: ignore
-            lambda: resets.append(True))
-        self.assertEqual(self.radio._tx_resume_fade_pos, -1)
+        reqs: list[bool] = []
+        self.radio._request_rx_channel = (              # type: ignore
+            lambda on: reqs.append(on))
         self.radio._on_tx_state_changed(True, PttState.MOX_TX)   # key down
-        self.assertTrue(self.radio._tx_rx_muted)
-        self.assertEqual(self.radio._tx_resume_fade_pos, -1)     # not armed
-        self.assertEqual(resets, [])                             # no flush yet
+        self.assertTrue(self.radio._tx_rx_muted)        # backup gate on
+        self.assertEqual(reqs, [False])                 # RX channel STOPPED
         self.radio._on_tx_state_changed(False, PttState.RX)      # key up
-        # Still gated + flushed; fade NOT armed (deferred to settle).
-        self.assertTrue(self.radio._tx_rx_muted)
-        self.assertEqual(resets, [True])                         # RX DSP flushed
-        self.assertEqual(self.radio._tx_resume_fade_pos, -1)
-        # Settle end (simulating the QTimer firing) un-gates + fades.
-        self.radio._finish_tx_rx_resume()
-        self.assertFalse(self.radio._tx_rx_muted)                # un-gated
-        self.assertEqual(self.radio._tx_resume_fade_pos, 0)      # fade armed
+        self.assertFalse(self.radio._tx_rx_muted)       # gate released
+        self.assertEqual(reqs, [False, True])           # RX channel STARTED
 
-    def test_resume_fade_ramps_then_releases(self) -> None:
-        """The fade ramps 0->1 across blocks then self-disarms
-        (-1), and the first resumed sample is heavily attenuated
-        (curve starts at 0) so there is no abrupt edge."""
-        import numpy as np
-        self.radio._tx_resume_fade_pos = 0
-        N = self.radio._TX_RESUME_FADE_SAMPLES
-        blk = np.ones(N // 2, dtype=np.float32)
-        out1 = self.radio._apply_tx_resume_fade(blk.copy())
-        self.assertLess(float(out1[0]), 0.05)            # ~silent at start
-        self.assertGreater(self.radio._tx_resume_fade_pos, 0)    # mid-fade
-        # second block finishes the curve -> disarms
-        self.radio._apply_tx_resume_fade(blk.copy())
-        self.assertEqual(self.radio._tx_resume_fade_pos, -1)
-        # inactive -> pass-through unchanged
-        same = np.full(64, 0.7, dtype=np.float32)
-        out = self.radio._apply_tx_resume_fade(same.copy())
-        self.assertTrue(np.allclose(out, 0.7))
+    def test_keyup_hook_fires_after_ptt_out_settle_not_before(self):
+        """The FSM must call the keyup hook from _end_keyup (past
+        the ptt_out_delay HW-T/R settle), NOT from _clear_mox_tail
+        (before it).  With a non-zero ptt_out_delay the QTimer
+        won't fire without an event loop, so the hook must NOT
+        have been called yet at that point."""
+        from lyra.ptt import PttState, TrSequencing
+        fsm = self.radio._ptt_fsm
+        fsm._tr = TrSequencing(mox_delay_ms=0, ptt_out_delay_ms=50)
+        events: list[bool] = []
+        # bind a recording hook (radio runtime not needed here)
+        fsm._on_tx_state_changed = lambda is_tx, st: events.append(is_tx)
+        self.radio.request_mox()
+        self.assertEqual(events, [True])                 # keydown fired
+        self.radio.release_mox()
+        # fade gate completes; _clear_mox_tail runs inline (mox=0)
+        # but _end_keyup is deferred by ptt_out=50 -> hook NOT yet
+        fsm._on_fade_poll()
+        self.assertEqual(events, [True])                 # NO keyup hook yet
+        self.assertEqual(fsm.current_state, PttState.MOX_TX)
 
-    def test_keyup_restores_rx_and_preserves_operator_mute(self) -> None:
+    def test_keyup_preserves_operator_mute(self) -> None:
         from lyra.ptt import PttState
         self.radio.set_muted(True)                   # operator chose mute
         self.assertTrue(self.radio._muted)
         self.radio._on_tx_state_changed(True, PttState.MOX_TX)   # key down
         self.radio._on_tx_state_changed(False, PttState.RX)      # key up
-        self.radio._finish_tx_rx_resume()            # settle completes
-        self.assertFalse(self.radio._tx_rx_muted)    # RX released
+        self.assertFalse(self.radio._tx_rx_muted)    # TX gate released
         self.assertTrue(self.radio._muted)           # operator mute SURVIVES
 
     def test_mox_button_drives_facade(self) -> None:

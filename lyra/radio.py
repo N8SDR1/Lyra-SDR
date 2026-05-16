@@ -889,26 +889,6 @@ class Radio(QObject):
         # thread / written on Qt-main -- GIL-atomic bool, same
         # single-writer discipline as _muted.
         self._tx_rx_muted = False
-        # cos² fade-in applied to receive audio on the TX->RX edge
-        # (smooths the un-key "rush" -- see _on_tx_state_changed).
-        # -1 = inactive; >=0 = current sample index into the
-        # raised-cosine resume curve.  Read on the DSP worker /
-        # written on Qt-main -- GIL-atomic int, single-writer.
-        self._tx_resume_fade_pos = -1
-        # ~80 ms raised-cosine ramp (0->1), click-free, at the HL2
-        # fixed 48 kHz audio rate.  Long enough to dissolve the
-        # un-key swell, short enough that no usable content is lost.
-        self._TX_RESUME_FADE_SAMPLES = 3840
-        _trt = np.linspace(0.0, 1.0, self._TX_RESUME_FADE_SAMPLES,
-                           dtype=np.float32)
-        self._tx_resume_curve = (
-            0.5 * (1.0 - np.cos(np.pi * _trt))).astype(np.float32)
-        # Settle held (still muted) after the wire MOX bit clears,
-        # before un-gating RX -- lets the flushed receive chain
-        # re-prime on clean post-T/R antenna IQ so its filter ring
-        # across the transition is never heard.  Covers the worker
-        # "reset between blocks" latency (~one block) plus margin.
-        self._TX_RX_RESUME_SETTLE_MS = 50
         # Auto-LNA loop: periodically adjust _gain_db to keep the ADC
         # peak near a target headroom. Engaged only when the operator
         # enables it; manual LNA is the default.
@@ -2649,78 +2629,71 @@ class Radio(QObject):
         self._tx_power_pct = -1
         self.set_tx_power_pct(pct)
 
+    def _request_rx_channel(self, on: bool) -> None:
+        """Start (on=True) / stop-with-flush (on=False) the WDSP RX
+        DSP channel itself.  Worker mode routes through the worker's
+        between-blocks request queue (race-free with
+        ``process_block``); single-thread mode acts directly."""
+        if self._dsp_worker is not None:
+            self._dsp_worker.request_rx_channel(on)
+            return
+        rx = getattr(self, "_wdsp_rx", None)
+        if rx is not None:
+            try:
+                rx.start() if on else rx.stop(blocking=True)
+            except Exception as exc:
+                print(f"[Radio] rx channel "
+                      f"{'start' if on else 'stop'} error: {exc}")
+
     def _on_tx_state_changed(self, is_tx: bool,
                              state: "PttState") -> None:
-        """RX-audio stand-down hook the FSM calls at the correct
-        keydown/keyup ordering slots (keydown: after the transmit
-        state is set, before the TX I/Q gate opens; keyup: before
-        the wire transmit bit is cleared).
+        """RX-DSP transmit/receive transition hook the FSM calls
+        at the §15.25 ordering slots: keydown after the transmit
+        state is set; keyup at ``_end_keyup`` — i.e. AFTER the
+        MOX bit has cleared and the ``ptt_out_delay`` hardware-T/R
+        settle has elapsed (the true return-to-receive point).
 
-        While transmitting, the receiver is folding the transmit
-        state — feeding that to the speaker is garbage (operator-
-        confirmed distorted audio).  So the RX audio output is
-        gated to silence for the duration of transmit and restored
-        on return to receive.
+        The receive chain must not process either the keyed period
+        (it would fold the transmit state) or the abrupt T/R input
+        discontinuity (its filters/decimator ring across it — heard
+        as a broadband "sweep").  So the WDSP RX *channel itself*
+        is STOPPED (blocking flush) for the whole transmit period
+        and only RESTARTED once the hardware has physically settled
+        back to receive — the receiver simply does not exist while
+        transmitting and comes back fresh on clean antenna IQ.
 
-        This uses a SEPARATE transient flag (``_tx_rx_muted``),
-        deliberately NOT the operator mute (``_muted`` /
-        ``_muted_rx2``): the operator's Mute-A / Mute-B state must
-        survive a transmit cycle untouched, so a keyup restores
-        exactly the pre-transmit listening state.  The flag is
-        OR'd into the audio-output gate in ``_do_demod_wdsp`` /
-        the dual + tone paths.  Read on the DSP worker thread,
-        written here on Qt-main — a GIL-atomic bool, same
-        single-writer pattern as ``_muted``.
+        ``_tx_rx_muted`` (OR'd into the audio-output gates) is kept
+        purely as cheap belt-and-suspenders so even a single
+        stopped-channel residual block is silenced; it never
+        touches the operator's Mute-A/Mute-B state, so the
+        pre-transmit listening state is restored exactly.
 
         ``state`` is carried so the deferred §15.14 dual-RX policy
-        (MuteRX1OnVFOBTX / MuteRX2OnVFOATX — choose WHICH RX(s) to
-        stand down by VFO/SPLIT) can layer on here without a
-        signature change.  Phase 3 = BASE behaviour: transmit
-        silences the receive path; receive restores it.
+        (which RX[s] to stand down by VFO/SPLIT) can layer on here
+        without a signature change.  Phase 3 = BASE behaviour:
+        transmit stops the single receive path; the post-settle
+        keyup restarts it.
         """
         if is_tx:
-            # RX -> TX: gate receive audio immediately.
+            # RX -> TX (keydown): gate audio + STOP the RX DSP
+            # channel with a blocking flush so nothing of the
+            # keyed period is processed or carried across.
             self._tx_rx_muted = True
+            self._request_rx_channel(False)
             return
-        # TX -> RX.  This hook fires the instant the wire MOX bit
-        # clears (HL2's TR-sequencing delays are all 0, so the FSM
-        # keyup tail is fully inline).  At that instant the T/R is
-        # only just switching back and the antenna IQ is returning:
-        # the receive chain spent the whole keyed period on the
-        # T/R-coupled IQ, and that abrupt input discontinuity rings
-        # the WDSP filters + decimator -- heard as a brief broadband
-        # "sweep" if un-gated raw (a volume ramp can't remove it;
-        # the transient is in the IQ/filter domain, not the
-        # envelope).
-        #
-        # So DON'T un-gate yet.  Keep receive gated, flush the
-        # receive DSP (the same decimator + in-DLL-filter reset
-        # used for a freq/mode change -- a clean, artifact-free
-        # discontinuity) so the keyed-period + transition ring is
-        # DISCARDED rather than heard, then let the flushed chain
-        # re-prime on clean post-T/R antenna IQ for a short settle
-        # WHILE STILL MUTED.  Only after that settle un-gate, with
-        # a brief cos² fade-in as the final click-free polish.
-        # Deferred via single-shot QTimer -- Qt-main never blocks
-        # (§15.21); worker applies the reset between blocks.
-        self._tx_rx_muted = True            # stay gated through flush+settle
-        self._request_dsp_reset_full()      # discard the ring
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(self._TX_RX_RESUME_SETTLE_MS,
-                          self._finish_tx_rx_resume)
+        # TX -> RX: fires from the FSM's _end_keyup, AFTER the
+        # MOX bit cleared and the ptt_out_delay HW-T/R settle.
+        # The hardware is now truly back on receive, so RESTART
+        # the RX DSP channel — it re-primes from scratch on clean
+        # antenna IQ (no keyed-period or transition state to ring
+        # out) — then un-gate.
+        self._request_rx_channel(True)
+        self._tx_rx_muted = False
         # §15.14 (deferred): replace the blanket base behaviour
         # with the per-RX MuteRX*OnVFOBTX policy keyed off
         # (is_tx, state) + the operator's per-RX prefs.  No inert
-        # code now — the base stand-down above is the real
+        # code now — the base stop/restart above is the real
         # behaviour until that policy lands.
-
-    def _finish_tx_rx_resume(self) -> None:
-        """Deferred end of the keyup RX-resume settle (Qt-main).
-        The flushed receive chain has re-primed on clean post-T/R
-        antenna IQ while muted; now un-gate with a short cos²
-        fade-in for a click-free edge."""
-        self._tx_resume_fade_pos = 0        # arm the cos² fade-in
-        self._tx_rx_muted = False           # un-gate the now-clean RX
 
     def set_ps_armed(self, ps_armed: bool) -> None:
         """Set the PS-armed axis of DispatchState.  Call from Qt main thread.
@@ -10330,27 +10303,6 @@ class Radio(QObject):
     # pipeline, exactly where Pratt designed it; no Python-side
     # gate can match that integration.
 
-    def _apply_tx_resume_fade(self, audio):
-        """Per-block cos² fade-in on the TX->RX edge (smooths the
-        un-key "rush").  Armed by ``_on_tx_state_changed(False)``
-        setting ``_tx_resume_fade_pos = 0``.  No-op when inactive
-        (-1) -- one int compare on the normal RX path, no cost.
-        Runs on the DSP worker thread; the only writer of the
-        position from here, Qt-main only re-arms it (sets 0)."""
-        pos = self._tx_resume_fade_pos
-        if pos < 0 or audio is None or audio.size == 0:
-            return audio
-        n = audio.size
-        N = self._TX_RESUME_FADE_SAMPLES
-        idx = np.arange(pos, pos + n)
-        ramp = np.ones(n, dtype=np.float32)
-        inwin = idx < N
-        if inwin.any():
-            ramp[inwin] = self._tx_resume_curve[idx[inwin]]
-        nxt = pos + n
-        self._tx_resume_fade_pos = nxt if nxt < N else -1
-        return audio * ramp
-
     def _do_demod_wdsp(self, iq):
         """WDSP-engine RX audio path (v0.0.9.6).
 
@@ -10517,9 +10469,6 @@ class Radio(QObject):
             v = float(self._volume)
             if v != 1.0:
                 audio = audio * np.float32(v)
-            # cos² fade-in on return from TX (no-op unless armed by
-            # the keyup edge) -- dissolves the un-key swell.
-            audio = self._apply_tx_resume_fade(audio)
 
         # ── Phase 3.D safety clamp (2026-05-12) ─────────────────
         # Hard-clamp the post-volume audio to [-1.0, +1.0] so any

@@ -58,7 +58,14 @@ class PttRadioWiringTest(unittest.TestCase):
 
     def setUp(self) -> None:
         from lyra.radio import Radio
+        from lyra.ptt import TrSequencing
         self.radio = Radio()
+        # Unit determinism: the production FSM default is now the
+        # non-zero HW-T/R settle (mox 10 / ptt_out 20 ms); force
+        # all-zero so the keyup tail runs inline without an event
+        # loop.  These tests exercise wiring/facade, not TR timing.
+        self.radio._ptt_fsm._tr = TrSequencing(
+            mox_delay_ms=0, ptt_out_delay_ms=0)
 
     def test_radio_owns_fsm(self) -> None:
         self.assertIsInstance(self.radio._ptt_fsm, PttStateMachine)

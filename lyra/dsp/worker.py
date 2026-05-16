@@ -200,6 +200,11 @@ class DspWorker(QObject):
         # need atomic compound updates.
         self._stop_requested: bool = False
         self._reset_requested: bool = False
+        # TX keydown/keyup: stop/start the WDSP RX channel itself
+        # (not just gate audio).  None = no pending request, True =
+        # start, False = stop-with-flush.  Applied between blocks
+        # like _reset_requested so it never races process_block.
+        self._rx_chan_req: "bool | None" = None
         # Phase 3.B B.3 — back-reference to Radio for the audio chain.
         # The worker calls radio._do_demod_wdsp() (the WDSP cffi
         # engine), radio._emit_tone(), and reads radio._mode +
@@ -319,6 +324,15 @@ class DspWorker(QObject):
         or rate change — any operator action that introduces a
         legitimate audio discontinuity."""
         self._reset_requested = True
+
+    def request_rx_channel(self, on: bool) -> None:
+        """Request the worker to start (on=True) or stop-with-flush
+        (on=False) the WDSP RX channel on the next block boundary.
+        Called from the main thread on TX keydown (stop) / the
+        post-T/R-settle keyup point (start) so the receive chain
+        does not process the keyed period or the T/R-transition
+        IQ — applied between blocks, never racing process_block."""
+        self._rx_chan_req = bool(on)
 
     def flush_fft_ring(self) -> None:
         """Phase 3.E.1 v0.1 (2026-05-12): flush the FFT sample ring
@@ -518,6 +532,22 @@ class DspWorker(QObject):
                 if self._reset_requested:
                     self._reset_requested = False
                     self._reset()
+
+                if self._rx_chan_req is not None:
+                    want_on = self._rx_chan_req
+                    self._rx_chan_req = None
+                    radio = self._radio
+                    rx = getattr(radio, "_wdsp_rx", None) if radio else None
+                    if rx is not None:
+                        try:
+                            if want_on:
+                                rx.start()
+                            else:
+                                rx.stop(blocking=True)
+                        except Exception as exc:
+                            print(f"[DspWorker] rx channel "
+                                  f"{'start' if want_on else 'stop'} "
+                                  f"error: {exc}")
 
                 try:
                     self.process_block(samples, rx2_samples)

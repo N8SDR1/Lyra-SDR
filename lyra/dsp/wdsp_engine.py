@@ -240,11 +240,19 @@ class RxChannel:
                 self._lib.SetChannelState(self.channel, 1, 0)
                 self._running = True
 
-    def stop(self) -> None:
-        """Stop processing without destroying state. Output slews down cleanly."""
+    def stop(self, blocking: bool = False) -> None:
+        """Stop processing without destroying state.
+
+        ``blocking=False`` (dmode=0): output slews down cleanly,
+        call returns immediately.  ``blocking=True`` (dmode=1):
+        the call waits until the channel's in-flight buffers are
+        flushed before returning -- used on a TX keydown so the
+        receive chain is fully quiesced (no stale samples, no
+        filter state carried across the transmit period)."""
         with self._lock:
             if self._opened and self._running:
-                self._lib.SetChannelState(self.channel, 0, 0)
+                self._lib.SetChannelState(
+                    self.channel, 0, 1 if blocking else 0)
                 self._running = False
 
     def close(self) -> None:

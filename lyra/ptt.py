@@ -123,14 +123,25 @@ class PttSource(Enum):
 
 @dataclass(frozen=True)
 class TrSequencing:
-    """TR-sequencing delays (ms).  HL2 defaults all-zero; values
-    are sourced from the radio capability struct per CLAUDE.md
-    §6.7 #5 (the FSM stays hardware-agnostic and merely consumes
-    a ``TrSequencing`` it is handed).  Each non-zero delay is
-    applied via a single-shot ``QTimer`` -- never ``sleep``."""
+    """TR-sequencing delays (ms).  These are operator "TR
+    sequencing" timing values, NOT capability-zero on HL2 (an
+    earlier draft wrongly defaulted them all to zero, which
+    collapsed the keyup tail fully inline and left no
+    hardware-T/R settle window before the receiver was restarted
+    -- the cause of the un-key transition transient).  Defaults
+    here match the long-standing reference defaults: a short gap
+    to let in-flight transmit samples clear before the MOX bit
+    drops, and a hardware-switch settle after the MOX bit clears
+    before the receiver is declared/restarted.  Operator-tunable
+    later; still sourced via the capability struct per CLAUDE.md
+    §6.7 #5 (the FSM stays hardware-agnostic).  Each non-zero
+    delay is applied via a single-shot ``QTimer`` -- never
+    ``sleep`` (Qt-main must not block, §15.21)."""
 
-    mox_delay_ms: int = 0       # gap: down-ramp done -> clear MOX bit
-    ptt_out_delay_ms: int = 0   # settle after keyup before declaring RX
+    mox_delay_ms: int = 10      # gap: down-ramp done -> clear MOX bit
+                                #   (lets in-flight TX samples clear)
+    ptt_out_delay_ms: int = 20  # HW-T/R settle after the MOX bit
+                                #   clears, before RX is restarted
     rf_delay_ms: int = 0        # gap: MOX bit set -> start TX I/Q
     space_mox_delay_ms: int = 0  # CW inter-element hold (v0.2.2)
     key_up_delay_ms: int = 0    # CW keyer hang (v0.2.2)
@@ -333,15 +344,21 @@ class PttStateMachine(QObject):
     def _clear_mox_tail(self) -> None:
         if self._radio is not None:
             self._radio.set_mox(False)   # NOW clear the MOX bit
-        if self._on_tx_state_changed is not None:
-            self._on_tx_state_changed(False, self._state)
-        # ptt_out_delay (HL2=0 -> inline): settle before
-        # declaring RX (TR relay / external-PA time on ANAN).
+        # ptt_out_delay: hardware-T/R switch settle AFTER the MOX
+        # bit clears and BEFORE the receiver is restarted.  The
+        # receive-side hook deliberately fires in _end_keyup (past
+        # this settle), NOT here -- so the RX DSP comes back only
+        # once the hardware is physically on receive and the
+        # antenna IQ is clean (no T/R-transition ring).
         self._deferred(self._tr.ptt_out_delay_ms, self._end_keyup)
 
     def _end_keyup(self) -> None:
         self._releasing = False
         self._transition(self._resolve())
+        # True return-to-receive point (post HW-T/R settle):
+        # restart the receive path here.
+        if self._on_tx_state_changed is not None:
+            self._on_tx_state_changed(False, self._state)
 
     # ── helpers ────────────────────────────────────────────────────
     def _deferred(self, ms: int, fn: Callable[[], None]) -> None:

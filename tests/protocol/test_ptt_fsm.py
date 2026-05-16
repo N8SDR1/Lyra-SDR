@@ -66,6 +66,13 @@ class PttFsmTest(unittest.TestCase):
         cls._app = QApplication.instance() or QApplication(sys.argv)
 
     def _bound(self, tr: TrSequencing | None = None):
+        # Unit determinism: default to explicit all-zero TR so the
+        # keyup tail runs fully inline (no QTimer / event loop
+        # needed).  The PRODUCTION default is now non-zero
+        # (mox 10 / ptt_out 20 ms -- the HW-T/R settle window);
+        # TR-timing tests pass an explicit TrSequencing.
+        if tr is None:
+            tr = TrSequencing(mox_delay_ms=0, ptt_out_delay_ms=0)
         fsm = PttStateMachine(tr_sequencing=tr)
         radio, stream, fade = _FakeRadio(), _FakeStream(), _FakeFade()
         tx_events: list[tuple[bool, PttState]] = []
@@ -129,7 +136,11 @@ class PttFsmTest(unittest.TestCase):
         fsm._on_fade_poll()
         self.assertFalse(stream.inject_tx_iq)      # inject cleared
         self.assertEqual(radio.set_mox_calls, [False])  # THEN MOX
-        self.assertEqual(tx_events[-1], (False, PttState.MOX_TX))
+        # The keyup hook now fires from _end_keyup (post HW-T/R
+        # settle) AFTER the RX transition -- it reports the
+        # just-entered state (RX), symmetric with the keydown hook
+        # reporting the just-entered TX state.
+        self.assertEqual(tx_events[-1], (False, PttState.RX))
         self.assertEqual(fsm.current_state, PttState.RX)
 
     # 4 ── SW/HW share state (wire bit exactly 2x) ──────────────────
@@ -204,29 +215,38 @@ class PttFsmTest(unittest.TestCase):
         # fire without an event loop -> state stays MOX_TX, proving
         # RX is not declared synchronously before the settle).
         fsm, radio, stream, fade, _e, _st = self._bound(
-            TrSequencing(ptt_out_delay_ms=50))
+            TrSequencing(mox_delay_ms=0, ptt_out_delay_ms=50))
         fsm.request_mox()
         fade.set_off(False)
         fsm.release_mox()
         fade.set_off(True)
         fsm._on_fade_poll()
         # inject cleared + MOX cleared (those are inline; mox_delay
-        # = 0) but RX NOT yet declared (ptt_out deferred).
+        # = 0) but RX NOT yet declared (ptt_out deferred -> the
+        # RX-restart hook fires in _end_keyup, past the settle).
         self.assertFalse(stream.inject_tx_iq)
         self.assertEqual(radio.set_mox_calls, [True, False])
         self.assertEqual(fsm.current_state, PttState.MOX_TX)
 
-    # 8 ── TR-sequencing: HL2 zero-defaults are all inline ──────────
-    def test_zero_delays_inline(self) -> None:
+    # 8 ── TR-sequencing -------------------------------------------------
+    def test_production_defaults_are_thetis_settle(self) -> None:
+        # The PRODUCTION default is the HW-T/R settle window
+        # (NOT all-zero -- the earlier all-zero default collapsed
+        # the keyup tail inline and caused the un-key transient).
+        tr = TrSequencing()
+        self.assertEqual(tr.mox_delay_ms, 10)
+        self.assertEqual(tr.ptt_out_delay_ms, 20)
+
+    def test_explicit_zero_delays_inline(self) -> None:
         fsm, radio, stream, fade, _e, _st = self._bound(
-            TrSequencing())   # all-zero (HL2)
+            TrSequencing(mox_delay_ms=0, ptt_out_delay_ms=0))
         fsm.request_mox()
         self.assertTrue(stream.inject_tx_iq)   # rf_delay=0 -> inline
         fade.set_off(False)
         fsm.release_mox()
         fade.set_off(True)
         fsm._on_fade_poll()
-        # mox_delay=0 + ptt_out_delay=0 -> fully inline to RX.
+        # explicit mox_delay=0 + ptt_out_delay=0 -> fully inline.
         self.assertEqual(radio.set_mox_calls, [True, False])
         self.assertEqual(fsm.current_state, PttState.RX)
 
@@ -244,7 +264,10 @@ class PttFsmTest(unittest.TestCase):
 
     # 10 ── unbound runtime degrades gracefully ─────────────────────
     def test_unbound_runtime_emits_state_no_crash(self) -> None:
-        fsm = PttStateMachine()           # no bind_runtime
+        # explicit all-zero TR -> keyup inline (production default
+        # is now the non-zero HW-T/R settle).
+        fsm = PttStateMachine(tr_sequencing=TrSequencing(
+            mox_delay_ms=0, ptt_out_delay_ms=0))   # no bind_runtime
         states: list[PttState] = []
         fsm.state_changed.connect(states.append)
         fsm.request_mox()                 # no DSP refs -> no crash

@@ -67,6 +67,12 @@ class PttHwForwarderTest(unittest.TestCase):
     def setUp(self) -> None:
         from lyra.radio import Radio
         self.radio = Radio()
+        from lyra.ptt import TrSequencing
+        # Unit determinism: force all-zero TR (production default
+        # is now the non-zero HW-T/R settle) so the keyup tail is
+        # inline without an event loop.
+        self.radio._ptt_fsm._tr = TrSequencing(
+            mox_delay_ms=0, ptt_out_delay_ms=0)
         # v0.2.0 Phase 3 hotfix (§15.25 / §10 Q#1): the EP6 ptt_in
         # forwarder is OPT-IN now (default OFF -- some HL2+/AK4951
         # units carry a non-zero ptt_in at RX rest, which the
