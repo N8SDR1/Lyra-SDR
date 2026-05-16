@@ -5971,6 +5971,51 @@ Phase-3-EXIT kill-Lyra-mid-TX dummy-load PA-bias-drop test
   Apollo-I²C work (same HL2 I²C side-channel surface) and is a
   prerequisite for an observable kill-test.
 
+#### OPERATOR THETIS SCREENSHOTS 2026-05-16 (working config, ground truth)
+
+N8SDR's actual working Thetis 2.10.3.13 setup (verify against
+source before coding -- standing directive):
+* **Ant/Filters → "ATT on Tx" ✓ = 31 (B20M)**, "Force ATT on
+  Tx to 31 when PS-A off" ✓, "Force ATT on Tx to 31 when Drive/
+  Tune ↑ & PS-A on" ✓.  Thetis `m_bATTonTX` (console.cs keydown
+  30293-30327 / keyup 30391-30410, HL2/non-HPSDR branch):
+  keydown saves per-band RX1 step-att + sets the step-att to
+  `getTXstepAttenuatorForBand` (FORCED 31 when PS-A off or CW);
+  keyup restores via `updateAttNudsCombos`/`UpdatePreamps`.
+  m_bATTonTX OFF → `SetTxAttenData(0)`.  **HL2 nuance:** the
+  AD9866 step-att is SHARED RX/TX; Lyra's frame-11 C4 already
+  mox-gates it (`_tx_step_attn_db` while mox else
+  `_rx_step_attn_db`).  So the OPEN question to source-verify
+  (`getTXstepAttenuatorForBand` / `_forceATTwhenPSAoff` →
+  wire): does Lyra need a **protective floor — force TX-time
+  step-att to 31 (min pwr) when PA/PS off or CW** on top of the
+  operator TX-power %?  (The freeze-Auto-LNA fix cb58bcb is
+  necessary but separate from this floor.)
+* **Options-1 → TR sequencing (operator's WORKING values on his
+  HL2+):** RX Delay 5 / **MOX Delay 15** / **RF Delay 50** /
+  **PTT Delay 13** ms; CW Key-Up 10 / Key-Down 9.  Lyra
+  TrSequencing gaps: `rf_delay_ms`=0 (his 50 — the MOX→RF
+  settle, biggest gap), `mox_delay_ms`=10 (his 15),
+  `ptt_out_delay_ms`=20 (his 13).  ACTION: source-verify the
+  Thetis RX/MOX/RF/PTT-Delay → wire mapping, reconcile Lyra
+  defaults to verified behaviour, and make them
+  operator-configurable (Settings → TX, per §15.20/§15.19).
+  Also: "HERMES-LITE Step Atten Enable RX1 ✓ -26"; "Prevent TX
+  when on different band to RX ✓"; "Auto att RX1 ✓ Undo 4 s".
+* **Other H/W → PA: "Enable PA" ✓ + "Enable Full Duplex" ✓.**
+  This is the PA-enable UI on his working Thetis (NOT a
+  separate Apollo checkbox in this build).  Source-verify what
+  "Enable PA" + "Enable Full Duplex" emit on the HL2 wire --
+  THIS is the path to RF on his gateware (supersedes/clarifies
+  the earlier "re-tooltipped chkApolloTuner" Plan-agent note;
+  trust this screenshot of his actual working rig).
+* **General → RX2:** "Auto Mute RX2 on TX" ✓, "Auto Mute RX1
+  on VFO B TX" ✓ (= the deferred §15.14 policy — confirmed).
+* **ADC:** all DDC0-6 → ADC0 (P1 ADC assignment).
+* Operator has MORE screenshots available (PA Settings /
+  Transmit / Other H/W→Amp / Calibration) -- request them for
+  the PA/Apollo + TR-delay verification.
+
 **RE-PRIORITISED NEXT (was deferred): Apollo-tuner I²C
 side-channel.**  Required for RF on N8SDR's gateware.  §3.9:
 it is a NEW emitted EP2 I²C surface → needs default-safe gate
