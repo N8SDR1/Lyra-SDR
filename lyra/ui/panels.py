@@ -4913,14 +4913,23 @@ class DspPanel(GlassPanel):
 class TxPanel(GlassPanel):
     """Transmit control: MOX keying, TUN (reserved), TX drive.
 
-    v0.2.0 Phase 3 commit 3.4 — the first operator surface that
-    can put the radio on the air.  MOX press/release funnels
-    through the Radio facade into the PTT state machine, which
-    runs the keydown/keyup ordering (TX carrier loaded before the
-    transmit bit; the bit cleared only after the I/Q down-ramp
-    completes).  The button is a slave display of true TX state —
-    it mirrors ``tx_active_changed`` so a hardware foot-switch (or
-    any future TX source) keeps it truthful.
+    v0.2.0 Phase 3 commit 3.4 — the first operator TX surface.
+    MOX press/release funnels through the Radio facade into the
+    PTT state machine, which runs the keydown/keyup ordering (TX
+    carrier loaded before the transmit bit; the bit cleared only
+    after the I/Q down-ramp completes).  The button is a slave
+    display of true TX state — it mirrors ``tx_active_changed`` so
+    a hardware foot-switch (or any future TX source) keeps it
+    truthful.
+
+    SAFETY (2026-05-16): MOX is shipped DISABLED.  The keydown
+    chain flips the transmit state but no code yet stands the
+    receive DSP/audio path down, so keying leaves RX running into
+    the transmit state (operator-confirmed distorted RX audio on
+    a dummy load).  The wire/facade plumbing is correct and
+    unit-tested; only the clickable path is gated off until the
+    RX-audio release exists.  Re-enabled in the commit that adds
+    it.
 
     TUN is rendered but disabled: a tune press needs a low-power
     carrier/tone source that does not exist until a later v0.2.x
@@ -4944,16 +4953,23 @@ class TxPanel(GlassPanel):
         self.mox_btn.setFixedWidth(64)
         self.mox_btn.setChecked(radio.is_tx if hasattr(radio, "is_tx")
                                 else False)
+        # SAFETY (2026-05-16): keying is DISABLED until the RX-audio
+        # release lands.  The keydown path flips the transmit state
+        # but nothing yet stands the receive DSP/audio path down, so
+        # keying leaves RX running into the transmit state (distorted
+        # audio, undefined RX behaviour).  The wire/facade plumbing
+        # is correct and unit-tested; only the operator-clickable
+        # path is gated off until RX release exists, so the button
+        # can't put the radio in that half-state.  Present (final
+        # layout) + disabled + tooltip — same no-inert-UI discipline
+        # as TUN.  Re-enabled in the commit that adds RX release.
+        self.mox_btn.setEnabled(False)
         self.mox_btn.setToolTip(
-            "MOX — manual transmit.  Press to key the transmitter, "
-            "press again to return to receive.\n\n"
-            "Keying runs the safe TX sequence: the transmit carrier "
-            "is loaded before the on-air bit is set, and on release "
-            "the on-air bit clears only after the transmit audio has "
-            "ramped down — no key-clicks, no splatter, no stuck "
-            "carrier.\n\n"
-            "This button reflects the true on-air state, so it also "
-            "lights if transmit is started by any other source.")
+            "MOX — manual transmit.\n\nTemporarily disabled: the "
+            "transmit keying sequence does not yet stand the "
+            "receive path down, so keying would leave RX running "
+            "into the transmit state.  Re-enabled once receive "
+            "release is in place — until then, no keying.")
         self.mox_btn.toggled.connect(self._on_mox_toggled)
         keys.addWidget(self.mox_btn)
 

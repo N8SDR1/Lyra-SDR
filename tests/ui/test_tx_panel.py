@@ -32,6 +32,14 @@ class TxPanelTest(unittest.TestCase):
         self.radio = Radio()
         self.panel = TxPanel(self.radio)
 
+    def test_mox_disabled_until_rx_release(self) -> None:
+        """SAFETY regression guard (2026-05-16): MOX must ship
+        DISABLED until the keydown chain stands the RX path down.
+        Keying without RX release = distorted RX / undefined
+        receive state.  Re-enable ONLY in the commit that adds
+        RX-audio release (delete/flip this guard there)."""
+        self.assertFalse(self.panel.mox_btn.isEnabled())
+
     def test_mox_button_drives_facade(self) -> None:
         calls: list[str] = []
         self.radio.request_mox = lambda: calls.append("req")   # type: ignore
