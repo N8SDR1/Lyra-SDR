@@ -1153,6 +1153,22 @@ class Radio(QObject):
         # start_fade_out() at MOX edges.  v0.2 keeps the fade in OFF
         # state permanently since no caller flips it.
         self._mox_edge_fade = None
+        # v0.2.0 Phase 3 commit 3b (§15.25): own the PTT/MOX FSM.
+        # Constructed HERE (before any stream) so the commit-5 UI
+        # + Radio pass-throughs can connect to it / state_changed
+        # at app-build time.  Runtime refs (radio/stream/fade/
+        # auto-mute cb) are injected by `_ptt_fsm.bind_runtime`
+        # in start() once the worker/fade exist, and cleared by
+        # `unbind_runtime` in stop().  Parent=self -> Qt-main
+        # affinity (Radio is created on Qt-main); Qt-main is the
+        # FSM's sole writer.  TrSequencing defaults all-zero
+        # (HL2); ANAN/external-PA values come from the capability
+        # struct later (§6.7 #5).
+        from lyra.ptt import PttStateMachine as _PttFSM
+        self._ptt_fsm = _PttFSM(parent=self)
+        # HW-PTT edge-detect latch (commit 3c forwarder sets this
+        # from the RX-loop thread; single-writer, GIL-atomic bool).
+        self._last_hw_ptt: bool = False
         # Phase 2 v0.1 (2026-05-11): second WDSP RX channel for RX2.
         # Mirrors ``_wdsp_rx`` lifecycle (created/recreated together
         # in ``_open_wdsp_rx``).  RX2's mode/filter/AGC follow RX1
@@ -2377,6 +2393,43 @@ class Radio(QObject):
         # consumers.  Phase 3 wires set_tx_active slots on
         # FrequencyDisplay / SMeter / spectrum widget here.
         self.tx_active_changed.emit(new)
+
+    # ── PTT/MOX FSM facade (v0.2.0 Phase 3 commit 3b, §15.25) ──────
+    # The UI (commit-5 MOX/TUN buttons) calls THESE, never reaches
+    # into ``self._ptt_fsm`` -- keeps the §6.7 facade discipline
+    # (UI ↔ Radio; Radio ↔ FSM).  The FSM is the single funnel that
+    # ultimately calls back into ``Radio.set_mox`` with the
+    # §15.25-correct keydown/keyup ordering.
+
+    def request_mox(self) -> None:
+        """Operator MOX-button press (commit-5 UI).  Drives the
+        FSM, which runs the §15.25 keydown chain (incl. the
+        commit-2 TX-freq-before-MOX ordering) and finally calls
+        ``Radio.set_mox(True)``."""
+        self._ptt_fsm.request_mox()
+
+    def release_mox(self) -> None:
+        """Operator MOX-button release.  Drives the FSM keyup:
+        fade-out → non-blocking gate → ``Radio.set_mox(False)``
+        only after the TX I/Q down-ramp completes (§15.25)."""
+        self._ptt_fsm.release_mox()
+
+    def _on_tx_state_changed(self, is_tx: bool,
+                             state: "PttState") -> None:
+        """Auto-mute hook the FSM calls at the §15.25-correct
+        ordering slot (keydown after set_mox; keyup before
+        clearing the MOX bit).
+
+        Phase 3: deliberate **no-op** -- §15.14 (auto-mute-on-TX)
+        fills the body in its own commit.  The ``state`` arg is
+        present from day one so the CW (v0.2.2) / TUN / VOX
+        (v0.2.3) branches need no signature change (§15.25
+        ambiguity #4 resolution).
+        """
+        # §15.14 will implement: mute/unmute the self-monitor RX
+        # path per the operator MuteRX*OnVFOBTX rules, keyed off
+        # (is_tx, state).  No behavior in Phase 3.
+        return
 
     def set_ps_armed(self, ps_armed: bool) -> None:
         """Set the PS-armed axis of DispatchState.  Call from Qt main thread.
@@ -8396,11 +8449,26 @@ class Radio(QObject):
                     )
                     self._tx_dsp_worker.start()
                     self._wire_mic_source()
+                    # v0.2.0 Phase 3 commit 3b (§15.25): inject the
+                    # runtime refs into the FSM now that stream +
+                    # MoxEdgeFade exist.  The FSM was constructed in
+                    # __init__; this is where it becomes able to
+                    # drive set_mox / inject_tx_iq / the fade gate.
+                    self._ptt_fsm.bind_runtime(
+                        radio=self,
+                        stream=self._stream,
+                        mox_edge_fade=self._mox_edge_fade,
+                        on_tx_state_changed=self._on_tx_state_changed,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     print(f"[Radio] TxDspWorker start failed: {exc}")
                     self._tx_dsp_worker = None
                     self._tx_iq_tap = None
                     self._mox_edge_fade = None
+                    try:
+                        self._ptt_fsm.unbind_runtime()
+                    except Exception:
+                        pass
         except Exception as e:
             self.status_message.emit(f"Start failed: {e}", 5000)
             self._stream = None
@@ -8510,6 +8578,18 @@ class Radio(QObject):
         #   5. _stream.stop() further down handles RX-loop teardown
         #      + final STOP_IQ + socket close (the HL2 wedge fix is
         #      orthogonal to TX teardown -- see Phase 1 commit 6.1).
+        # v0.2.0 Phase 3 commit 3b (§15.25): unbind the FSM runtime
+        # FIRST -- it stops the keyup fade-poll QTimer, clears
+        # _releasing, and drops the radio/stream/fade refs so the
+        # FSM cannot drive a half-torn-down chain.  FSM object
+        # itself survives stop() (owned in __init__); a later
+        # start() re-binds.  Does NOT clear the wire MOX bit --
+        # the full _stream.stop() below stops the wire entirely
+        # (+ STOP_IQ per Phase 1 6.1).
+        try:
+            self._ptt_fsm.unbind_runtime()
+        except Exception:
+            pass
         if self._stream is not None:
             try:
                 self._stream.register_mic_consumer(None)
