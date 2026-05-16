@@ -47,17 +47,31 @@ class TxPanelTest(unittest.TestCase):
         self.assertTrue(self.radio._tx_rx_muted)     # RX stood down
         self.assertFalse(self.radio._muted)          # operator mute UNTOUCHED
 
-    def test_keyup_arms_resume_fade_keydown_does_not(self) -> None:
-        """The TX->RX edge arms the cos² resume fade-in (smooths
-        the un-key 'rush'); the RX->TX edge does NOT (output is
-        gated to silence -- a fade there is meaningless).  -1 =
-        inactive, 0 = armed at curve start."""
+    def test_keyup_holds_gated_through_flush_then_finish_releases(self):
+        """TX->RX must NOT un-gate at the hook (the wire MOX bit
+        just cleared; the RX chain rings across the T/R IQ
+        discontinuity).  It stays gated + flushes the RX DSP; only
+        the deferred settle-end (_finish_tx_rx_resume, fired by a
+        single-shot QTimer in the live app) un-gates + arms the
+        cos² fade.  Keydown does not arm the fade."""
         from lyra.ptt import PttState
-        self.assertEqual(self.radio._tx_resume_fade_pos, -1)     # idle
+        resets: list[bool] = []
+        self.radio._request_dsp_reset_full = (          # type: ignore
+            lambda: resets.append(True))
+        self.assertEqual(self.radio._tx_resume_fade_pos, -1)
         self.radio._on_tx_state_changed(True, PttState.MOX_TX)   # key down
-        self.assertEqual(self.radio._tx_resume_fade_pos, -1)     # NOT armed
+        self.assertTrue(self.radio._tx_rx_muted)
+        self.assertEqual(self.radio._tx_resume_fade_pos, -1)     # not armed
+        self.assertEqual(resets, [])                             # no flush yet
         self.radio._on_tx_state_changed(False, PttState.RX)      # key up
-        self.assertEqual(self.radio._tx_resume_fade_pos, 0)      # armed
+        # Still gated + flushed; fade NOT armed (deferred to settle).
+        self.assertTrue(self.radio._tx_rx_muted)
+        self.assertEqual(resets, [True])                         # RX DSP flushed
+        self.assertEqual(self.radio._tx_resume_fade_pos, -1)
+        # Settle end (simulating the QTimer firing) un-gates + fades.
+        self.radio._finish_tx_rx_resume()
+        self.assertFalse(self.radio._tx_rx_muted)                # un-gated
+        self.assertEqual(self.radio._tx_resume_fade_pos, 0)      # fade armed
 
     def test_resume_fade_ramps_then_releases(self) -> None:
         """The fade ramps 0->1 across blocks then self-disarms
@@ -84,6 +98,7 @@ class TxPanelTest(unittest.TestCase):
         self.assertTrue(self.radio._muted)
         self.radio._on_tx_state_changed(True, PttState.MOX_TX)   # key down
         self.radio._on_tx_state_changed(False, PttState.RX)      # key up
+        self.radio._finish_tx_rx_resume()            # settle completes
         self.assertFalse(self.radio._tx_rx_muted)    # RX released
         self.assertTrue(self.radio._muted)           # operator mute SURVIVES
 

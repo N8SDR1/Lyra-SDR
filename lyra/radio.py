@@ -903,6 +903,12 @@ class Radio(QObject):
                            dtype=np.float32)
         self._tx_resume_curve = (
             0.5 * (1.0 - np.cos(np.pi * _trt))).astype(np.float32)
+        # Settle held (still muted) after the wire MOX bit clears,
+        # before un-gating RX -- lets the flushed receive chain
+        # re-prime on clean post-T/R antenna IQ so its filter ring
+        # across the transition is never heard.  Covers the worker
+        # "reset between blocks" latency (~one block) plus margin.
+        self._TX_RX_RESUME_SETTLE_MS = 50
         # Auto-LNA loop: periodically adjust _gain_db to keep the ADC
         # peak near a target headroom. Engaged only when the operator
         # enables it; manual LNA is the default.
@@ -2672,28 +2678,49 @@ class Radio(QObject):
         signature change.  Phase 3 = BASE behaviour: transmit
         silences the receive path; receive restores it.
         """
-        self._tx_rx_muted = bool(is_tx)
-        if not is_tx:
-            # TX -> RX edge.  Arm a short cos² fade-in on the
-            # resumed receive audio.  Un-gating raw snaps the
-            # receiver back to full level after the keyed-silent
-            # period -- heard as a "rush"/swell regardless of the
-            # exact source (AGC re-attack, engine/buffer flush,
-            # T/R-settle transient).  Ramping the resumed output
-            # 0 -> full over ~80 ms removes the abrupt edge while
-            # keeping content (a key-up is a deliberate listening-
-            # state change, so a brief smooth ramp reads as natural,
-            # not lost audio).  Applied per-block in the audio
-            # output gate; -1 = inactive, 0 = (re)arm from the
-            # start of the curve.  GIL-atomic int, written here on
-            # Qt-main / read on the DSP worker -- single-writer,
-            # same discipline as _tx_rx_muted.
-            self._tx_resume_fade_pos = 0
+        if is_tx:
+            # RX -> TX: gate receive audio immediately.
+            self._tx_rx_muted = True
+            return
+        # TX -> RX.  This hook fires the instant the wire MOX bit
+        # clears (HL2's TR-sequencing delays are all 0, so the FSM
+        # keyup tail is fully inline).  At that instant the T/R is
+        # only just switching back and the antenna IQ is returning:
+        # the receive chain spent the whole keyed period on the
+        # T/R-coupled IQ, and that abrupt input discontinuity rings
+        # the WDSP filters + decimator -- heard as a brief broadband
+        # "sweep" if un-gated raw (a volume ramp can't remove it;
+        # the transient is in the IQ/filter domain, not the
+        # envelope).
+        #
+        # So DON'T un-gate yet.  Keep receive gated, flush the
+        # receive DSP (the same decimator + in-DLL-filter reset
+        # used for a freq/mode change -- a clean, artifact-free
+        # discontinuity) so the keyed-period + transition ring is
+        # DISCARDED rather than heard, then let the flushed chain
+        # re-prime on clean post-T/R antenna IQ for a short settle
+        # WHILE STILL MUTED.  Only after that settle un-gate, with
+        # a brief cos² fade-in as the final click-free polish.
+        # Deferred via single-shot QTimer -- Qt-main never blocks
+        # (§15.21); worker applies the reset between blocks.
+        self._tx_rx_muted = True            # stay gated through flush+settle
+        self._request_dsp_reset_full()      # discard the ring
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(self._TX_RX_RESUME_SETTLE_MS,
+                          self._finish_tx_rx_resume)
         # §15.14 (deferred): replace the blanket base behaviour
         # with the per-RX MuteRX*OnVFOBTX policy keyed off
         # (is_tx, state) + the operator's per-RX prefs.  No inert
         # code now — the base stand-down above is the real
         # behaviour until that policy lands.
+
+    def _finish_tx_rx_resume(self) -> None:
+        """Deferred end of the keyup RX-resume settle (Qt-main).
+        The flushed receive chain has re-primed on clean post-T/R
+        antenna IQ while muted; now un-gate with a short cos²
+        fade-in for a click-free edge."""
+        self._tx_resume_fade_pos = 0        # arm the cos² fade-in
+        self._tx_rx_muted = False           # un-gate the now-clean RX
 
     def set_ps_armed(self, ps_armed: bool) -> None:
         """Set the PS-armed axis of DispatchState.  Call from Qt main thread.
