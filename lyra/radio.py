@@ -392,6 +392,12 @@ class Radio(QObject):
     # struct.  Bidirectional sync between the dockable TxPanel
     # drive stepper and the Settings -> TX power section.
     tx_power_pct_changed = Signal(int)
+    # §15.20 TX safety timeout (commit 3.5): auto-unkey after N
+    # minutes of continuous keydown; operator-bypassable for long
+    # AM/CW.  Bidirectional sync to the Settings -> TX "TX Safety"
+    # section.
+    tx_timeout_seconds_changed = Signal(int)
+    tx_timeout_bypass_changed  = Signal(bool)
     # CW Zero (white) line offset from the VFO marker, in Hz.
     # Vertical reference line drawn at the filter center — i.e., where
     # a clicked CW signal lands and where the audio is generated.
@@ -1483,6 +1489,19 @@ class Radio(QObject):
         self._ncdxf_follow_timer.setInterval(1000)
         self._ncdxf_follow_timer.timeout.connect(self._ncdxf_follow_pump)
 
+        # §15.20 TX safety timeout (commit 3.5).  Single-shot timer
+        # armed on the MOX keydown edge / cancelled on keyup (in
+        # set_mox).  On expiry: force_release_all + operator toast.
+        # Defaults: 600 s (10 min), range enforced 60..1200 s
+        # (1..20 min) by the setter.  Bypass = never arm (long
+        # AM/CW).  Seeded here; QSettings restore via
+        # autoload_tx_timeout_settings (mirrors RIT/TX-power).
+        self._tx_timeout_seconds: int = 600
+        self._tx_timeout_bypass: bool = False
+        self._tx_timeout_timer = _QTimer(self)
+        self._tx_timeout_timer.setSingleShot(True)
+        self._tx_timeout_timer.timeout.connect(self._on_tx_timeout_fired)
+
         # Notch bank — list of Notch dataclasses (see top of file).
         # Operators add/remove via right-click on spectrum/waterfall;
         # each notch carries its own width, depth, cascade, and active
@@ -2443,6 +2462,14 @@ class Radio(QObject):
         # consumers.  Phase 3 wires set_tx_active slots on
         # FrequencyDisplay / SMeter / spectrum widget here.
         self.tx_active_changed.emit(new)
+        # §15.20 TX safety timeout: this is the single MOX edge
+        # funnel, so arm on the keydown edge / cancel on the keyup
+        # edge.  Catches stuck-PTT / fell-asleep-keyed / a software
+        # latch -- NOT a normal ragchew (bypass + the minutes knob
+        # cover long AM/CW).  Fires force_release_all (routes
+        # through the FSM source-set so a still-held source can't
+        # instantly re-key) + an operator toast.
+        self._update_tx_timeout(armed=new)
 
     # ── PTT/MOX FSM facade (v0.2.0 Phase 3 commit 3b, §15.25) ──────
     # The UI (commit-5 MOX/TUN buttons) calls THESE, never reaches
@@ -2628,6 +2655,101 @@ class Radio(QObject):
         # bypass the idempotent early-return by clearing it first).
         self._tx_power_pct = -1
         self.set_tx_power_pct(pct)
+
+    # ── TX safety timeout (v0.2.0 Phase 3 commit 3.5, §15.20) ──────
+    _TX_TIMEOUT_MIN_S = 60      # 1 min
+    _TX_TIMEOUT_MAX_S = 1200    # 20 min
+
+    @property
+    def tx_timeout_seconds(self) -> int:
+        return int(self._tx_timeout_seconds)
+
+    @property
+    def tx_timeout_bypass(self) -> bool:
+        return bool(self._tx_timeout_bypass)
+
+    def _update_tx_timeout(self, armed: bool) -> None:
+        """Arm (armed=True, MOX keydown edge) or cancel (keyup)
+        the safety timeout.  No-op-arm when bypassed.  Qt-main
+        only (set_mox runs on Qt-main via the FSM)."""
+        try:
+            if armed and not self._tx_timeout_bypass:
+                self._tx_timeout_timer.start(
+                    int(self._tx_timeout_seconds) * 1000)
+            else:
+                self._tx_timeout_timer.stop()
+        except Exception:
+            pass
+
+    def _on_tx_timeout_fired(self) -> None:
+        """Continuous-keydown limit reached -> stand down.  Routes
+        through force_release_all (FSM source-set) so a still-held
+        source can't instantly re-key; operator is told why + how
+        to change it."""
+        mins = max(1, round(self._tx_timeout_seconds / 60))
+        try:
+            self.force_release_all()
+        finally:
+            self.status_message.emit(
+                f"TX timeout reached after {mins} min — returned to "
+                f"receive.  Adjust or bypass in Settings → TX.", 6000)
+
+    def set_tx_timeout_seconds(self, seconds: int) -> None:
+        """Set the continuous-keydown limit (clamped 60..1200 s =
+        1..20 min).  Persists + signals.  If currently transmitting
+        and not bypassed, re-arm with the new limit."""
+        s = max(self._TX_TIMEOUT_MIN_S,
+                min(self._TX_TIMEOUT_MAX_S, int(seconds)))
+        if s == self._tx_timeout_seconds:
+            return
+        self._tx_timeout_seconds = s
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue("tx/timeout_seconds", s)
+        except Exception:
+            pass
+        if self._dispatch_state.mox:
+            self._update_tx_timeout(armed=True)   # re-arm w/ new limit
+        self.tx_timeout_seconds_changed.emit(s)
+
+    def set_tx_timeout_bypass(self, on: bool) -> None:
+        """Enable/disable the timeout bypass (for long AM ragchews
+        / slow CW).  Persists + signals.  Bypassing mid-transmit
+        cancels a pending timer; un-bypassing mid-transmit arms
+        one."""
+        on = bool(on)
+        if on == self._tx_timeout_bypass:
+            return
+        self._tx_timeout_bypass = on
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue("tx/timeout_bypass", on)
+        except Exception:
+            pass
+        if self._dispatch_state.mox:
+            self._update_tx_timeout(armed=not on)
+        self.tx_timeout_bypass_changed.emit(on)
+
+    def autoload_tx_timeout_settings(self) -> None:
+        """Restore the TX-safety-timeout prefs from QSettings on
+        startup (default 600 s / not bypassed).  Called once at app
+        build alongside the other ``autoload_*`` restores."""
+        try:
+            from PySide6.QtCore import QSettings
+            s = QSettings("N8SDR", "Lyra")
+            raw_s = s.value("tx/timeout_seconds", 600)
+            raw_b = s.value("tx/timeout_bypass", False)
+            secs = int(raw_s)
+            byp = (raw_b if isinstance(raw_b, bool)
+                   else str(raw_b).lower() in ("1", "true", "yes"))
+        except Exception:
+            secs, byp = 600, False
+        self._tx_timeout_seconds = max(
+            self._TX_TIMEOUT_MIN_S,
+            min(self._TX_TIMEOUT_MAX_S, secs))
+        self._tx_timeout_bypass = bool(byp)
+        self.tx_timeout_seconds_changed.emit(self._tx_timeout_seconds)
+        self.tx_timeout_bypass_changed.emit(self._tx_timeout_bypass)
 
     def _request_rx_channel(self, on: bool) -> None:
         """Start (on=True) / stop-with-flush (on=False) the WDSP RX

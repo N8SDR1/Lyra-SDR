@@ -44,13 +44,32 @@ class TxSettingsSyncTest(unittest.TestCase):
         # guarded setValue must not bounce back and re-emit).
         self.assertEqual(seen.count(100), 1)
 
-    def test_settings_tab_has_no_inert_groupbox(self) -> None:
-        from PySide6.QtWidgets import QGroupBox
-        boxes = self.tab.findChildren(QGroupBox)
-        # Exactly the one real "TX Power & Drive" section -- future
-        # sections are comment anchors, not empty boxes (no-inert-UI).
-        self.assertEqual(len(boxes), 1)
-        self.assertEqual(boxes[0].title(), "TX Power & Drive")
+    def test_settings_tab_sections_are_real_no_inert_ui(self) -> None:
+        from PySide6.QtWidgets import (
+            QGroupBox, QSpinBox, QCheckBox)
+        from lyra.ui.widgets.stepper_readout import StepperReadout
+        boxes = {b.title(): b for b in
+                 self.tab.findChildren(QGroupBox)}
+        # Exactly the two shipped sections -- both functional;
+        # later sections remain comment anchors, not empty boxes
+        # (the no-inert-UI rule).
+        self.assertEqual(set(boxes), {"TX Power & Drive", "TX Safety"})
+        # TX Power & Drive carries a live drive control.
+        self.assertTrue(boxes["TX Power & Drive"].findChildren(
+            StepperReadout))
+        # TX Safety carries a live timeout spin + bypass checkbox.
+        self.assertTrue(boxes["TX Safety"].findChildren(QSpinBox))
+        self.assertTrue(boxes["TX Safety"].findChildren(QCheckBox))
+
+    def test_tx_timeout_settings_round_trip(self) -> None:
+        # Spin/checkbox <-> Radio, both directions, guarded.
+        self.tab.tx_timeout_spin.setValue(15)
+        self.assertEqual(self.radio.tx_timeout_seconds, 15 * 60)
+        self.radio.set_tx_timeout_bypass(True)
+        self.assertTrue(self.tab.tx_timeout_bypass_chk.isChecked())
+        # bypass disables the (now-meaningless) minutes spin
+        self.assertFalse(self.tab.tx_timeout_spin.isEnabled())
+        self.radio.set_tx_timeout_bypass(False)
 
 
 if __name__ == "__main__":

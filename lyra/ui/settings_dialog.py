@@ -2830,10 +2830,47 @@ class TxSettingsTab(QWidget):
         self.radio.tx_power_pct_changed.connect(
             self._on_radio_tx_power_changed)
 
+        # ── TX Safety (§15.20) — continuous-keydown timeout ─────────
+        saf_grp = QGroupBox("TX Safety")
+        saf_v = QVBoxLayout(saf_grp)
+        srow = QHBoxLayout()
+        srow.addWidget(QLabel("Stop transmit after"))
+        self.tx_timeout_spin = QSpinBox()
+        self.tx_timeout_spin.setRange(1, 20)
+        self.tx_timeout_spin.setSuffix(" min")
+        self.tx_timeout_spin.setValue(
+            max(1, round(radio.tx_timeout_seconds / 60)))
+        self.tx_timeout_spin.setToolTip(
+            "Auto-return to receive after this many minutes of "
+            "continuous keydown.  Catches a stuck PTT / falling "
+            "asleep keyed / a software latch — it is not meant to "
+            "interrupt a normal QSO (raise it, or tick Bypass, for "
+            "long AM ragchews or slow CW).")
+        self.tx_timeout_spin.valueChanged.connect(
+            self._on_tx_timeout_spin)
+        srow.addWidget(self.tx_timeout_spin)
+        srow.addStretch(1)
+        saf_v.addLayout(srow)
+        self.tx_timeout_bypass_chk = QCheckBox(
+            "Bypass timeout (long AM ragchews, slow CW, etc.)")
+        self.tx_timeout_bypass_chk.setChecked(radio.tx_timeout_bypass)
+        self.tx_timeout_bypass_chk.setToolTip(
+            "When ticked, the safety timeout never arms.  Use only "
+            "if you routinely hold a long continuous carrier and "
+            "accept the responsibility for unkeying yourself.")
+        self.tx_timeout_bypass_chk.toggled.connect(
+            self._on_tx_timeout_bypass_chk)
+        saf_v.addWidget(self.tx_timeout_bypass_chk)
+        # Spin is meaningless while bypassed -> disable it.
+        self.tx_timeout_spin.setEnabled(not radio.tx_timeout_bypass)
+        v.addWidget(saf_grp)
+        self.radio.tx_timeout_seconds_changed.connect(
+            self._on_radio_tx_timeout_seconds)
+        self.radio.tx_timeout_bypass_changed.connect(
+            self._on_radio_tx_timeout_bypass)
+
         # ── Future sections (land WITH behavior — no inert UI) ──────
         # Ordered insertion anchors so the tab grows without reorg:
-        #   • v0.2.0 Phase 3 commit 3.5 — "TX Safety": continuous-
-        #     keydown timeout (minutes + bypass).
         #   • v0.2.0 Phase 3 commit 3.5 — "Advanced": gateware
         #     reset-on-link-loss opt-in (default OFF) + the
         #     hardware-PTT-input opt-in (default OFF) surfaced here.
@@ -2858,6 +2895,30 @@ class TxSettingsTab(QWidget):
         self.tx_drive_stepper.blockSignals(True)
         self.tx_drive_stepper.setValue(int(pct))
         self.tx_drive_stepper.blockSignals(False)
+
+    # ── TX-safety-timeout sync (§15.20) ─────────────────────────────
+    def _on_tx_timeout_spin(self, minutes: int) -> None:
+        self.radio.set_tx_timeout_seconds(int(minutes) * 60)
+
+    def _on_tx_timeout_bypass_chk(self, on: bool) -> None:
+        self.radio.set_tx_timeout_bypass(bool(on))
+
+    def _on_radio_tx_timeout_seconds(self, seconds: int) -> None:
+        mins = max(1, round(int(seconds) / 60))
+        if self.tx_timeout_spin.value() == mins:
+            return
+        self.tx_timeout_spin.blockSignals(True)
+        self.tx_timeout_spin.setValue(mins)
+        self.tx_timeout_spin.blockSignals(False)
+
+    def _on_radio_tx_timeout_bypass(self, on: bool) -> None:
+        on = bool(on)
+        if self.tx_timeout_bypass_chk.isChecked() != on:
+            self.tx_timeout_bypass_chk.blockSignals(True)
+            self.tx_timeout_bypass_chk.setChecked(on)
+            self.tx_timeout_bypass_chk.blockSignals(False)
+        # Spin is meaningless while bypassed.
+        self.tx_timeout_spin.setEnabled(not on)
 
 
 class VisualsSettingsTab(QWidget):

@@ -388,6 +388,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             print(f"[app] TX-power autoload error: {exc}")
 
+        # TX safety timeout (v0.2.0 Phase 3 commit 3.5, §15.20) --
+        # restores the continuous-keydown limit + bypass pref.
+        try:
+            self.radio.autoload_tx_timeout_settings()
+        except Exception as exc:
+            print(f"[app] TX-timeout autoload error: {exc}")
+
         # Mic-input source (v0.2 Phase 2) -- HL2 mic jack (AK4951
         # codec on HL2+) vs PC sound card.  Restored from QSettings
         # so operator's choice survives across launches.  Default
