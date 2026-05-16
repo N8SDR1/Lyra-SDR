@@ -5937,6 +5937,50 @@ carry the facts.
 Phase-3-EXIT kill-Lyra-mid-TX dummy-load PA-bias-drop test
 (gateware watchdog still TX-unverified, §15.20/§15.24-C).
 
+#### OPERATOR BENCH 2026-05-16 (PART C / safety findings)
+
+* **"no power" on N8SDR's HL2+ — DIAGNOSTIC, expected.**
+  Confirms his gateware is an **Apollo-gated variant**: the
+  frame-10 bit alone does NOT key the PA.  => the Apollo-tuner
+  I²C side-channel is now **REQUIRED for ANY RF on his unit**
+  (was "deferred / separate later commit" — now the critical
+  path to the project goal "an actual RF-producing TX keyup").
+  Also he tested in **CWU**; Phase-3 is SSB-only (CW TX =
+  v0.2.2) so even with PA there is no carrier in CWU — for the
+  first-RF bench he must use **USB/LSB + speak into the mic**
+  (no tune-carrier until TUN/CW land).
+* **CRITICAL safety bug FIXED `cb58bcb`:** MOX went into TX on
+  stream stop/start (FSM survived stop holding MOX_TX +
+  dispatch mox stale).  Now: unbind_runtime force-resets FSM
+  to RX + clears sources; Radio.stop() set_mox(False) first.
+  No auto-key on restart.  365/0.
+* **Auto-LNA-during-TX FIXED `cb58bcb`:** `_adjust_lna_auto`
+  now frozen while `_dispatch_state.mox`.
+* **S-meter climbs S2→S8 in TX regardless of drive — EXPECTED,
+  pending commit 3.6.**  Not a bug: the TX meter source-swap
+  (AGC/S-row → ALC/PWR while MOX, §15.25 decision #1) is
+  commit 3.6 (§15.9/§15.15 batch, not yet done).  Until 3.6
+  the S-meter still shows the RX-derived reading, which rises
+  on the TX-coupled energy.  Note in 3.6 scope.
+* **PA-bias / PA-current readout — operator FEATURE REQUEST
+  (re-raised; "we should add it").**  He has no PA bias to
+  watch, so the Phase-3-EXIT kill-test isn't observable on his
+  bench.  HL2 exposes PA current via the I²C user-ADC
+  (reference: `getUserADC0` / `computeHermesLitePAAmps`).  Add
+  a PA-current telemetry readout — naturally bundles with the
+  Apollo-I²C work (same HL2 I²C side-channel surface) and is a
+  prerequisite for an observable kill-test.
+
+**RE-PRIORITISED NEXT (was deferred): Apollo-tuner I²C
+side-channel.**  Required for RF on N8SDR's gateware.  §3.9:
+it is a NEW emitted EP2 I²C surface → needs default-safe gate
++ dossier + Thetis-verify the `EnableApolloTuner` semantics
+FIRST (operator standing directive: Thetis-verify, no
+guessing).  Bundle the PA-current I²C readout with it.  THEN
+the first real RF + the Phase-3-EXIT kill-test become possible
+on his unit.  Foot-switch (HW-PTT opt-in + §10 Q#1) and the
+§9.6 pops leads stay parked behind that.
+
 **(historical) PART C = the HARD OPERATOR CHECKPOINT.**  First
 commit that makes the radio emit real power.
 Plan (from §15.26 PART C, locked): (4a) research-doc
