@@ -6146,6 +6146,19 @@ shipped code):
   Lyra already does (`4ce07b9`).  No conflict; defer
   RX-during-TX as non-Phase-3.
 
+**⚠ RF-DELAY = AMPLIFIER PROTECTION (operator 2026-05-16).**
+N8SDR drives a **1 kW solid-state linear** from ~2-3 W HL2+.
+`rf_delay=50 ms` exists so the T/R sequencing fully settles
+before RF is applied — preventing **HOT-SWITCHING** the
+linear (RF into mid-transition relays = destroyed amp).  This
+makes Commit B amp-SAFETY, not cosmetic: HL2 `rf_delay`
+default MUST be ≥50 ms, the keydown order MUST apply RF
+strictly AFTER the MOX-bit + relay settle, and the value must
+never silently shrink (clamp floor, operator-raisable only by
+deliberate action; document the hot-switch risk in the
+Settings tooltip).  Forward: external-PA/QSK sequencing in
+v0.2.x must preserve this invariant.
+
 **COMMIT LADDER (locked; A/B/C are RF-safe, D is first RF):**
 * **A — PA-current EP6 decode + readout.** stream.py decode
   C0-rot 0x10 C3:C4 → FrameStats; radio.py `pa_current_amps`
