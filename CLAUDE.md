@@ -5179,7 +5179,155 @@ applied on TX [v0.2.2 landmine]; (7) DDC2/DDC3 not mirrored
 Phase-3-EXIT hardware gate (unchanged): kill-Lyra-mid-TX
 dummy-load PA-bias-drop test (§15.20 / §15.24-C).
 
-**Status: LOCKED 2026-05-16, executing (commit 1 next).**
+#### Integrated FSM + TX-UI-home design (Plan-agent, 2026-05-16)
+
+A Plan-agent designed the `lyra/ptt.py` FSM grounded in the
+shipped commits 1+2; a follow-on agent folded the TX UI-home
+in.  Locked design:
+
+**FSM model:** single authoritative `PttState` (RX/MOX_TX +
+reserved TUN_TX/CW_TX/VOX_TX) driven by a **source-set +
+resolver**.  `PttSource` enum {SW_MOX, HW_PTT, TUN, CW_KEY,
+VOX, CAT_TCI}; FSM holds `set[PttSource]`; `_resolve()` maps
+the held set → exactly one state with precedence MOX_TX >
+CW_TX > VOX_TX > TUN_TX > RX.  SW-MOX & HW-PTT OR at the
+*source/intent* level → one state → wire MOX bit touched
+exactly twice per transmission (never bit-OR'd -- §15.25
+"shared not OR'd").  `set_source(src,bool)` is the core
+funnel; `request_mox`/`release_mox`/`set_hardware_ptt`/etc.
+are thin wrappers (scaffold-compat).  Forward-compat =
+"new PttSource member + one resolver line"; keydown/keyup
+ordering, fade-gate, HW forwarder, wire-funnel never change
+for CW(v0.2.2)/VOX(v0.2.3)/TUN.
+
+**Keydown (RX→MOX_TX), exact order:** `radio.set_mox(True)`
+(commit 2 owns TX-freq-push-before-MOX-bit; FSM must NOT
+duplicate `_set_tx_freq`) → `on_tx_state_changed(True,state)`
+auto-mute hook (no-op Phase 3, §15.14 later) →
+`stream.inject_tx_iq=True` → `mox_edge_fade.start_fade_in()`
+LAST.  inject BEFORE start_fade_in so the worker actually
+pumps `apply()` (it only calls fade.apply inside the
+`inject_tx_iq` branch); cos² first sample is 0 → no click.
+
+**Keyup (MOX_TX→RX), the load-bearing path:**
+`mox_edge_fade.start_fade_out()` → enter internal
+`_releasing=True` (NOT an enum member -- keeps enum stable)
+→ arm a **5 ms coalescing QTimer** polling
+`mox_edge_fade.is_off()` (lock-guarded, race-free; ≤~10
+polls for the 50 ms ramp) → on OFF: `_finalize_keyup()` =
+`inject_tx_iq=False` → `radio.set_mox(False)` (NOW clear MOX
+bit -- §15.25 "only after down-ramp completes") →
+`on_tx_state_changed(False,state)` → optional `ptt_out_delay`
+single-shot → `_transition(resolve())`.  NEVER blocks Qt-main
+(§15.21 discipline); never `time.sleep`.
+
+**HW-PTT forwarder:** reuse the EXISTING mic-callback hop --
+`FrameStats.ptt_in` is live in `stats` when `_rx_loop` calls
+`mic_callback`; `Radio._on_hl2_mic` (RX-loop thread) does
+edge-detect on `_last_hw_ptt` and
+`QMetaObject.invokeMethod(ptt,"set_hardware_ptt",
+QueuedConnection,...)` → FSM runs on Qt-main.  No 2nd EP6
+consumer, no FSM lock (Qt-main sole writer).  Scaffold's
+`_hw_ptt_debounce_ms` removed -- C&C cadence + edge-detect +
+set-idempotency is the debounce (§15.25 "level-driven, no
+debounce"); if real foot-switch chatter shows on the
+Phase-3-EXIT bench, debounce goes at the Radio adapter, never
+the FSM.
+
+**TR-sequencing:** frozen `TrSequencing` dataclass
+(mox_delay/ptt_out_delay/rf_delay/space_mox_delay/
+key_up_delay), **all-zero HL2 defaults**, values sourced
+from capabilities per §6.7 #5 (FSM stays hardware-agnostic).
+Each delay applied via single-shot QTimer (never sleep);
+HL2 = all inline.
+
+**§15.20 hook:** FSM exposes `force_release_all()` (clears
+source set, drives normal gated keyup).  The QTimer/QSettings/
+toast is its OWN separate Phase-3 commit (§15.18 ~2 h budget),
+NOT inside the FSM -- commit 3 only lands the hook.
+
+**Resolved §15.25 ambiguities (locked):** (1) re-key during
+draining keyup → COLLAPSE into one continuous TX (skip
+MOX-clear, re-fade-in; mirrors MoxEdgeFade's internal
+abort-continuity; avoids the sub-50 ms MOX churn = traps
+#2/#5).  (2) fade-gate = 5 ms poll of `is_off()`, NOT a
+worker→FSM signal (simplicity + unit-testability; ≤5 ms
+added MOX-clear latency, far below splatter).  (3)
+mox_delay/ptt_out_delay = TrSequencing, capability-sourced,
+HL2-zero.  (4) auto-mute = `on_tx_state_changed(is_tx,state)`
+at the §15.25-correct ordering slot, no-op Phase 3, §15.14
+fills body (the `state` arg defined now so CW/TUN/VOX need
+no signature change).
+
+**TX UI-home (no-inert-UI HARD constraint -- §15.13/14/15/17):**
+* New `TxSettingsTab(QWidget)` in settings_dialog.py,
+  registered after "Audio" before "Visuals".  Phase-3
+  sections (each lands WITH its behavior): TX Power & Drive
+  (StepperReadout 0-100% → HL2 step-attn via capabilities;
+  mic gain), TX Safety (§15.20 timeout min + bypass),
+  Advanced (`reset_on_disconnect` opt-in, default OFF).
+  v0.2.1 "Speech Processing" + v0.2.3 "Voice Keyer &
+  Profiles" are DOCUMENTED INSERTION ANCHORS (ordered
+  comments), NOT empty QGroupBoxes -- absent now, inserted
+  with behavior later, no reorganize.  Mic *source* stays on
+  Settings→Audio (§13.5); TX tab gets mic *gain*.
+* New dockable `TxPanel(GlassPanel "TX")` in panels.py:
+  MOX + TUN lit-buttons (→ Radio pass-throughs →
+  `_ptt_fsm.request_*`, never UI-reaches-into-FSM, §6.7
+  facade), TX Drive `StepperReadout` (shared setter w/ the
+  Settings TX-Power control, bidirectional via radio signal),
+  reuse existing `LedBarMeter` (PWR/SWR/MIC + the AGC row
+  source-swaps to **ALC while TX** per decision #1), §15.9
+  red accent + §15.15 AAmixer badge subscribe
+  `tx_active_changed`/`dispatch_state_changed`.
+
+**Two decisions, Thetis-source-confirmed 2026-05-16:**
+* #1 TX meter = **ALC** during TX.  `enum MeterTXMode`
+  (Thetis enums.cs:176) has NO AGC -- AGC is RX-only
+  (`MeterRXMode`).  TX-active source-swap (AGC row → ALC on
+  MOX), mirrors Thetis's separate RX/TX meter-mode sets +
+  Lyra's §15.13 idiom.  (Thetis's full TX meter menu --
+  Leveler/Lev-Gain/CFC/COMP/ALC-Comp/ALC-Group, console.cs:
+  5651-5662 -- is v0.2.1 picker territory per §15.19; Phase
+  3 wires core PWR/SWR/MIC/ALC only, no-inert-UI.)
+* #2 TX drive = **StepperReadout** (NOT a deviation): Thetis
+  HL2 TX power is `PrettyTrackBar` configured DISCRETE-
+  STEPPED (`ptbPWR.Maximum=90`, Small/LargeChange=6, comment
+  "HL2 only having a 16 step output attenuator",
+  console.cs:2101-2104).  Lyra StepperReadout is the
+  Lyra-native equivalent of that stepped HL2 behavior --
+  mirror confirmed, and a better fit for the 16-step
+  attenuator than a smooth slider.
+
+**Commit-3 sub-commit breakdown (each wire-safe, RX bytes
+unchanged until commit-5 UI keys MOX):**
+* **3a** -- FSM core: rewrite `lyra/ptt.py` (PttSource,
+  TrSequencing, source-set, _resolve, transition table,
+  _enter_tx/_begin_keyup/_on_fade_poll/_finalize_keyup with
+  INJECTED fakes only, no Radio import; back-compat wrappers;
+  `@Slot(bool) set_hardware_ptt`; `force_release_all`) +
+  `tests/protocol/test_ptt_fsm.py` (state machine, keydown
+  order, keyup fade-gate ordering, HW/SW share-state,
+  idempotency, re-key collapse, §15.25 trap regression
+  guards, TrSequencing knobs, force_release_all, unbound).
+  Zero Radio/stream/worker/fade edits → wire-identical.
+* **3b** -- Radio owns FSM (`__init__` constructs;
+  `bind_runtime` in `start()` post-worker; `unbind_runtime`
+  in `stop()`); `Radio._on_tx_state_changed(is_tx,state)`
+  no-op stub; Radio `request_mox`/`release_mox`
+  pass-throughs.  Still nothing calls request_mox →
+  wire-identical.
+* **3c** -- HW-PTT forwarder in `_on_hl2_mic` + `_last_hw_ptt`
+  + `Radio.force_release_all()` exposure (§15.20 timer/UI is
+  the separate §15.20 commit).  ptt_in=0 at rest → CI/RX-only
+  wire-identical.
+Then commits 3.4 (`set_tx_power_pct` + TxPanel + TxSettingsTab
+TX-Power section) → 3.5 (§15.20 timeout + Safety/Advanced
+sections) → 3.6 (§15.9 + §15.14 + §15.15).
+
+**Status: LOCKED 2026-05-16.  Commits 1 (`32f0473`) + 2
+(`eef2218`) SHIPPED + verified (293/0).  Executing commit 3a
+next.**
 
 ---
 
