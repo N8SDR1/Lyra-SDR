@@ -543,7 +543,18 @@ class DspWorker(QObject):
                             if want_on:
                                 rx.start()
                             else:
-                                rx.stop(blocking=True)
+                                # Non-blocking stop: clean slew-down
+                                # without parking this worker in a
+                                # blocking DLL flush at the keydown
+                                # instant.  A blocking flush here was
+                                # implicated in keydown T/R-relay
+                                # chatter (the HL2 gateware is
+                                # sensitive to any wire-cadence hiccup
+                                # at the MOX edge -- §15.21/§15.26).
+                                # The keyup path fully restarts the RX
+                                # channel on clean post-T/R IQ, so a
+                                # perfectly-flushed stop is not needed.
+                                rx.stop(blocking=False)
                         except Exception as exc:
                             print(f"[DspWorker] rx channel "
                                   f"{'start' if want_on else 'stop'} "

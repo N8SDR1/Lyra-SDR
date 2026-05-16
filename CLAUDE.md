@@ -5811,11 +5811,43 @@ silence is the HW-settle working, not a fault).  §15.25's
 shipped code -- correct it to 10/20 next doc pass.  If a
 residual transient remains → `LYRA_AUDIO_DEBUG=1`, no more
 guesses.  Then resume: §15.20 TX-timeout → PART C (PA) →
-foot-switch.  **Remaining bench-verify
-gate (before ANY keying/power):** press+release MOX into a
-DUMMY LOAD → RX silent instantly on key, and on un-key it
-returns to the prior listening state with NO delayed rush
-(Mute-A/B unchanged).  NEXT
+foot-switch.
+
+#### KEYUP CONFIRMED FIXED + new keydown relay-chatter (2026-05-16)
+
+**Keyup tail: operator-confirmed GONE.**  Bristle-broom sweep
+eliminated, RX returns clean on un-key.  Thetis-faithful
+RX-channel stop/restart (`4ce07b9`) was correct.
+
+**NEW: keydown T/R-relay chatter.**  First click to start MOX
+→ heavy relay chatter.  Only keydown change in `4ce07b9` =
+the new blocking `SetChannelState(rx,0,1)` flush.
+Thetis-verified difference (console.cs:30073): Thetis calls
+`NetworkIO.SendHighPriority(1)` on every MOX change — an
+immediate, deterministic, SINGLE command-frame push of the
+new MOX state.  Lyra has NO equivalent; it flips
+`_dispatch_state.mox` and waits for the round-robin C&C
+emission.  + HL2 gateware EP2/keepalive-cadence sensitivity
+(§15.21).  Leading hypothesis: unstable MOX line at the
+keydown transition bounces the T/R relay.
+- **Lever tested first (`6e..` non-blocking commit):** keydown
+  RX-stop → `rx.stop(blocking=False)` (`worker.py`) — removes
+  the blocking-flush worker stall at the key instant.  Thetis
+  can afford blocking (deterministic SendHighPriority MOX +
+  different threading); Lyra's keyup fully restarts the RX
+  channel so a perfectly-flushed stop isn't needed.  344/0.
+  AWAITING operator A/B (chatter gone?).
+- **QUEUED next lead if non-blocking does NOT fix it (do NOT
+  re-derive):** add the Lyra-native equivalent of Thetis
+  `SendHighPriority(1)` — a deterministic immediate MOX
+  command-frame send at the `set_mox` edge so the wire MOX
+  bit transitions exactly once, atomically, instead of
+  waiting for the next round-robin C&C frame.  Investigate
+  `HL2Stream` C&C emission for a priority/immediate-send
+  path; verify Thetis SendHighPriority semantics FIRST
+  (operator directive: Thetis-verify, no guessing).
+
+NEXT
 after that confirms green: §15.20 host TX-timeout, then
 PART C (4a map-doc+capability / 4b stream.set_pa_on +
 set_pa_enabled + safety-OFF / 4c TxSettingsTab PA checkbox;
