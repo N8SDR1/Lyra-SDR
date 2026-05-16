@@ -5794,7 +5794,24 @@ v3 59ebf5e — REVERT all three's keyup-specific code):**
 - Net: Lyra-native realization of "RX DSP stopped through TX,
   restarted only after the T/R has physically settled."
   Update §15.25 keydown/keyup ground-truth note + the
-  TrSequencing-defaults correction.  **Remaining bench-verify
+  TrSequencing-defaults correction.
+
+**STATUS: SHIPPED `4ce07b9` 2026-05-16.**  v1/v2/v3 all
+reverted.  `RxChannel.stop(blocking=)` + `DspWorker.
+request_rx_channel` (between-blocks, race-free) + `Radio.
+_request_rx_channel` + `_on_tx_state_changed` rewrite
+(keydown STOP RX channel blocking-flush / keyup START) +
+`ptt.py` keyup hook moved to `_end_keyup` (post ptt_out
+settle) + TrSequencing HL2 defaults 10/20 ms (was the wrong
+all-zero).  Tests: synchronous suites pin explicit all-zero
+TR; full suite 344/0.  Awaiting operator dummy-load
+bench-verify (sweep gone; ~30 ms+restart of clean post-key
+silence is the HW-settle working, not a fault).  §15.25's
+"HL2 all-zero TrSequencing defaults" line is now WRONG vs
+shipped code -- correct it to 10/20 next doc pass.  If a
+residual transient remains → `LYRA_AUDIO_DEBUG=1`, no more
+guesses.  Then resume: §15.20 TX-timeout → PART C (PA) →
+foot-switch.  **Remaining bench-verify
 gate (before ANY keying/power):** press+release MOX into a
 DUMMY LOAD → RX silent instantly on key, and on un-key it
 returns to the prior listening state with NO delayed rush
