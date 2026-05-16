@@ -5471,9 +5471,9 @@ already-present signal/setter.  Operator enables it only after
 the Phase-3-EXIT bench verifies `ptt_in` semantics on their
 specific unit (per-unit, answers §10 Q#1 with hardware truth).
 
-**Bisect worktrees** (`SDRProject-yesterday-eod`,
-`SDRProject-3b-no-pttfwd`) — remove once operator confirms
-`ff5f128` on the dev build is clean.**
+**Operator-confirmed 2026-05-16:** `ff5f128` clean on the
+usual dev path (N8SDR HL2+, real hardware) — surge gone.
+Bisect worktrees removed.  Regression CLOSED.**
 
 ---
 
