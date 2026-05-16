@@ -5054,7 +5054,29 @@ attribution -- the legit "Phase 3.E.1 hotfix v0.16" RX2-history
 refs are intentionally retained; tx_bench_gate Tier-A GREEN) +
 RX/RX2 225-test regression null.
 
-**Status: LOCKED 2026-05-15, executing.**
+**Status: COMPLETE 2026-05-15 — plan items A + B DONE +
+verification gate GREEN.**  Commits on
+`feature/v0.0.9.6-audio-foundation`: `9ab2d9d` (item A doc
+blockers: §8.5 SetTXABandpassRun/gen0-gen1 + tx_bench_gate
+GREEN + CLAUDE.md xref cleanup), `e783821` (B: §15.21 bugs 1+2
+socket-before-join + null _thread; A5's _rx_loop OSError-widen
+prerequisite verified ALREADY met), `6501cdb` (B: §15.21 bug 3
+sync-Event barrier, A5's approach over the watchdog), `d5c643b`
+(B6: 15 stale UI tests fixed + §15.17 CLOSED).  Verification
+gate results: Tier-A bench ALL PASS (I/Q peak 0.545); FFT bench
+OVERALL PASS (USB/LSB symmetric, 69/63 dB); TX unit suite 55/55
+(the "60/60" estimate was loose -- actual is 55: tx_dsp_worker
+9 + sip1_tap 15 + mox_edge_fade 16 + ep2_tx_iq_packing 9 +
+pc_mic_log_once 6); 20× construct+stop teardown clean (max
+0.01 ms, _sock/_thread nulled every cycle); doc-lint all clean
+(0 §8.5 SetTXABandpassRun prescriptions, 0 bare SetTXAGen*,
+tx_bench_gate GREEN, 0 stale tx_active "Phase 3.E", 5 legit
+"Phase 3.E.1 hotfix v0.16" retained); **full suite 280 passed
+/ 0 failed** (was 15 failed pre-§15.24 -- zero regressions,
+all 15 stale reds resolved).  Item C (§15.20 crash-mid-TX
+kill-test) remains a Phase-3-EXIT hardware gate before
+real-antenna keying.  Item D preventive notes embedded in
+§8.5 + §15.24.  **Phase 3 is unblocked.**
 
 ---
 
