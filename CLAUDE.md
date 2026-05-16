@@ -5907,6 +5907,33 @@ kill-Lyra-mid-TX PA-bias-drop test → real antenna.
 Foot-switch (HW-PTT opt-in + §10 Q#1 root-cause) after
 PART C.
 
+**§15.20 SHIPPED `1a0da74` 2026-05-16.**  Host TX-safety
+timeout: single-shot QTimer armed/cancelled on the MOX
+edge in `set_mox`; expiry → `force_release_all` + toast;
+default 600 s, clamp 60..1200, operator bypass; `Radio`
+state+setters+2 signals+`autoload_tx_timeout_settings`
+(wired app.py); TxSettingsTab "TX Safety" QGroupBox
+(minutes spin + bypass, real/no-inert).  353/0.  Produces
+NO RF (pure host timer+UI) — the §15.24-C safety
+prerequisite is now in place.
+
+**PART C = the HARD OPERATOR CHECKPOINT (next).**  It is
+the first commit that makes the radio emit real power.
+Plan (from §15.26 PART C, locked): (4a) research-doc
+`hpsdr_protocol_map.md` + `capabilities.pa_enable_uses_
+apollo_i2c`; (4b) `stream.set_pa_on` (→`_refresh_frame_10`,
+round-robin re-emit) + `Radio.set_pa_enabled` facade +
+auto-OFF wired into `force_release_all`/timeout-fire; (4c)
+TxSettingsTab "Advanced"/PA default-OFF "Enable PA"
+checkbox (capability-driven, no-inert).  The Apollo-tuner
+I²C side-channel stays a SEPARATE later §3.9-gated commit
+(dual-path trap — frame-10 bit alone may not fully key on
+Apollo-gated gateware; tooltip must warn).  Phase-3-EXIT
+kill-Lyra-mid-TX dummy-load PA-bias-drop test gates ANY
+real-antenna keying after 4b/4c.  Do NOT start 4b/4c
+without operator go-ahead (operator-directed hard
+checkpoint — first real RF).
+
 NEXT
 after that confirms green: §15.20 host TX-timeout, then
 PART C (4a map-doc+capability / 4b stream.set_pa_on +
