@@ -5847,6 +5847,66 @@ keydown transition bounces the T/R relay.
   path; verify Thetis SendHighPriority semantics FIRST
   (operator directive: Thetis-verify, no guessing).
 
+#### KEYDOWN CHATTER FIXED + §9.6-pops investigation queued (2026-05-16)
+
+**Operator-confirmed:** non-blocking keydown RX-stop
+(`47ae18d`) **fixed the relay chatter** — MOX keydown clean,
+no chatter; keyup still clean (no broom).  **Both TX
+transition artifacts resolved.**  SendHighPriority-equivalent
+(the queued lead above) NOT needed — non-blocking stop was
+sufficient.
+
+**RX pops "back":** verified NOT revert-residue — zero
+v1/v2/v3 machinery remains in `lyra/`, PART A pops-fix
+(hidden TX dock) intact, tree clean.  These are the
+long-parked **§9.6 residual pop class** (since v0.0.7.1;
+reproducible into a dummy load; not caused by any Phase-3
+work).  Operator (2026-05-16) wants the ROOT CAUSE chased
+**after** an actual RF-producing TX keyup exists.  Operator
+leads to pursue THEN (do not lose):
+
+1. **Windows network-throttling registry tweak.**  Operator
+   recalls Thetis/PowerSDR-era "gaming patch", value "6 or 8
+   lowercase f" = almost certainly the classic
+   `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\
+   Multimedia\SystemProfile\NetworkThrottlingIndex =
+   0xffffffff` (8 f's = disable the multimedia network
+   throttle).  Action when circling back: confirm whether
+   it is currently set on N8SDR's machine; if not, that
+   alone could explain periodic EP2-cadence jitter -> the
+   §9.6 pops.  Document the recommendation in install/
+   troubleshooting docs either way (genuinely relevant to
+   the HL2 EP2-keepalive sensitivity, §15.21).
+2. **FFTW WISDOM.**  Lyra bundles `libfftw3`; without
+   precomputed plan wisdom FFTW uses estimate plans
+   (less deterministic timing under load -> a §9.6 P2-class
+   jitter contributor).  Investigate generating/persisting
+   FFTW wisdom for the FFT sizes Lyra uses (panadapter +
+   any DSP FFT).  Real candidate, not theatre.
+3. **Operator network topology is already optimal** (rule
+   out as cause): dedicated NIC direct to HL2+ @ 1 Gb, no
+   Wi-Fi/router, 2 NICs, HL2 NIC metric 2 vs internet
+   30/40 (HL2 prioritised).  So §9.6 pops are NOT topology
+   — points at host-timing (throttle/WISDOM/GIL-GC) or HL2
+   gateware glitches.
+4. **Vulkan GPU compute path** (reinforces §15.8 item #1):
+   operator now on an **AMD RX 9070XT** — Vulkan gives a
+   real cross-vendor compute advantage (Thetis is
+   NVIDIA/CUDA-only).  Frees CPU headroom under contest
+   load (also a §9.6 GIL-pressure mitigation).  Still a
+   ~2-week v0.2-window effort per §15.8; keep parked,
+   annotate with the specific AMD hardware.
+
+**Path forward (operator-directed): get an actual
+RF-producing TX keyup FIRST**, then circle back to the
+§9.6 pops with leads 1+2.  Per §15.26 commit order:
+§15.20 host TX-timeout → PART C PA (frame-10 bit +
+capability + default-OFF "Enable PA" UI — this is what
+actually produces RF) → dummy-load bench → Phase-3-EXIT
+kill-Lyra-mid-TX PA-bias-drop test → real antenna.
+Foot-switch (HW-PTT opt-in + §10 Q#1 root-cause) after
+PART C.
+
 NEXT
 after that confirms green: §15.20 host TX-timeout, then
 PART C (4a map-doc+capability / 4b stream.set_pa_on +
