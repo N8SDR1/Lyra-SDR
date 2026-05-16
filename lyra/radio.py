@@ -2414,6 +2414,18 @@ class Radio(QObject):
         only after the TX I/Q down-ramp completes (§15.25)."""
         self._ptt_fsm.release_mox()
 
+    def force_release_all(self) -> None:
+        """Force every held TX source off and run a normal gated
+        keyup.  §15.20 TX-safety-timeout HOOK (commit 3c) -- the
+        QTimer / QSettings / toast is its OWN later Phase-3 commit
+        per §15.18; this just exposes the FSM entry so that commit
+        has its hook ready.  Going through the FSM source-set
+        (not a raw ``set_mox(False)``) means a still-asserted HW
+        PTT won't instantly re-key -- it re-fires only on its
+        next EP6 edge (the operator-visible timeout toast, when
+        §15.20 lands, explains that)."""
+        self._ptt_fsm.force_release_all()
+
     def _on_tx_state_changed(self, is_tx: bool,
                              state: "PttState") -> None:
         """Auto-mute hook the FSM calls at the §15.25-correct
@@ -9357,6 +9369,30 @@ class Radio(QObject):
         Submit is a ``queue.Queue.put_nowait`` -- O(1), no blocking;
         the worker thread does the heavy lifting on its own context.
         """
+        # v0.2.0 Phase 3 commit 3c (§15.25): HW-PTT-in forwarder.
+        # `stats.ptt_in` (EP6 ControlBytesIn[0]&0x01) is live for
+        # THIS datagram -- reuse this existing RX-loop hop rather
+        # than add a 2nd EP6 consumer/thread.  Edge-detect HERE (on
+        # the RX-loop thread, where the C&C-frame cadence is the
+        # natural debounce per §15.25) so the QueuedConnection only
+        # fires on real transitions, not every datagram (~1300/s).
+        # Done BEFORE the mic-empty / worker-None early-returns so a
+        # foot-switch press registers even on a mic-silent datagram
+        # or before the TX worker is up.  Hop RX-loop -> Qt-main via
+        # invokeMethod(QueuedConnection) so the FSM (Qt-main sole
+        # writer) is never touched cross-thread.
+        ptt = bool(getattr(stats, "ptt_in", False))
+        if ptt != self._last_hw_ptt:
+            self._last_hw_ptt = ptt
+            try:
+                from PySide6.QtCore import QMetaObject, Qt, Q_ARG
+                QMetaObject.invokeMethod(
+                    self._ptt_fsm, "set_hardware_ptt",
+                    Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(bool, ptt))
+            except Exception:
+                pass
+
         if mic_int16.size == 0:
             return
         if self._tx_dsp_worker is None:
