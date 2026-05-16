@@ -2659,6 +2659,21 @@ class Radio(QObject):
         silences the receive path; receive restores it.
         """
         self._tx_rx_muted = bool(is_tx)
+        if not is_tx:
+            # TX -> RX edge.  The receive DSP kept running through
+            # the keyed period (only the output was gated to
+            # silence), so its AGC wound its gain up against the
+            # silent/transmit-folded input.  Un-gating raw would
+            # dump that wound-up gain as a delayed loud "rush"
+            # until the AGC time-constant recovers.  Treat the
+            # return-to-receive as exactly what it is -- a
+            # legitimate audio discontinuity -- and run the same
+            # full RX-DSP reset used for a freq/mode change
+            # (re-inits the in-DLL AGC, S-meter average, binaural)
+            # so receive resumes fresh with no gain blast.  Worker
+            # mode applies it between blocks, around the RX-resume
+            # boundary -- no race.
+            self._request_dsp_reset_full()
         # §15.14 (deferred): replace the blanket base behaviour
         # with the per-RX MuteRX*OnVFOBTX policy keyed off
         # (is_tx, state) + the operator's per-RX prefs.  No inert

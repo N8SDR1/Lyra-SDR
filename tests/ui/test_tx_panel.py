@@ -47,6 +47,20 @@ class TxPanelTest(unittest.TestCase):
         self.assertTrue(self.radio._tx_rx_muted)     # RX stood down
         self.assertFalse(self.radio._muted)          # operator mute UNTOUCHED
 
+    def test_keyup_resets_rx_dsp_keydown_does_not(self) -> None:
+        """The TX->RX edge must reset the RX DSP (kills AGC
+        wound-up-gain so resume has no delayed 'rush').  The
+        RX->TX edge must NOT (output is gated; nothing to reset
+        and a reset there would be wasted)."""
+        from lyra.ptt import PttState
+        calls: list[bool] = []
+        self.radio._request_dsp_reset_full = (          # type: ignore
+            lambda: calls.append(True))
+        self.radio._on_tx_state_changed(True, PttState.MOX_TX)   # key down
+        self.assertEqual(calls, [])                     # no reset on keydown
+        self.radio._on_tx_state_changed(False, PttState.RX)      # key up
+        self.assertEqual(calls, [True])                 # reset on keyup only
+
     def test_keyup_restores_rx_and_preserves_operator_mute(self) -> None:
         from lyra.ptt import PttState
         self.radio.set_muted(True)                   # operator chose mute
