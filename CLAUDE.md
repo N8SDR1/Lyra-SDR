@@ -5558,6 +5558,103 @@ specific unit (per-unit, answers §10 Q#1 with hardware truth).
 usual dev path (N8SDR HL2+, real hardware) — surge gone.
 Bisect worktrees removed.  Regression CLOSED.**
 
+### 15.26 — Post-3.4 safe-TX plan (Plan-agent, LOCKED 2026-05-16)
+
+Commit 3.4 (`e507054`) shipped TX panel/Settings/`set_tx_power_pct`;
+operator bench on real HL2+ surfaced TWO issues + a PA directive.
+Plan-agent produced the consolidated fix plan; execute in order.
+
+**PART A — RX-pops regression (commit 3.4).** Operator A/B on
+the REAL ANTENNA (no lightning): `413df85` worktree fewer pops
+than HEAD; sensitivity identical (ruled out).  Root cause
+(traced, not assumed): NOT the TX-power wire path —
+`autoload_tx_power_settings` runs app-build (app.py:387) before
+`radio.start()` (app.py:1365) so `_stream is None` ⇒
+`set_tx_step_attn_db`/frame-4/11 never run at startup (register-
+churn theory DEAD); `StepperReadout.__init__` doesn't emit;
+`tx_power_pct_changed` has no slots at autoload fire.  Real
+mechanism = §9.6 **P2**: the new always-visible glass `TxPanel`
++ persistent `tx` dock + `tabifyDockWidget`+`raise_()` adds
+Qt main-thread/compositor paint load per dock-area repaint ⇒
+longer GIL/event-loop stalls ⇒ EP2-writer/audio-sink miss
+cadence ⇒ underrun-recovery step pops (DSP content unchanged —
+delivery jitter, matches "same sensitivity, more pops").  **Fix
+C1 (recommended):** lazy/hidden TX dock — construct `TxPanel`
+(cheap) but `self.docks["tx"].hide()` and DEFER the
+tabify+raise (app.py ~688-691) into a first-show handler;
+mirrors the GainPanel "don't construct/paint until needed"
+precedent (app.py ~421).  Removes the steady-state glass
+repaint, zero behavior loss.  Lands FIRST, independent, no TX
+behavior.  Verify with `LYRA_AUDIO_DEBUG=1` (`_diagnose_audio_
+step`, §9.6) pop-count A/B; if unchanged, residual is the §9.6
+HL2/GIL baseline not 3.4.
+
+**PART B — RX-audio release on TX (gate to re-enable MOX).**
+Confirmed: nothing stands RX down on keydown ⇒ distorted RX
+(operator, dummy load).  `set_mox` only flips dispatch+freq;
+`worker.py` zero mox/inject consumption; `MoxEdgeFade` fades TX
+I/Q not RX.  Implement the body of `Radio._on_tx_state_changed`
+(radio.py ~2624 — the FSM already calls it at the §15.25-correct
+slots: keydown after `set_mox` before inject/fade-in
+`ptt.py:_enter_tx`; keyup before clearing wire MOX bit
+`ptt.py:_clear_mox_tail`).  NEW transient flag
+`Radio._tx_rx_muted` (init by `_muted` ~radio.py:883, NOT
+persisted, NO signal) set True/False on is_tx; OR it into the
+audio-output mute predicate at the existing sites (radio.py
+~10405 single, ~10635-10636 dual, ~10510 rx2, ~10730 tone) as
+`(self._muted or self._tx_rx_muted)` — keeps operator
+Mute-A/B (`_muted`/`muted_changed`) untouched so pre-TX state
+restores exactly.  Hard-zero mute (click-free given keydown
+ordering + per-sample AGC + np.clip; cos²-on-RX fallback
+comment-anchored if bench shows an edge click).  §15.14 dual-RX
+`MuteRX*OnVFOBTX` policy layers here later (comment anchor, no
+inert code).  Re-enable MOX ONLY in this commit: panels.py
+`TxPanel` remove `setEnabled(False)` (`a91f805` line) + restore
+functional tooltip/docstring; flip
+`test_mox_disabled_until_rx_release`→enabled + add
+keydown-mutes / keyup-restores / FSM-order tests.
+
+**PART C — HL2 PA (operator directive; the §15.23-class find).**
+Thetis HL2 PA-enable is DUAL-PATH: C&C 0x09 C3 bit7 (= Lyra
+frame-10 `0x12` C3 bit7 `_pa_on`, **byte-correct, no bit-layout
+trap**) **AND** an HL2-only Apollo-tuner I²C side-channel
+(`EnableApolloTuner`) that Lyra does NOT emit at all.  The
+Thetis HL2 "PA" UI is the re-tooltipped Apollo-tuner checkbox.
+Gateware-version diffs are NOT in the bit layout (stable) but
+in: per-band PA-gain host-side scaling tables, I²C HW-version
+PA-current telemetry scaling, and the Apollo-I²C path behaviour
+across community-gateware revs.  **Scope decision:** Phase-3 =
+frame-10 bit ONLY — `stream.set_pa_on(bool)`→`_refresh_frame_10`
+(round-robin re-emit, pop-free `_refresh_frame_11`-class; §3.9:
+DRIVING a defined default-safe bit, no new consumed byte = OK);
+`Radio.set_pa_enabled` facade; default-OFF capability-driven
+"Enable PA" in `TxSettingsTab` Advanced (no-inert-UI, ships
+with behavior); auto-revert PA OFF in `force_release_all` +
+TX-timeout.  Capability `pa_enable_uses_apollo_i2c` (HL2=True).
+The **Apollo-tuner I²C emit is a SEPARATE later commit**, §3.9-
+gated (new EP2 I²C surface) + dossier-backed; until then the PA
+tooltip MUST warn the operator PA may not fully key on Apollo-
+gated gateware (never silently half-enable).  Provenance →
+`docs/architecture/hpsdr_protocol_map.md` (create), tagged
+[verified-reference] bit / [UNVERIFIED] Apollo-path+gateware.
+
+**Commit order:** (1) PART A lazy-dock — independent, immediate
+clean RX, bench-verify pops drop.  (2) PART B RX-release +
+MOX re-enable — the keying gate.  (3) §15.20 host TX-timeout
+(after B; needs MOX live + `force_release_all` hook).  (4) PART
+C split: 4a `hpsdr_protocol_map.md` + capability field; 4b
+`stream.set_pa_on`+`set_pa_enabled`+safety-OFF wiring; 4c
+TxSettingsTab PA checkbox.  Apollo-I²C = later §3.9-gated
+commit, NOT Phase-3.  Phase-3-EXIT kill-Lyra-mid-TX dummy-load
+PA-bias-drop test gates ANY real-antenna PA-enable keying
+(§15.20 watchdog still TX-UNVERIFIED).  No-attribution rule
+(2026-05-16): shipped code/comments/commits in first-principles
+RF terms; citations only here + docs/.
+
+**Worktree:** `Y:\Claude local\SDRProject-pre3.4` (`413df85`,
+operator-confirmed fewer-pops baseline) — KEEP until PART A
+verified, then `git worktree remove`.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-15 EOD)
