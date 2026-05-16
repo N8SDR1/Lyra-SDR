@@ -372,6 +372,14 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             print(f"[app] RIT autoload error: {exc}")
 
+        # HW-PTT-in opt-in (v0.2.0 Phase 3 hotfix, §15.25 / §10 Q#1)
+        # -- default OFF so the EP6 ptt_in forwarder stays inert
+        # until the operator enables it post-bench-verify.
+        try:
+            self.radio.autoload_hw_ptt_setting()
+        except Exception as exc:
+            print(f"[app] HW-PTT autoload error: {exc}")
+
         # Mic-input source (v0.2 Phase 2) -- HL2 mic jack (AK4951
         # codec on HL2+) vs PC sound card.  Restored from QSettings
         # so operator's choice survives across launches.  Default

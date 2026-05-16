@@ -67,7 +67,36 @@ class PttHwForwarderTest(unittest.TestCase):
     def setUp(self) -> None:
         from lyra.radio import Radio
         self.radio = Radio()
+        # v0.2.0 Phase 3 hotfix (§15.25 / §10 Q#1): the EP6 ptt_in
+        # forwarder is OPT-IN now (default OFF -- some HL2+/AK4951
+        # units carry a non-zero ptt_in at RX rest, which the
+        # always-on forwarder mis-keyed as MOX).  These tests
+        # exercise the *enabled* path, so opt in explicitly.
+        self.radio._hw_ptt_input_enabled = True
         self.empty = np.zeros(0, dtype=np.int16)
+
+    def test_forwarder_gated_off_by_default(self) -> None:
+        """Regression guard for the 2026-05-16 phantom-TX surge:
+        a fresh Radio defaults _hw_ptt_input_enabled=False, so an
+        asserted ptt_in is IGNORED -- no latch, no FSM key, RX
+        stays RX (byte-identical to pre-commit-3c)."""
+        from lyra.radio import Radio
+        from lyra.ptt import PttState
+        radio = Radio()
+        self.assertFalse(radio._hw_ptt_input_enabled)  # default OFF
+        st = _PttStub()
+        st.ptt_in = True                 # foot-switch "pressed"
+        radio._on_hl2_mic(self.empty, st)
+        self.assertFalse(radio._last_hw_ptt)            # not latched
+        from PySide6.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
+        self.assertEqual(radio._ptt_fsm.current_state,
+                         PttState.RX)                   # never keyed
+        # Opting in re-enables the forwarder.
+        radio.set_hw_ptt_input_enabled(True)
+        self.assertTrue(radio._hw_ptt_input_enabled)
+        radio._on_hl2_mic(self.empty, st)
+        self.assertTrue(radio._last_hw_ptt)             # now latched
 
     def _pump(self) -> None:
         # Deliver the QueuedConnection invokeMethod to the FSM.

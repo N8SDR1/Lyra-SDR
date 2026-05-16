@@ -380,6 +380,13 @@ class Radio(QObject):
     # per §15.9), AAmixer auto-mute-on-TX rules per §15.14, status
     # bar AAmixer state badge per §15.15.
     tx_active_changed = Signal(bool)
+    # v0.2.0 Phase 3 hotfix (§15.25 / §10 Q#1): operator opt-in for
+    # the HW-PTT-in forwarder.  Default OFF -- some HL2+/AK4951 units
+    # carry a non-zero EP6 ControlBytesIn[0]&0x01 at RX rest, which
+    # the always-on forwarder mis-read as a foot-switch press and
+    # spuriously keyed MOX (loud phantom-TX surge).  Bidirectional
+    # sync to the future Settings -> TX toggle (commit 3.6).
+    hw_ptt_input_enabled_changed = Signal(bool)
     # CW Zero (white) line offset from the VFO marker, in Hz.
     # Vertical reference line drawn at the filter center — i.e., where
     # a clicked CW signal lands and where the audio is generated.
@@ -1169,6 +1176,23 @@ class Radio(QObject):
         # HW-PTT edge-detect latch (commit 3c forwarder sets this
         # from the RX-loop thread; single-writer, GIL-atomic bool).
         self._last_hw_ptt: bool = False
+        # v0.2.0 Phase 3 hotfix (§15.25 / §10 Q#1, 2026-05-16):
+        # operator opt-in gate for the HW-PTT-in forwarder.  Seeded
+        # OFF here (safe default, mirrors the _rit_enabled pattern);
+        # autoloaded from QSettings by ``autoload_hw_ptt_setting``.
+        # WHY: §10 open question #1 ("HL2 mic/control bytes in EP6
+        # with AK4951 audio active -- value or zero?") was answered
+        # by N8SDR's HL2+ hardware on 2026-05-16: the ptt_in bit is
+        # NOT a clean 0 at RX rest on that unit, so an always-on
+        # forwarder spuriously fired set_hardware_ptt(True) -> FSM
+        # -> set_mox(True) -> phantom TX (sustained ~10x-loud,
+        # freq-change-sensitive, AGC-Off/Fast-resettable surge).
+        # OFF by default => _on_hl2_mic never touches ptt_in =>
+        # RX wire/audio behaviour byte-identical to pre-commit-3c.
+        # Operator enables it (Settings -> TX, commit 3.6) only
+        # after the Phase-3-EXIT bench verifies ptt_in semantics on
+        # their specific HL2/HL2+ unit.
+        self._hw_ptt_input_enabled: bool = False
         # Phase 2 v0.1 (2026-05-11): second WDSP RX channel for RX2.
         # Mirrors ``_wdsp_rx`` lifecycle (created/recreated together
         # in ``_open_wdsp_rx``).  RX2's mode/filter/AGC follow RX1
@@ -2425,6 +2449,51 @@ class Radio(QObject):
         next EP6 edge (the operator-visible timeout toast, when
         §15.20 lands, explains that)."""
         self._ptt_fsm.force_release_all()
+
+    # ── HW-PTT-in opt-in (v0.2.0 Phase 3 hotfix, §15.25 / §10 Q#1) ─
+    @property
+    def hw_ptt_input_enabled(self) -> bool:
+        return self._hw_ptt_input_enabled
+
+    def set_hw_ptt_input_enabled(self, on: bool) -> None:
+        """Operator opt-in for the EP6 HW-PTT-in forwarder.
+
+        Default OFF.  Some HL2+/AK4951 units carry a non-zero
+        ``ControlBytesIn[0]&0x01`` at RX rest (§10 Q#1, confirmed
+        on N8SDR's unit 2026-05-16) -- with the forwarder always
+        on that mis-keyed MOX (phantom-TX loud surge).  Persisted
+        immediately + signalled for the future Settings -> TX
+        toggle (commit 3.6).  When turning OFF, also drop any
+        latched HW-PTT edge so a stale True can't strand the FSM
+        keyed."""
+        on = bool(on)
+        if on == self._hw_ptt_input_enabled:
+            return
+        self._hw_ptt_input_enabled = on
+        if not on:
+            self._last_hw_ptt = False
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue(
+                "tx/hw_ptt_input_enabled", on)
+        except Exception:
+            pass
+        self.hw_ptt_input_enabled_changed.emit(on)
+
+    def autoload_hw_ptt_setting(self) -> None:
+        """Restore the HW-PTT-in opt-in from QSettings (default
+        OFF).  Called once at app build alongside the other
+        ``autoload_*`` restores."""
+        try:
+            from PySide6.QtCore import QSettings
+            raw = QSettings("N8SDR", "Lyra").value(
+                "tx/hw_ptt_input_enabled", False)
+            on = (raw if isinstance(raw, bool)
+                  else str(raw).lower() in ("1", "true", "yes"))
+        except Exception:
+            on = False
+        self._hw_ptt_input_enabled = bool(on)
+        self.hw_ptt_input_enabled_changed.emit(self._hw_ptt_input_enabled)
 
     def _on_tx_state_changed(self, is_tx: bool,
                              state: "PttState") -> None:
@@ -9381,17 +9450,24 @@ class Radio(QObject):
         # or before the TX worker is up.  Hop RX-loop -> Qt-main via
         # invokeMethod(QueuedConnection) so the FSM (Qt-main sole
         # writer) is never touched cross-thread.
-        ptt = bool(getattr(stats, "ptt_in", False))
-        if ptt != self._last_hw_ptt:
-            self._last_hw_ptt = ptt
-            try:
-                from PySide6.QtCore import QMetaObject, Qt, Q_ARG
-                QMetaObject.invokeMethod(
-                    self._ptt_fsm, "set_hardware_ptt",
-                    Qt.ConnectionType.QueuedConnection,
-                    Q_ARG(bool, ptt))
-            except Exception:
-                pass
+        # Default OFF (see ``_hw_ptt_input_enabled`` in __init__):
+        # only consume ptt_in when the operator has explicitly
+        # enabled HW-PTT input AND verified its semantics on their
+        # unit.  With it off this whole block is skipped, so RX
+        # behaviour is byte-identical to pre-commit-3c -- the
+        # 2026-05-16 phantom-TX surge fix (§15.25 / §10 Q#1).
+        if self._hw_ptt_input_enabled:
+            ptt = bool(getattr(stats, "ptt_in", False))
+            if ptt != self._last_hw_ptt:
+                self._last_hw_ptt = ptt
+                try:
+                    from PySide6.QtCore import QMetaObject, Qt, Q_ARG
+                    QMetaObject.invokeMethod(
+                        self._ptt_fsm, "set_hardware_ptt",
+                        Qt.ConnectionType.QueuedConnection,
+                        Q_ARG(bool, ptt))
+                except Exception:
+                    pass
 
         if mic_int16.size == 0:
             return
