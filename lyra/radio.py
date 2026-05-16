@@ -2350,6 +2350,26 @@ class Radio(QObject):
         new = bool(mox)
         if self._dispatch_state.mox == new:
             return
+        # §15.25 commit 2 -- FINDING #2 / trap #2 (stale-freq first
+        # burst).  On the MOX=1 edge, load the TX NCO into the HL2
+        # C&C round-robin (regs 0x02/0x08/0x0a) BEFORE flipping the
+        # dispatch MOX bit, so the first MOX=1 C&C frame the gateware
+        # sees already carries the correct TX freq -- not the stale
+        # RX freq / 0 that `_set_tx_freq`'s docstring warns persists
+        # with no caller.  Mirrors Thetis calling UpdateTXDDSFreq()
+        # inside HdwMOXChanged *before* SetPttOut(1)
+        # (console.cs:29758-29794).  Same-frame atomicity is NOT
+        # required (HL2 holds tx[0].frequency persistent; the EP2
+        # round-robin re-emits within a few ms) -- freq-before-edge
+        # is sufficient and correct per §15.25 FINDING #2.  Value is
+        # RIT-free via `tx_freq_hz` (FINDING #1).  Guarded: stream
+        # may be None if MOX is toggled before start().
+        if new and self._stream is not None:
+            try:
+                self._stream._set_tx_freq(self.tx_freq_hz)  # noqa: SLF001
+            except Exception as exc:  # noqa: BLE001
+                self.status_message.emit(
+                    f"TX freq set on MOX failed: {exc}", 3000)
         from dataclasses import replace
         self._dispatch_state = replace(self._dispatch_state, mox=new)
         self.dispatch_state_changed.emit(self._dispatch_state)
@@ -2682,6 +2702,14 @@ class Radio(QObject):
                 # the operator-displayed value.  See the convention
                 # note above _compute_dds_freq_hz for the why.
                 self._stream._set_rx1_freq(self._compute_dds_freq_hz(hz))  # noqa: SLF001
+                # §15.25 commit 2: retune-while-TX.  Thetis calls
+                # UpdateTXDDSFreq() on EVERY dial change independent
+                # of MOX (console.cs:15528-15549).  If the operator
+                # retunes while keyed, re-push the TX NCO so the on-
+                # air TX freq follows the dial (RIT-free via
+                # tx_freq_hz).  No-op when not transmitting.
+                if self._dispatch_state.mox:
+                    self._stream._set_tx_freq(self.tx_freq_hz)  # noqa: SLF001
             except Exception as e:
                 self.status_message.emit(f"Freq set failed: {e}", 3000)
         with self._ring_lock:
