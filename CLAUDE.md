@@ -5395,11 +5395,50 @@ suite 318/0 (was 280 pre-Phase-3; +38 TX/FSM tests, zero
 regressions).  Every commit wire-safe: RX-only bytes
 byte-identical -- nothing keys MOX until the commit-3.4 UI.
 
-NEXT: commit 3.4 -- `Radio.set_tx_power_pct` + the dockable
-`TxPanel` (MOX/TUN buttons, TX-drive StepperReadout, LedBarMeter
-w/ AGC-row→ALC-on-TX swap per decision #1) + `TxSettingsTab`
-(TX Power section).  First operator-visible + first commit that
-can key the radio.  No-inert-UI enforced.
+commit 3.4 -- **SHIPPED `e507054` 2026-05-16.**
+`stream.set_tx_step_attn_db` (dual frame-4/11 coherent, drives
+the Phase-1-bench-verified register, consumes no new byte --
+§3.9 OK) + `Radio.set_tx_power_pct` (16-step quantised map onto
+`capabilities.tx_attenuator_range`, hardware-agnostic; autoload
+default = unity = 0 dB = Phase-1 wire-identical) +
+`request_tun`/`release_tun` facade + dockable `TxPanel` (MOX
+checkable button funnels request_mox/release_mox + is a
+tx_active_changed SLAVE; TX-drive StepperReadout) +
+`TxSettingsTab` ("TX" tab between Audio/Visuals; "TX Power &
+Drive" section; future sections are comment anchors).  338/0
+(+19).  **First transmit-capable commit** -- MOX keys the radio
+via the FSM; RX-only wire bytes unchanged (fresh default = 0 dB).
+
+  * **TUN scoping decision (2026-05-16):** TUN ships
+    present-but-DISABLED + tooltip.  The FSM resolves
+    PttSource.TUN → keys MOX, but Phase-3 has no low-power
+    tune-carrier/tone generator, so a live TUN would transmit a
+    silent dead carrier (ATU-useless, UX trap).  Disabled keeps
+    the row layout final (no reflow when it lands) -- same
+    no-inert-UI discipline as the v0.1.1 disabled-XIT precedent.
+    TUN goes live with the tune-carrier generator (a later
+    v0.2.x sub-release).
+  * **Deferred from the §15.25 3.4 sketch:** the LedBarMeter w/
+    AGC-row→ALC-on-TX swap (decision #1) moves to commit 3.6
+    (§15.9 red-on-air / §15.15 badge batch) -- it needs the
+    TX ALC meter signal which doesn't exist until the v0.2.0
+    DSP TX-meter wiring; shipping the meter now would be inert.
+  * Mic *gain* deferred: no Radio mic-gain setter exists yet
+    (arrives with the v0.2.1 speech-processing chain) -- a
+    documented anchor in TxSettingsTab, not an empty widget.
+
+NEXT: commit 3.5 -- §15.20 host TX-timeout (~80 LOC, in budget)
++ the TxSettingsTab "TX Safety" + "Advanced" sections (the
+reset-on-disconnect opt-in + surfacing the HW-PTT-input opt-in
+from `ff5f128`).  Then 3.6 -- §15.9 red-on-air + §15.14
+auto-mute + §15.15 AAmixer badge + the TX LedBarMeter
+(ALC-on-TX).  Phase-3-EXIT hardware gate unchanged
+(§15.20/§15.24-C kill-Lyra-mid-TX dummy-load PA-bias test).
+
+OPEN -- RX-audio-surge investigation (operator-reported
+2026-05-16, HL2 jack, ~3x surge, dummy load / no antenna,
+AGC Fast, LNA Auto, USB 20m RX1-no-SUB).  Mechanistic review:
+NONE of commits 1/2/3a/3b/3c touch the RX audio / AGC / gain /
 
 OPEN -- RX-audio-surge investigation (operator-reported
 2026-05-16, HL2 jack, ~3x surge, dummy load / no antenna,
