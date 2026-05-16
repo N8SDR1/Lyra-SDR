@@ -5651,15 +5651,38 @@ PA-bias-drop test gates ANY real-antenna PA-enable keying
 (2026-05-16): shipped code/comments/commits in first-principles
 RF terms; citations only here + docs/.
 
+**FOOT-SWITCH (operator-active need, tracked 2026-05-16):**
+N8SDR operates with a hardware foot switch on the HL2.  It
+asserts the EP6 PTT-in bit — consumed by the commit-3c
+forwarder that the `ff5f128` regression fix gated OFF by
+default (his HL2+ PTT-in is non-zero at rest → phantom-TX).
+So the foot switch does NOT key today, expected.  Proper
+support = (a) expose the HW-PTT opt-in (the TxSettingsTab
+"Advanced" anchor already reserved), AND (b) root-cause why
+this HL2+ PTT-in reads non-zero at rest (genuine line
+noise/needs debounce vs an EP6 decode/byte-slot confusion —
+the open §10 Q#1) and make the forwarder edge-robust so it
+keys on a real foot-switch press without phantom-keying on
+the noisy-at-rest level.  This is safety-coupled to the
+PART-C TX-enable area; scheduled to follow PART C (raised
+in priority — operator uses it daily).  Do NOT just
+re-enable the forwarder (phantom-TX surge returns).
+
 **STATUS 2026-05-16:** PART A SHIPPED `0ae3ccb` +
 operator-confirmed (pops on dev now match pre-3.4 ≈ same;
 residual = §9.6 HL2/GIL baseline, not 3.4).  `pre-3.4`
 worktree removed.  PART B SHIPPED `13caf39` (`_tx_rx_muted`
 + `_on_tx_state_changed` body + 4 audio-gate sites + MOX
-re-enabled + tests; 341/0).  **Operator bench-verify gate
-(before ANY keying/power):** press MOX into a DUMMY LOAD →
-RX must go SILENT instantly + return to exactly the prior
-listening state on release with Mute-A/B unchanged.  NEXT
+re-enabled + tests) + refinement `8f86be5` (keyup runs
+`_request_dsp_reset_full` to kill the AGC-wound-up "rush"
+on un-key — operator-reported; same artifact-free reset
+used for freq/mode change).  342/0.  Operator bench: PART B
+core PASSED (RX silent on MOX, restores, Mute-A/B intact);
+keyup-rush fix awaiting re-verify.  **Remaining bench-verify
+gate (before ANY keying/power):** press+release MOX into a
+DUMMY LOAD → RX silent instantly on key, and on un-key it
+returns to the prior listening state with NO delayed rush
+(Mute-A/B unchanged).  NEXT
 after that confirms green: §15.20 host TX-timeout, then
 PART C (4a map-doc+capability / 4b stream.set_pa_on +
 set_pa_enabled + safety-OFF / 4c TxSettingsTab PA checkbox;
