@@ -137,6 +137,13 @@ class FrameStats:
     rev_pwr_adc: int = 0
     supply_adc: int = 0
     temp_adc:   int = 0
+    # v0.2 Phase 3 commit A (§15.26): HL2 PA current.  On the
+    # 0x10 telemetry slot the gateway fills C1:C2 = reverse power
+    # AND C3:C4 = user-ADC0, which on HL2 is the PA-current sense
+    # (raw ADC).  Engineering-unit conversion (the HL2 sense-amp
+    # math) lives in Radio.  Needed for the observable
+    # Phase-3-EXIT kill-test + the operator PA-bias readout.
+    pa_current_adc: int = 0
     # Fallback supply candidate from addr 0 C1:C2 (some HL2 firmware
     # variants pack AIN6 / supply ADC into bits[15:4] of this 16-bit
     # field instead of using addr 3). Radio's _emit_hl2_telemetry
@@ -492,7 +499,9 @@ def _decode_hl2_telemetry(cc: bytes, stats: "FrameStats") -> None:
         stats.temp_adc    = ((cc[1] << 8) | cc[2]) & 0xFFFF
         stats.fwd_pwr_adc = ((cc[3] << 8) | cc[4]) & 0xFFFF
     elif addr == 2:
-        stats.rev_pwr_adc = ((cc[1] << 8) | cc[2]) & 0xFFFF
+        stats.rev_pwr_adc   = ((cc[1] << 8) | cc[2]) & 0xFFFF
+        # C3:C4 on this slot = HL2 user-ADC0 = PA-current sense.
+        stats.pa_current_adc = ((cc[3] << 8) | cc[4]) & 0xFFFF
     elif addr == 3:
         stats.supply_adc  = ((cc[3] << 8) | cc[4]) & 0xFFFF
 
