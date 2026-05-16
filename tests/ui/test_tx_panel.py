@@ -32,13 +32,29 @@ class TxPanelTest(unittest.TestCase):
         self.radio = Radio()
         self.panel = TxPanel(self.radio)
 
-    def test_mox_disabled_until_rx_release(self) -> None:
-        """SAFETY regression guard (2026-05-16): MOX must ship
-        DISABLED until the keydown chain stands the RX path down.
-        Keying without RX release = distorted RX / undefined
-        receive state.  Re-enable ONLY in the commit that adds
-        RX-audio release (delete/flip this guard there)."""
-        self.assertFalse(self.panel.mox_btn.isEnabled())
+    def test_mox_enabled_after_rx_release(self) -> None:
+        """MOX is enabled now that the keydown chain stands the RX
+        audio path down (PART B).  Before PART B this asserted
+        DISABLED (the safety gate); flipped here in the same
+        commit that landed RX release."""
+        self.assertTrue(self.panel.mox_btn.isEnabled())
+
+    def test_keydown_mutes_rx_without_touching_operator_mute(self) -> None:
+        from lyra.ptt import PttState
+        self.assertFalse(self.radio._tx_rx_muted)
+        self.assertFalse(self.radio._muted)          # operator mute
+        self.radio._on_tx_state_changed(True, PttState.MOX_TX)
+        self.assertTrue(self.radio._tx_rx_muted)     # RX stood down
+        self.assertFalse(self.radio._muted)          # operator mute UNTOUCHED
+
+    def test_keyup_restores_rx_and_preserves_operator_mute(self) -> None:
+        from lyra.ptt import PttState
+        self.radio.set_muted(True)                   # operator chose mute
+        self.assertTrue(self.radio._muted)
+        self.radio._on_tx_state_changed(True, PttState.MOX_TX)   # key down
+        self.radio._on_tx_state_changed(False, PttState.RX)      # key up
+        self.assertFalse(self.radio._tx_rx_muted)    # RX released
+        self.assertTrue(self.radio._muted)           # operator mute SURVIVES
 
     def test_mox_button_drives_facade(self) -> None:
         calls: list[str] = []

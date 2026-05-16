@@ -881,6 +881,14 @@ class Radio(QObject):
         self._balance = 0.0
         self._volume = 0.5                      # 50% = ~-12 dB trim
         self._muted = False
+        # Transient RX-audio stand-down while transmitting (set by
+        # _on_tx_state_changed on the keydown/keyup edges).  Kept
+        # SEPARATE from the operator mute above so a transmit cycle
+        # never disturbs the operator's Mute-A/Mute-B state.  Not
+        # persisted, not operator-visible.  Read on the DSP worker
+        # thread / written on Qt-main -- GIL-atomic bool, same
+        # single-writer discipline as _muted.
+        self._tx_rx_muted = False
         # Auto-LNA loop: periodically adjust _gain_db to keep the ADC
         # peak near a target headroom. Engaged only when the operator
         # enables it; manual LNA is the default.
@@ -2623,20 +2631,39 @@ class Radio(QObject):
 
     def _on_tx_state_changed(self, is_tx: bool,
                              state: "PttState") -> None:
-        """Auto-mute hook the FSM calls at the §15.25-correct
-        ordering slot (keydown after set_mox; keyup before
-        clearing the MOX bit).
+        """RX-audio stand-down hook the FSM calls at the correct
+        keydown/keyup ordering slots (keydown: after the transmit
+        state is set, before the TX I/Q gate opens; keyup: before
+        the wire transmit bit is cleared).
 
-        Phase 3: deliberate **no-op** -- §15.14 (auto-mute-on-TX)
-        fills the body in its own commit.  The ``state`` arg is
-        present from day one so the CW (v0.2.2) / TUN / VOX
-        (v0.2.3) branches need no signature change (§15.25
-        ambiguity #4 resolution).
+        While transmitting, the receiver is folding the transmit
+        state — feeding that to the speaker is garbage (operator-
+        confirmed distorted audio).  So the RX audio output is
+        gated to silence for the duration of transmit and restored
+        on return to receive.
+
+        This uses a SEPARATE transient flag (``_tx_rx_muted``),
+        deliberately NOT the operator mute (``_muted`` /
+        ``_muted_rx2``): the operator's Mute-A / Mute-B state must
+        survive a transmit cycle untouched, so a keyup restores
+        exactly the pre-transmit listening state.  The flag is
+        OR'd into the audio-output gate in ``_do_demod_wdsp`` /
+        the dual + tone paths.  Read on the DSP worker thread,
+        written here on Qt-main — a GIL-atomic bool, same
+        single-writer pattern as ``_muted``.
+
+        ``state`` is carried so the deferred §15.14 dual-RX policy
+        (MuteRX1OnVFOBTX / MuteRX2OnVFOATX — choose WHICH RX(s) to
+        stand down by VFO/SPLIT) can layer on here without a
+        signature change.  Phase 3 = BASE behaviour: transmit
+        silences the receive path; receive restores it.
         """
-        # §15.14 will implement: mute/unmute the self-monitor RX
-        # path per the operator MuteRX*OnVFOBTX rules, keyed off
-        # (is_tx, state).  No behavior in Phase 3.
-        return
+        self._tx_rx_muted = bool(is_tx)
+        # §15.14 (deferred): replace the blanket base behaviour
+        # with the per-RX MuteRX*OnVFOBTX policy keyed off
+        # (is_tx, state) + the operator's per-RX prefs.  No inert
+        # code now — the base stand-down above is the real
+        # behaviour until that policy lands.
 
     def set_ps_armed(self, ps_armed: bool) -> None:
         """Set the PS-armed axis of DispatchState.  Call from Qt main thread.
@@ -10402,7 +10429,11 @@ class Radio(QObject):
         # quick mute/unmute transitions don't ride through WDSP's slew
         # envelope (which is sized for mode/freq transitions, not for
         # operator finger-on-mute).
-        if self._muted:
+        if self._muted or self._tx_rx_muted:
+            # _tx_rx_muted: receiver folds the transmit state while
+            # keyed -> gate RX audio to silence for the duration of
+            # transmit (restored on return to receive; operator
+            # mute state untouched).  See _on_tx_state_changed.
             audio = audio * 0.0
         else:
             v = float(self._volume)
@@ -10632,8 +10663,13 @@ class Radio(QObject):
         # 0.0 / 1.0 split) gets its own trim.  When RX2 is OFF the
         # mixer doesn't feed _do_demod_wdsp_dual at all -- this
         # path is unreachable in the SUB-off case.
-        rx1_vol = 0.0 if self._muted else float(self._volume)
-        rx2_vol = 0.0 if self._muted_rx2 else float(self._volume_rx2)
+        # _tx_rx_muted gates BOTH receivers while transmitting
+        # (BASE behaviour -- the deferred §15.14 policy will later
+        # choose per-RX which to stand down by VFO/SPLIT).
+        rx1_vol = (0.0 if (self._muted or self._tx_rx_muted)
+                   else float(self._volume))
+        rx2_vol = (0.0 if (self._muted_rx2 or self._tx_rx_muted)
+                   else float(self._volume_rx2))
         if audio_rx1 is not None and audio_rx1.size > 0 and rx1_vol != 1.0:
             audio_rx1 = audio_rx1 * np.float32(rx1_vol)
         if audio_rx2 is not None and audio_rx2.size > 0 and rx2_vol != 1.0:
@@ -10727,7 +10763,7 @@ class Radio(QObject):
         # 0.3-amplitude sine would write peak ≈ 17 to the sink,
         # which clips hard and on some sinks throws / blocks.
         af = self.af_gain_linear
-        vol = 0.0 if self._muted else self._volume
+        vol = 0.0 if (self._muted or self._tx_rx_muted) else self._volume
         audio = np.tanh(audio * af * vol).astype(np.float32)
         try:
             self._audio_sink.write(audio)
