@@ -50,16 +50,26 @@ class TxSettingsSyncTest(unittest.TestCase):
         from lyra.ui.widgets.stepper_readout import StepperReadout
         boxes = {b.title(): b for b in
                  self.tab.findChildren(QGroupBox)}
-        # Exactly the two shipped sections -- both functional;
+        # Exactly the three shipped sections -- all functional;
         # later sections remain comment anchors, not empty boxes
         # (the no-inert-UI rule).
-        self.assertEqual(set(boxes), {"TX Power & Drive", "TX Safety"})
+        self.assertEqual(
+            set(boxes),
+            {"TX Power & Drive", "TX Safety", "Advanced"})
         # TX Power & Drive carries a live drive control.
         self.assertTrue(boxes["TX Power & Drive"].findChildren(
             StepperReadout))
         # TX Safety carries a live timeout spin + bypass checkbox.
         self.assertTrue(boxes["TX Safety"].findChildren(QSpinBox))
         self.assertTrue(boxes["TX Safety"].findChildren(QCheckBox))
+        # Advanced carries the live PA-enable checkbox.
+        self.assertTrue(boxes["Advanced"].findChildren(QCheckBox))
+
+    def test_pa_enable_round_trip(self) -> None:
+        self.tab.pa_enable_chk.setChecked(True)
+        self.assertTrue(self.radio.pa_enabled)
+        self.radio.set_pa_enabled(False)           # Radio -> UI
+        self.assertFalse(self.tab.pa_enable_chk.isChecked())
 
     def test_tx_timeout_settings_round_trip(self) -> None:
         # Spin/checkbox <-> Radio, both directions, guarded.

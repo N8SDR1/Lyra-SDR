@@ -2922,6 +2922,30 @@ class HL2Stream:
         self._refresh_frame_4()
         self._refresh_frame_11()
 
+    def set_pa_on(self, on: bool):
+        """Enable/disable the HL2 PA bias (frame 10 / register 0x12
+        C3 bit 7).  Default OFF: until the operator opts in, no RF
+        can be keyed even when MOX is asserted -- this is the
+        bias-enable for the transmit power amplifier.
+
+        Updates the cached frame 10 via the composer so all four
+        bytes stay coherent; no direct _send_cc -- the EP2 writer
+        re-emits the cached register on its next round-robin tick
+        (same imperceptible-latency / no-audio-pop discipline as
+        set_lna_gain_db / set_tx_step_attn_db).
+
+        NOTE (the dual-path caveat): on some HL2 community-gateware
+        variants the PA is additionally gated by an Apollo-tuner
+        I2C side-channel that this bit does NOT drive.  On those
+        units the bit alone may not fully key the PA.  That side-
+        channel is a separate, later, gated change; callers/UI
+        must warn the operator rather than silently half-enable.
+        """
+        if self._sock is None:
+            raise RuntimeError("stream not started")
+        self._pa_on = bool(on)
+        self._refresh_frame_10()
+
     def stop(self):
         self._stop_event.set()
         # Wake the EP2 writer thread if it's blocked waiting for

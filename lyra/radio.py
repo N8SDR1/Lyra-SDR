@@ -398,6 +398,10 @@ class Radio(QObject):
     # section.
     tx_timeout_seconds_changed = Signal(int)
     tx_timeout_bypass_changed  = Signal(bool)
+    # §15.26 PART C: operator PA-bias enable (frame-10 C3 bit 7).
+    # Default OFF; a safety stand-down auto-disarms it.  Bidir
+    # sync to Settings -> TX "Advanced".
+    pa_enabled_changed = Signal(bool)
     # CW Zero (white) line offset from the VFO marker, in Hz.
     # Vertical reference line drawn at the filter center — i.e., where
     # a clicked CW signal lands and where the audio is generated.
@@ -1502,6 +1506,14 @@ class Radio(QObject):
         self._tx_timeout_timer.setSingleShot(True)
         self._tx_timeout_timer.timeout.connect(self._on_tx_timeout_fired)
 
+        # §15.26 PART C: operator PA-bias enable (frame-10 C3
+        # bit 7).  Seeded OFF -- fresh installs are byte-identical
+        # to the Phase-1 _pa_on=False wire default; no RF can be
+        # keyed until the operator deliberately opts in (Settings
+        # -> TX "Advanced").  QSettings restore via
+        # autoload_pa_enabled_setting.
+        self._pa_enabled: bool = False
+
         # Notch bank — list of Notch dataclasses (see top of file).
         # Operators add/remove via right-click on spectrum/waterfall;
         # each notch carries its own width, depth, cascade, and active
@@ -2513,8 +2525,16 @@ class Radio(QObject):
         (not a raw ``set_mox(False)``) means a still-asserted HW
         PTT won't instantly re-key -- it re-fires only on its
         next EP6 edge (the operator-visible timeout toast, when
-        §15.20 lands, explains that)."""
+        §15.20 lands, explains that).
+
+        §15.26 PART C: a safety stand-down also DISARMS the PA
+        (set_pa_enabled False) -- a forced release means something
+        went wrong (timeout / stuck source), so the amplifier
+        must not stay armed for the next accidental key.  The
+        operator deliberately re-enables PA to transmit again."""
         self._ptt_fsm.force_release_all()
+        if getattr(self, "_pa_enabled", False):
+            self.set_pa_enabled(False)
 
     # ── HW-PTT-in opt-in (v0.2.0 Phase 3 hotfix, §15.25 / §10 Q#1) ─
     @property
@@ -2750,6 +2770,62 @@ class Radio(QObject):
         self._tx_timeout_bypass = bool(byp)
         self.tx_timeout_seconds_changed.emit(self._tx_timeout_seconds)
         self.tx_timeout_bypass_changed.emit(self._tx_timeout_bypass)
+
+    # ── PA-bias enable (v0.2.0 Phase 3 commit 3.5, §15.26 PART C) ──
+    @property
+    def pa_enabled(self) -> bool:
+        return bool(self._pa_enabled)
+
+    def set_pa_enabled(self, on: bool) -> None:
+        """Arm/disarm the transmit power amplifier (frame-10 C3
+        bit 7).  Default OFF -- with it off, MOX produces NO RF.
+        Persists + signals + pushes to the stream.  A safety
+        stand-down (force_release_all / TX timeout) calls this
+        with False to disarm.
+
+        Dual-path caveat (capability ``pa_enable_uses_apollo_i2c``,
+        HL2 = True): on community-gateware variants the PA is also
+        gated by an Apollo-tuner I2C side-channel this bit does
+        NOT drive -- the operator-facing control warns of this; we
+        never silently half-enable.  The I2C side-channel is a
+        separate later, gated change."""
+        on = bool(on)
+        if on == self._pa_enabled:
+            return
+        self._pa_enabled = on
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue("tx/pa_enabled", on)
+        except Exception:
+            pass
+        if self._stream is not None:
+            try:
+                self._stream.set_pa_on(on)  # noqa: SLF001
+            except Exception as exc:  # noqa: BLE001
+                self.status_message.emit(
+                    f"PA enable set failed: {exc}", 3000)
+        self.pa_enabled_changed.emit(on)
+
+    def autoload_pa_enabled_setting(self) -> None:
+        """Restore the PA-enable opt-in from QSettings on startup
+        (default OFF -- fresh installs / a safety disarm stay
+        wire-identical to _pa_on=False).  Called once at app build
+        alongside the other ``autoload_*`` restores."""
+        try:
+            from PySide6.QtCore import QSettings
+            raw = QSettings("N8SDR", "Lyra").value("tx/pa_enabled",
+                                                   False)
+            on = (raw if isinstance(raw, bool)
+                  else str(raw).lower() in ("1", "true", "yes"))
+        except Exception:
+            on = False
+        self._pa_enabled = bool(on)
+        if self._pa_enabled and self._stream is not None:
+            try:
+                self._stream.set_pa_on(True)  # noqa: SLF001
+            except Exception:
+                pass
+        self.pa_enabled_changed.emit(self._pa_enabled)
 
     def _request_rx_channel(self, on: bool) -> None:
         """Start (on=True) / stop-with-flush (on=False) the WDSP RX

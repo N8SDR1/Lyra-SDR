@@ -160,6 +160,15 @@ class RadioCapabilities:
     tx_attenuator_range: tuple[int, int]
     cwx_ptt_bit_position: int
 
+    # PA-enable is dual-path on HL2: the frame-10 C3 bit-7 PA-bias
+    # bit PLUS an HL2-only Apollo-tuner I2C side-channel.  When
+    # True, the frame-10 bit alone may not fully key the PA on
+    # community-gateware variants that gate on the Apollo path --
+    # the operator-facing control must warn rather than silently
+    # half-enable (the I2C side-channel is a separate later
+    # change).  CLAUDE.md §15.26 PART C.
+    pa_enable_uses_apollo_i2c: bool
+
 
 # ──────────────────────────────────────────────────────────────────────
 # HL2 capability instance.
@@ -185,4 +194,5 @@ HL2_CAPABILITIES: RadioCapabilities = RadioCapabilities(
     puresignal_requires_mod=True,                   # CLAUDE.md §6.5
     tx_attenuator_range=(-28, 31),                  # CLAUDE.md §3.8 HL2 quirks
     cwx_ptt_bit_position=3,                         # CLAUDE.md §3.8 L-5
+    pa_enable_uses_apollo_i2c=True,                 # CLAUDE.md §15.26 PART C
 )

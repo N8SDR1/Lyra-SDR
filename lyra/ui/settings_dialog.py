@@ -2869,11 +2869,46 @@ class TxSettingsTab(QWidget):
         self.radio.tx_timeout_bypass_changed.connect(
             self._on_radio_tx_timeout_bypass)
 
+        # ── Advanced — PA bias enable (§15.26 PART C) ───────────────
+        adv_grp = QGroupBox("Advanced")
+        adv_v = QVBoxLayout(adv_grp)
+        self.pa_enable_chk = QCheckBox(
+            "Enable PA  (transmit power amplifier bias)")
+        self.pa_enable_chk.setChecked(radio.pa_enabled)
+        _apollo = bool(getattr(
+            radio.capabilities, "pa_enable_uses_apollo_i2c", False))
+        _tip = (
+            "Arms the transmit power amplifier.  DEFAULT OFF — with "
+            "it off, keying MOX produces NO RF (safe for bench / "
+            "dummy-load setup).  Tick it ONLY when you intend to "
+            "transmit real power and have a dummy load or antenna "
+            "connected.\n\n"
+            "A safety stand-down (TX timeout / forced release) "
+            "automatically disarms this — you re-tick it "
+            "deliberately to transmit again.")
+        if _apollo:
+            _tip += (
+                "\n\nNOTE (this hardware): PA enable is dual-path — "
+                "some HL2 community-gateware variants also gate the "
+                "PA through an Apollo-tuner control this switch does "
+                "NOT drive, so on those gateware builds the PA may "
+                "not fully key from this switch alone.  If you tick "
+                "this and get no power, that gateware path is the "
+                "reason (a separate change handles it).")
+        self.pa_enable_chk.setToolTip(_tip)
+        self.pa_enable_chk.toggled.connect(self._on_pa_enable_chk)
+        adv_v.addWidget(self.pa_enable_chk)
+        v.addWidget(adv_grp)
+        self.radio.pa_enabled_changed.connect(
+            self._on_radio_pa_enabled)
+
         # ── Future sections (land WITH behavior — no inert UI) ──────
         # Ordered insertion anchors so the tab grows without reorg:
-        #   • v0.2.0 Phase 3 commit 3.5 — "Advanced": gateware
+        #   • Advanced (above) still to gain: gateware
         #     reset-on-link-loss opt-in (default OFF) + the
-        #     hardware-PTT-input opt-in (default OFF) surfaced here.
+        #     hardware-PTT-input opt-in (default OFF) — added to the
+        #     same box when those land (foot-switch work / §15.20
+        #     reset_on_disconnect exposure).
         #   • v0.2.1 — "Speech Processing": parametric EQ, multiband
         #     combinator, tube-plating, formant/sibilance, de-esser,
         #     compressor position, mic auto-AGC + mic gain.
@@ -2919,6 +2954,18 @@ class TxSettingsTab(QWidget):
             self.tx_timeout_bypass_chk.blockSignals(False)
         # Spin is meaningless while bypassed.
         self.tx_timeout_spin.setEnabled(not on)
+
+    # ── PA-enable sync (§15.26 PART C) ──────────────────────────────
+    def _on_pa_enable_chk(self, on: bool) -> None:
+        self.radio.set_pa_enabled(bool(on))
+
+    def _on_radio_pa_enabled(self, on: bool) -> None:
+        on = bool(on)
+        if self.pa_enable_chk.isChecked() == on:
+            return
+        self.pa_enable_chk.blockSignals(True)
+        self.pa_enable_chk.setChecked(on)
+        self.pa_enable_chk.blockSignals(False)
 
 
 class VisualsSettingsTab(QWidget):
