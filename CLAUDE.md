@@ -6016,6 +6016,46 @@ source before coding -- standing directive):
   Transmit / Other H/W→Amp / Calibration) -- request them for
   the PA/Apollo + TR-delay verification.
 
+#### CRITICAL FINDING — HL2 TX-att encoding is PS-entangled (2026-05-16)
+
+Operator: "−31dB it needs that for PureSignal, better check on
+it!"  Verified in Thetis source:
+* `console.cs:10657-10658` — **HL2-ONLY**: `SetTxAttenData(31 -
+  _tx_attenuator_data)` (inverted/offset vs the ANAN
+  `SetTxAttenData(_tx_attenuator_data)` path).
+* `m_bATTonTX == false` → `SetTxAttenData(0)`.
+* `console.cs:13078-13090` QSK path force-sets `ATTOnTX=true;
+  SetupForm.ATTOnTX=31` and restores `non_qsk_ATTOnTXVal`.
+* `console.cs:21408-21413`: `_auto_attTX_when_not_in_ps` ↔
+  `ATTOnTX` — the **PureSignal auto-attenuator FSM drives this
+  same TX-att path**.  Screenshot "Force ATT on Tx to 31 when
+  PS-A off / when Drive↑ & PS-A on" = this interaction.
+=> the **31-forced-att, the HL2 `31−x` encoding, ATT-on-TX,
+and PS-A are ONE interlinked subsystem** (CLAUDE.md §3.8: the
+−28..+31 attenuator is "used for both normal TX gain AND the
+PS auto-attenuator state machine").  Lyra currently feeds
+frame-11(mox-gated)/frame-4 from `_tx_step_attn_db` (operator
+TX-%) with its OWN encoding -- reconciling that vs this Thetis
+HL2 path WITHOUT breaking v0.3 PureSignal requires whole-
+surface verification, NOT piecemeal patches (§15.23-trap
+risk).  `SetTxAttenData`→ which C&C register/byte must be
+traced (NetworkIO/networkproto1.c) and reconciled with Lyra
+frame-4 C3 (`_tx_step_attn_db & 0x1F`) + frame-11 C4 mox-gate.
+
+**DECISION: a dedicated Thetis-ground-truth verification pass
+(the §15.25/§15.26 methodology) over the WHOLE interlinked
+surface BEFORE any code:** Enable PA + Enable Full Duplex
+wire path · `SetTxAttenData` 31−x → C&C register mapping ·
+ATT-on-TX (m_bATTonTX) keydown/keyup · PS-A auto-attenuator
+interaction (forward-compat with v0.3) · Apollo-tuner I²C
+side-channel · PA-current readout (getUserADC0) · TR delays
+(RX5/MOX15/RF50/PTT13) → wire mapping.  Inputs: operator
+screenshots (some pending: PA Settings / Transmit / Other
+H/W→Amp+ATU / Calibration / HL2 Options) + Thetis source.
+Output: one reconciled plan that does NOT paint v0.3 PS into
+a corner.  Operator standing directive: verify-first, no
+guessing.
+
 **RE-PRIORITISED NEXT (was deferred): Apollo-tuner I²C
 side-channel.**  Required for RF on N8SDR's gateware.  §3.9:
 it is a NEW emitted EP2 I²C surface → needs default-safe gate
