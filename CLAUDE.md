@@ -1392,7 +1392,16 @@ These weren't answered by code-reading; we'll find out on N8SDR's
 hardware:
 
 1. **HL2 mic samples in EP6 with AK4951 audio active** — value or
-   zero?  Affects v0.1 mic-input source choice.
+   zero?  **ANSWERED 2026-05-16 (N8SDR HL2+, AK4951): the
+   `ControlBytesIn[0]&0x01` `ptt_in` bit is NOT a clean 0 at RX
+   rest on this unit.**  The always-on commit-3c HW-PTT-in
+   forwarder mis-read it as a foot-switch press → spurious MOX
+   keying → phantom-TX loud surge (see §15.25 RESOLVED-CORRECTION).
+   Fix: HW-PTT-in is now operator opt-in, default OFF (`ff5f128`).
+   Per-unit `ptt_in` semantics still need a scope/bench check at
+   the Phase-3-EXIT gate before any operator enables it.  The mic
+   *sample* bytes (slot 24-25) value-vs-zero question is separate
+   and still open (affects PC-vs-codec mic-source default).
 2. **DDC2/DDC3 sample rate during PS+TX** — Thetis sets RX1 rate but
    actual gateware delivery is TBD.  Wireshark a PS+TX session.
 3. **HL2 PA-on bit power-up default** — is `pa & 1` set by gateware
@@ -5408,6 +5417,63 @@ test will confirm.  Doc nit fixed (stale `lyra/radio/ptt.py`
 -> `lyra/ptt.py` in §8 + §6.6).  Phase 3 continues at commit
 3.4 (TxPanel + TxSettingsTab) once the operator confirms the
 antenna test.**
+
+#### ⚠️ RESOLVED-CORRECTION 2026-05-16 — the audit was WRONG; it
+#### WAS a real regression (commit `2295524`), now FIXED `ff5f128`
+
+The "environmental AGC-chasing-dead-air, no fix" verdict above
+was **incorrect** and is a standing lesson: a mechanistic
+agent audit that reasons from an *unverified assumption*
+("`ptt_in=0` at RX rest") loses to operator empirical data.
+This is the SECOND time this session operator data overrode an
+agent verdict — when they conflict, the data wins; re-open, do
+not defend the audit.
+
+**What actually happened.**  Operator returned with antenna +
+freq-change data, then the decisive facts: the surge **started
+today only**, did NOT occur across **40+ stop/restart cycles on
+yesterday's dev build**, and was **freq/band-change triggered,
+sustained ~10× loud, AGC-Off→Fast resettable**.  A 3-worktree
+bisect on the real HL2+ isolated it 100 %:
+
+| Build | State | Result |
+|---|---|---|
+| `f5d4842` | yesterday EOD | CLEAN |
+| `d1e9cf9` | commit 3b (FSM built+bound, **no** ptt_in fwd) | CLEAN |
+| HEAD | commit 3c forwarder live | LOUD |
+
+**Root cause.**  Commit `2295524` (3c) is the first code in
+project history to *act on* `stats.ptt_in`.  §10 Q#1 was never
+answered; N8SDR's HL2+/AK4951 carries a **non-zero `ptt_in` at
+RX rest**, so the always-on forwarder spuriously fired
+`set_hardware_ptt(True)` → FSM → `Radio.set_mox(True)` →
+phantom TX (`inject_tx_iq` + `dispatch.mox=True`) = the loud
+surge.  This ALSO retro-explains the earlier "loud on dummy
+load / no antenna" reports the audit mis-called environmental.
+
+**Why the audit's per-commit "RX-inert" clearance still held
+for 1/2/3a/3b** — those genuinely are inert (verified again
+here: `tx_freq_hz` read-only; `_set_tx_freq` calls hard-gated
+on `mox`; FSM dormant unless something calls it).  The defect
+was solely 3c's forwarder + the unverified `ptt_in=0`
+assumption the audit treated as fact.
+
+**Fix (`ff5f128`).**  HW-PTT-in is now operator **opt-in,
+default OFF**: `Radio._hw_ptt_input_enabled` (seeded False),
+`_on_hl2_mic` gates the whole `ptt_in` block behind it (OFF ⇒
+RX byte-identical to pre-3c), `set_hw_ptt_input_enabled()` +
+`hw_ptt_input_enabled_changed` signal + `tx/hw_ptt_input_enabled`
+QSettings + `autoload_hw_ptt_setting()` (wired in `ui/app.py`),
+turning OFF clears `_last_hw_ptt`.  Regression guard
+`test_forwarder_gated_off_by_default`.  Suite 329/0.  The
+future Settings→TX toggle (commit 3.6, no-inert-UI) binds the
+already-present signal/setter.  Operator enables it only after
+the Phase-3-EXIT bench verifies `ptt_in` semantics on their
+specific unit (per-unit, answers §10 Q#1 with hardware truth).
+
+**Bisect worktrees** (`SDRProject-yesterday-eod`,
+`SDRProject-3b-no-pttfwd`) — remove once operator confirms
+`ff5f128` on the dev build is clean.**
 
 ---
 
