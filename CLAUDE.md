@@ -5651,9 +5651,21 @@ PA-bias-drop test gates ANY real-antenna PA-enable keying
 (2026-05-16): shipped code/comments/commits in first-principles
 RF terms; citations only here + docs/.
 
-**Worktree:** `Y:\Claude local\SDRProject-pre3.4` (`413df85`,
-operator-confirmed fewer-pops baseline) — KEEP until PART A
-verified, then `git worktree remove`.
+**STATUS 2026-05-16:** PART A SHIPPED `0ae3ccb` +
+operator-confirmed (pops on dev now match pre-3.4 ≈ same;
+residual = §9.6 HL2/GIL baseline, not 3.4).  `pre-3.4`
+worktree removed.  PART B SHIPPED `13caf39` (`_tx_rx_muted`
++ `_on_tx_state_changed` body + 4 audio-gate sites + MOX
+re-enabled + tests; 341/0).  **Operator bench-verify gate
+(before ANY keying/power):** press MOX into a DUMMY LOAD →
+RX must go SILENT instantly + return to exactly the prior
+listening state on release with Mute-A/B unchanged.  NEXT
+after that confirms green: §15.20 host TX-timeout, then
+PART C (4a map-doc+capability / 4b stream.set_pa_on +
+set_pa_enabled + safety-OFF / 4c TxSettingsTab PA checkbox;
+Apollo-I²C = later §3.9-gated commit).  Phase-3-EXIT
+kill-Lyra-mid-TX dummy-load PA-bias-drop test still gates
+real-antenna PA-enable keying.
 
 ---
 
