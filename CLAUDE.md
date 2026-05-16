@@ -5673,12 +5673,15 @@ operator-confirmed (pops on dev now match pre-3.4 ≈ same;
 residual = §9.6 HL2/GIL baseline, not 3.4).  `pre-3.4`
 worktree removed.  PART B SHIPPED `13caf39` (`_tx_rx_muted`
 + `_on_tx_state_changed` body + 4 audio-gate sites + MOX
-re-enabled + tests) + refinement `8f86be5` (keyup runs
-`_request_dsp_reset_full` to kill the AGC-wound-up "rush"
-on un-key — operator-reported; same artifact-free reset
-used for freq/mode change).  342/0.  Operator bench: PART B
-core PASSED (RX silent on MOX, restores, Mute-A/B intact);
-keyup-rush fix awaiting re-verify.  **Remaining bench-verify
+re-enabled + tests) .  Keyup-rush iterations: `8f86be5`
+(AGC reset) — operator: NO change, REVERTED.  `212c080` v2
+= §15.26-pre-authorized cos² RX-resume fade-in (~80 ms
+raised-cosine, single-RX path, mechanism-robust).  343/0.
+Operator clean-build bench: PART B core PASSED (RX silent
+on MOX, restores, Mute-A/B intact); pops/"stumbling" were a
+mid-edit artifact (GONE on clean build, ruled out); mic-
+whistle panadapter spike = expected TX-modulation display.
+keyup-rush v2 (cos² fade) awaiting re-verify.  **Remaining bench-verify
 gate (before ANY keying/power):** press+release MOX into a
 DUMMY LOAD → RX silent instantly on key, and on un-key it
 returns to the prior listening state with NO delayed rush
