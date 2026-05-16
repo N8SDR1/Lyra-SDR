@@ -5696,9 +5696,30 @@ muted 50 ms while the flushed chain re-primes on clean post-
 T/R IQ, then `_finish_tx_rx_resume` un-gates with the cos²
 fade.  Lyra-native equivalent of stop-RX-DSP/restart-after-
 settle.  Adds ~50 ms+fade RX-return delay (correct trade).
-343/0.  Awaiting operator re-verify; if residual →
-`LYRA_AUDIO_DEBUG=1` (§9.6 `_diagnose_audio_step`) for hard
-evidence, NOT a 5th guess.  **Remaining bench-verify
+343/0.
+
+**OPERATOR DIRECTIVE 2026-05-16 (locked, supersedes the
+"awaiting re-verify" stance):** STOP iterating guesses on the
+keyup artifact.  (1) Verify the EXACT Thetis TX→RX un-key
+sequence as ground truth (the proven §15.25 methodology --
+study Thetis, write Lyra-native, no attribution in shipped
+code), specifically: does Thetis SetChannelState the RX DSP
+channel OFF on keydown (dmode=1 blocking flush) and RESTART
+it only after the ptt_out settle?  §15.25 already documents
+that order ("RX DSP stop ... dmode=1 BLOCKING" keydown; "RX
+DSP restart" after ptt_out settle keyup) -- Lyra's divergence
+is it NEVER stops the RX channel, just gates audio + (v3)
+flush-while-muted, which only APPROXIMATES a true
+stop/restart.  (2) REVERT the speculative keyup layering --
+the standalone cos² resume-fade (`212c080`) and the
+guess-placed AGC/DSP-reset (`8f86be5`) -- and reimplement the
+keyup as the Thetis-faithful RX-DSP stop-on-keydown /
+restart-after-settle, Lyra-native, NOT envelope band-aids.
+v3 `59ebf5e` flush+settle is a CANDIDATE realization but must
+be reconciled to the verified Thetis mechanism (true channel
+stop vs reset-between-blocks) before it's trusted.  Next
+session: do the Thetis read FIRST, then a clean single
+implementation replacing the v1/v2/v3 stack.  **Remaining bench-verify
 gate (before ANY keying/power):** press+release MOX into a
 DUMMY LOAD → RX silent instantly on key, and on un-key it
 returns to the prior listening state with NO delayed rush
