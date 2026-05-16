@@ -5917,8 +5917,28 @@ state+setters+2 signals+`autoload_tx_timeout_settings`
 NO RF (pure host timer+UI) — the §15.24-C safety
 prerequisite is now in place.
 
-**PART C = the HARD OPERATOR CHECKPOINT (next).**  It is
-the first commit that makes the radio emit real power.
+**PART C SHIPPED `52bd910` 2026-05-16 (default-OFF, wire-safe).**
+4b/4c done: `stream.set_pa_on` (frame-10 C3 bit7,
+`_refresh_frame_10` round-robin) + `capabilities.
+pa_enable_uses_apollo_i2c=True` + `Radio.set_pa_enabled`/
+`pa_enabled`/`autoload_pa_enabled_setting` (wired app.py) +
+`pa_enabled_changed` + `force_release_all` AUTO-DISARMS PA +
+TxSettingsTab "Advanced" default-OFF "Enable PA" checkbox
+(Apollo dual-path caveat in the tooltip).  363/0.  RF happens
+ONLY when the operator ticks Enable-PA + keys MOX.  Apollo-I²C
+side-channel = still a separate later §3.9-gated commit (bit
+alone may not key on Apollo-gated gateware -- tooltip warns).
+**4a doc still PENDING:** create `docs/architecture/
+hpsdr_protocol_map.md` (PA bit-map + dual-path provenance --
+the no-attribution "provenance home"); low priority, not
+blocking RF, the §15.26 PART C text + capability flag already
+carry the facts.
+**REMAINING GATE before real-antenna keying:** the
+Phase-3-EXIT kill-Lyra-mid-TX dummy-load PA-bias-drop test
+(gateware watchdog still TX-unverified, §15.20/§15.24-C).
+
+**(historical) PART C = the HARD OPERATOR CHECKPOINT.**  First
+commit that makes the radio emit real power.
 Plan (from §15.26 PART C, locked): (4a) research-doc
 `hpsdr_protocol_map.md` + `capabilities.pa_enable_uses_
 apollo_i2c`; (4b) `stream.set_pa_on` (→`_refresh_frame_10`,
