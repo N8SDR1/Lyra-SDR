@@ -6953,6 +6953,31 @@ contradiction.  Agent ids: A=a025cb057db7d05b7,
 B=a06b3a1aa3bc4da99, C(RTL)=a9876bea26e083dd0/
 a98eb352347d9864c.
 
+**✅ ATT-on-TX CONVERGED + SHIPPED `7959587` 2026-05-17.**
+Round 4 (2 independent agents: Thetis-source + ak4951v4 RTL)
+reached the IDENTICAL answer, reconciling all prior rounds —
+the "circle back till all agree" condition MET.  Resolution:
+the autonomous `0x0e[15]` recommendation was REFUTED (string
+`en_tx_gain` absent from the entire Thetis tree; `ad9866.v:
+144` arbiter proves with `en_tx_gain==0` live gain ALWAYS
+follows `rx_gain`).  Proven mechanism = **MOX-gated cmd_addr
+0x0a = Lyra's EXISTING `_compose_frame_11`**; the bug was the
+TX-branch VALUE (`_tx_step_attn_db=0` → c4 0x5F → rx_gain 31
+= max gain = no protection).  FIX = the `m_bATTonTX` policy:
+keydown `_tx_step_attn_db=31` → frame-11 TX-branch `0x40` →
+gateware `rx_gain=0` = min LNA = max RX-ADC protection,
+byte-identical to Thetis `SetTxAttenData(31-31=0)`→case-11;
+keyup→0.  `radio._apply_att_on_tx` via the FSM keydown/keyup
+hooks; default ON (operator rig).  NO new register; frame-4
+inert on FAST_LNA; RX-branch untouched; single-writer kept;
+**PS-entanglement REFUTED for this variant** (PS=cmd_addr
+0x09).  RX-inert at rest, phase0 green, +2 tests, 395/0,
+backup `_backups/lyra-2026-05-17-att-on-tx.bundle`.  NEXT:
+operator bench — TUN/MOX into dummy should now show RX NOT
+overloading (panadapter no longer wide/off-scale, S-meter
+not pegged) → then re-attempt the HL2 Telemetry Probe
+PA-current-slot capture + kill-test on a clean RX.
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
