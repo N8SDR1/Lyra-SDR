@@ -1,10 +1,15 @@
-"""PA-bias enable tests (v0.2.0 Phase 3 commit 3.5, §15.26 PART C).
+"""PA-bias enable tests (v0.2.0 Phase 3 §15.26 PART C + Commit D-2).
 
-The PA-enable opt-in: frame-10 (reg 0x12) C3 bit 7.  Default OFF
-so MOX produces NO RF until the operator deliberately arms it;
-a safety stand-down auto-disarms.  The Apollo-I2C dual-path is
-NOT driven here (separate later change) -- capability-flagged so
-the UI can warn.
+The PA-enable opt-in, frame-10 (reg 0x12).  Default OFF so MOX
+produces NO RF until the operator deliberately arms it; a safety
+stand-down auto-disarms.
+
+Commit D-2 (the first-RF commit, §15.26): PA-on now drives the
+Thetis-verified HL2 mechanism C2 bit 3 (0x08 Apollo tuner) + bit
+2 (0x04 Apollo filter) => C2 = 0x4C, AND keeps the legacy C3
+bit 7.  The Apollo-tuner *I2C side-channel* is still NOT driven
+here (separate later change) -- capability-flagged so the UI can
+warn (Apollo-gated gateware may need it for full keying).
 """
 from __future__ import annotations
 
@@ -48,14 +53,25 @@ class PaEnableStreamTest(unittest.TestCase):
         self.assertEqual(s._cc_registers[0x12][2] & 0x80, 0)
         self.assertEqual(s._cc_registers[0x12], (0x00, 0x40, 0x00, 0x00))
 
-    def test_enable_sets_bit7_disable_clears(self) -> None:
+    def test_enable_sets_apollo_c2_and_legacy_bit7(self) -> None:
+        # D-2: PA-on => C2 0x4C (0x40 const | 0x08 Apollo tuner |
+        # 0x04 Apollo filter) AND legacy C3 bit 7.  Off restores
+        # C2 0x40 / C3 bit 7 clear.
         s = self._stream()
         s.set_pa_on(True)
         self.assertTrue(s._pa_on)
-        self.assertEqual(s._cc_registers[0x12][2] & 0x80, 0x80)
+        self.assertEqual(s._cc_registers[0x12][1], 0x4C)   # C2
+        self.assertEqual(s._cc_registers[0x12][2] & 0x80, 0x80)  # C3 b7
         s.set_pa_on(False)
         self.assertFalse(s._pa_on)
+        self.assertEqual(s._cc_registers[0x12][1], 0x40)   # C2 const
         self.assertEqual(s._cc_registers[0x12][2] & 0x80, 0)
+
+    def test_apollo_bits_clear_when_pa_off(self) -> None:
+        # Belt-and-suspenders: no Apollo bit may leak with PA off.
+        s = self._stream()
+        s._refresh_frame_10()
+        self.assertEqual(s._cc_registers[0x12][1] & (0x08 | 0x04), 0)
 
 
 class PaEnableRadioTest(unittest.TestCase):

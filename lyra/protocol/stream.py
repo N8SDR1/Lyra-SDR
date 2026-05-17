@@ -1576,10 +1576,10 @@ class HL2Stream:
         attributes only).  Does NOT acquire any locks itself --
         ``_refresh_frame_10`` is the lock-acquiring sibling.
 
-        v0.2 Phase 1 defaults: drive=0, all toggles False, pa_on=False.
-        Wire output: (0x00, 0x40, 0x00, 0x00).  PA bias is OFF so
-        even when MOX bit emission lands (item 8), no RF can be
-        keyed until operator opts in via Phase 3 Settings UI.
+        Defaults: drive=0, all toggles False, pa_on=False ->
+        wire (0x00, 0x40, 0x00, 0x00): PA OFF so no RF can be
+        keyed even with MOX asserted until the operator opts in.
+        PA-on (D-2): C2 -> 0x4C (0x40|0x08|0x04) + C3 bit 7.
         """
         c1 = self._tx_drive_level & 0xFF
         c2 = 0x40  # HL2 constant (legacy Apollo-flag bit position)
@@ -1587,6 +1587,17 @@ class HL2Stream:
             c2 |= 0x01
         if self._line_in_route_enabled:
             c2 |= 0x02
+        if self._pa_on:
+            # Commit D-2 (§15.26, Thetis-verified + independent
+            # red-team confirmed): the HL2 PA-enable mechanism is
+            # C2 bit 3 (0x08, "Apollo tuner") + bit 2 (0x04,
+            # "Apollo filter").  Operator's working rig has BOTH
+            # set, so PA-on C2 = 0x40|0x08|0x04 = 0x4C.  This is
+            # THE bit pair that emits RF on an Apollo-gated HL2+;
+            # the C3-bit-7 path below is the legacy/non-XVTR bit
+            # (kept for non-Apollo gateware, NOT the mechanism on
+            # N8SDR's unit -- UNCERTAIN, do not rely on it alone).
+            c2 |= 0x08 | 0x04
         c3 = self._bpf_filter_bits & 0x7F
         if self._pa_on:
             c3 |= 0x80
@@ -2973,10 +2984,16 @@ class HL2Stream:
         self._refresh_frame_10()
 
     def set_pa_on(self, on: bool):
-        """Enable/disable the HL2 PA bias (frame 10 / register 0x12
-        C3 bit 7).  Default OFF: until the operator opts in, no RF
-        can be keyed even when MOX is asserted -- this is the
-        bias-enable for the transmit power amplifier.
+        """Enable/disable the HL2 PA (frame 10 / register 0x12).
+        Default OFF: until the operator opts in, no RF can be keyed
+        even when MOX is asserted -- this is the transmit power
+        amplifier enable.
+
+        Commit D-2 (§15.26): when ON the composer sets C2 bit 3
+        (0x08 Apollo tuner) + bit 2 (0x04 Apollo filter) -- the
+        Thetis-verified HL2 PA-enable mechanism (operator's working
+        rig has chkApolloTuner=chkApolloFilter=True) -- AND keeps
+        C3 bit 7 (the legacy/non-Apollo path).
 
         Updates the cached frame 10 via the composer so all four
         bytes stay coherent; no direct _send_cc -- the EP2 writer
@@ -2984,12 +3001,12 @@ class HL2Stream:
         (same imperceptible-latency / no-audio-pop discipline as
         set_lna_gain_db / set_tx_step_attn_db).
 
-        NOTE (the dual-path caveat): on some HL2 community-gateware
-        variants the PA is additionally gated by an Apollo-tuner
-        I2C side-channel that this bit does NOT drive.  On those
-        units the bit alone may not fully key the PA.  That side-
-        channel is a separate, later, gated change; callers/UI
-        must warn the operator rather than silently half-enable.
+        NOTE (the dual-path caveat): the in-frame Apollo C2 bits
+        ARE driven here, but some community-gateware variants ALSO
+        gate the PA behind an Apollo-tuner I2C side-channel that
+        this register does NOT drive.  That side-channel is a
+        separate, later, gated change; callers/UI must warn the
+        operator rather than silently half-enable.
         """
         if self._sock is None:
             raise RuntimeError("stream not started")
