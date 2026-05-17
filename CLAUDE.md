@@ -6876,6 +6876,43 @@ true can the kill-test be definitively closed.  Also
 available without PA current: the watt-meter A/B (Lyra
 full drive vs Thetis 5.1 W) for the Q1 drive-scale gap.
 
+**⚠ OPERATOR-CAUGHT 2026-05-17: NO RX-attenuation-on-TX
+(ATT-on-TX policy missing) — PROMOTED from deferred.**
+Operator (correct recall): Thetis forces the HL2 step
+attenuator to 31 on TX (RX-ADC protection + PS prereq).
+Code-verified: Lyra has NEITHER Thetis HL2 mechanism:
+(1) **`m_bATTonTX`** keydown save+force-31 / keyup restore
+(`console.cs:30293-30327`/`30391-30410`; operator DB
+`chkATTOnTX=True udATTOnTX=31 chkForceATTwhenPSAoff=True`)
+— Lyra `_tx_step_attn_db` is a static 0 default
+(stream.py:957), zero keydown/keyup policy in radio.py/
+ptt.py; Commit C (`73a459b`) shipped ONLY the `(31−db)`
+ENCODING, §15.26 scoped the POLICY out as "a SEPARATE
+later layer".  (2) the SEPARATE **reg-0x16 / case-12
+XmitBit-gated RX-step-att→0x1F force** (`networkproto1.c:
+773-788`, per the prior §15.26 independent verification)
+— Lyra implements no reg-0x16 at all.  Net: the RX ADC is
+WIDE OPEN during TX → the wide/off-scale panadapter +
+S9+43 peg the operator saw is RX-ADC overload from
+unattenuated TX coupling, NOT (necessarily) dirty RF.
+This is RX-ADC protection AND a v0.3 PureSignal
+prerequisite (tx_step_attn = the shared PS auto-att
+actuator; §15.26 "TX-att is PS-entangled").  STATUS:
+promoted from deferred to **active next priority** —
+blocks clean TX assessment + safety + PS.
+DISCIPLINE: §15.26 flags this surface (tx_step_attn ↔
+ATT-on-TX ↔ reg-0x16 ↔ PS-A) PS-entangled / §15.23-trap-
+prone — implement via a Thetis-source-VERIFIED pass
+(exact force value in Lyra's signed `_tx_step_attn_db`
+axis given Commit-C `31−signed_db` encoding; case-4
+tx_step_attn vs case-12/reg-0x16 RX-att-force; m_bATTonTX
+keydown/keyup; `chkFWCATUBypass`/PS-A gating), single-
+writer-disciplined (`stream.set_tx_step_attn_db` the ONLY
+writer; v0.3 PS swaps the SOURCE not the encoding),
+forward-compatible with PS.  NO chat-guessed magic
+number.  Likely a focused multi-agent Thetis verify
+(same methodology that's worked all session) BEFORE code.
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
