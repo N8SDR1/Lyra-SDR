@@ -7041,6 +7041,39 @@ HL2 Telemetry Probe capture at full tune → real PA-current
 slot on this ak4951v4 (vs Thetis 1.8 A anchor) — then
 A-vs-B is unambiguous + kill-test closeable.
 
+**⚠ BENCH 2026-05-17 (4 items, awaiting operator Thetis
+A/B):**
+1. **Keying-vs-PA-enable:** operator: Lyra TX only engages
+   with Enable-PA ON; thinks Thetis keys with PA off.  Lyra
+   DESIGN: keying (MOX/T-R/TUN) is independent of
+   `_pa_enabled` (FSM keydown→set_mox regardless); Enable-PA
+   only gates PA bias.  So Lyra SHOULD key with PA off (no
+   power).  Operator to clarify post-Thetis-check: does Lyra
+   not key AT ALL w/PA off (→ real bug, dig) or key-but-no-
+   power (expected)?  Verify Thetis behaviour (reference).
+2. **3 loud audio pops** (20 m, AGC Fast, LNA Auto, DIGU,
+   on antenna) = the long-parked §9.6 residual-pop class
+   (since v0.0.7.1; NOT new, NOT TX-caused; today's gateware/
+   frame-layout audits ruled out a packet cause).  New data
+   point logged.  Stays the dedicated post-RF workstream:
+   leads = NetworkThrottlingIndex registry, FFTW WISDOM,
+   GIL/GC, Vulkan (AMD GPU).  Do NOT rabbit-hole now.
+3. **Power Lyra ~1.5-2 W vs Thetis ~5.1 W** (10 m 28.495,
+   dummy, same Palstar — operator re-checking Thetis same
+   meter).  ~1.5-2 W is ABOVE pure-driver, BELOW full PA →
+   leans candidate **B (PA on, Q1 drive-scale gap: flat
+   255·%/100 vs Thetis per-band cal)** over driver-only;
+   NOT definitive — Enable-PA toggle + PA-current telemetry
+   still the discriminators.
+4. **TUN tone unsteady/pulsing on panadapter** (not a smooth
+   carrier).  HYPOTHESIS (verify, don't guess): the R2
+   TxDspWorker pump alternates mic-fed vs synthetic-zero
+   self-clock (~50 Hz) → amplitude-ripples the WDSP postgen
+   tone.  Recorded for investigation; benign into dummy but
+   relevant to clean TX.  Likely fix area = make the TUN
+   pump cadence deterministic (steady block rate while
+   keyed, independent of mic queue).
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
