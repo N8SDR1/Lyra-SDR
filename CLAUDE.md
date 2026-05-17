@@ -6305,7 +6305,49 @@ real-antenna PA-enable keying.
 
 ---
 
-## ▶ NEXT SESSION STARTS HERE (2026-05-15 EOD)
+## ▶ NEXT SESSION STARTS HERE (2026-05-16 EOD)
+
+**AUTHORITATIVE RESUME DOC = §15.26** (full locked plan +
+Thetis-verified ground truth + the A/B/C/D ladder + the
+independent-red-team corrections + every operator decision).
+Read §15.26 first; the 2026-05-15 block below is historical.
+
+**State (2026-05-16 EOD):** branch
+`feature/v0.0.9.6-audio-foundation`, HEAD `3aa9a39`, tree
+clean (only untracked docs/screenshots), full suite **378
+passed / 0**.  Backup: `_backups/lyra-2026-05-16-eod.bundle`
+(+ the per-commit bundles).  NOT pushed (operator batches;
+main stays v0.1.1).
+
+**Phase-3 shipped & clean:** TX transitions (keydown chatter
++ keyup broom both operator-CONFIRMED fixed via the
+Thetis-faithful RX-channel stop/restart), §15.20 TX-timeout,
+PART C default-OFF PA bit, the no-auto-key-on-restart +
+Auto-LNA-frozen-in-TX safety fixes, **Commit A** (PA-current/
+VDD readout `4b4170a`), **Commit B/B.1** (cap-sourced TR
+sequencing + `rf_delay` operator-adjustable **1–75 ms**
+default 50, `9bc95a2`).  No RF has ever been enabled.
+
+**RESUME AT: C-REVERIFY** (read-only, no RF) — confirm WHY
+Lyra's production RX-LNA works with its current frame-11 C4
+`+12`-bias encoding vs Thetis `rx&0x1F|0x20`, so **Commit C**
+(tx_step_attn ONLY via reg `0x1C` C3 `(31−dB)&0x1F` +
+single-actuator + ATT-on-TX, no RF) fixes TX without
+regressing working RX.  Independent agent
+`a3e37ee1d8729b19d` can be continued (SendMessage) for the
+C-REVERIFY.  Then **Commit D** = frame-10 `c2 |= 0x0C`
+(Apollo tuner+filter) — **the first commit that emits real
+RF; HARD operator gate** (dummy-load + the now-observable
+§15.20/§15.24-C Phase-3-EXIT kill-test; the operator's HL2+
+is Apollo-gated so D is what produces power on his unit;
+first-RF test in USB/LSB+mic, NOT CWU).  Then: foot-switch
+(HW-PTT opt-in + §10 Q#1), commit 3.6 (§15.9/§15.15 + the TX
+meter source-swap that fixes the S-meter-in-TX), §9.6 pops
+(network-throttle / FFTW-WISDOM / Vulkan leads — all parked).
+
+---
+
+## (historical) ▶ NEXT SESSION (2026-05-15 EOD)
 
 **State:** v0.2.0 Phase 2 COMPLETE + §15.23 TX SSB defect FIXED
 + §15.24 pre-Phase-3 reconciliation (items A+B) DONE & verified.
