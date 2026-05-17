@@ -6545,17 +6545,33 @@ re-pushes frame-10 at stream start.  Fix: in `start()` after
 the socket exists, reassert `_pa_on`/`_tx_drive_level` from
 Radio state and `_refresh_frame_10()`.
 
-**R2 — CORROBORATED + SHARPENED.**  pihpsdr feeds
-`tx_add_mic_sample()` UNCONDITIONALLY at 48 kHz from the EP6
-**mic slot that HL2 sends EVERY frame even with no mic**
-(all-zero samples, slot always present).  TUN carrier =
-WDSP PostGen pumped every frame.  So the correct pump trigger
-= the always-present per-datagram mic slot (or a free-running
-TX clock), NOT audio energy.  Lyra bug bites IFF `_on_hl2_mic`
-suppresses/early-returns on all-zero/empty slots OR HL2Stream
-doesn't deliver the slot every datagram.  `LYRA_TX_DEBUG`
-(`_on_hl2_mic submitted N` vs `mic EMPTY`, `TxDspWorker
-process ok peak=`) resolves this on hardware.
+**⚠ OPERATOR CAVEAT 2026-05-17 (load-bearing for R2):** the
+cross-ref impls (pihpsdr/Quisk/linHPSDR) are authoritative
+for the **PA / C&C protocol** — that is the COMMON HL2
+gateware (register 0x09 etc.), so R1′/R3/R4/R5 stand on
+solid multi-source + HL2-designer ground truth.  But they
+may NOT model the **HL2+ AK4951-codec gateware** mic/audio
+specifics.  So their "HL2 sends a mic slot every frame" is
+authoritative for *generic HL2*, NOT a guarantee for the
+operator's *HL2+ AK4951* path (= exactly the still-open §10
+Q#1).  Do NOT treat the references as proof of HL2+ mic-slot
+delivery.
+
+**R2 — CORROBORATED (design pattern) + SHARPENED (HL2+-safe
+fix).**  pihpsdr pumps the TX chain UNCONDITIONALLY at the
+48 kHz wire cadence (TUN carrier = WDSP PostGen produced
+every frame, mic content irrelevant).  Given the AK4951
+caveat, the ROBUST Lyra fix is to **decouple the TX/TUN DSP
+pump from the AK4951 mic path ENTIRELY** — drive
+`TxChannel.process()` from Lyra's existing EP2 **wire
+cadence** (the producer-paced semaphore / 48 kHz EP2 frame
+clock the stream already has) on a synthetic zero-mic block
+whenever `inject_tx_iq`, NOT from `_on_hl2_mic`.  This makes
+TUN work regardless of whatever the HL2+ codec gateware does
+with the EP6 mic slot (which the references can't tell us).
+`LYRA_TX_DEBUG` still used to CONFIRM on the operator's HL2+
+(does the pump now advance + `TxDspWorker process ok peak>0`
+during TUN, independent of `_on_hl2_mic`).
 
 **R4 — REVISED.**  No working ref uses a keydown freq-priority
 hack; round-robin is fine BECAUSE TX-freq is **recomputed
@@ -6579,9 +6595,13 @@ no RF until opt-in+key):**
    level` to the wire after socket exists.
 2. **R1′:** drop C3-bit7 `_pa_on` write for HL2; set C2
    `0x08 if _pa_on else 0x04` (wiki+pihpsdr-exact).
-3. **R2:** pump TX DSP from the always-present per-datagram
-   mic slot regardless of content (verify HL2Stream delivers
-   it every datagram; don't gate on energy/size).
+3. **R2:** pump TX DSP from Lyra's EP2 **wire cadence**
+   (producer-paced 48 kHz clock) on a synthetic zero-mic
+   block whenever `inject_tx_iq` — DECOUPLED from the AK4951
+   `_on_hl2_mic` path entirely (HL2+-safe; refs can't vouch
+   for the codec mic slot, §10 Q#1).  Mic audio, when later
+   wanted for SSB, mixes in separately; TUN never depends
+   on it.
 4. **R4:** eager-register 0x02/0x08/0x0a + recompute TX-freq
    from VFO each cycle (pihpsdr pattern).
 5. **R5 (low):** immediate 0x12 emit on `set_pa_on`/
