@@ -5042,11 +5042,23 @@ class TxPanel(GlassPanel):
 
     # ── Radio → display (slave; guarded against re-fire) ────────────
     def _on_tx_active(self, is_tx: bool) -> None:
-        if self.mox_btn.isChecked() == bool(is_tx):
-            return
-        self.mox_btn.blockSignals(True)
-        self.mox_btn.setChecked(bool(is_tx))
-        self.mox_btn.blockSignals(False)
+        on = bool(is_tx)
+        if self.mox_btn.isChecked() != on:
+            self.mox_btn.blockSignals(True)
+            self.mox_btn.setChecked(on)
+            self.mox_btn.blockSignals(False)
+        # §15.26 (2026-05-17): when transmit ends -- INCLUDING the
+        # stop/restart FSM force-reset to RX (cb58bcb) -- the TUN
+        # button must also un-light.  Nothing else syncs it, so it
+        # would sit lit-but-inert (operator had to manually cycle
+        # TUN off).  Only drive it OFF here (tx_active is a single
+        # any-source bool; lighting TUN on True would wrongly lit it
+        # for a MOX/HW-PTT source).  Guard against re-firing
+        # release_tun back into the FSM.
+        if not on and self.tun_btn.isChecked():
+            self.tun_btn.blockSignals(True)
+            self.tun_btn.setChecked(False)
+            self.tun_btn.blockSignals(False)
 
     def _on_radio_tx_power_changed(self, pct: int) -> None:
         if int(self.tx_drive_stepper.value()) == int(pct):

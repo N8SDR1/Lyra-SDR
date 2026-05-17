@@ -9145,6 +9145,20 @@ class Radio(QObject):
         # banner readouts begin updating once the first EP6 frame
         # carrying the right C0 address arrives.
         self._hl2_telem_timer.start()
+        # §15.26 (2026-05-17 incident): a stream START must come up
+        # in a clean RX state regardless of how the previous session
+        # ended.  Two stop/restart-survivable hazards, both
+        # confirmed: (1) ``_tx_rx_muted`` stuck True silences RX;
+        # (2) the WDSP RX channel is created ONCE in __init__ and
+        # REUSED across stop/start -- a keydown ``_request_rx_channel
+        # (False)`` (blocking-flush stop) whose keyup never completed
+        # leaves it STOPPED, so no demod output ("no signals") until
+        # a full process restart.  Force both back to RX-live here.
+        self._tx_rx_muted = False
+        try:
+            self._request_rx_channel(True)   # idempotent if running
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Radio] RX channel ensure-on-start failed: {exc}")
         self.stream_state_changed.emit(True)
 
     def stop(self):
@@ -9232,6 +9246,16 @@ class Radio(QObject):
             self._ptt_fsm.unbind_runtime()
         except Exception:
             pass
+        # §15.26 (2026-05-17 incident, code-confirmed): extend the
+        # "a stopped/restarted stream ALWAYS comes up clean"
+        # guarantee (cb58bcb: set_mox(False)+unbind_runtime) to the
+        # RX-audio gate.  ``_tx_rx_muted`` is OR'd into the
+        # audio-output mute predicate; if a keyup didn't complete
+        # (operator stopped while effectively still keyed) it stays
+        # True and silences RX for the NEXT session too -- only a
+        # full process restart (re-runs __init__) cleared it.
+        # Reset it on teardown so that can't happen.
+        self._tx_rx_muted = False
         if self._stream is not None:
             try:
                 self._stream.register_mic_consumer(None)

@@ -172,6 +172,20 @@ class TxPanelTest(unittest.TestCase):
         self.radio._on_tx_state_changed(True, PttState.TUN_TX)
         self.radio._on_tx_state_changed(False, PttState.RX)
 
+    def test_tx_active_false_unlights_tun_button(self) -> None:
+        # §15.26 (2026-05-17 incident): a stop/restart FSM
+        # force-reset to RX emits tx_active_changed(False); the TUN
+        # button must un-light (it sat lit-but-inert) WITHOUT
+        # re-firing release_tun back into the FSM.
+        calls: list[str] = []
+        self.radio.release_tun = lambda: calls.append("rel")
+        self.radio.request_tun = lambda: calls.append("req")
+        self.panel.tun_btn.setChecked(True)          # operator armed TUN
+        calls.clear()                                # ignore the arm
+        self.radio.tx_active_changed.emit(False)     # FSM reset to RX
+        self.assertFalse(self.panel.tun_btn.isChecked())   # un-lit
+        self.assertEqual(calls, [])                  # no FSM re-fire
+
     def test_drive_stepper_drives_radio(self) -> None:
         seen: list[int] = []
         self.radio.tx_power_pct_changed.connect(seen.append)
