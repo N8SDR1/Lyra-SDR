@@ -3124,15 +3124,20 @@ class Radio(QObject):
             from lyra._txdiag import txdbg
             txdbg(f"_apply_att_on_tx({on}) failed: {exc}")
 
-    # TUN tune-carrier amplitude (modulator domain, 0..1).  The
-    # actual radiated level is set by TX drive % (frame-10 C1) and
-    # gated by the PA-enable opt-in; this is just the WDSP TXA
-    # generator's tone magnitude.  A clean single tone at a 1 kHz
-    # audio offset — a standard tune carrier for ATU / amplifier
-    # adjustment and the steady, meter-readable signal a first-RF
-    # / PA-current / kill-test bench needs (SSB is suppressed-
-    # carrier + voice-shaped, a poor instrument for that).
-    _TUNE_TONE_MAG = 0.5
+    # TUN tune-carrier: a clean single tone at a 1 kHz offset,
+    # generated at FULL modulator scale.  The WDSP output-side
+    # generator injects post-bandpass/post-ALC, so its magnitude
+    # maps near-directly to the EP2 TX I/Q amplitude; the actual
+    # radiated power is governed downstream by the operator's TX
+    # Drive % (the gateware digital drive level) + the PA-enable
+    # opt-in -- NOT by capping the modulator here.  0.95 (not
+    # 1.00) leaves ~0.4 dB headroom so the int16 EP2 quantiser
+    # never clips the sinusoid peak (a clipped carrier =
+    # splatter).  (The earlier 0.5 was a deliberate first-RF
+    # safety cap that has served its purpose -- it was a hidden
+    # -6 dB that prevented TX Drive % ever reaching full power;
+    # removed now that keyed RF is hardware-confirmed.)
+    _TUNE_TONE_MAG = 0.95
     _TUNE_TONE_FREQ_HZ = 1000.0
 
     def _set_tune_tone(self, on: bool) -> None:
