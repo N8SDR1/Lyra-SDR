@@ -6332,12 +6332,24 @@ separate/deferred.  378/0, no RF.
 
 **CORRECTED Commit-D scope (was 1 commit; now 2 + a
 decision):**
-* **D-1 (NEW, CRITICAL):** add `set_tx_drive_level` (single
-  writer → `_refresh_frame_10` C1); wire operator TX-power%
-  → C1 per Thetis `i=int(255*f)`; **LOW default** (~≤20% →
-  C1≈25-50) for a conservative first key.  Resolve the §5
-  TX-power%↔step-att-vs-drive_level mapping (operator
-  decision).  Without D-1, first RF is impossible.
+* **D-1 — SHIPPED `8813a5d` 2026-05-17 (operator-confirmed
+  decision "TX% → drive_level (Thetis-faithful)").**
+  `stream.set_tx_drive_level(level)` single writer (0..255
+  range + not-started guards → `_refresh_frame_10` C1, round-
+  robin re-emit, no `_send_cc`).  `radio`: removed
+  `_TX_ATTN_STEPS`/`_tx_pct_to_attn_db`/`_tx_unity_pct`;
+  added `_tx_pct_to_drive_level(pct)=int(round(255*pct/100))`
+  (Thetis `i=int(255*f)`); `set_tx_power_pct` now pushes
+  `set_tx_drive_level` (was the step attenuator — that is
+  the PS / ATT-on-TX layer, NOT the power knob);
+  `autoload_tx_power_settings` default **0 %** (drive 0 =
+  zero RF; fail-safe, PA also default-OFF — the bench sets a
+  low value before the first key).  `set_tx_step_attn_db`
+  UNCHANGED (Commit-C 31-x contract holds).  Tests rewritten
+  for the drive-level map + `set_tx_drive_level` guards.
+  **382/0, no RF** (PA still default-OFF; D-1 is the
+  necessary-but-not-sufficient amplitude-scalar half).
+  Backup `_backups/lyra-2026-05-17-commit-d1.bundle`.
 * **D-2 (= the original D):** `set_pa_on` → frame-10 C2
   `|= 0x08 | 0x04` (behind default-OFF `set_pa_enabled`;
   `pa_enable_uses_apollo_i2c` cap).  Keep C3-bit-7 gated but
@@ -6366,7 +6378,9 @@ PA-current/VDD readout, then the Phase-3-EXIT kill-test.
 Amp re-enters only after the operator is confident
 (separate later step).
 
-**NEXT = Commit D — HARD OPERATOR GATE (first real RF).**
+**NEXT = Commit D-2 — HARD OPERATOR GATE (first real RF).**
+D-1 shipped (drive_level wired); D-2 is the remaining
+necessary half + the operator checkpoint.
 `_compose_frame_10` `c2 |= 0x0C` (Apollo tuner 0x08 + filter
 0x04; operator `chkApolloTuner=True`+`chkApolloFilter=True`)
 behind the shipped default-OFF `set_pa_enabled` gate +
