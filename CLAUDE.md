@@ -6262,6 +6262,50 @@ TX until D; phase0 audio-null green).  Single-actuator/PS-
 corner discipline kept.  ATT-on-TX force-31 layer still
 separate/deferred.  378/0, no RF.
 
+**PRE-D INDEPENDENT 2-AGENT AUDIT (operator-requested
+2026-05-17, Thetis as known-good ref):**
+* **Auditor 1 (TX wire-sequence/safety) — DONE, ALL CONFIRM.**
+  Independently re-verified vs `WriteMainLoop_HL2` (HL2's
+  actual loop, dispatch `networkproto1.c:1261-1262`):
+  keydown order (TX-freq regs 0x02/0x08/0x0a pushed BEFORE
+  the dispatch MOX flip; RF gated behind MOX-bit by rf_delay
+  → hot-switch-safe), keyup order (TX-off→mox_delay→clear
+  MOX→ptt_out_delay→RX-restart, defaults 10/20 match Thetis),
+  MOX bit = per-frame XmitBit single-funnel no-chatter,
+  Commit-C TX-att byte-correct + RX branch safe/untouched,
+  RX-channel stop/restart race-free (worker between-blocks;
+  the non-blocking keydown stop is the sound operator-
+  verified `47ae18d` divergence), all safety interlocks
+  (unbind→RX, Auto-LNA-frozen-in-MOX, §15.20 arm/cancel,
+  force_release_all PA-disarm) correct.  ZERO hot-switch /
+  wrong-freq / splatter / stuck hazards.  Only GAP = the
+  v0.3 PureSignal DDC0/DDC2-TX-freq routing corner —
+  correctly OUT of Phase-3 scope, no Commit-D action (revisit
+  in the v0.3 PS commit).  §15.26 ground truth independently
+  CONFIRMED against source; no UNCERTAIN items.
+* **Auditor 2 (RF-production completeness) — PENDING**
+  (Apollo bitset completeness, BPF/LPF band filters,
+  modulation→EP2, drive-level safety).  Synthesise both +
+  GO/NO-GO before Commit D.
+
+**OPERATOR DECISION 2026-05-17: NO external amplifier until
+"a really good feel of things" — first RF is BARE HL2+ into
+a dummy load only (~few W).**  Materially de-risks first RF:
+no 1 kW linear in the path ⇒ no hot-switch-destruction
+consequence, HL2+ output is benign.  `rf_delay`/hot-switch
+discipline stays (good practice, still default 50) but is
+no longer the critical-consequence gate for the initial
+bench phase.  Does NOT relax the other gates: Auditor 2
+(RF-completeness: BPF/LPF band filters, modulation→EP2,
+Apollo bitset, drive sanity) + Commit D still required;
+correct-RF still matters (clean signal, right band filter,
+modulation present), just with benign fallout.  Bench
+procedure for the initial phase: dummy load, **linear OUT/
+bypassed**, USB/LSB+mic (not CWU), low drive, watch the
+PA-current/VDD readout, then the Phase-3-EXIT kill-test.
+Amp re-enters only after the operator is confident
+(separate later step).
+
 **NEXT = Commit D — HARD OPERATOR GATE (first real RF).**
 `_compose_frame_10` `c2 |= 0x0C` (Apollo tuner 0x08 + filter
 0x04; operator `chkApolloTuner=True`+`chkApolloFilter=True`)
