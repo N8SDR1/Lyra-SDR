@@ -6728,8 +6728,41 @@ control.v, hermeslite_core.v, i2s_ak4951.v, variant, wiki).
   Verification is EXHAUSTIVE + converged; the disciplined
   next step is implement-the-fix + bench, not more docs.
 
-**LOCKED reconcile plan (ONE commit, gateware-verified,
-no RF until opt-in+key):**
+**✅ RECONCILE COMMIT SHIPPED `b68886d` 2026-05-17 (388/0,
+no RF -- default-OFF PA).**  All 5 findings in one commit:
+* **R3 (PRIME):** `radio._repush_tx_state_to_stream()` called
+  in `start()` after the socket exists -- re-asserts drive +
+  PA-enable + TX-freq from Radio state.  THIS lands C2 0x08
+  on the wire (the autoload-before-start gap is closed).
+* **R1′:** `_compose_frame_10` gateware-exact -- PA-on
+  C2|=0x08, PA-off C2|=0x04, `C2 &= ~0x80` VNA guard, C3-bit7
+  write DROPPED.
+* **R2:** `TxDspWorker._run_loop` self-clocks the TXA chain
+  (synthetic 38-sample zero block, 0.02 s) while
+  `inject_tx_iq` -- decoupled from `_on_hl2_mic`/AK4951.
+* **R4:** start() re-push eager-populates TX-NCO 0x02/0x08/
+  0x0a (no stale 0 Hz first keyed frame).
+* **R5:** `set_pa_on`/`set_tx_drive_level` -> `_send_cc(0x12)`
+  immediate (AK4951 falls back to round-robin, no click).
+* WIRE NOTE: RX-only frame-10 C2 default 0x40→0x44
+  (tr_disable, PA-off).  RX-INERT per gateware (`pa_inttr`
+  only when `int_tx_on`); phase0 RX-audio null gate GREEN.
+  Backup `_backups/lyra-2026-05-17-tx-reconcile.bundle`.
+
+**NEXT = operator hardware bench (the fix is in; verify on
+the HL2+):** run `LYRA_TX_DEBUG=1`, reproduce (start → enable
+PA → TX drive ~50% → TUN).  Expect in the log:
+`_repush_tx_state: pa_on<-True (C2 bit3 0x08 now reaches the
+wire)`, `_repush_tx_state: drive_level<-128`,
+`_repush_tx_state: tx_freq<-...`; `_open_tx_iq: SET
+inject_tx_iq=True`; `TxDspWorker: process ok ... peak>0
+inject_tx_iq=True`; `TxDspWorker: PACKED`.  AT2K should show
+power.  Then the §15.20/§15.24-C Phase-3-EXIT kill-test (PA
+current drops).  If still zero RF, the TXDBG line that's
+last-present localises the remaining link (no more guessing).
+
+(historical) **LOCKED reconcile plan (ONE commit, gateware-
+verified, no RF until opt-in+key):**
 1. **R3 (prime):** `start()` re-pushes `_pa_on`+`_tx_drive_
    level` to the wire after socket exists.
 2. **R1′:** drop C3-bit7 `_pa_on` write for HL2; set C2
