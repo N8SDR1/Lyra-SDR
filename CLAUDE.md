@@ -6705,6 +6705,29 @@ fix is the next action.  RTL copies: `Y:\Claude local\
 _hl2src\` (radio.v, fifos.v, usopenhpsdr1.v, dsopenhpsdr1.v,
 control.v, hermeslite_core.v, i2s_ak4951.v, variant, wiki).
 
+#### 2nd web-synthesis (PySide6/parsing blueprint) — TRIAGED
+#### & MOSTLY REJECTED 2026-05-17 (verify-don't-guess applied
+#### to the doc itself).
+* Its `_parse_sub_frame` "HL2+ caps RX@2, frame[387:512] =
+  PCM audio blob" = the SAME slice/stride myth already
+  REFUTED vs ak4951v4 RTL (mic = ONE 16-bit sample/26-B slot
+  @off24, not a blob; `.NR(4)`, host-Nrx, no cap).  Following
+  its blueprint would BREAK the working HL2+ RX path
+  (empirically: operator's RX works today on Lyra's correct
+  26-B/4-DDC parser).  REJECTED — do not restructure parsing.
+* Its `generate_tx_control_packet` is invalid (`packet[0]=
+  0xEFFE` throws; EP2=1032 B not 512; fictional offsets).
+  Lyra EP2 framing already Thetis-audited correct.  REJECTED.
+* Watchdog point = restates R2 (already gateware-established).
+* PySide6 threading/deque pattern = ALREADY how Lyra is built
+  (§5); QAudioSink advice misreads Lyra's WDSP-cffi/AK4951
+  design.  Nothing actionable.
+* **Process note:** external web syntheses have now hit
+  net-negative — they recycle the refuted 2-RX myth and
+  conflict with the authoritative RTL already read.
+  Verification is EXHAUSTIVE + converged; the disciplined
+  next step is implement-the-fix + bench, not more docs.
+
 **LOCKED reconcile plan (ONE commit, gateware-verified,
 no RF until opt-in+key):**
 1. **R3 (prime):** `start()` re-pushes `_pa_on`+`_tx_drive_
