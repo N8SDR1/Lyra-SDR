@@ -6498,16 +6498,103 @@ whole, not piecemeal):
   `LYRA_TX_DEBUG=1`, watch `_on_hl2_mic submitted N` vs
   `mic EMPTY` + `TxDspWorker process ok peak=` while keyed).
 
-**LOCKED reconcile plan (ONE Thetis-faithful commit, no RF
-until operator opts in + keys; verify-first per directive):**
-fix R1 (C3 polarity) + R3 (start() re-push of pa/drive) + R2
-(unconditional TXA pump while inject_tx_iq) + R4 (eager TX-NCO
-regs + MOX-edge emit) + R5 (immediate 0x12 on pa/drive set).
-Keep the `LYRA_TX_DEBUG` instrumentation to verify on the
-operator's hardware (esp. R2 mic-slot + R3 wire bytes).  Then
-the bench retry + Phase-3-EXIT kill-test.  Agent ids for
-follow-up: `ad04eac41e9e6e5ed` (wire), `a665f20ad85a000a1`
-(DSP/PA).
+#### ⚠ 3rd-AGENT MULTI-IMPL CROSS-REF 2026-05-17 (operator-
+#### directed: also check Hermes-Lite2 Python module / Quisk /
+#### SparkSDR / linHPSDR / PiSDR).  SparkSDR2 = binaries only
+#### (no source).  Checked: **HL2-wiki Protocol.md (gateware
+#### register doc = GROUND TRUTH, by HL2 designer)** + pihpsdr
+#### + Quisk + linHPSDR.  This MATERIALLY REVISES R1/R4 and
+#### ELEVATES R3 — the Thetis-only audits were partly off-target.
+
+**GROUND TRUTH (HL2 wiki Protocol.md, C&C addr 0x09 =
+Lyra frame-10/0x12; word [31:24]=C1 [23:16]=C2 [15:8]=C3
+[7:0]=C4):**
+* `0x09[31:28]` = **Hermes TX Drive Level — ONLY top 4 bits
+  used ⇒ the HL2 drive DAC is 16 coarse steps** (C1).
+* `0x09[19]` = onboard **PA: 0=off, 1=on** ⇒ **C2 bit 3
+  (0x08), ACTIVE-HIGH.  THIS is the HL2 PA enable.**
+* `0x09[18]` = "if PA off, disable T/R relay" ⇒ C2 bit 2
+  (0x04) — set when PA OFF.
+* `0x09[20]` = tune request ⇒ C2 bit 4 (0x10).
+* PA *enable* is NOT I²C (C&C byte only).  PA *bias* is I2C2
+  (stored hw setting, orthogonal).  4 independent sources
+  agree (wiki + pihpsdr `old_protocol.c:2213-2237` +
+  Quisk `hermes/quisk_hardware.py:817 SetControlBit(0x09,19)`
+  + linHPSDR `protocol1.c:1354`).
+
+**R1 — REVISED (was "C3-bit7 polarity inverted"; that was
+itself off-target).**  C3 bit 7 is the **WRONG BYTE for HL2
+entirely** — it is the legacy Apollo/Alex `tx[0].pa` path the
+HL2 gateware IGNORES; **pihpsdr explicitly ZEROES C3 for
+HL2**.  The real PA enable is **C2 bit 3 = 1 (active-high)**,
+which Lyra D-2 (`52bd910`) ALREADY sets correctly
+(`c2 |= 0x08`).  So the polarity debate is moot; the correct
+action = **drop the Lyra C3-bit7 `_pa_on` write for HL2**
+(match pihpsdr), keep C2 bit3.  Refine C2: pihpsdr sets 0x08
+when PA-ON, 0x04 when PA-OFF (T/R-relay-disable) — adopt that
+exact logic (`c2 |= 0x08 if _pa_on else 0x04`), not the
+current unconditional `0x08|0x04`-when-on.
+
+**R3 — NOW THE PRIME ZERO-RF SUSPECT.**  The PA-enable BIT is
+correct in code (C2 0x08) — so the only way "PA enabled in
+Settings + keys + dead air" happens is the C2 byte **never
+reaching the wire**: autoload (`autoload_pa_enabled_setting`/
+TX-drive) runs at app-build BEFORE `start()`; `set_pa_on`/
+`set_tx_drive_level` no-op when `_stream is None`; nothing
+re-pushes frame-10 at stream start.  Fix: in `start()` after
+the socket exists, reassert `_pa_on`/`_tx_drive_level` from
+Radio state and `_refresh_frame_10()`.
+
+**R2 — CORROBORATED + SHARPENED.**  pihpsdr feeds
+`tx_add_mic_sample()` UNCONDITIONALLY at 48 kHz from the EP6
+**mic slot that HL2 sends EVERY frame even with no mic**
+(all-zero samples, slot always present).  TUN carrier =
+WDSP PostGen pumped every frame.  So the correct pump trigger
+= the always-present per-datagram mic slot (or a free-running
+TX clock), NOT audio energy.  Lyra bug bites IFF `_on_hl2_mic`
+suppresses/early-returns on all-zero/empty slots OR HL2Stream
+doesn't deliver the slot every datagram.  `LYRA_TX_DEBUG`
+(`_on_hl2_mic submitted N` vs `mic EMPTY`, `TxDspWorker
+process ok peak=`) resolves this on hardware.
+
+**R4 — REVISED.**  No working ref uses a keydown freq-priority
+hack; round-robin is fine BECAUSE TX-freq is **recomputed
+live from the current VFO every C&C cycle** (pihpsdr
+`channel_freq(-1)` each frame → never a cached/stale 0).
+Robust fix = recompute/emit TX-freq every cycle from VFO,
+not latch at keydown.  R4 only bites if an app caches a
+stale 0 — eager-register + live recompute removes it.
+
+**Q1 (drive scaling) — NOT the zero, but a calibration gap.**
+Flat `255*pct/100` will key and DOES emit at mid-slider (50%
+→ C1 0x80 → top nibble 1000 = step 8/16, nonzero).  But every
+ref applies per-band normalization (pihpsdr/linHPSDR Thetis-
+family `pa_calibration` formula; Quisk per-band `tx_level`
+table) + the HL2 16-step coarse + fine TX-IQ scale.  Defer as
+v0.2.x power-calibration polish; NOT the dead-air cause.
+
+**LOCKED reconcile plan (ONE commit, multi-source-verified,
+no RF until opt-in+key):**
+1. **R3 (prime):** `start()` re-pushes `_pa_on`+`_tx_drive_
+   level` to the wire after socket exists.
+2. **R1′:** drop C3-bit7 `_pa_on` write for HL2; set C2
+   `0x08 if _pa_on else 0x04` (wiki+pihpsdr-exact).
+3. **R2:** pump TX DSP from the always-present per-datagram
+   mic slot regardless of content (verify HL2Stream delivers
+   it every datagram; don't gate on energy/size).
+4. **R4:** eager-register 0x02/0x08/0x0a + recompute TX-freq
+   from VFO each cycle (pihpsdr pattern).
+5. **R5 (low):** immediate 0x12 emit on `set_pa_on`/
+   `set_tx_drive_level` (Quisk-style), or guarantee a full
+   cycle before MOX edge.
+Q1 drive-cal = deferred polish.  Keep `LYRA_TX_DEBUG` to
+verify R2/R3 on the operator's HL2+.  Agent ids:
+`ad04eac41e9e6e5ed` (Thetis-wire), `a665f20ad85a000a1`
+(Thetis-DSP/PA), `a1399a631a77f5c45` (multi-impl cross-ref).
+
+(Superseded plan retained for trail:) ~~fix R1 (C3 polarity) +
+R3 + R2 + R4 + R5~~ — R1 corrected to "drop C3, C2-bit3 is
+the HL2 enable" per the HL2-designer register doc + 3 refs.
 
 **NEXT (verify-first, reconcile-whole-surface — NOT piecemeal,
 per the §15.26 PS-entangled discipline):** one focused
