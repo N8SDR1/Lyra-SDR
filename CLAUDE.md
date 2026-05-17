@@ -6657,6 +6657,54 @@ EP2 **I/Q-frame** C0 bit0=mox while keyed.  Prime cause
 unchanged: **R3** (the correct C2 0x08 bit never reaching
 the wire due to autoload-before-start()).
 
+#### ✅ EP6 SLICE/STRIDE MISMATCH HYPOTHESIS — REFUTED
+#### 2026-05-17 (operator forwarded a web synthesis claiming
+#### HL2+=2-RX-max + OCOC/Band-Volts-required + 4-slice-
+#### packets-break-HL2+; verified vs the local ak4951v4 RTL +
+#### Lyra parser, NOT rubber-stamped).
+
+* **OCOC / Band-Volts / PWM "PA stays asleep" claim —
+  CONTRADICTED by RTL.**  `control.v:357-365`:
+  `pwr_envpa=pwr_envbias=int_tx_on & ~vna & pa_enable` —
+  onboard 5 W PA bias depends ONLY on pa_enable(0x09 b19)+
+  MOX+run+~vna.  OCOC/Band-Volts drive EXTERNAL companion-
+  board amps, irrelevant to the bare-HL2+/dummy-load bench.
+  Rejected (don't chase).
+* **Watchdog claim — CORROBORATES R2** (no continuous synced
+  TX packets ⇒ gateware drops PA bias).  Supportive.
+* **"HL2+ = 2 RX max; 4-slice packets break it" — FALSE per
+  RTL.**  Variant `hl2b5up_ak4951v4/hermeslite.v:101`
+  instantiates `.NR(4)`; `radio.v:526-554` generate-builds 4
+  RECEIVER engines; `radio.v:269-272`
+  `last_chan=cmd_data[6:3]` (host-requested Nrx, 1..12, no
+  2-cap).  EP6 = `Nrx×(3B I+3B Q)` then 2B mic; mic offset =
+  f(requested Nrx).
+* **MISMATCH VERDICT = MATCH (refuted).**  Lyra requests
+  nddc=4 (`stream.py:621-622` `_config_c4=0x1C`) and parses
+  `_SLOT_STRIDE=26`/`_MIC_OFFSET=24`/19-slots — byte-exact
+  vs gateware Nrx=4 (D0I 0-2 … D3Q 18-23, mic 24-25).
+  Self-consistent BY CONSTRUCTION.  NOT the TX cause, NOT
+  the §9.6 pops cause.  Lyra reads mic at the CORRECT
+  offset; only residual = §10 Q#1 mic *content* (codec
+  silence vs audio) — already handled by the R2 design
+  (wire-cadence pump independent of mic content).
+* **§3.1 doc correction:** the "HL2 silicon has only 2
+  physical DDC engines, gateware exposes 4 logical" line is
+  imprecise for ak4951v4 — that RTL has 4 real RECEIVER
+  instances (`radio.v:526-554`).  Cosmetic; no conclusion
+  changes.  (Fix §3.1 wording on a future doc pass.)
+
+Net: hypothesis cleanly eliminated; diagnosis UNCHANGED and
+tighter.  TX dead-air = **R3** (correct C2 0x08 never
+reaching the wire, autoload-before-start); §9.6 pops stay
+the separate parked GIL/EP2-cadence class.  Verification is
+now EXHAUSTIVE (Thetis ×2 + pihpsdr/Quisk/linHPSDR + HL2
+wiki + HL2+ ak4951v4 gateware RTL ×2, all converged) —
+further reference-gathering has diminishing returns; the
+fix is the next action.  RTL copies: `Y:\Claude local\
+_hl2src\` (radio.v, fifos.v, usopenhpsdr1.v, dsopenhpsdr1.v,
+control.v, hermeslite_core.v, i2s_ak4951.v, variant, wiki).
+
 **LOCKED reconcile plan (ONE commit, gateware-verified,
 no RF until opt-in+key):**
 1. **R3 (prime):** `start()` re-pushes `_pa_on`+`_tx_drive_
