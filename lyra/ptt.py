@@ -86,7 +86,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, ClassVar, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
@@ -138,13 +138,32 @@ class TrSequencing:
     delay is applied via a single-shot ``QTimer`` -- never
     ``sleep`` (Qt-main must not block, §15.21)."""
 
+    # Generic fallback defaults (used only if the FSM is
+    # constructed without capability-sourced values -- e.g. unit
+    # tests).  Real HL2 values come from
+    # ``RadioCapabilities.tr_delays_ms`` via Radio, NOT hardcoded
+    # here (§6.7 #5).  rf_delay default is the amp-safety FLOOR.
     mox_delay_ms: int = 10      # gap: down-ramp done -> clear MOX bit
                                 #   (lets in-flight TX samples clear)
     ptt_out_delay_ms: int = 20  # HW-T/R settle after the MOX bit
                                 #   clears, before RX is restarted
-    rf_delay_ms: int = 0        # gap: MOX bit set -> start TX I/Q
+    rf_delay_ms: int = 50       # gap: MOX bit set -> start TX I/Q.
+                                #   AMP-SAFETY: hard floor (below).
     space_mox_delay_ms: int = 0  # CW inter-element hold (v0.2.2)
     key_up_delay_ms: int = 0    # CW keyer hang (v0.2.2)
+
+    # rf_delay is the MOX-bit→RF settle that keeps an external
+    # linear from being hot-switched into mid-transition relays
+    # (operator runs a 1 kW SS amp off ~2-3 W; CLAUDE.md §15.26).
+    # It must NEVER silently go below this floor -- clamped here
+    # so no caller / corrupt QSetting / future code path can
+    # defeat the amplifier protection.  Operators may RAISE it.
+    RF_DELAY_FLOOR_MS: ClassVar[int] = 50
+
+    def __post_init__(self) -> None:
+        if self.rf_delay_ms < self.RF_DELAY_FLOOR_MS:
+            object.__setattr__(self, "rf_delay_ms",
+                               self.RF_DELAY_FLOOR_MS)
 
 
 # Resolver precedence: a voice/MOX source beats CW beats VOX

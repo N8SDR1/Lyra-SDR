@@ -402,6 +402,9 @@ class Radio(QObject):
     # Default OFF; a safety stand-down auto-disarms it.  Bidir
     # sync to Settings -> TX "Advanced".
     pa_enabled_changed = Signal(bool)
+    # §15.26 Commit B: TR-sequencing delays changed (dict of the
+    # 5 ms values).  Bidir sync to Settings → TX "TR Sequencing".
+    tr_sequencing_changed = Signal(dict)
     # CW Zero (white) line offset from the VFO marker, in Hz.
     # Vertical reference line drawn at the filter center — i.e., where
     # a clicked CW signal lands and where the audio is generated.
@@ -1209,6 +1212,12 @@ class Radio(QObject):
         # struct later (§6.7 #5).
         from lyra.ptt import PttStateMachine as _PttFSM
         self._ptt_fsm = _PttFSM(parent=self)
+        # §15.26 Commit B: hand the FSM its TR-sequencing from the
+        # capability struct (FSM stays hardware-agnostic, §6.7),
+        # overlaid with any operator QSettings overrides.  rf_delay
+        # is amp-safety (1 kW-linear hot-switch protection) and is
+        # hard-floored in TrSequencing — see _apply_tr_sequencing.
+        self._apply_tr_sequencing()
         # HW-PTT edge-detect latch (commit 3c forwarder sets this
         # from the RX-loop thread; single-writer, GIL-atomic bool).
         self._last_hw_ptt: bool = False
@@ -2841,6 +2850,84 @@ class Radio(QObject):
             except Exception:
                 pass
         self.pa_enabled_changed.emit(self._pa_enabled)
+
+    # ── TR sequencing (v0.2.0 Phase 3 Commit B, §15.26) ───────────
+    # Order in capabilities.tr_delays_ms + the QSettings/signal
+    # dict: mox, ptt_out, rf, space_mox, key_up.
+    _TR_NAMES = ("mox", "ptt_out", "rf", "space_mox", "key_up")
+    _TR_QS = {n: f"tx/tr_{n}_ms" for n in _TR_NAMES}
+
+    def _tr_dict(self) -> dict:
+        """Effective TR delays: capability defaults overlaid with
+        operator QSettings overrides (ints, ms)."""
+        try:
+            caps = tuple(self.capabilities.tr_delays_ms)
+        except Exception:
+            caps = (15, 20, 50, 13, 10)
+        d = dict(zip(self._TR_NAMES, caps))
+        try:
+            from PySide6.QtCore import QSettings
+            qs = QSettings("N8SDR", "Lyra")
+            for n in self._TR_NAMES:
+                v = qs.value(self._TR_QS[n], None)
+                if v is not None:
+                    d[n] = int(v)
+        except Exception:
+            pass
+        return d
+
+    def _apply_tr_sequencing(self) -> None:
+        """Build a TrSequencing from caps+QSettings and hand it to
+        the FSM.  rf_delay is hard-floored inside TrSequencing
+        (amp hot-switch protection) -- a corrupt/old QSetting can
+        never defeat it.  Qt-main only; FSM reads _tr on Qt-main."""
+        from lyra.ptt import TrSequencing
+        d = self._tr_dict()
+        tr = TrSequencing(
+            mox_delay_ms=int(d["mox"]),
+            ptt_out_delay_ms=int(d["ptt_out"]),
+            rf_delay_ms=int(d["rf"]),            # floored in __post_init__
+            space_mox_delay_ms=int(d["space_mox"]),
+            key_up_delay_ms=int(d["key_up"]),
+        )
+        try:
+            self._ptt_fsm._tr = tr               # noqa: SLF001
+        except Exception:
+            pass
+        return
+
+    @property
+    def tr_delays(self) -> dict:
+        """Effective TR delays (post-floor), as the FSM sees them."""
+        tr = getattr(self._ptt_fsm, "_tr", None)
+        if tr is None:
+            return self._tr_dict()
+        return {"mox": tr.mox_delay_ms, "ptt_out": tr.ptt_out_delay_ms,
+                "rf": tr.rf_delay_ms,
+                "space_mox": tr.space_mox_delay_ms,
+                "key_up": tr.key_up_delay_ms}
+
+    def set_tr_delay(self, name: str, ms: int) -> None:
+        """Operator override of one TR delay (ms).  Persists,
+        rebuilds the FSM TrSequencing (rf hard-floored there),
+        emits ``tr_sequencing_changed``.  ``name`` ∈ _TR_NAMES."""
+        if name not in self._TR_NAMES:
+            return
+        ms = max(0, int(ms))
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue(self._TR_QS[name], ms)
+        except Exception:
+            pass
+        self._apply_tr_sequencing()
+        self.tr_sequencing_changed.emit(self.tr_delays)
+
+    def autoload_tr_sequencing(self) -> None:
+        """Re-apply caps+QSettings TR delays at app build + emit
+        for the Settings UI.  Called alongside the other
+        ``autoload_*`` restores."""
+        self._apply_tr_sequencing()
+        self.tr_sequencing_changed.emit(self.tr_delays)
 
     def _request_rx_channel(self, on: bool) -> None:
         """Start (on=True) / stop-with-flush (on=False) the WDSP RX

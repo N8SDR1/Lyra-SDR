@@ -402,6 +402,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             print(f"[app] PA-enable autoload error: {exc}")
 
+        # TR sequencing (v0.2.0 Phase 3 Commit B, §15.26) -- caps +
+        # operator overrides; rf_delay is amp-hot-switch protected.
+        try:
+            self.radio.autoload_tr_sequencing()
+        except Exception as exc:
+            print(f"[app] TR-sequencing autoload error: {exc}")
+
         # Mic-input source (v0.2 Phase 2) -- HL2 mic jack (AK4951
         # codec on HL2+) vs PC sound card.  Restored from QSettings
         # so operator's choice survives across launches.  Default

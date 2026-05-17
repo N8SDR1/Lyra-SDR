@@ -73,6 +73,10 @@ class PttHwForwarderTest(unittest.TestCase):
         # inline without an event loop.
         self.radio._ptt_fsm._tr = TrSequencing(
             mox_delay_ms=0, ptt_out_delay_ms=0)
+        # rf_delay hard-floored at 50 (amp safety) -> inline
+        # _deferred so the keydown/keyup chain stays synchronous
+        # for these forwarder tests (no event loop).
+        self.radio._ptt_fsm._deferred = lambda ms, fn: fn()
         # v0.2.0 Phase 3 hotfix (§15.25 / §10 Q#1): the EP6 ptt_in
         # forwarder is OPT-IN now (default OFF -- some HL2+/AK4951
         # units carry a non-zero ptt_in at RX rest, which the

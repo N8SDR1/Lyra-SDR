@@ -169,6 +169,17 @@ class RadioCapabilities:
     # change).  CLAUDE.md §15.26 PART C.
     pa_enable_uses_apollo_i2c: bool
 
+    # TR-sequencing delays (ms), ordered
+    # (mox, ptt_out, rf, space_mox, key_up).  The FSM stays
+    # hardware-agnostic (§6.7 #5) and is HANDED these; they are
+    # NOT hardcoded in ptt.py.  HL2 values are the operator-
+    # verified working set.  rf_delay is AMPLIFIER-SAFETY: it is
+    # the MOX-bit→RF settle that prevents hot-switching an
+    # external linear into mid-transition relays (CLAUDE.md
+    # §15.26) — it has a hard 50 ms floor enforced in
+    # TrSequencing and must never silently shrink.
+    tr_delays_ms: "tuple[int, int, int, int, int]"
+
 
 # ──────────────────────────────────────────────────────────────────────
 # HL2 capability instance.
@@ -195,4 +206,13 @@ HL2_CAPABILITIES: RadioCapabilities = RadioCapabilities(
     tx_attenuator_range=(-28, 31),                  # CLAUDE.md §3.8 HL2 quirks
     cwx_ptt_bit_position=3,                         # CLAUDE.md §3.8 L-5
     pa_enable_uses_apollo_i2c=True,                 # CLAUDE.md §15.26 PART C
+    # (mox, ptt_out, rf, space_mox, key_up) ms — operator-verified
+    # working values (DB export 2026-05-16): MoxDelay 15, RFDelay
+    # 50 (1 kW-linear hot-switch protection — hard floor),
+    # SpaceMox 13, KeyUp 10.  ptt_out kept at 20 = Lyra's
+    # operator-confirmed-clean keyup-settle (Lyra's RX-channel-
+    # restart-after-settle is a different mechanism than the
+    # reference rig's, so its GenPTTOut=5 does not map 1:1;
+    # operator-adjustable in Settings → TX).
+    tr_delays_ms=(15, 20, 50, 13, 10),              # CLAUDE.md §15.26 Commit B
 )

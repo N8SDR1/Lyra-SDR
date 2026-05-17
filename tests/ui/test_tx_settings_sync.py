@@ -55,7 +55,16 @@ class TxSettingsSyncTest(unittest.TestCase):
         # (the no-inert-UI rule).
         self.assertEqual(
             set(boxes),
-            {"TX Power & Drive", "TX Safety", "Advanced"})
+            {"TX Power & Drive", "TX Safety", "Advanced",
+             "TR Sequencing (ms)"})
+        # TR Sequencing carries live delay spinboxes; the RF-delay
+        # spin enforces the amp-hot-switch floor as its minimum.
+        self.assertTrue(boxes["TR Sequencing (ms)"].findChildren(
+            QSpinBox))
+        from lyra.ptt import TrSequencing
+        self.assertEqual(
+            self.tab._tr_spins["rf"].minimum(),
+            TrSequencing.RF_DELAY_FLOOR_MS)
         # TX Power & Drive carries a live drive control.
         self.assertTrue(boxes["TX Power & Drive"].findChildren(
             StepperReadout))
@@ -70,6 +79,18 @@ class TxSettingsSyncTest(unittest.TestCase):
         self.assertTrue(self.radio.pa_enabled)
         self.radio.set_pa_enabled(False)           # Radio -> UI
         self.assertFalse(self.tab.pa_enable_chk.isChecked())
+
+    def test_tr_sequencing_round_trip_and_rf_floor(self) -> None:
+        self.tab._tr_spins["mox"].setValue(25)     # UI -> Radio
+        self.assertEqual(self.radio.tr_delays["mox"], 25)
+        self.radio.set_tr_delay("ptt_out", 35)     # Radio -> UI
+        self.assertEqual(self.tab._tr_spins["ptt_out"].value(), 35)
+        # RF spin can't even be set below the amp-safety floor.
+        self.assertEqual(self.tab._tr_spins["rf"].minimum(), 50)
+        from PySide6.QtCore import QSettings
+        qs = QSettings("N8SDR", "Lyra")
+        for n in ("mox", "ptt_out", "rf", "space_mox", "key_up"):
+            qs.remove(f"tx/tr_{n}_ms")             # tidy
 
     def test_tx_timeout_settings_round_trip(self) -> None:
         # Spin/checkbox <-> Radio, both directions, guarded.

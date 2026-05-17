@@ -235,6 +235,7 @@ class _ColorPickLabel(QLabel):
 from lyra.control.tci import TciServer, TCI_DEFAULT_PORT
 from lyra.hardware.oc import format_bits
 from lyra.hardware.usb_bcd import list_devices as list_ftdi_devices
+from lyra.ptt import TrSequencing
 from lyra.ui.toggle import ToggleSwitch
 from lyra.ui.widgets.stepper_readout import StepperReadout
 
@@ -2902,6 +2903,50 @@ class TxSettingsTab(QWidget):
         self.radio.pa_enabled_changed.connect(
             self._on_radio_pa_enabled)
 
+        # ── TR Sequencing (§15.26 Commit B) ─────────────────────────
+        tr_grp = QGroupBox("TR Sequencing (ms)")
+        tr_form = QFormLayout(tr_grp)
+        d = radio.tr_delays
+        self._tr_spins = {}
+        # (key, label, min, tooltip)
+        _tr_rows = [
+            ("rf", "RF delay",
+             TrSequencing.RF_DELAY_FLOOR_MS,
+             "Gap between asserting transmit and applying RF.\n\n"
+             "⚠ AMPLIFIER PROTECTION: this delay lets the T/R "
+             "sequencing settle so an external linear is never "
+             "hot-switched (RF into mid-transition relays = "
+             "destroyed amp).  Hard floor enforced — you may "
+             "RAISE it for slow relays / big amps, never lower "
+             "it below the floor."),
+            ("mox", "MOX delay", 0,
+             "Gap after the transmit down-ramp before the MOX "
+             "bit clears (lets in-flight transmit samples clear)."),
+            ("ptt_out", "PTT-out / RX-settle", 0,
+             "Hardware T/R settle after the MOX bit clears, "
+             "before the receiver is restarted.  Lower values "
+             "may reintroduce an un-key transient — raise if you "
+             "hear one."),
+            ("space_mox", "Space-MOX (CW)", 0,
+             "CW inter-element hold (active when CW TX lands, "
+             "v0.2.2)."),
+            ("key_up", "Key-up (CW)", 0,
+             "CW keyer hang (active when CW TX lands, v0.2.2)."),
+        ]
+        for key, label, vmin, tip in _tr_rows:
+            sp = QSpinBox()
+            sp.setRange(int(vmin), 2000)
+            sp.setSuffix(" ms")
+            sp.setValue(int(d.get(key, vmin)))
+            sp.setToolTip(tip)
+            sp.valueChanged.connect(
+                lambda v, k=key: self.radio.set_tr_delay(k, int(v)))
+            self._tr_spins[key] = sp
+            tr_form.addRow(label, sp)
+        v.addWidget(tr_grp)
+        self.radio.tr_sequencing_changed.connect(
+            self._on_radio_tr_sequencing)
+
         # ── Future sections (land WITH behavior — no inert UI) ──────
         # Ordered insertion anchors so the tab grows without reorg:
         #   • Advanced (above) still to gain: gateware
@@ -2966,6 +3011,17 @@ class TxSettingsTab(QWidget):
         self.pa_enable_chk.blockSignals(True)
         self.pa_enable_chk.setChecked(on)
         self.pa_enable_chk.blockSignals(False)
+
+    def _on_radio_tr_sequencing(self, d: dict) -> None:
+        # Radio → spinboxes (e.g. rf_delay was floor-clamped on a
+        # too-low entry, or autoload).  Guarded against re-fire.
+        for key, sp in self._tr_spins.items():
+            v = int(d.get(key, sp.value()))
+            if sp.value() == v:
+                continue
+            sp.blockSignals(True)
+            sp.setValue(v)
+            sp.blockSignals(False)
 
 
 class VisualsSettingsTab(QWidget):

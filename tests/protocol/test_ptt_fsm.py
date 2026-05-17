@@ -65,15 +65,21 @@ class PttFsmTest(unittest.TestCase):
         from PySide6.QtWidgets import QApplication
         cls._app = QApplication.instance() or QApplication(sys.argv)
 
-    def _bound(self, tr: TrSequencing | None = None):
+    def _bound(self, tr: TrSequencing | None = None,
+               inline_deferred: bool = True):
         # Unit determinism: default to explicit all-zero TR so the
-        # keyup tail runs fully inline (no QTimer / event loop
-        # needed).  The PRODUCTION default is now non-zero
-        # (mox 10 / ptt_out 20 ms -- the HW-T/R settle window);
-        # TR-timing tests pass an explicit TrSequencing.
+        # keyup tail runs fully inline.  ``rf_delay_ms`` is now
+        # hard-floored at 50 (amp hot-switch protection) and CANNOT
+        # be zeroed, so ``_deferred`` is, by default, replaced with
+        # a synchronous shim for FSM-LOGIC tests (they verify
+        # ordering, not real timer behaviour).  TR-TIMING tests
+        # that assert a deferral does NOT fire pass
+        # ``inline_deferred=False`` and a non-zero delay.
         if tr is None:
             tr = TrSequencing(mox_delay_ms=0, ptt_out_delay_ms=0)
         fsm = PttStateMachine(tr_sequencing=tr)
+        if inline_deferred:
+            fsm._deferred = lambda ms, fn: fn()    # run all inline
         radio, stream, fade = _FakeRadio(), _FakeStream(), _FakeFade()
         tx_events: list[tuple[bool, PttState]] = []
         fsm.bind_runtime(
@@ -210,23 +216,34 @@ class PttFsmTest(unittest.TestCase):
         self.assertEqual(radio.set_mox_calls, [True, False])
 
     def test_trap_rx_not_declared_before_ptt_out_settle(self) -> None:
-        # Non-zero ptt_out_delay -> RX transition is deferred (the
-        # _end_keyup runs via QTimer.singleShot, which does NOT
-        # fire without an event loop -> state stays MOX_TX, proving
-        # RX is not declared synchronously before the settle).
+        # Selective seam: run every deferred step inline EXCEPT the
+        # ptt_out-deferred ``_end_keyup`` (capture it).  Proves RX
+        # is NOT declared until the ptt_out settle elapses, while
+        # still letting the (now rf-floored) keydown open inline.
         fsm, radio, stream, fade, _e, _st = self._bound(
-            TrSequencing(mox_delay_ms=0, ptt_out_delay_ms=50))
+            TrSequencing(mox_delay_ms=0, ptt_out_delay_ms=50),
+            inline_deferred=False)
+        captured = []
+
+        def _seam(ms, fn):
+            if getattr(fn, "__name__", "") == "_end_keyup":
+                captured.append(fn)            # defer (record only)
+            else:
+                fn()                           # everything else inline
+        fsm._deferred = _seam
         fsm.request_mox()
         fade.set_off(False)
         fsm.release_mox()
         fade.set_off(True)
         fsm._on_fade_poll()
-        # inject cleared + MOX cleared (those are inline; mox_delay
-        # = 0) but RX NOT yet declared (ptt_out deferred -> the
-        # RX-restart hook fires in _end_keyup, past the settle).
+        # inject cleared + MOX cleared (inline) but RX NOT declared
+        # -- _end_keyup is still pending past the ptt_out settle.
         self.assertFalse(stream.inject_tx_iq)
         self.assertEqual(radio.set_mox_calls, [True, False])
         self.assertEqual(fsm.current_state, PttState.MOX_TX)
+        self.assertEqual(len(captured), 1)
+        captured[0]()                          # settle elapses
+        self.assertEqual(fsm.current_state, PttState.RX)
 
     # 8 ── TR-sequencing -------------------------------------------------
     def test_production_defaults_are_thetis_settle(self) -> None:

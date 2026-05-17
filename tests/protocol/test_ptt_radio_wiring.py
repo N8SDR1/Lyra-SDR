@@ -66,6 +66,10 @@ class PttRadioWiringTest(unittest.TestCase):
         # loop.  These tests exercise wiring/facade, not TR timing.
         self.radio._ptt_fsm._tr = TrSequencing(
             mox_delay_ms=0, ptt_out_delay_ms=0)
+        # rf_delay is hard-floored at 50 (amp safety) so keydown is
+        # deferred even with zero mox/ptt_out -> inline _deferred so
+        # these wiring/facade tests stay synchronous (no event loop).
+        self.radio._ptt_fsm._deferred = lambda ms, fn: fn()
 
     def test_radio_owns_fsm(self) -> None:
         self.assertIsInstance(self.radio._ptt_fsm, PttStateMachine)
