@@ -7074,6 +7074,29 @@ A/B):**
    pump cadence deterministic (steady block rate while
    keyed, independent of mic queue).
 
+**⚠ POWER DEFICIT VERIFIED 2026-05-17 (same Palstar meter,
+10 m 28.495, dummy, same mode):** Thetis **5 W** vs Lyra
+**~1.5-2 W** = real ~2.5-3× deficit, NOT a meter-ref
+artifact.  NOT a regression from today's ATT-on-TX
+(operator reported low power BEFORE that commit; ATT-on-TX
+= RX-LNA reg cmd_addr 0x0a, does not gate TX power per
+converged RTL).  KEY REFINEMENT: at 100% TX drive Lyra
+sends `drive_level = round(255×100/100) = 255` = MAX
+(top-4-bits 15/15) ≈ the same max Thetis sends at full on
+10 m (Thetis per-band f≈1.0 → i≈255).  Max-drive yet 1/3
+power ⇒ a drive-scaling shortfall (Q1) is UNLIKELY to
+explain a 3× deficit at full → **prime suspect = candidate
+A: PA not actually biased/fully enabled** (driver+partial)
+vs Thetis full-PA 5 W.  Q1 per-band cal bites at partial/
+other bands, not "100% on 10 m".  DISCRIMINATORS (await
+operator, no guessing/fix until then): (1) Enable-PA toggle
+watching Palstar — power jumps ⇒ PA-enable works (deficit
+elsewhere); no change ⇒ C2-bit3 not engaging gateware PA
+bias = THE bug (dig `_pa_enabled`→`set_pa_on`→start-repush
+→frame-10 C2 / cmd_addr 0x09 bit19 path). (2) HL2 Telemetry
+Probe full-tune PA-current vs Thetis 1.8 A (≈1.8 A=biased;
+≈0=driver-only).
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
