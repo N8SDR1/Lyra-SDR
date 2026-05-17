@@ -2599,58 +2599,37 @@ class Radio(QObject):
     # attenuator as a small number of discrete steps, so the map is
     # quantised to that grid rather than a smooth continuum.
 
-    # Number of discrete attenuator steps the gateware honours.
-    _TX_ATTN_STEPS = 16
-
-    @classmethod
-    def _tx_pct_to_attn_db(cls, pct: int, lo: int, hi: int) -> int:
-        """percent (0..100) -> attenuator dB on the 16-step grid.
-
-        pct=100 -> ``lo`` (most gain / max output);
-        pct=0   -> ``hi`` (most attenuation / min output).
-        """
+    @staticmethod
+    def _tx_pct_to_drive_level(pct: int) -> int:
+        """Operator TX power % (0..100) -> HL2 gateware digital
+        drive-level byte (0..255).  Thetis-faithful linear scale
+        (its ``i = int(255 * f)``)."""
         pct = max(0, min(100, int(pct)))
-        n = cls._TX_ATTN_STEPS - 1
-        idx = round(pct / 100.0 * n)              # 0..n
-        return int(round(hi - (hi - lo) * idx / n))
-
-    @classmethod
-    def _tx_unity_pct(cls, lo: int, hi: int) -> int:
-        """The percent whose quantised dB is closest to 0 (unity).
-
-        Used as the fresh-install default so frame-4 C3 stays
-        (0,0,0,0) -- byte-identical to the Phase-1 wire default.
-        """
-        best_pct, best_err = 0, None
-        for p in range(0, 101):
-            err = abs(cls._tx_pct_to_attn_db(p, lo, hi))
-            if best_err is None or err < best_err:
-                best_pct, best_err = p, err
-        return best_pct
+        return int(round(255 * pct / 100.0))
 
     @property
     def tx_power_pct(self) -> int:
-        """Operator TX drive level, 0..100 %."""
+        """Operator TX power, 0..100 % (the real power knob =
+        HL2 gateware drive level, frame-10 C1)."""
         return int(self._tx_power_pct)
 
     def set_tx_power_pct(self, pct: int) -> None:
-        """Set the operator TX drive (0..100 %).  Maps to the TX
-        step attenuator via the capability range, quantises to the
-        gateware step grid, pushes it to the stream (no-op if not
-        started), persists, and emits ``tx_power_pct_changed`` for
-        the panel<->Settings bidirectional sync.  Idempotent."""
+        """Set the operator TX power (0..100 %).  Maps to the HL2
+        gateware **drive level** (frame-10 C1, the primary
+        transmit amplitude scalar), Thetis-faithful linear scale
+        -- NOT the AD9866 step attenuator (that is the
+        PureSignal / ATT-on-TX layer).  Pushes to the stream
+        (no-op if not started), persists, emits
+        ``tx_power_pct_changed`` for panel<->Settings sync.
+        Idempotent."""
         pct = max(0, min(100, int(pct)))
         if pct == self._tx_power_pct:
             return
         self._tx_power_pct = pct
-        try:
-            lo, hi = self.capabilities.tx_attenuator_range
-        except Exception:
-            lo, hi = -28, 31
-        db = self._tx_pct_to_attn_db(pct, lo, hi)
+        level = self._tx_pct_to_drive_level(pct)
         if self._stream is not None:
             try:
-                self._stream.set_tx_step_attn_db(db)  # noqa: SLF001
+                self._stream.set_tx_drive_level(level)  # noqa: SLF001
             except Exception as exc:  # noqa: BLE001
                 self.status_message.emit(
                     f"TX power set failed: {exc}", 3000)
@@ -2662,26 +2641,21 @@ class Radio(QObject):
         self.tx_power_pct_changed.emit(pct)
 
     def autoload_tx_power_settings(self) -> None:
-        """Restore TX drive from QSettings on startup.  Default =
-        the unity percent (quantises to 0 dB) so a fresh install is
-        byte-identical to the Phase-1 _tx_step_attn_db=0 wire
-        state.  Called once at app build alongside the other
-        ``autoload_*`` restores."""
-        try:
-            lo, hi = self.capabilities.tx_attenuator_range
-        except Exception:
-            lo, hi = -28, 31
-        default_pct = self._tx_unity_pct(lo, hi)
+        """Restore TX power from QSettings on startup.  Default =
+        **0 %** (drive level 0 = zero RF) -- fail-safe: with PA
+        also default-OFF, a fresh install can emit no power until
+        the operator deliberately raises it (the bench procedure
+        sets a low value before the first key).  Called once at
+        app build alongside the other ``autoload_*`` restores."""
         try:
             from PySide6.QtCore import QSettings
-            raw = QSettings("N8SDR", "Lyra").value(
-                "tx/power_pct", default_pct)
+            raw = QSettings("N8SDR", "Lyra").value("tx/power_pct", 0)
             pct = int(raw)
         except Exception:
-            pct = default_pct
+            pct = 0
         pct = max(0, min(100, pct))
-        # Force a push even if pct == seed (seed is a placeholder;
-        # bypass the idempotent early-return by clearing it first).
+        # Force a push even if pct == seed (bypass the idempotent
+        # early-return by clearing it first).
         self._tx_power_pct = -1
         self.set_tx_power_pct(pct)
 

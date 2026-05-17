@@ -2948,6 +2948,30 @@ class HL2Stream:
         self._refresh_frame_4()
         self._refresh_frame_11()
 
+    def set_tx_drive_level(self, level: int):
+        """Set the HL2 gateware digital TX drive level (frame 10 /
+        register 0x12, C1) -- 0..255.  This is the PRIMARY transmit
+        amplitude scalar (the operator power knob): the gateware
+        multiplies the modulated TX I/Q by this before the PA.
+        ``level == 0`` => zero RF output regardless of PA-enable,
+        step attenuator, or modulation (fail-safe).
+
+        The step attenuator (set_tx_step_attn_db) is a SEPARATE
+        gain stage that belongs to the PureSignal / ATT-on-TX
+        layer, NOT the operator power control -- the operator
+        "TX power %" maps HERE, to drive level.
+
+        No direct _send_cc: round-robin re-emit (same
+        imperceptible-latency / no-audio-pop discipline as
+        set_lna_gain_db / set_tx_step_attn_db).
+        """
+        if not 0 <= level <= 255:
+            raise ValueError("level must be in 0..255")
+        if self._sock is None:
+            raise RuntimeError("stream not started")
+        self._tx_drive_level = int(level)
+        self._refresh_frame_10()
+
     def set_pa_on(self, on: bool):
         """Enable/disable the HL2 PA bias (frame 10 / register 0x12
         C3 bit 7).  Default OFF: until the operator opts in, no RF
