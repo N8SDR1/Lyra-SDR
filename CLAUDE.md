@@ -7191,6 +7191,30 @@ verify-don't-guess; await operator toggle result.  (UNRESOLVED
 needing RTL/datasheet: is AD9866 PGA `gain` in the TX
 amplitude path or RX-only — decisive for the mechanism.)
 
+**✅ PA-CURRENT TELEMETRY FIXED `059c51d` 2026-05-17
+(operator: "you haven't fixed the telemetry probe ... asking
+for bad info" — valid).** Gateware-RTL-decisive, anchored on
+the proven temp+supply decode.  HL2 EP6 4-slot status
+rotation (control.v iresp, addr=(C0>>3)&0x1F): addr1
+C1:C2=temp / C3:C4=fwd; **addr2 C1:C2=rev / C3:C4=PA bias
+current(12b)**; addr3 C1:C2=0 / C3:C4=debug(junk); supply =
+addr0 C1:C2>>4 fallback (live path).  Prior code read PA
+current from addr3 C1:C2 (always 0 → n/a) and read addr2
+C3:C4 (the REAL PA current) as "pa_volts" via a volts
+formula (the 41.8 V garbage).  Fixed: addr2→rev+pa_current,
+addr3→inert; removed pa_volts/VDD entirely (no such slot).
+Decode-only, temp+supply byte-identical (anchor, zero
+regression), 398/0, backup
+`_backups/lyra-2026-05-17-pa-current-decode-fix.bundle`.
+**Kill-test + PA A/B now UNBLOCKED with a trustworthy
+instrument.**  NEXT (operator, non-invasive): pull
+`059c51d`+`9cef8fc`; TUN into dummy @ TX Drive 100% →
+expect Palstar power UP toward ~5 W (tone_mag fix) AND HL2
+banner PA ≈ reference 1.8 A (decode fix); idle PA ≈0.2 A;
+temp/supply still correct (anchor intact).  One keyup =
+power A/B + PA-current A/B + kill-test re-enabled; no
+broken instrument, no front-end-risk test.
+
 **✅ TUN POWER-DEFICIT ROOT CAUSE FOUND + FIXED `9cef8fc`
 2026-05-17 (stopped theorising, did the concrete in-Lyra
 check per operator directive "do like the reference,
