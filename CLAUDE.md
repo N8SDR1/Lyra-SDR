@@ -7191,6 +7191,31 @@ verify-don't-guess; await operator toggle result.  (UNRESOLVED
 needing RTL/datasheet: is AD9866 PGA `gain` in the TX
 amplitude path or RX-only — decisive for the mechanism.)
 
+**✅✅ POWER + PA-CURRENT VALIDATED ON HARDWARE 2026-05-17
+(one keyup, both fixes confirmed).** Operator: 98% TX drive,
+10 m, dummy → **~5 W on the Palstar** (reference 5.1 W —
+TUN power deficit CLOSED, the `tone_mag` 0.5→0.95 fix
+`9cef8fc` was exactly it) AND **PA current 1.76 A** on the
+fixed telemetry (reference anchor 1.8 A — decode fix
+`059c51d` correct + trustworthy).  **DUAL-PA HYPOTHESIS
+DEFINITIVELY DEAD BY MEASUREMENT:** 1.76 A ≈ full reference
+draw ⇒ PA fully biased, both push-pull devices working; the
+deficit was 100% my conservative tone_mag cap, nothing in
+the PA path.  Power + PA telemetry now reference-parity.
+OPEN: operator "odd wavey waveform on panadapter".  TRIAGE
+(don't over-read): ATT-on-TX deliberately drives RX LNA to
+MIN during TX (front-end protection) → the panadapter is
+fed from a near-deaf RX during TX → wavey/aliased display
+is EXPECTED and is NOT a TX-quality indicator.  Discriminator
+= the PALSTAR: steady ~5 W + wavey panadapter ⇒ benign
+protected-RX display artifact; FLUCTUATING wattmeter ⇒ real
+tone instability → then chase (leading candidate: R2 TX-pump
+over-producing into the EP2 _tx_iq deque on HL2+ where the
+mic slot ALSO feeds every datagram → deque overrun → tone
+discontinuity; verify via tx_iq_overruns / Thetis-panadapter
+A/B, do NOT guess-fix).  Await: is Palstar steady? + external/
+Thetis view of the same TUN.
+
 **✅ PA-CURRENT TELEMETRY FIXED `059c51d` 2026-05-17
 (operator: "you haven't fixed the telemetry probe ... asking
 for bad info" — valid).** Gateware-RTL-decisive, anchored on
