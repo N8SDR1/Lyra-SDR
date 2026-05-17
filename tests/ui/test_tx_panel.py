@@ -9,8 +9,10 @@ radio.  These tests prove:
   * The button is a SLAVE of true TX state: tx_active_changed
     mirrors it (so a hardware foot-switch / any TX source keeps
     it truthful) WITHOUT re-firing request/release.
-  * TUN ships disabled (no silent-dead-carrier trap until the
-    tune-carrier generator lands) but present (final layout).
+  * TUN is enabled and funnels through request_tun / release_tun;
+    the FSM TUN state runs the WDSP TXA single-tone tune carrier
+    (started on the TUN keydown, stopped on keyup), and MOX does
+    NOT run the tone (mic chain).
   * TX-drive stepper <-> Radio.set_tx_power_pct, and the
     tx_power_pct_changed mirror doesn't feed back.
 """
@@ -130,9 +132,45 @@ class TxPanelTest(unittest.TestCase):
         # Mirroring must NOT have called the facade (no re-fire).
         self.assertEqual(calls, [])
 
-    def test_tun_present_but_disabled(self) -> None:
+    def test_tun_enabled_and_funnels_through_facade(self) -> None:
         self.assertIsNotNone(self.panel.tun_btn)
-        self.assertFalse(self.panel.tun_btn.isEnabled())
+        self.assertTrue(self.panel.tun_btn.isEnabled())
+        calls: list[str] = []
+        self.radio.request_tun = lambda: calls.append("req")
+        self.radio.release_tun = lambda: calls.append("rel")
+        self.panel.tun_btn.setChecked(True)
+        self.panel.tun_btn.setChecked(False)
+        self.assertEqual(calls, ["req", "rel"])
+
+    def test_tune_tone_only_for_tun_state(self) -> None:
+        from lyra.ptt import PttState
+
+        class _TxCh:
+            def __init__(self) -> None:
+                self.calls: list[bool] = []
+
+            def set_postgen(self, running, mode=0,
+                            tone_freq_hz=1000.0, tone_mag=0.5):
+                self.calls.append(bool(running))
+
+        ch = _TxCh()
+        self.radio._tx_channel = ch
+        # MOX keydown: mic chain -> tone OFF (one stop call).
+        self.radio._on_tx_state_changed(True, PttState.MOX_TX)
+        self.assertEqual(ch.calls, [False])
+        # TUN keydown: steady tune tone ON.
+        self.radio._on_tx_state_changed(True, PttState.TUN_TX)
+        self.assertEqual(ch.calls, [False, True])
+        # Keyup (state resolved back to RX): tone OFF.
+        self.radio._on_tx_state_changed(False, PttState.RX)
+        self.assertEqual(ch.calls, [False, True, False])
+
+    def test_tune_tone_none_safe(self) -> None:
+        from lyra.ptt import PttState
+        self.radio._tx_channel = None
+        # Must not raise when the TX channel isn't open.
+        self.radio._on_tx_state_changed(True, PttState.TUN_TX)
+        self.radio._on_tx_state_changed(False, PttState.RX)
 
     def test_drive_stepper_drives_radio(self) -> None:
         seen: list[int] = []

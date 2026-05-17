@@ -4928,13 +4928,13 @@ class TxPanel(GlassPanel):
     Mute-A/Mute-B state is left untouched and restored exactly on
     return to receive.
 
-    TUN is rendered but disabled: a tune press needs a low-power
-    carrier/tone source that does not exist until a later v0.2.x
-    sub-release.  Shipping it live now would transmit a silent
-    dead carrier — useless for ATU tuning and a UX trap — so it
-    is present (final row layout, no reflow when it lands) but
-    disabled with an explanatory tooltip, the same discipline used
-    for not-yet-live controls elsewhere.
+    TUN keys a steady single-tone tune carrier (the WDSP TXA
+    output-side generator, post-modulator) through the same FSM
+    keydown/keyup ordering as MOX.  It is the right signal for
+    ATU / amplifier adjustment and for a first-RF / PA-current /
+    kill-test bench — SSB is suppressed-carrier + voice-shaped,
+    a poor instrument for that.  Radiated level is still set by
+    TX Drive % and gated by the PA-enable opt-in.
     """
 
     def __init__(self, radio: Radio, parent=None):
@@ -4969,13 +4969,18 @@ class TxPanel(GlassPanel):
         self.tun_btn.setObjectName("dsp_btn")
         self.tun_btn.setCheckable(True)
         self.tun_btn.setFixedWidth(64)
-        self.tun_btn.setEnabled(False)          # see class docstring
         self.tun_btn.setToolTip(
-            "TUN — steady tune carrier for ATU / amplifier "
-            "adjustment.\n\nActivates in a later v0.2.x sub-release "
-            "once the low-power tune-carrier generator is in place. "
-            "Disabled until then so a tune press can't transmit a "
-            "silent dead carrier.")
+            "TUN — steady single-tone tune carrier for ATU / "
+            "amplifier adjustment.\n\n"
+            "Press to key a continuous carrier, press again to "
+            "return to receive.  Runs the same safe keying "
+            "sequence as MOX (carrier loaded before the on-air "
+            "bit; bit cleared only after down-ramp; receive audio "
+            "gated, Mute-A/B untouched).\n\n"
+            "Radiated level is set by TX Drive % and only emitted "
+            "when PA-enable is opted in (Settings → TX → Advanced) "
+            "— set a LOW drive before keying into a dummy load.")
+        self.tun_btn.toggled.connect(self._on_tun_toggled)
         keys.addWidget(self.tun_btn)
         keys.addStretch(1)
         self.content_layout().addLayout(keys)
@@ -4995,10 +5000,10 @@ class TxPanel(GlassPanel):
             caption_width=64, value_width=56)
         self.tx_drive_stepper.setToolTip(
             "TX Drive — transmit output level, 0–100 %.\n\n"
-            "Maps onto the transmitter's stepped gain attenuator "
-            "(quantised to the hardware's discrete steps).  100 % = "
-            "maximum drive, 0 % = minimum.  Set this BEFORE keying "
-            "into an antenna.\n\n"
+            "Maps to the gateware digital drive level (the primary "
+            "transmit amplitude scalar).  100 % = maximum drive, "
+            "0 % = no output.  Set this LOW BEFORE keying into a "
+            "dummy load.\n\n"
             "Gestures: click [-]/[+] = one step, Shift+click = "
             "coarse, hold = ramp, wheel over widget = step, "
             "right-click value to type exact.")
@@ -5022,6 +5027,15 @@ class TxPanel(GlassPanel):
             self.radio.request_mox()
         else:
             self.radio.release_mox()
+
+    def _on_tun_toggled(self, checked: bool) -> None:
+        """TUN button → Radio facade (same branch-the-bool reason
+        as MOX).  Drives the FSM TUN source; the keydown chain
+        starts the steady tune tone, the keyup chain stops it."""
+        if checked:
+            self.radio.request_tun()
+        else:
+            self.radio.release_tun()
 
     def _on_tx_drive_changed(self, pct: float) -> None:
         self.radio.set_tx_power_pct(int(round(pct)))

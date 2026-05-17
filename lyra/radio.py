@@ -2948,19 +2948,29 @@ class Radio(QObject):
         transmit stops the single receive path; the post-settle
         keyup restarts it.
         """
+        from lyra.ptt import PttState
         if is_tx:
             # RX -> TX (keydown): gate audio + STOP the RX DSP
             # channel with a blocking flush so nothing of the
             # keyed period is processed or carried across.
             self._tx_rx_muted = True
             self._request_rx_channel(False)
+            # TUN: drive the WDSP TXA output-side generator (a
+            # steady single tone, post-bp0 — the tune carrier).
+            # Other TX states (MOX_TX) use the mic chain, so the
+            # generator must be OFF for them.  Real on-air level
+            # is still governed by TX drive % (frame-10 C1) + the
+            # PA-enable opt-in — this only shapes the modulator.
+            self._set_tune_tone(state == PttState.TUN_TX)
             return
         # TX -> RX: fires from the FSM's _end_keyup, AFTER the
         # MOX bit cleared and the ptt_out_delay HW-T/R settle.
         # The hardware is now truly back on receive, so RESTART
         # the RX DSP channel — it re-primes from scratch on clean
         # antenna IQ (no keyed-period or transition state to ring
-        # out) — then un-gate.
+        # out) — then un-gate.  Stop the tune tone unconditionally
+        # (idempotent — harmless if it was never running).
+        self._set_tune_tone(False)
         self._request_rx_channel(True)
         self._tx_rx_muted = False
         # §15.14 (deferred): replace the blanket base behaviour
@@ -2968,6 +2978,37 @@ class Radio(QObject):
         # (is_tx, state) + the operator's per-RX prefs.  No inert
         # code now — the base stop/restart above is the real
         # behaviour until that policy lands.
+
+    # TUN tune-carrier amplitude (modulator domain, 0..1).  The
+    # actual radiated level is set by TX drive % (frame-10 C1) and
+    # gated by the PA-enable opt-in; this is just the WDSP TXA
+    # generator's tone magnitude.  A clean single tone at a 1 kHz
+    # audio offset — a standard tune carrier for ATU / amplifier
+    # adjustment and the steady, meter-readable signal a first-RF
+    # / PA-current / kill-test bench needs (SSB is suppressed-
+    # carrier + voice-shaped, a poor instrument for that).
+    _TUNE_TONE_MAG = 0.5
+    _TUNE_TONE_FREQ_HZ = 1000.0
+
+    def _set_tune_tone(self, on: bool) -> None:
+        """Run/stop the WDSP TXA output-side single-tone generator
+        (the TUN tune carrier).  It injects post-bp0 — independent
+        of the mic chain — so a steady carrier is produced even
+        with no mic input.  Idempotent + None-safe (the TX channel
+        may not be open when called); never raises into the FSM."""
+        ch = self._tx_channel
+        if ch is None:
+            return
+        try:
+            ch.set_postgen(
+                running=bool(on),
+                mode=0,                       # single tone
+                tone_freq_hz=self._TUNE_TONE_FREQ_HZ,
+                tone_mag=self._TUNE_TONE_MAG)
+        except Exception as exc:  # noqa: BLE001
+            self.status_message.emit(
+                f"TUN tone {'start' if on else 'stop'} failed: {exc}",
+                3000)
 
     def set_ps_armed(self, ps_armed: bool) -> None:
         """Set the PS-armed axis of DispatchState.  Call from Qt main thread.
