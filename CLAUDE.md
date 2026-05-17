@@ -7191,7 +7191,38 @@ verify-don't-guess; await operator toggle result.  (UNRESOLVED
 needing RTL/datasheet: is AD9866 PGA `gain` in the TX
 amplitude path or RX-only — decisive for the mechanism.)
 
-**OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
+**✅ TUN POWER-DEFICIT ROOT CAUSE FOUND + FIXED `9cef8fc`
+2026-05-17 (stopped theorising, did the concrete in-Lyra
+check per operator directive "do like the reference,
+Lyra-native, no attribution").**  The cause was MINE:
+`radio._TUNE_TONE_MAG = 0.5` — a deliberate conservative cap
+from the first-ever RF keyup.  The HL2 output-side tone gen
+injects post-bp0/post-ALC ⇒ its magnitude maps near-directly
+to EP2 TX I/Q amplitude ⇒ 0.5 = a hidden **−6 dB** the
+operator's TX Drive % could never overcome.  Matches the
+gateware-RTL agent's #2-ranked cause exactly ("0.5×
+amplitude = −6 dB = ~half/quarter power"); fits the measured
+~1.5-2 W vs 5 W (~−4 to −5 dB).  Fix: `_TUNE_TONE_MAG=0.95`
+(full scale, ~0.4 dB headroom so the int16 EP2 quantiser
+can't clip the sinusoid peak = no carrier splatter); actual
+power now governed downstream by TX Drive % + PA as a real
+tune should be.  Lyra-native, no protocol change, RX-inert,
+397/0, backup `_backups/lyra-2026-05-17-tun-fullscale.bundle`.
+NEXT (non-invasive, NO front-end-risk test): operator keys
+TUN into dummy at TX Drive 100%, re-reads Palstar — expect
+power to rise substantially toward the ~5 W reference (if
+~5 W: deficit closed; if still low: continue the Thetis-vs-
+Lyra full TX-emission reconciliation — drive_level 0x09
+nibble / 0x0e — but this -6 dB cap was the prime, concrete,
+self-introduced cause).  **PROCESS NOTE (operator directive
+re-asserted 2026-05-17):** study the reference, implement
+Lyra-native, NO code copy, NO reference name in shipped
+code/comments/commits (RF/gateware-first-principles terms
+only) — provenance ONLY here in §15.26/docs; WDSP ports are
+the sole attributed code.  I had been lax with "Thetis-…"
+in commits/comments this session; corrected from `9cef8fc`
+onward.  ATT-on-TX-toggle discriminator WITHDRAWN (operator:
+never disable RX front-end protection to test).
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
 style): disable device 2 → set device 1 to ~100-105 mA →
