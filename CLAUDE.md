@@ -8092,6 +8092,35 @@ the first-RF / Phase-3-EXIT priority.**  Agent ids:
 `a547a1e68ee90f8e7` + `af7484949addaa28d` (re-verifiers),
 `a90630117a915dace` (reference study).
 
+**✅ FIX #3 SHIPPED `086dca1` 2026-05-17 (operator
+"if you think it's worth a try, YES").**  The lowest-risk,
+independently dummy-load-benchable structural fix:
+`HL2Stream._slew_fill_pairs` replaces the hard `(0.0,0.0)`
+underrun splice (the §9.6 residual-pop mechanism) with a
+Lyra-native raised-cosine — first underrun frame fades the
+last real sample out over ~0.67 ms then zero-pads; sustained
+underrun stays pure silence (NO per-frame re-fade — the unit
+test caught that a naive re-fade would be a frame-rate
+sawtooth/buzz, worse than the hard zero); first healthy
+frame after recovery fades back in with the complementary
+cosine.  One helper shared by BOTH EP2 drain sites
+(`stream.py` writer loop + `_send_cc`), single
+`tx_audio_underruns` source of truth.  **Latency-neutral**:
+steady state only records the last sample + one branch — no
+buffer added, EP2 cadence/keepalive/threading UNTOUCHED, no
+§15.7 regression.  `tests/protocol/test_ep2_slew_fill.py`
+(7 cases incl. the sawtooth regression guard).  Full suite
+**415 passed + 7 new, 0 regressions** (lone
+`scratch/test_tx_dsp_bench.py` error = pre-existing manual-
+bench `mode`-fixture artifact, unrelated).  Backup
+`_backups/lyra-2026-05-17-ep2-slew-fill.bundle`.  NO RF;
+safe to bench (dummy load, DSP off — the exact §9.6 repro).
+The remaining structural items (control off the worker
+`processEvents` loop = the real relay-chatter fix;
+decoupled single-owner wire-thread hand-off; independent
+OS-timer keepalive) stay the **pre-antenna safety gate** —
+NOT shipped here, higher regression risk, need bench cycles.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-16 EOD)
