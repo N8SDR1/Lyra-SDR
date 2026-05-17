@@ -7001,6 +7001,23 @@ that folder for later: "HL2 PA and full duplex",
 "See multi meter…PO-SWR-ID-Compression-ALC and VDD",
 "AGC and ALC", "PTT Hangtime", "EER", "DSP Buffers".
 
+**✅ ATT-on-TX VALUE CONFIRMED from operator's OWN Thetis DB
+export 2026-05-17** (`Y:\hold\screenshots\Thetis_database_
+export_Default_5_16_2026_6_54 PM.xml`, ground truth): the
+"31 vs −31" question is CLOSED — `chkATTOnTX=True`,
+**`udATTOnTX=31` (POSITIVE 31)**, `chkForceATTwhenPSAoff=True`,
+`chkForceATTwhenOutPowerChanges=True` (`_decreased`=False),
+`chkAutoATTTXPsOff=False`, `chkUndoAutoATTTx=False`.  Lyra's
+shipped default (ATT-on-TX ON / +31) exactly matches.  The
+operator's "−31" recollection = the SEPARATE
+`udHermesStepAttenuatorData=−26` (the RX/receive LNA step-att,
+signed-negative axis) — a different field/purpose; the
+TX-protect ATT (`udATTOnTX`) is positive 31.  RTL-proven
+(`ad9866.v:150-151` CW-protect forces `gain<=6'h00`): +31 →
+wire rx_gain code 0 = MIN LNA gain = MAX RX-ADC protection
+(removes gain on TX, does NOT add — operator's principle
+upheld).  No code change; default correct.
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
