@@ -402,6 +402,10 @@ class Radio(QObject):
     # Default OFF; a safety stand-down auto-disarms it.  Bidir
     # sync to Settings -> TX "Advanced".
     pa_enabled_changed = Signal(bool)
+    # §15.26 ATT-on-TX (operator-facing, mirrors Thetis "ATT on
+    # Tx" checkbox + "ATT: NN" spin) -- TxSettingsTab sync.
+    att_on_tx_enabled_changed = Signal(bool)
+    att_on_tx_db_changed = Signal(int)
     # §15.26 Commit B: TR-sequencing delays changed (dict of the
     # 5 ms values).  Bidir sync to Settings → TX "TR Sequencing".
     tr_sequencing_changed = Signal(dict)
@@ -1522,6 +1526,11 @@ class Radio(QObject):
         # -> TX "Advanced").  QSettings restore via
         # autoload_pa_enabled_setting.
         self._pa_enabled: bool = False
+        # §15.26 ATT-on-TX operator state (defaults = operator
+        # working rig: chkATTOnTX=True / udATTOnTX=31).  QSettings
+        # restore via autoload_att_on_tx_settings.
+        self._att_on_tx_enabled: bool = True
+        self._att_on_tx_db: int = 31
 
         # Notch bank — list of Notch dataclasses (see top of file).
         # Operators add/remove via right-click on spectrum/waterfall;
@@ -3036,9 +3045,71 @@ class Radio(QObject):
     # swaps THIS policy's source (the PS auto-attenuator FSM),
     # never the wire encoding.  No new register; frame-4
     # (cmd_addr 0x0e) is inert on this FAST_LNA variant.
-    _att_on_tx_enabled: bool = True
-    _ATT_ON_TX_DB: int = 31          # operator-dB, signed axis
+    # Operator-facing (mirrors Thetis Setup->General->Ant/Filters
+    # "ATT on Tx" checkbox + "ATT: NN" spin; ref screenshot
+    # Y:\hold\screenshots\"metering for SWR and ATT on TX and
+    # Force ATT .jpg").  Instance state + setters/signals/autoload
+    # below; defaults = operator working rig (ON / 31).  The PS-
+    # conditional "Force when PS-A off/on" sub-options are v0.3
+    # PS-dialog scope (PS not entangled on this variant) -- not
+    # inert UI now.
     _ATT_ON_TX_REST_DB: int = 0      # resting (RX-branch governs)
+
+    @property
+    def att_on_tx_enabled(self) -> bool:
+        return bool(self._att_on_tx_enabled)
+
+    @property
+    def att_on_tx_db(self) -> int:
+        return int(self._att_on_tx_db)
+
+    def set_att_on_tx_enabled(self, on: bool) -> None:
+        """Operator ATT-on-TX master enable (Thetis 'ATT on Tx').
+        Persists + signals.  Idempotent."""
+        on = bool(on)
+        if on == self._att_on_tx_enabled:
+            return
+        self._att_on_tx_enabled = on
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue("tx/att_on_tx", on)
+        except Exception:
+            pass
+        self.att_on_tx_enabled_changed.emit(on)
+
+    def set_att_on_tx_db(self, db: int) -> None:
+        """Operator ATT-on-TX value (Thetis 'ATT: NN').  Signed
+        HL2 axis -28..+31 (31 = max RX-ADC protection = the
+        default / operator rig).  Persists + signals.  Idempotent."""
+        db = max(-28, min(31, int(db)))
+        if db == self._att_on_tx_db:
+            return
+        self._att_on_tx_db = db
+        try:
+            from PySide6.QtCore import QSettings
+            QSettings("N8SDR", "Lyra").setValue("tx/att_on_tx_db", db)
+        except Exception:
+            pass
+        self.att_on_tx_db_changed.emit(db)
+
+    def autoload_att_on_tx_settings(self) -> None:
+        """Restore ATT-on-TX from QSettings (defaults ON / 31 =
+        the operator working rig: chkATTOnTX=True, udATTOnTX=31).
+        Called once at app build alongside the other autoload_*."""
+        try:
+            from PySide6.QtCore import QSettings
+            qs = QSettings("N8SDR", "Lyra")
+            raw = qs.value("tx/att_on_tx", True)
+            self._att_on_tx_enabled = (
+                raw if isinstance(raw, bool)
+                else str(raw).lower() in ("1", "true", "yes"))
+            self._att_on_tx_db = max(
+                -28, min(31, int(qs.value("tx/att_on_tx_db", 31))))
+        except Exception:
+            self._att_on_tx_enabled = True
+            self._att_on_tx_db = 31
+        self.att_on_tx_enabled_changed.emit(self._att_on_tx_enabled)
+        self.att_on_tx_db_changed.emit(self._att_on_tx_db)
 
     def _apply_att_on_tx(self, on: bool) -> None:
         """Drive the RX-ADC-protect step attenuator on the MOX
@@ -3046,7 +3117,7 @@ class Radio(QObject):
         never raises into the FSM.  Inert if disabled."""
         if not self._att_on_tx_enabled or self._stream is None:
             return
-        db = self._ATT_ON_TX_DB if on else self._ATT_ON_TX_REST_DB
+        db = (self._att_on_tx_db if on else self._ATT_ON_TX_REST_DB)
         try:
             self._stream.set_tx_step_attn_db(db)  # noqa: SLF001
         except Exception as exc:  # noqa: BLE001

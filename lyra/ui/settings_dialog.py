@@ -2864,7 +2864,43 @@ class TxSettingsTab(QWidget):
         saf_v.addWidget(self.tx_timeout_bypass_chk)
         # Spin is meaningless while bypassed -> disable it.
         self.tx_timeout_spin.setEnabled(not radio.tx_timeout_bypass)
+
+        # §15.26 ATT-on-TX -- RX-ADC protection on transmit
+        # (mirrors Thetis Setup->General->Ant/Filters "ATT on Tx"
+        # + "ATT: NN").  Default ON / 31 = operator working rig.
+        self.att_on_tx_chk = QCheckBox(
+            "ATT on TX (protect RX ADC from transmit coupling)")
+        self.att_on_tx_chk.setChecked(radio.att_on_tx_enabled)
+        self.att_on_tx_chk.setToolTip(
+            "On transmit, force the HL2 RX LNA to minimum gain so "
+            "the RX ADC isn't overloaded by TX coupling (the "
+            "wide/off-scale panadapter when off).  Mirrors Thetis "
+            "'ATT on Tx'.  Leave ON unless you have a specific "
+            "reason; required posture for clean TX + PureSignal.")
+        self.att_on_tx_chk.toggled.connect(self._on_att_on_tx_chk)
+        saf_v.addWidget(self.att_on_tx_chk)
+        arow = QHBoxLayout()
+        arow.addWidget(QLabel("ATT on TX:"))
+        self.att_on_tx_spin = QSpinBox()
+        self.att_on_tx_spin.setRange(-28, 31)
+        self.att_on_tx_spin.setSuffix(" dB")
+        self.att_on_tx_spin.setValue(int(radio.att_on_tx_db))
+        self.att_on_tx_spin.setToolTip(
+            "TX-time attenuator value (Thetis 'ATT: NN').  31 = "
+            "maximum RX-ADC protection (the standard / operator "
+            "default).  Signed HL2 axis -28..+31.")
+        self.att_on_tx_spin.setEnabled(radio.att_on_tx_enabled)
+        self.att_on_tx_spin.valueChanged.connect(
+            self._on_att_on_tx_spin)
+        arow.addWidget(self.att_on_tx_spin)
+        arow.addStretch(1)
+        saf_v.addLayout(arow)
+
         v.addWidget(saf_grp)
+        self.radio.att_on_tx_enabled_changed.connect(
+            self._on_radio_att_on_tx_enabled)
+        self.radio.att_on_tx_db_changed.connect(
+            self._on_radio_att_on_tx_db)
         self.radio.tx_timeout_seconds_changed.connect(
             self._on_radio_tx_timeout_seconds)
         self.radio.tx_timeout_bypass_changed.connect(
@@ -3016,6 +3052,31 @@ class TxSettingsTab(QWidget):
         self.pa_enable_chk.blockSignals(True)
         self.pa_enable_chk.setChecked(on)
         self.pa_enable_chk.blockSignals(False)
+
+    # ── ATT-on-TX (§15.26) ──────────────────────────────────────────
+    def _on_att_on_tx_chk(self, on: bool) -> None:
+        self.radio.set_att_on_tx_enabled(bool(on))
+        self.att_on_tx_spin.setEnabled(bool(on))
+
+    def _on_att_on_tx_spin(self, db: int) -> None:
+        self.radio.set_att_on_tx_db(int(db))
+
+    def _on_radio_att_on_tx_enabled(self, on: bool) -> None:
+        on = bool(on)
+        self.att_on_tx_spin.setEnabled(on)
+        if self.att_on_tx_chk.isChecked() == on:
+            return
+        self.att_on_tx_chk.blockSignals(True)
+        self.att_on_tx_chk.setChecked(on)
+        self.att_on_tx_chk.blockSignals(False)
+
+    def _on_radio_att_on_tx_db(self, db: int) -> None:
+        db = int(db)
+        if int(self.att_on_tx_spin.value()) == db:
+            return
+        self.att_on_tx_spin.blockSignals(True)
+        self.att_on_tx_spin.setValue(db)
+        self.att_on_tx_spin.blockSignals(False)
 
     def _on_radio_tr_sequencing(self, d: dict) -> None:
         # Radio → spinboxes (e.g. rf_delay was floor-clamped on a

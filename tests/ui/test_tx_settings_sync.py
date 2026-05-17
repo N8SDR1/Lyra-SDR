@@ -106,6 +106,56 @@ class TxSettingsSyncTest(unittest.TestCase):
         # bypass disables the (now-meaningless) minutes spin
         self.assertFalse(self.tab.tx_timeout_spin.isEnabled())
         self.radio.set_tx_timeout_bypass(False)
+    def test_att_on_tx_round_trip_and_defaults(self) -> None:
+        # §15.26: default ON / 31 = operator working rig.
+        self.assertTrue(self.radio.att_on_tx_enabled)
+        self.assertEqual(self.radio.att_on_tx_db, 31)
+        self.assertTrue(self.tab.att_on_tx_chk.isChecked())
+        self.assertEqual(self.tab.att_on_tx_spin.value(), 31)
+        # UI -> Radio
+        self.tab.att_on_tx_spin.setValue(10)
+        self.assertEqual(self.radio.att_on_tx_db, 10)
+        self.tab.att_on_tx_chk.setChecked(False)
+        self.assertFalse(self.radio.att_on_tx_enabled)
+        # disabling greys the dB spin
+        self.assertFalse(self.tab.att_on_tx_spin.isEnabled())
+        # Radio -> UI (guarded, no feedback loop)
+        seen: list = []
+        self.radio.att_on_tx_db_changed.connect(seen.append)
+        self.radio.set_att_on_tx_enabled(True)
+        self.assertTrue(self.tab.att_on_tx_chk.isChecked())
+        self.radio.set_att_on_tx_db(31)
+        self.assertEqual(self.tab.att_on_tx_spin.value(), 31)
+        self.assertEqual(seen.count(31), 1)            # one edge
+        from PySide6.QtCore import QSettings
+        qs = QSettings("N8SDR", "Lyra")
+        qs.remove("tx/att_on_tx")
+        qs.remove("tx/att_on_tx_db")
+
+    def test_att_on_tx_policy_uses_operator_value(self) -> None:
+        # The keydown policy must push the operator-set dB via
+        # the single writer, and respect the enable toggle.
+        from lyra.ptt import PttState
+
+        class _S:
+            def __init__(self) -> None:
+                self.calls: list[int] = []
+                self.inject_tx_iq = False
+
+            def set_tx_step_attn_db(self, db: int) -> None:
+                self.calls.append(int(db))
+
+        s = _S()
+        self.radio._stream = s
+        self.radio.set_att_on_tx_db(7)
+        self.radio._on_tx_state_changed(True, PttState.MOX_TX)
+        self.assertEqual(s.calls[-1], 7)               # operator value
+        self.radio._on_tx_state_changed(False, PttState.RX)
+        self.assertEqual(s.calls[-1], 0)               # rest
+        s.calls.clear()
+        self.radio.set_att_on_tx_enabled(False)
+        self.radio._on_tx_state_changed(True, PttState.MOX_TX)
+        self.assertEqual(s.calls, [])                  # disabled -> inert
 
 
 if __name__ == "__main__":

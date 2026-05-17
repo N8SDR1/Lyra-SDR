@@ -402,6 +402,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             print(f"[app] PA-enable autoload error: {exc}")
 
+        # ATT-on-TX (§15.26) -- RX-ADC protection on transmit;
+        # default ON / 31 (operator working rig).
+        try:
+            self.radio.autoload_att_on_tx_settings()
+        except Exception as exc:
+            print(f"[app] ATT-on-TX autoload error: {exc}")
+
         # TR sequencing (v0.2.0 Phase 3 Commit B, §15.26) -- caps +
         # operator overrides; rf_delay is amp-hot-switch protected.
         try:
