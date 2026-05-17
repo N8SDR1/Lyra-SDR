@@ -6749,6 +6749,35 @@ no RF -- default-OFF PA).**  All 5 findings in one commit:
   only when `int_tx_on`); phase0 RX-audio null gate GREEN.
   Backup `_backups/lyra-2026-05-17-tx-reconcile.bundle`.
 
+**✅ RX-DEATH INCIDENT 2026-05-17 — NOT hardware (Thetis RX
+fine on same HL2+ = front end UNDAMAGED; QRP into dummy load
+never blew anything; the invalid "kill-test" only killed the
+terminal, not python.exe, so the gateware was never even
+hard-killed).  ROOT CAUSE CODE-CONFIRMED:** `_tx_rx_muted`
+(OR'd into the RX audio-output gate, radio.py:10905/11142/
+11239) is reset to False ONLY in `__init__:904` and the
+normal keyup `_on_tx_state_changed:2982`.  It is NOT reset
+in `Radio.stop()` (9150) or `Radio.start()` (8988).  TX sets
+it True; if keyup doesn't complete (operator hit in-app Stop
+while effectively still keyed during the botched kill-test),
+it stays True; stop()/start() don't clear it; only a full
+process restart (re-runs __init__) does → "no RX audio at
+full vol, no signals" until restart.  Operator-confirmed:
+full Lyra restart cleared it.  Same class as `cb58bcb`
+(stream stop/start must ALWAYS come up clean) — the
+set_mox(False)+unbind_runtime guarantee there must be
+extended to `_tx_rx_muted` (and verify the WDSP RX channel
+is running on start, since keydown `_request_rx_channel
+(False)` stops it and a non-completing keyup leaves it
+stopped).  FIX (locked, low-risk, pre-next-bench): reset
+`self._tx_rx_muted = False` in stop() AND at the top of
+start(); ensure RX channel running on start.  Noise-floor
+A/B (operator): Thetis −107.2 vs Lyra −110 dBm @10 m =
+2.8 dB, within S-meter cal tolerance (§14.4) — RX healthy,
+no action.  KILL-TEST STILL PENDING (the terminal-kill was
+invalid; must kill python.exe; the recovery fix should land
+FIRST so the valid kill-test's restart comes up clean).
+
 **✅✅ FIRST RF CONFIRMED ON HARDWARE 2026-05-17** (operator,
 N8SDR HL2+, TUN into dummy load, ~28% drive).  The
 gateware-verified reconcile (`b68886d`) WORKED -- R3 (C2
