@@ -6827,6 +6827,55 @@ is likely INCONCLUSIVE — a definitive kill-test needs PA
 current reading first.  (Operator electing to run it
 anyway to observe gateware behavior — their call.)
 
+**⚠ KILL-TEST + 2nd BENCH 2026-05-17 (screenshot read):**
+* **Kill-test BEHAVIOR pass:** operator killed `python.exe`
+  (valid method), Lyra died; on relaunch RX returned fine
+  (b7e61e6 recovery WORKED -- no dead RX), TX did NOT
+  auto-resume (start stream + re-click TUN required = the
+  correct cb58bcb no-auto-key safety).
+* **Kill-test SAFETY still UNCONFIRMED:** PA current reads
+  n/a so the "PA bias drops on kill" observation could not
+  be made.  §15.20/§15.24-C gate NOT closed -- needs PA
+  current working OR an external watt-meter/Thetis check.
+* **Banner: `PA n/a`, `VDD 41.8 V`** (T 28.7 °C, V 12.3 V
+  both fine = the untouched field-proven decode).  **41.8 V
+  is NOT a sane PA drain (~12-13 V expected).**  So BOTH
+  Corr-3 re-mapped fields are wrong for this ak4951v4
+  variant: PA-amps absent (0x18 C1:C2) AND PA-volts mis-
+  valued (0x10 C3:C4 / formula).  The GENERIC Thetis
+  networkproto1.c slot map does NOT apply to this HL2+
+  gateware (same class as the temp divergence; operator-
+  empirical > source inference, §3.9).  Corr-3's "VDD
+  works" was premature -- it populated but the VALUE is
+  wrong.  => the ENTIRE PA-telemetry slot/scale map for
+  this gateware must be derived by CAPTURE, not source.
+* **Wide/off-scale TX panadapter:** most likely RX-ADC
+  overload artifact (RX wide open -- LNA +15 dB, AGC Fast,
+  S9+43 pegged -- folding its own strong TUN into the
+  dummy) + the documented no-TX-bandpass GAP; NOT confirmed
+  dirty RF (a single-tone TUN is narrow on a real
+  analyzer).  Do NOT conclude splatter without a Thetis
+  A/B or analyzer.  Tie-in: commit 3.6 (TX visual/meter)
+  + RX-during-TX panadapter handling + the hard
+  pre-antenna filter gate.  Flag, don't alarm-guess.
+
+**NEXT (priority, verify-don't-guess): HL2 Telemetry Probe
+capture.** Help → HL2 Telemetry Probe (dialog
+`lyra/ui/telem_probe.py`, `_probe_cb` tap).  Capture the
+live (addr,C1,C2,C3,C4) rotation in TWO states: (a) RX
+idle, (b) keyed FULL tune into the dummy (the Thetis
+≈1.8 A / ~12-13 V VDD / 5.1 W / 31 °C condition).  Then
+correlate raw byte-pairs against the known Thetis anchor
+to derive THIS gateware's real map: which (addr,pair) →
+PA-amps (converts to ~1.8 A via the verified sense
+formula), which → PA-volts (~12-13 V), confirm temp/
+supply.  Re-point `pa_current_adc`/`pa_volts_adc` to the
+captured-true slots; re-derive the VDD scale from the
+~12-13 V anchor if needed.  ONLY after PA current reads
+true can the kill-test be definitively closed.  Also
+available without PA current: the watt-meter A/B (Lyra
+full drive vs Thetis 5.1 W) for the Q1 drive-scale gap.
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
