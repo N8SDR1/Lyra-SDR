@@ -6390,6 +6390,20 @@ PA-current/VDD readout, then the Phase-3-EXIT kill-test.
 Amp re-enters only after the operator is confident
 (separate later step).
 
+**PA-current VISUAL SHIPPED `83e8ba0` 2026-05-17** (operator
+caught it: "I still dont see a visual for PA current").
+Commit A (`4b4170a`) over-claimed "readout" — it decoded
+`pa_current_adc` + added `Radio.pa_current_amps` + put
+`pa_a` in the telemetry payload, but the banner label only
+rendered T/V; `pa_a` was wired to NO visible widget.  Fix:
+`MainWindow._update_hl2_telemetry` now renders a third
+banner field `PA <x.xx> A` (NaN→"n/a" like T/V); initial
+label + tooltip updated (tooltip states it's the kill-test
+observable).  Pure display add over an already-tested
+payload field; no protocol/RF change.  388/0.  **This is
+the bench observable — it lives on the HL2 telemetry banner
+chip (top toolbar, next to T/V), NOT a separate panel.**
+
 **TUN tune-carrier SHIPPED `468f34f` 2026-05-17** (operator
 design call: SSB is suppressed-carrier + voice-shaped, a
 poor first-RF/PA-current/kill-test instrument; other modes
