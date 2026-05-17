@@ -6749,8 +6749,38 @@ no RF -- default-OFF PA).**  All 5 findings in one commit:
   only when `int_tx_on`); phase0 RX-audio null gate GREEN.
   Backup `_backups/lyra-2026-05-17-tx-reconcile.bundle`.
 
-**NEXT = operator hardware bench (the fix is in; verify on
-the HL2+):** run `LYRA_TX_DEBUG=1`, reproduce (start → enable
+**✅✅ FIRST RF CONFIRMED ON HARDWARE 2026-05-17** (operator,
+N8SDR HL2+, TUN into dummy load, ~28% drive).  The
+gateware-verified reconcile (`b68886d`) WORKED -- R3 (C2
+0x08 PA-enable never reaching the wire via the autoload-
+before-start gap) was the root cause, exactly as the HL2+
+ak4951v4 RTL predicted.  The exhaustive verify-don't-guess
+pass (Thetis×2 + pihpsdr/Quisk/linHPSDR + HL2 wiki + the
+actual HL2+ gateware RTL) correctly localised it; zero
+wasted speculative code.  Phase-3 TX is RF-producing.
+
+Open at first-RF (all EXPECTED / known, not regressions):
+* **S-meter pegged in TX** = the documented pending commit
+  3.6 TX-meter-source-swap (§15.25 decision #1: AGC/S row →
+  ALC/PWR while MOX).  Until 3.6 the S-meter shows the
+  RX-derived reading which rises on TX-coupled energy.  The
+  HL2-banner **PA current** field (Commit A `83e8ba0`) is
+  the meaningful TX observable, NOT the S-meter.
+* **Drive % vs output** = Q1 (deferred polish): flat
+  `255*pct/100` keys + emits but the HL2 drive DAC is the
+  top 4 bits = **16 coarse steps**, NOT per-band calibrated
+  (pihpsdr `pa_calibration` / Quisk per-band `tx_level`).
+  Expect coarse/non-linear variation, not smooth.  Not a
+  bug; v0.2.x power-cal item.
+* **Phase-3-EXIT kill-test still PENDING** (§15.20/§15.24-C)
+  -- the load-bearing safety gate before ANY real-antenna
+  keying (gateware watchdog TX-UNVERIFIED).  Method: force-
+  kill mid-TUN (Task Manager End task / `taskkill /F /PID`,
+  NOT window-close/Ctrl+C), PA-current banner must drop to
+  ~idle within a few sec.
+
+**NEXT = (historical) operator hardware bench:** run
+`LYRA_TX_DEBUG=1`, reproduce (start → enable
 PA → TX drive ~50% → TUN).  Expect in the log:
 `_repush_tx_state: pa_on<-True (C2 bit3 0x08 now reaches the
 wire)`, `_repush_tx_state: drive_level<-128`,
