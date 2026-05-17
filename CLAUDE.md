@@ -7097,6 +7097,30 @@ bias = THE bug (dig `_pa_enabled`→`set_pa_on`→start-repush
 Probe full-tune PA-current vs Thetis 1.8 A (≈1.8 A=biased;
 ≈0=driver-only).
 
+**✅ KEYING-WITH-PA-OFF BUG FIXED `d577d2d` 2026-05-17
+(operator-empirical caught it; I was WRONG that "keying is
+independent of PA-enable").** Operator: PA off in Lyra ⇒ HL2
+relays never click, rig never TX at all.  Cause = my own R1'
+`_compose_frame_10` `else: c2 |= 0x04` (tr_disable) when PA
+off.  RTL `control.v:362` `pa_inttr = int_tx_on & ~vna &
+(pa_enable | ~tr_disable)` — pa_enable=0 & tr_disable=1 ⇒
+pa_inttr=0 even on TX ⇒ no T/R relay.  Fix: dropped the 0x04;
+PA off ⇒ C2 0x40 base only ⇒ tr_disable=0 ⇒ pa_inttr=
+int_tx_on (relays click, keyable, no power) = Thetis
+behaviour (operator-confirmed Thetis keys w/PA off).  RX-
+inert (tr_disable only acts under int_tx_on; pa_inttr=0 at
+RX), phase0 green, 397/0, backup
+`_backups/lyra-2026-05-17-tr-disable-fix.bundle`.
+**KEY IMPLICATION — POWER DEFICIT candidate A REFUTED:** TX
+working ONLY with Enable-PA on PROVES C2-bit3 pa_enable IS
+reaching + engaging the gateware PA path.  So the ~3× deficit
+(Thetis 5 W vs Lyra ~1.5-2 W, same Palstar) is NOT "PA not
+enabled" — it is DOWNSTREAM: drive/PA-bias-level/another gain
+stage.  Localise via PA-current telemetry (HL2 Telemetry
+Probe full-tune capture vs Thetis 1.8 A).  This fix also
+RE-ENABLES the operator's Enable-PA toggle discriminator.
+The §15.26 R1' "PA-off ⇒ C2|=0x04" line is SUPERSEDED.
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
