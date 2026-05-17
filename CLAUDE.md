@@ -7191,6 +7191,33 @@ verify-don't-guess; await operator toggle result.  (UNRESOLVED
 needing RTL/datasheet: is AD9866 PGA `gain` in the TX
 amplitude path or RX-only — decisive for the mechanism.)
 
+**✅ WAVEY CLOSED + ⚠ NEW DEFECT: GUI-event relay chatter
+2026-05-17.** Operator: Palstar HOLDS STEADY ~5 W ⇒ the
+"wavey panadapter" is CONFIRMED the benign blinded-RX
+display artifact (ATT-on-TX min-gain RX + AGC-Fast residual
+on a strong local carrier); transmitted carrier is steady/
+clean.  Wavey item CLOSED (display-only, no fix).
+**NEW (real, tracked, NOT a guess-fix): GUI-event-induced
+HL2 relay chatter.** Opening a tab/window caused rapid HL2
+T/R relay clicks + a momentary stumble.  Operator (correct
+— capable hardware): NOT a PC-performance issue.  Signature
+= a transient Qt main-thread stall (window/focus/paint
+event) starving the EP2 writer thread (GIL) → HL2 gateware
+sees an EP2 keepalive/cadence gap → T/R relay reacts/
+chatters.  SAME host-timing family as §9.6 pops / §15.21
+EP2-cadence sensitivity / §15.7 (Qt main blocking the wire
+thread).  PRIORITY > the audio pops: relay chatter is
+mechanically hard on the T/R relay and dangerous if it ever
+coincides with antenna/amp TX (hot-switch) — a
+robustness/safety item, **pre-antenna/heavy-on-air gate
+alongside the no-TX-bandpass GAP.**  Needs a VERIFIED
+investigation (what the main thread blocks on for a
+window/focus event; insulating the EP2 writer to ride a
+brief main-thread stall — MMCSS priority is set but a hard
+GIL stall still starves it; possibly decouple/buffer EP2
+keepalive from main-thread events).  Do NOT guess-fix;
+investigate (likely a focused diagnostic, post-core-TX).
+
 **✅✅✅ SCREENSHOT-CONFIRMED 2026-05-17: banner `HL2 T
 35.6°C  V 12.3 V  PA 1.75 A` (no VDD field) at full TX
 drive, ~5 W Palstar.** PA readout fixed+trustworthy (≈ref
