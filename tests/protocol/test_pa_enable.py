@@ -51,20 +51,26 @@ class PaEnableStreamTest(unittest.TestCase):
             s.set_pa_on(True)
 
     def test_default_off_frame10(self) -> None:
-        # §15.26 R1' (HL2+ gateware-proven): PA OFF => C2 bit2
-        # (0x04 tr_disable) set, C2 bit3 (0x08 pa_enable) clear,
-        # C2 bit7 (0x80 VNA) clear, C3 bit7 NOT written.
+        # §15.26 CORRECTION 2026-05-17 (operator-empirical +
+        # control.v:362 pa_inttr proof): PA OFF => C2 = 0x40
+        # BASE ONLY -- bit2 (0x04 tr_disable) NOT set (setting
+        # it forced the internal T/R relay off even on TX ->
+        # "relays never click with PA off").  bit3 (0x08
+        # pa_enable) clear, bit7 (0x80 VNA) clear, C3 bit7 not
+        # written.  Keyable with PA off (no power) like Thetis.
         s = self._stream()
         s._refresh_frame_10()
-        self.assertEqual(s._cc_registers[0x12], (0x00, 0x44, 0x00, 0x00))
+        self.assertEqual(s._cc_registers[0x12], (0x00, 0x40, 0x00, 0x00))
         self.assertEqual(s._cc_registers[0x12][1] & 0x08, 0)   # no PA
+        self.assertEqual(s._cc_registers[0x12][1] & 0x04, 0)   # no tr_dis
         self.assertEqual(s._cc_registers[0x12][1] & 0x80, 0)   # no VNA
         self.assertEqual(s._cc_registers[0x12][2] & 0x80, 0)   # no C3b7
 
     def test_enable_sets_c2_bit3_only(self) -> None:
-        # PA-on => C2 = 0x40|0x08 = 0x48 (bit3 pa_enable; NO 0x04
-        # tr_disable, NO 0x80 VNA); C3 bit7 stays clear.  Off =>
-        # C2 = 0x40|0x04 = 0x44.
+        # PA-on => C2 = 0x40|0x08 = 0x48 (bit3 pa_enable only;
+        # NO 0x04 tr_disable, NO 0x80 VNA); C3 bit7 clear.
+        # PA-off => C2 = 0x40 base only (tr_disable NOT set so
+        # the rig still keys/relays with PA off).
         s = self._stream()
         s.set_pa_on(True)
         self.assertTrue(s._pa_on)
@@ -73,8 +79,9 @@ class PaEnableStreamTest(unittest.TestCase):
         self.assertEqual(s._cc_registers[0x12][2] & 0x80, 0)    # C3b7 0
         s.set_pa_on(False)
         self.assertFalse(s._pa_on)
-        self.assertEqual(s._cc_registers[0x12][1], 0x44)        # tr_dis
+        self.assertEqual(s._cc_registers[0x12][1], 0x40)        # base only
         self.assertEqual(s._cc_registers[0x12][1] & 0x08, 0)    # PA off
+        self.assertEqual(s._cc_registers[0x12][1] & 0x04, 0)    # tr NOT dis
 
     def test_vna_bit_never_set(self) -> None:
         # C2 bit7 (0x80, 0x09[23] vna) must be clear in both

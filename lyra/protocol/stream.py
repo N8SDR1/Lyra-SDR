@@ -1593,9 +1593,11 @@ class HL2Stream:
         ``_refresh_frame_10`` is the lock-acquiring sibling.
 
         Defaults: drive=0, all toggles False, pa_on=False ->
-        wire (0x00, 0x40, 0x00, 0x00): PA OFF so no RF can be
-        keyed even with MOX asserted until the operator opts in.
-        PA-on (D-2): C2 -> 0x4C (0x40|0x08|0x04) + C3 bit 7.
+        wire (0x00, 0x40, 0x00, 0x00): PA OFF -> C2 0x40 base
+        (tr_disable NOT set -> rig still keys/relays click with
+        PA off, no RF -- Thetis behaviour).  PA ON -> C2 0x48
+        (0x40 | 0x08 pa_enable).  No C3 bit7 (not gateware-
+        decoded).  Drive level (C1) governs power.
         """
         c1 = self._tx_drive_level & 0xFF
         # §15.26 R1' -- GATEWARE-PROVEN (HL2+ ak4951v4
@@ -1615,11 +1617,23 @@ class HL2Stream:
             c2 |= 0x02
         if self._pa_on:
             c2 |= 0x08            # bit19 pa_enable=1 (emit RF)
-        else:
-            c2 |= 0x04            # bit18 tr_disable when PA off
-                                  # (no point keying the T/R
-                                  # relay with no PA -- matches
-                                  # pihpsdr/wiki 0x09[18])
+        # §15.26 CORRECTION 2026-05-17 (operator-empirical, RTL-
+        # proven): do NOT set bit18 tr_disable when PA off.
+        # control.v:362 pa_inttr = int_tx_on & ~vna &
+        # (pa_enable | ~tr_disable).  With pa_enable=0 AND
+        # tr_disable=1 the INTERNAL T/R RELAY is forced 0 even
+        # while transmitting -> "relays don't even click with
+        # PA off; rig never goes TX" (operator-confirmed; my
+        # prior R1' `else: c2 |= 0x04` WAS the cause -- the
+        # pihpsdr/wiki "disable T/R when PA off" is a niche
+        # protective option, NOT the default; proven-working
+        # Thetis keys with PA off, relays click, no power).
+        # PA off => C2 base 0x40 only => tr_disable=0 =>
+        # pa_inttr = int_tx_on (relay clicks, keyable) while
+        # pwr_envpa = ...&pa_enable = 0 (no PA bias, no RF) --
+        # exactly Thetis behaviour.  (A future operator
+        # "disable T/R when PA off" toggle could re-add it; not
+        # default, not inert UI now.)
         c2 &= ~0x80               # guard: bit23 vna MUST be 0
                                   # (pwr_envpa = ... & ~vna)
         c3 = self._bpf_filter_bits & 0x7F   # C3 bit7 left clear
