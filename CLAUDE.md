@@ -7152,6 +7152,45 @@ current ≈ HALF Thetis's 1.8 A (~0.9 A) = single-device
 fingerprint.  Power-deficit cause = OPEN; this is the lead.
 Operator now benching d577d2d (keys-with-PA-off + power).
 
+**✅ DUAL-PA HYPOTHESIS REFUTED 2026-05-17 (2 independent
+agents converged, Thetis-source + ak4951v4 RTL + wiki):**
+Thetis has ZERO MCP4662/PA-bias code (only C&C 0x09
+drive_level + pa_enable; `networkproto1.c:1076-1089`,
+`netInterface.c:525-533,626-631`).  HL2 PA bias = MCP4662
+dual-pot **non-volatile EEPROM wipers** (wiki:159-177
+`0x06ac20vv`/`0x06ac30vv`, loaded at power-cycle), set once
+by the operator's bias procedure, **persistent across
+power-cycles AND across apps** — Lyra inherits the identical
+both-device-biased state Thetis does.  Gateware: single
+`pa_enable` (0x09 bit19) gates the WHOLE push-pull stage
+(`control.v:359-363` `pwr_envpa=pwr_envbias=int_tx_on&~vna&
+pa_enable`); NO per-device enable anywhere; software-caused
+single-device op is DEFINITIVELY IMPOSSIBLE.  Operator's
+hypothesis reasonable but evidence-killed.
+
+**⚠ NEW PRIME SUSPECT (both agents) = TX drive/gain chain;
+specific lead points at MY ATT-on-TX fix (FAST_LNA shared
+`gain`):** `ad9866.v:144` — during TX with `en_tx_gain=0`,
+**`gain <= rx_gain`**.  My ATT-on-TX policy forces
+`rx_gain→0` (min) on TX for RX-ADC protection.  If that
+AD9866 PGA `gain` is in the TX amplitude path (NOT RX-only),
+my RX-protect fix SUPPRESSES TX power on this variant — an
+RX-protect-vs-TX-power interaction I introduced (can't be
+SOLE cause — low power predates ATT-on-TX `7959587` — but
+plausibly WORSENS it; mechanism RTL-real).  Agents' other
+ranked causes: 0x09[31:28] drive nibble (Lyra@100% → C1
+0xFF → nibble 0xF=max, so Lyra DOES command max — weak), the
+0x0e en_tx_gain/tx_gain word (frame-4 C3, which ATT-on-TX
+sets to 0).  IMMEDIATE OPERATOR DISCRIMINATOR (ATT-on-TX
+toggle now exists, Settings→TX→TX Safety): key TUN dummy,
+toggle ATT-on-TX OFF — power JUMPS ⇒ ATT-on-TX (rx_gain→0)
+is the FAST_LNA-shared-gain TX-power suppressor (real fix:
+RX-protect must not cut TX gain on FAST_LNA); UNCHANGED ⇒
+not ATT-on-TX, dig drive_level/0x0e encoding.  Open;
+verify-don't-guess; await operator toggle result.  (UNRESOLVED
+needing RTL/datasheet: is AD9866 PGA `gain` in the TX
+amplitude path or RX-only — decisive for the mechanism.)
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
