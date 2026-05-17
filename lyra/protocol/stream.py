@@ -1525,9 +1525,21 @@ class HL2Stream:
                 mox = bool(self._dispatch_state_provider().mox)
             except Exception:
                 mox = False
-        step_attn_db = (self._tx_step_attn_db if mox
-                        else self._rx_step_attn_db)
-        c4 = 0x40 | ((int(step_attn_db) + 12) & 0x3F)
+        # MOX-gated 6-bit step-attenuator field, override-enable
+        # bit 0x40.  TX and RX use DIFFERENT operator axes that
+        # both map monotonically into the same 6-bit field:
+        #   TX: signed drive-attenuator dB in [-28,+31] -> the
+        #       gateware wants (31 - db) (so +31 dB attenuation
+        #       => 0, max gain -28 => 59).  This is the wire
+        #       convention for the HL2 transmit gain stage.
+        #   RX: operator "LNA gain" dB in [-12,+31] (gain-sense)
+        #       -> (db + 12) bias into the same field.  This RX
+        #       encoding is field-proven since v0.0.9.6 -- leave
+        #       it byte-identical.
+        if mox:
+            c4 = 0x40 | ((31 - int(self._tx_step_attn_db)) & 0x3F)
+        else:
+            c4 = 0x40 | ((int(self._rx_step_attn_db) + 12) & 0x3F)
         return (c1, c2, c3, c4)
 
     def _refresh_frame_11(self) -> None:
@@ -1621,9 +1633,11 @@ class HL2Stream:
         must be coherent.  Any operator-facing setter that mutates
         ``_tx_step_attn_db`` MUST call BOTH ``_refresh_frame_4`` and
         ``_refresh_frame_11`` so the two encodings stay in sync.
-        Encodings differ:
-        * Frame 4 C3 -- unsigned 5-bit mask: ``db & 0x1F``
-        * Frame 11 C4 -- 6-bit + override: ``0x40 | ((db + 12) & 0x3F)``
+        TX wire convention is ``31 - db`` (signed drive-att dB):
+        * Frame 4 C3  -- ``(31 - db) & 0x1F``  (5-bit, truncated)
+        * Frame 11 C4 -- ``0x40 | ((31 - db) & 0x3F)``  (6-bit,
+          MOX-gated TX branch; RX branch keeps its own
+          field-proven ``db + 12`` gain-sense bias)
 
         Lock-free.  ``_refresh_frame_4`` is the lock-acquiring sibling.
 
@@ -1635,10 +1649,13 @@ class HL2Stream:
         # state.
         c1 = 0
         c2 = 0
-        # C3 -- 5-bit unsigned masking of tx_step_attn_db.  HL2 firmware
-        # reads this register in parallel with frame 11 C4's extended-
-        # range encoding.
-        c3 = int(self._tx_step_attn_db) & 0x1F
+        # C3 -- 5-bit TX step-attenuator, SAME wire convention as
+        # frame-11 C4's TX branch: the gateware wants (31 - db)
+        # (signed drive-attenuator dB in [-28,+31]), then a 5-bit
+        # mask (the gateware truncates this copy; the full range
+        # rides frame-11 C4's 6-bit field).  Read in parallel with
+        # frame-11 C4 -- both must carry the coherent (31-db) value.
+        c3 = (31 - int(self._tx_step_attn_db)) & 0x1F
         c4 = 0
         return (c1, c2, c3, c4)
 

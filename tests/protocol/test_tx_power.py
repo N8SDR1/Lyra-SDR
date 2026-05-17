@@ -117,19 +117,27 @@ class TxStepAttnStreamTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             s.set_tx_step_attn_db(0)
 
-    def test_refreshes_both_frame_4_and_frame_11(self) -> None:
+    def test_refreshes_both_frame_4_with_31_minus_db(self) -> None:
+        # Commit C (§15.26 C-REVERIFY): HL2 TX-att wire convention
+        # is (31 - signed_db), then frame-4 C3 5-bit-masked.
         s = self._stream()
         s.set_tx_step_attn_db(7)
         self.assertEqual(s._tx_step_attn_db, 7)
-        # Frame 4 C3 = tx_step_attn_db & 0x1F (un-gated).
-        self.assertEqual(s._cc_registers[0x1C][2], 7 & 0x1F)
-        # Frame 11 is cached/coherent (4-tuple present).
+        self.assertEqual(s._cc_registers[0x1C][2], (31 - 7) & 0x1F)
+        s.set_tx_step_attn_db(-28)                 # max gain
+        self.assertEqual(s._cc_registers[0x1C][2], (31 + 28) & 0x1F)
+        s.set_tx_step_attn_db(31)                  # max atten
+        self.assertEqual(s._cc_registers[0x1C][2], 0)
+        # Frame 11 stays a cached coherent 4-tuple.
         self.assertEqual(len(s._cc_registers[0x14]), 4)
 
-    def test_zero_keeps_frame_4_clear(self) -> None:
+    def test_zero_db_encodes_31_minus_0(self) -> None:
+        # db=0 (unity) -> wire (31-0)=31 (the OLD code wrongly
+        # shipped 0 here; correct HL2 convention is 31).  Inert
+        # at RX (TX-att; gateware acts on it only during TX).
         s = self._stream()
         s.set_tx_step_attn_db(0)
-        self.assertEqual(s._cc_registers[0x1C], (0, 0, 0, 0))
+        self.assertEqual(s._cc_registers[0x1C][2], 31 & 0x1F)
 
 
 if __name__ == "__main__":
