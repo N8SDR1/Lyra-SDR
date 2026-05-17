@@ -7121,6 +7121,37 @@ Probe full-tune capture vs Thetis 1.8 A).  This fix also
 RE-ENABLES the operator's Enable-PA toggle discriminator.
 The §15.26 R1' "PA-off ⇒ C2|=0x04" line is SUPERSEDED.
 
+**⚠ CORRECTION 2026-05-17 (operator caught premature
+reasoning — 3rd time this session operator-empirical
+discipline overrode an inference):** my "candidate A
+REFUTED — TX-needs-PA proves pa_enable reaches gateware"
+is WITHDRAWN.  PA-off produced no TX because of the
+`tr_disable` bug (d577d2d), NOT because of PA bias — we
+have NEVER observed a real PA-off keyup.  **Candidate A
+stays OPEN** until the post-d577d2d PA-off keying is
+actually benched.  Verify-don't-guess reaffirmed.
+
+**LEADING HYPOTHESIS (operator, strong + coherent):
+DUAL-PA — Lyra may be driving/biasing only ONE of the HL2
+push-pull pair's TWO devices.**  Fits the data best:
+HL2 final = push-pull pair (~100 mA bias each, operator
+ground truth); one device dead/unbiased ⇒ **~half power**
+(Lyra ~1.5-2 W vs Thetis ~5 W — "~half" fits this far
+better than drive-scaling, which is already weak since
+Lyra commands max drive at 100%); could ALSO explain the
+anomalous PA-volts telemetry (unbalanced/single-ended
+stage).  VERIFICATION TARGET (Thetis-vs-gateware-RTL,
+multi-agent, AFTER operator bench data — not preemptive):
+is there a C&C/gateware second-PA-device bias/drive enable
+Thetis drives that Lyra omits?  (MCP4662 dual bias *pots*
+are hw-persistent from the operator's Thetis bias-set —
+Lyra doesn't touch them — so suspect = a gateware/enable-
+side path, not stored bias values.)  DECISIVE INSTRUMENT:
+the PA-current Telemetry-Probe capture — Lyra keyed PA
+current ≈ HALF Thetis's 1.8 A (~0.9 A) = single-device
+fingerprint.  Power-deficit cause = OPEN; this is the lead.
+Operator now benching d577d2d (keys-with-PA-off + power).
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
