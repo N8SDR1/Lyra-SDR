@@ -8123,45 +8123,113 @@ NOT shipped here, higher regression risk, need bench cycles.
 
 ---
 
-## ▶ NEXT SESSION STARTS HERE (2026-05-16 EOD)
+## ▶ NEXT SESSION STARTS HERE (2026-05-17 EOD)
 
 **AUTHORITATIVE RESUME DOC = §15.26** (full locked plan +
-Thetis-verified ground truth + the A/B/C/D ladder + the
-independent-red-team corrections + every operator decision).
-Read §15.26 first; the 2026-05-15 block below is historical.
+Thetis-verified ground truth + the audit/red-team/reference
+corrections + every operator decision).  Read §15.26 first
+(esp. the four most-recent dated subsections: the 2-senior-
+agent full-codebase audit, the SUPERSEDES red-team re-loop +
+reference study, and the FIX #3 SHIPPED block).  The
+2026-05-16 / 2026-05-15 blocks below are historical.
 
-**State (2026-05-16 EOD):** branch
-`feature/v0.0.9.6-audio-foundation`, HEAD `3aa9a39`, tree
-clean (only untracked docs/screenshots), full suite **378
-passed / 0**.  Backup: `_backups/lyra-2026-05-16-eod.bundle`
-(+ the per-commit bundles).  NOT pushed (operator batches;
-main stays v0.1.1).
+**State (2026-05-17 EOD):** branch
+`feature/v0.0.9.6-audio-foundation`, HEAD `98f94ca`, tree
+clean (only untracked docs/PDFs/screenshots, no source).
+Full suite **415 passed / 0 + 7 new** (lone
+`scratch/test_tx_dsp_bench.py` error = pre-existing
+manual-bench `mode`-fixture artifact, unrelated).  Backups:
+`_backups/lyra-2026-05-17-*.bundle` (per-commit incl.
+`...-ep2-slew-fill.bundle`).  **PUSHED to
+`origin/feature/v0.0.9.6-audio-foundation` (98f94ca, 0/0
+in sync) for tester Brent (RX/TX bench); `origin/main`
+deliberately untouched at `0b730f2` v0.1.1.**
 
-**Phase-3 shipped & clean:** TX transitions (keydown chatter
-+ keyup broom both operator-CONFIRMED fixed via the
-Thetis-faithful RX-channel stop/restart), §15.20 TX-timeout,
-PART C default-OFF PA bit, the no-auto-key-on-restart +
-Auto-LNA-frozen-in-TX safety fixes, **Commit A** (PA-current/
-VDD readout `4b4170a`), **Commit B/B.1** (cap-sourced TR
-sequencing + `rf_delay` operator-adjustable **1–75 ms**
-default 50, `9bc95a2`).  No RF has ever been enabled.
+**Today's arc (2026-05-17):** FIRST RF achieved + hardware-
+validated into a dummy (~5 W on the Palstar = ref 5.1 W;
+PA 1.75–1.76 A = ref ~1.8 A; temp/supply anchor intact;
+ADC −54 dBFS during TX = ATT-on-TX front-end protection
+working).  Commit C (TX-att `31−db` wire encoding `73a459b`),
+D-1 (`set_tx_drive_level` → frame-10 C1, Thetis-faithful
+`8813a5d`), D-2 (Apollo C2 `0x4C` PA-enable `cbba63a`),
+TUN tune-carrier (`468f34f`), PA-current decode fix
+(`059c51d` → addr-2 C3:C4) + TUN power fix (`9cef8fc`
+tone_mag 0.5→0.95), ATT-on-TX policy (`7959587`),
+keying-with-PA-off `tr_disable` fix (`d577d2d`),
+RX-recovery hardening (`b7e61e6`).  Dual-PA hypothesis
+DEFINITIVELY REFUTED (gateware single `pa_enable` + by
+1.76 A measurement).  Wavey panadapter CLOSED = benign
+blinded-RX display artifact (Palstar steady).  No-attribution
+directive re-asserted + corrected from `9cef8fc` onward.
 
-**RESUME AT: C-REVERIFY** (read-only, no RF) — confirm WHY
-Lyra's production RX-LNA works with its current frame-11 C4
-`+12`-bias encoding vs Thetis `rx&0x1F|0x20`, so **Commit C**
-(tx_step_attn ONLY via reg `0x1C` C3 `(31−dB)&0x1F` +
-single-actuator + ATT-on-TX, no RF) fixes TX without
-regressing working RX.  Independent agent
-`a3e37ee1d8729b19d` can be continued (SendMessage) for the
-C-REVERIFY.  Then **Commit D** = frame-10 `c2 |= 0x0C`
-(Apollo tuner+filter) — **the first commit that emits real
-RF; HARD operator gate** (dummy-load + the now-observable
-§15.20/§15.24-C Phase-3-EXIT kill-test; the operator's HL2+
-is Apollo-gated so D is what produces power on his unit;
-first-RF test in USB/LSB+mic, NOT CWU).  Then: foot-switch
-(HW-PTT opt-in + §10 Q#1), commit 3.6 (§15.9/§15.15 + the TX
-meter source-swap that fixes the S-meter-in-TX), §9.6 pops
-(network-throttle / FFTW-WISDOM / Vulkan leads — all parked).
+**Relay-chatter / RX-pop investigation (operator refuted the
+shallow FPS/EiBi diagnosis):** 2 senior agents → full-codebase
+audit; then a 3-agent RED-TEAM re-loop + C-source reference
+study CONVERGED and **caught a real prior error** — D-2 / the
+old "release WDSP `_lock` across `fexchange0`" Fix #1 is a
+**NO-OP** (`process_block` is lock-free).  Corrected root:
+the host→radio wire path is a GIL-serialized **unbuffered
+lockstep** (D-1, no AK4951 pre-buffer; `_lockstep_slot.acquire`
+has NO timeout = latent infinite-hang), the real tab-open→
+relay-chatter coupling is the **`processEvents()` slot-storm
+inside the DSP worker loop** (not a shared lock), and the
+RX pop is the **hard zero-pad underrun step** (D-3).  Vulkan
+/ more-threads = NOT this root (both re-verifiers concur);
+only a separate process or in-process OS-timer keepalive
+truly decouples.  Reference architecture = 3 decoupled
+threads + pre-filled elastic ring + dedicated single-owner
+wire thread + independent OS-timer keepalive.  Full corrected
+ranking + reference mechanisms recorded in §15.26.
+
+**Fix #3 SHIPPED `086dca1` (operator-authorised "worth a
+try"):** Lyra-native raised-cosine EP2 underrun fade-out +
+recovery fade-in replacing the hard `(0,0)` splice (the §9.6
+pop mechanism); sustained underrun stays pure silence
+(sawtooth bug caught by the new test).  Latency-neutral,
+EP2 cadence/keepalive/threading UNTOUCHED.
+`tests/protocol/test_ep2_slew_fill.py` 7 cases.  This is the
+isolated, dummy-load-benchable down-payment on the RX pop —
+it is NOT the relay-chatter fix and does NOT close the root.
+
+**RESUME AT (operator wants it FIXED CORRECTLY, not
+patch-slapped — explicit):**
+1. **Awaiting operator bench feedback** on Fix #3 (dummy
+   load, DSP off, normal RX — is the louder-than-audio pop
+   reduced/gone?  `tx_audio_underruns` ticks in the 1 Hz
+   status correlate?) AND Brent's RX/TX round on the pushed
+   branch.
+2. **The STRUCTURAL REBUILD (the real correct fix — design
+   it, do NOT point-patch).**  To the reference architecture:
+   (a) get the tab/dock QueuedConnection slot-storm +
+   channel-restart/`reset()` OFF the audio worker's
+   `QCoreApplication.processEvents()` path (`worker.py:510`,
+   `:536-561`) — dedicated control queue drained between
+   blocks = the REAL relay-chatter (symptom 2) fix;
+   (b) buffered single-owner wire-thread hand-off + a
+   TIMEOUT on / removal of `_lockstep_slot.acquire()`
+   (`audio_sink.py:297`, latent infinite-hang);
+   (c) independent OS/Qt-timer keepalive decoupled from DSP
+   (unused Win32 waitable-timer scaffolding
+   `stream.py:1980-2049` is the seam).
+   **Operator pending-decision:** start this design now vs
+   after Brent's feedback (bench data could inform it).
+   Higher regression risk on the safety-critical wire path —
+   proper design + bench cycles, NOT a slap.
+3. Pre-antenna gates still open: no-host-TX-bandpass
+   (BPF/LPF) GAP; Phase-3-EXIT kill-Lyra-mid-TX dummy-load
+   PA-bias-drop test (now observable via fixed PA-current;
+   gateware watchdog still TX-UNVERIFIED).
+4. Deferred behind the above: revert the self-introduced R5
+   `_send_cc` main-thread `sendto` regression; commit 3.6
+   (§15.9/§15.15 + TX meter source-swap fixing S-meter-in-TX);
+   foot-switch (HW-PTT opt-in + §10 Q#1); §9.6 secondary
+   leads (network-throttle reg / FFTW WISDOM); Vulkan
+   (CPU-headroom item only, NOT this root) — all parked.
+
+Agent ids (continuable via SendMessage): `a2aa14216d723a17f`
++ `af89e59555c97e345` (audit), `a547a1e68ee90f8e7` +
+`af7484949addaa28d` (red-team re-verifiers),
+`a90630117a915dace` (reference study).
 
 ---
 
@@ -8223,8 +8291,42 @@ confirmation — verified clean in unit/smoke only so far).
 
 ---
 
-*Last updated: 2026-05-16 EOD — **v0.2.0 Phase 3 TX bring-up
-deep session (authoritative detail = §15.26).**  Day arc:
+*Last updated: 2026-05-17 EOD — **v0.2.0 Phase 3: FIRST RF +
+audio-root-cause deep session (authoritative detail = §15.26;
+resume from the 2026-05-17 EOD NEXT-SESSION block above).**
+Day arc: Commit C TX-att `31−db` encoding (`73a459b`) → D-1
+drive_level (`8813a5d`) → D-2 Apollo C2 PA-enable (`cbba63a`)
+→ **FIRST RF hardware-validated into a dummy** (~5 W = ref
+5.1 W, PA 1.75–1.76 A = ref ~1.8 A, ADC −54 dBFS = ATT-on-TX
+protecting); TUN carrier (`468f34f`), PA-current decode fix
+(`059c51d`), TUN power fix (`9cef8fc` tone_mag 0.5→0.95),
+ATT-on-TX policy (`7959587`), keying-with-PA-off `tr_disable`
+fix (`d577d2d`), RX-recovery hardening (`b7e61e6`).  Dual-PA
+hypothesis REFUTED (gateware + measurement).  Wavey CLOSED
+(benign blinded-RX artifact).  Operator refuted the shallow
+FPS/EiBi pop/relay diagnosis → 2-senior-agent full-codebase
+audit → 3-agent red-team re-loop + C-source reference study
+CONVERGED and caught a real prior error (old Fix #1 / D-2 =
+NO-OP; `process_block` lock-free).  Corrected root: GIL-
+serialized unbuffered EP2 lockstep (D-1) + `processEvents`
+slot-storm in the worker loop (the real relay-chatter
+coupling) + hard zero-pad underrun step (D-3); reference
+architecture = 3 decoupled threads + pre-filled elastic ring
++ dedicated wire thread + independent OS-timer keepalive;
+Vulkan/more-threads NOT this root.  Fix #3 SHIPPED `086dca1`
+(raised-cosine EP2 underrun fade, sustained-underrun-silent
+sawtooth bug caught by test, latency-neutral; the isolated
+dummy-load-benchable down-payment on the RX pop — NOT the
+relay-chatter fix).  Suite 415+7/0.  Branch PUSHED to
+`origin/feature/v0.0.9.6-audio-foundation` (`98f94ca`) for
+tester Brent; `origin/main` untouched at v0.1.1.  Backups
+`_backups/lyra-2026-05-17-*.bundle`.  RESUME: operator bench
+of Fix #3 + Brent feedback, then the STRUCTURAL REBUILD
+(fix-it-correctly, not patch-slap — operator explicit) of
+the wire path to the reference architecture; pre-antenna
+gates (BPF/LPF GAP, Phase-3-EXIT kill-test) still open.
+Earlier (2026-05-16 EOD): **v0.2.0 Phase 3 TX bring-up
+deep session.**  Day arc:
 HW-PTT phantom-TX regression root-caused + fixed (`ff5f128`,
 opt-in default-OFF; §10 Q#1 answered — N8SDR HL2+ ptt_in not
 clean at rest) + §3.9 protocol-byte consumption discipline
