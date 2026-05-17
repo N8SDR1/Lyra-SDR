@@ -6350,10 +6350,22 @@ decision):**
   **382/0, no RF** (PA still default-OFF; D-1 is the
   necessary-but-not-sufficient amplitude-scalar half).
   Backup `_backups/lyra-2026-05-17-commit-d1.bundle`.
-* **D-2 (= the original D):** `set_pa_on` → frame-10 C2
-  `|= 0x08 | 0x04` (behind default-OFF `set_pa_enabled`;
-  `pa_enable_uses_apollo_i2c` cap).  Keep C3-bit-7 gated but
-  documented not-the-mechanism / UNCERTAIN.
+* **D-2 — SHIPPED `cbba63a` 2026-05-17 (operator explicit
+  go-ahead).**  `_compose_frame_10`: `_pa_on` → C2 `|= 0x08
+  | 0x04` ⇒ PA-on C2 = `0x4C` (the Thetis-verified HL2
+  PA-enable mechanism — operator's rig has
+  chkApolloTuner=chkApolloFilter=True; the bit pair Lyra
+  never set = why no RF on his Apollo-gated HL2+).  Legacy
+  C3 bit 7 kept (non-Apollo path, UNCERTAIN, not relied on
+  alone).  Still behind the shipped default-OFF
+  `set_pa_enabled` + `pa_enable_uses_apollo_i2c` cap +
+  force_release_all / TX-timeout auto-disarm (all wired).
+  Apollo-tuner *I2C side-channel* still a separate later
+  gated change — `set_pa_on` docstring + UI tooltip keep
+  the dual-path warning.  **D-1 + D-2 ⇒ an opted-in
+  operator keying MOX into a bare HL2+/dummy load now emits
+  real RF.**  383/0.  Backup
+  `_backups/lyra-2026-05-17-commit-d2.bundle`.
 * Both behind the shipped default-OFF `set_pa_enabled`; BOTH
   required for RF; band-filter (GAP #3) deferred (benign on
   the bare-HL2 dummy-load bench, hard gate before on-air).
@@ -6378,20 +6390,20 @@ PA-current/VDD readout, then the Phase-3-EXIT kill-test.
 Amp re-enters only after the operator is confident
 (separate later step).
 
-**NEXT = Commit D-2 — HARD OPERATOR GATE (first real RF).**
-D-1 shipped (drive_level wired); D-2 is the remaining
-necessary half + the operator checkpoint.
-`_compose_frame_10` `c2 |= 0x0C` (Apollo tuner 0x08 + filter
-0x04; operator `chkApolloTuner=True`+`chkApolloFilter=True`)
-behind the shipped default-OFF `set_pa_enabled` gate +
-`pa_enable_uses_apollo_i2c=True` cap + force_release_all
-auto-disarm (already wired) + the dual-path tooltip warning.
-This is THE commit that first emits real power on N8SDR's
-Apollo-gated HL2+.  DO NOT land/enable without explicit
-operator go-ahead + bench: dummy load, USB/LSB+mic (NOT
-CWU), watch the Commit-A PA-current/VDD readout, then the
-§15.20/§15.24-C Phase-3-EXIT kill-Lyra-mid-TX test (PA
-current must drop).  Then 3.6 (S-meter-in-TX swap),
+**NEXT = first-RF bench (D-1 + D-2 both SHIPPED; operator
+go-ahead given for the code).**  The TX wire path is now
+complete: drive_level (D-1) + Apollo C2 PA-enable (D-2),
+both behind the default-OFF `set_pa_enabled` gate.  The
+remaining gate is HARDWARE, not code: operator opts in
+(`set_pa_enabled(True)` via TxSettingsTab Advanced) + keys
+MOX into **bare HL2+, dummy load, NO amp, USB/LSB+mic (NOT
+CWU), low drive**, watching the Commit-A PA-current/VDD
+readout, THEN the §15.20/§15.24-C Phase-3-EXIT
+kill-Lyra-mid-TX test (PA current must drop within N sec —
+the gateware watchdog is still TX-UNVERIFIED and
+load-bearing).  Band-filter GAP (BPF/LPF =0) stays deferred
+— benign on the bare-HL2 dummy-load bench, HARD gate before
+filter-board / on-air.  Then 3.6 (S-meter-in-TX swap),
 foot-switch, §9.6 pops.
 
 **REVISED LADDER:** A (verified) → B (verified, amp-safety)
