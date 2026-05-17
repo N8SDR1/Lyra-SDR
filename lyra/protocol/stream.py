@@ -137,24 +137,24 @@ class FrameStats:
     rev_pwr_adc: int = 0
     supply_adc: int = 0
     temp_adc:   int = 0
-    # §15.26 Correction-3 (2026-05-17, triple-verified: Thetis
-    # networkproto1.c:330-353 + HL2 wiki + operator PA-bias
-    # ground truth).  Commit A wrongly read PA "current" from
-    # slot 0x10 C3:C4 -- that is HL2 ``user_adc0`` = "AIN3 MKII
-    # PA *Volts*" (VDD), NOT amps; running the amps formula on
-    # it gave the operator's bogus ~0.75.  The real PA *current*
-    # (combined push-pull drain) = ``user_adc1`` = "AIN4 MKII PA
-    # Amps" on slot **0x18 C1:C2**.  So:
-    #   pa_current_adc <- 0x18 C1:C2  (user_adc1, PA Amps)
-    #   pa_volts_adc   <- 0x10 C3:C4  (user_adc0, PA Volts/VDD)
-    # Validation yardstick (operator): correctly-decoded current
-    # ~0.2 A at idle bias (2x ~100 mA push-pull), rising on
-    # TUN/drive.  Decode-only -- no wire change (§3.9 inert).
-    # The field-proven temp/supply/fwd/rev decode below is
-    # operator-confirmed on this HL2+ and is NOT touched
-    # (operator-empirical > Thetis-source label inference).
+    # §15.26 Correction-3-FINAL (2026-05-17, gateware-RTL-
+    # decisive, anchored on the proven temp+supply decode).
+    # The HL2 EP6 4-slot status rotation (gateware control.v
+    # iresp, indexed by resp_addr = C0>>3 & 0x1F):
+    #   addr 1: C1:C2 = die temperature  ; C3:C4 = fwd power
+    #   addr 2: C1:C2 = reverse power    ; C3:C4 = PA bias
+    #                                      current (12-bit)
+    #   addr 3: C1:C2 = 0                ; C3:C4 = debug (junk)
+    # Supply is the addr-0 C1:C2>>4 fallback (proven path).
+    # Prior code wrongly read PA current from addr-3 C1:C2
+    # (always 0 -> "n/a") and read addr-2 C3:C4 -- which IS
+    # the PA bias current -- as "pa_volts" through a volts
+    # formula (the bogus 41.8 V).  There is NO PA-volts ADC
+    # slot in this rotation; pa_volts_adc is removed.  The
+    # temp (addr1 C1:C2) + supply (addr0 fallback) decode is
+    # byte-identical and UNTOUCHED (zero regression -- it is
+    # the anchor proving the rotation/addr extraction).
     pa_current_adc: int = 0
-    pa_volts_adc:   int = 0
     # Fallback supply candidate from addr 0 C1:C2 (some HL2 firmware
     # variants pack AIN6 / supply ADC into bits[15:4] of this 16-bit
     # field instead of using addr 3). Radio's _emit_hl2_telemetry
@@ -510,16 +510,15 @@ def _decode_hl2_telemetry(cc: bytes, stats: "FrameStats") -> None:
         stats.temp_adc    = ((cc[1] << 8) | cc[2]) & 0xFFFF
         stats.fwd_pwr_adc = ((cc[3] << 8) | cc[4]) & 0xFFFF
     elif addr == 2:
-        stats.rev_pwr_adc   = ((cc[1] << 8) | cc[2]) & 0xFFFF
-        # §15.26 Corr-3: C3:C4 = user_adc0 = PA *Volts* (VDD),
-        # NOT current.  (Was mislabeled pa_current_adc by
-        # Commit A -> the operator's bogus ~0.75.)
-        stats.pa_volts_adc  = ((cc[3] << 8) | cc[4]) & 0xFFFF
+        # gateware control.v iresp slot 2: C1:C2 = reverse
+        # power; C3:C4 = the 12-bit PA bias/drain current.
+        stats.rev_pwr_adc    = ((cc[1] << 8) | cc[2]) & 0xFFFF
+        stats.pa_current_adc = ((cc[3] << 8) | cc[4]) & 0xFFFF
     elif addr == 3:
-        # §15.26 Corr-3: C1:C2 = user_adc1 = "AIN4 MKII PA Amps"
-        # = the real combined push-pull PA drain current.
-        stats.pa_current_adc = ((cc[1] << 8) | cc[2]) & 0xFFFF
-        stats.supply_adc  = ((cc[3] << 8) | cc[4]) & 0xFFFF
+        # gateware iresp slot 3: C1:C2 = 0, C3:C4 = debug
+        # (junk on this gateware -- NOT supply; supply is the
+        # proven addr-0 C1:C2>>4 fallback, left untouched).
+        pass
 
 
 # ── TPDF dither for float→int16 audio quantization ────────────────────

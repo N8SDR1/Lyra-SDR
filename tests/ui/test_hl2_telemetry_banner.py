@@ -35,25 +35,17 @@ class Hl2TelemetryBannerTest(unittest.TestCase):
         MainWindow._update_hl2_telemetry(shim, payload)
         return shim.hl2_telem_label.text
 
-    def test_pa_current_and_vdd_rendered(self) -> None:
-        # §15.26 Corr-3: banner shows PA current (2 dp) AND a
-        # separate VDD (PA drain volts, user_adc0).
+    def test_pa_current_rendered_no_vdd(self) -> None:
+        # §15.26 Corr-3-FINAL: banner shows PA current (2 dp).
+        # No VDD field -- there is no PA-volts slot on this
+        # gateware (the old "VDD" was mis-routed PA current).
         txt = self._render(
-            {"temp_c": 47.0, "supply_v": 12.3,
-             "pa_a": 0.21, "pa_v": 12.8})
+            {"temp_c": 47.0, "supply_v": 12.3, "pa_a": 0.21})
         self.assertIn("PA", txt)
         self.assertIn("0.21 A", txt)
-        self.assertIn("VDD", txt)
-        self.assertIn("12.8 V", txt)
+        self.assertNotIn("VDD", txt)
         self.assertIn("47.0", txt)
         self.assertIn("12.3", txt)
-
-    def test_nan_vdd_renders_na(self) -> None:
-        txt = self._render(
-            {"temp_c": 47.0, "supply_v": 12.3,
-             "pa_a": 0.21, "pa_v": float("nan")})
-        self.assertIn("VDD", txt)
-        self.assertIn("n/a", txt)
 
     def test_nan_pa_renders_na_not_zero(self) -> None:
         txt = self._render(

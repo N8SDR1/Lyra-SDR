@@ -2770,39 +2770,23 @@ class Radio(QObject):
 
     @property
     def pa_current_amps(self) -> float:
-        """HL2 combined push-pull PA drain current in amps, or NaN
-        if not yet reported / no stream.  §15.26 Correction-3:
-        sourced from ``user_adc1`` ("AIN4 MKII PA Amps", EP6 slot
-        0x18 C1:C2) -- the verified real PA-current sense (Commit
-        A wrongly used user_adc0 = PA Volts -> the bogus ~0.75).
-        Verified HL2 sense-amp math (3.26 V ref, 4096-step ADC,
-        ×50 gain, 0.04 Ω shunt, 1000/1270 divider).  Operator
-        validation yardstick: ~0.2 A at idle bias (2x ~100 mA),
-        rising on TUN/drive.  The observable for the Phase-3-EXIT
-        kill-test (must fall when Lyra dies mid-TX)."""
+        """HL2 combined push-pull PA drain (bias) current in amps,
+        or NaN if not yet reported / no stream.  §15.26
+        Correction-3-FINAL (gateware-RTL-decisive): sourced from
+        the EP6 4-slot status rotation **addr 2, C3:C4** = the
+        12-bit `bias_current` ADC (the gateware iresp slot 2
+        low half).  HL2 sense-amp math (3.26 V ref, 4096-step
+        ADC, ×50 gain, 0.04 Ω shunt, 1000/1270 divider).
+        Operator validation yardstick: ~0.2 A at idle bias
+        (2× ~100 mA push-pull), ~1.8 A at full tune into a
+        dummy.  The observable for the Phase-3-EXIT kill-test
+        (must fall when Lyra dies mid-TX)."""
         s = self._stream.stats if self._stream is not None else None
         raw = getattr(s, "pa_current_adc", 0) if s is not None else 0
         if not raw:
             return float("nan")
         return (((3.26 * (raw / 4096.0)) / 50.0) / 0.04
                 / (1000.0 / 1270.0))
-
-    @property
-    def pa_volts(self) -> float:
-        """HL2 PA drain voltage (VDD) in volts, or NaN if not yet
-        reported.  §15.26 Correction-3: ``user_adc0`` ("AIN3 MKII
-        PA Volts", EP6 slot 0x10 C3:C4) -- the value Commit A
-        mislabeled/mis-converted as current.  Converted with the
-        verified Hermes-volts divider math ``(raw/4095)*5*(23/
-        1.1)`` (same as the 12 V supply rail; HL2's PA drain runs
-        off that rail, so a healthy reading is ~12-13 V -- if it
-        reads off, the divider constant is the only knob, an
-        operator-self-cal per §10 Q#4)."""
-        s = self._stream.stats if self._stream is not None else None
-        raw = getattr(s, "pa_volts_adc", 0) if s is not None else 0
-        if not raw:
-            return float("nan")
-        return (raw / 4095.0) * 5.0 * (23.0 / 1.1)
 
     def set_pa_enabled(self, on: bool) -> None:
         """Arm/disarm the transmit power amplifier.  Default OFF
@@ -6950,8 +6934,7 @@ class Radio(QObject):
                        "supply_v": float("nan"),
                        "fwd_w":    float("nan"),
                        "rev_w":    float("nan"),
-                       "pa_a":     float("nan"),
-                       "pa_v":     float("nan")}
+                       "pa_a":     float("nan")}
         else:
             # ADC == 0 means we've not yet seen a telemetry frame for
             # that field — emit NaN so the UI shows "--" rather than
@@ -6965,26 +6948,24 @@ class Radio(QObject):
             adc = s.supply_adc if s.supply_adc else s.supply_adc_alt
             supply_v = ((adc / 4095.0) * 5.0 * (23.0 / 1.1)
                         if adc else float("nan"))
-            # §15.26 Corr-3: PA current = user_adc1 (0x18 C1:C2);
-            # PA volts/VDD = user_adc0 (0x10 C3:C4).  Verified HL2
-            # sense-amp math (3.26 V ref, 4096 ADC, ×50 gain,
-            # 0.04 Ω shunt, 1000/1270 divider) for amps; verified
-            # Hermes-volts divider for VDD.  NaN until the slot
-            # reports.  PA current is the Phase-3-EXIT kill-test
+            # §15.26 Corr-3-FINAL: PA bias current = the 12-bit
+            # `bias_current` ADC, EP6 4-slot rotation addr 2 C3:C4
+            # (gateware-RTL-decisive).  HL2 sense-amp math (3.26 V
+            # ref, 4096 ADC, ×50 gain, 0.04 Ω shunt, 1000/1270
+            # divider).  NaN until the slot reports.  Kill-test
             # observable (must drop when Lyra dies mid-TX); idle
-            # yardstick ~0.2 A.
+            # ~0.2 A, full tune ~1.8 A.  No PA-volts slot exists
+            # in this rotation (the old "VDD" was this same
+            # current mis-routed -> removed).
             pa_a = (((3.26 * (s.pa_current_adc / 4096.0)) / 50.0)
                     / 0.04 / (1000.0 / 1270.0)
                     if s.pa_current_adc else float("nan"))
-            pa_v = ((s.pa_volts_adc / 4095.0) * 5.0 * (23.0 / 1.1)
-                    if s.pa_volts_adc else float("nan"))
             payload = {
                 "temp_c":   temp_c,
                 "supply_v": supply_v,
                 "fwd_w":    float(s.fwd_pwr_adc),   # raw ADC for now
                 "rev_w":    float(s.rev_pwr_adc),
                 "pa_a":     pa_a,
-                "pa_v":     pa_v,
             }
         self.hl2_telemetry_changed.emit(payload)
 
