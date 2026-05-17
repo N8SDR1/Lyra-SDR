@@ -6783,8 +6783,16 @@ same full-tune A/B (Lyra vs Thetis current AND watt-meter
 power) is ALSO the Q1 drive-scaling anchor (flat
 255*pct/100 vs Thetis per-band GainByBand): if Lyra full
 drive draws ≪1.8 A / less power, that quantifies the
-deferred Q1 cal gap.  NOTE: image not received in-thread;
-working from operator's stated 1.8 A.
+deferred Q1 cal gap.  SCREENSHOT READ (precise anchor,
+Thetis 2.10.3.13, this HL2+): 10 M **28.495 MHz**, full
+tune, dummy load → **PA = 1.8 A**, **PWR = 5.1 W** (TX
+meter + Power bar), **temp = 31.1 °C**, **SWR 1.0:1**,
+ALC 0.0 dB, MIC −193.8 dB (pure tune carrier), Thetis
+Drive −7.5 dB.  Lyra A/B target (identical conditions):
+PA ≈ 1.8 A, power ≈ 5.1 W, temp ≈ 31 °C.  Cross-check:
+temp is the SAME board, so Lyra's untouched field-proven
+temp decode should also read ~31 °C — agreement validates
+the "don't touch field-proven temp decode" call.
 
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
