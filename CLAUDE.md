@@ -6210,12 +6210,17 @@ required before touching C.  TX side (case-4 0x1C C3 =
 hard RF gate).  Independent agent id `a3e37ee1d8729b19d`
 (SendMessage to continue / for the C-reverify).
 
-**Commit A SHIPPED `4b4170a` 2026-05-16:** HL2 PA-current
-decode (EP6 slot 0x10 C3:C4 → FrameStats.pa_current_adc) +
-`Radio.pa_current_amps` (verified HL2 sense-amp math) +
-`pa_a` in hl2_telemetry payload.  Decode-only, no wire change,
-371/0.  Operator PA-bias readout + the kill-test observable
-are now in place.  NEXT = Commit B.
+**Commit A SHIPPED `4b4170a`:** PA-current decode + readout
+(371/0).  **Commit B SHIPPED `5c8e6b5`:** capability-sourced
+TR sequencing (`capabilities.tr_delays_ms=(15,20,50,13,10)`)
++ `rf_delay` HARD 50 ms floor in `TrSequencing.__post_init__`
+(amp hot-switch protection — operator's 1 kW linear) +
+`Radio._apply_tr_sequencing`/`set_tr_delay`/
+`autoload_tr_sequencing`/`tr_delays`/`tr_sequencing_changed`
++ TxSettingsTab "TR Sequencing (ms)" section (RF-min == floor,
+hot-switch tooltip) + FSM-test inline-`_deferred` seam.
+378/0, no RF.  ptt_out kept 20 (Lyra confirmed-clean keyup;
+operator-adjustable).  NEXT = C-REVERIFY then Commit C.
 
 **COMMIT LADDER (locked; A/B/C are RF-safe, D is first RF):**
 * **A — PA-current EP6 decode + readout.** stream.py decode
