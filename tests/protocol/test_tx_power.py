@@ -111,6 +111,9 @@ class TxDriveLevelStreamTest(unittest.TestCase):
     def _stream(self) -> HL2Stream:
         s = HL2Stream("10.10.10.1", sample_rate=96000)
         s._sock = object()        # bypass the not-started guard
+        # set_tx_drive_level now uses _send_cc (R5); AK4951 mode
+        # caches + skips socket I/O (no .sendto on the stub).
+        s.inject_audio_tx = True
         return s
 
     def test_range_guard(self) -> None:
@@ -135,8 +138,10 @@ class TxDriveLevelStreamTest(unittest.TestCase):
         self.assertEqual(s._cc_registers[0x12][0], 0)
         s.set_tx_drive_level(255)
         self.assertEqual(s._cc_registers[0x12][0], 255)
-        # C2 still the HL2 0x40 constant (PA bits land in D-2).
+        # §15.26 R1': C2 base 0x40 + 0x04 tr_disable (PA off
+        # default in this stream) = 0x44; VNA bit7 clear.
         self.assertEqual(s._cc_registers[0x12][1] & 0x40, 0x40)
+        self.assertEqual(s._cc_registers[0x12][1] & 0x80, 0)
 
 
 class TxStepAttnStreamTest(unittest.TestCase):

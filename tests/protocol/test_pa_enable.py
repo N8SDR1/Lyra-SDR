@@ -37,6 +37,11 @@ class PaEnableStreamTest(unittest.TestCase):
     def _stream(self) -> HL2Stream:
         s = HL2Stream("10.10.10.1", sample_rate=96000)
         s._sock = object()        # bypass the not-started guard
+        # set_pa_on now uses _send_cc (R5 immediate emit); under
+        # AK4951 audio-injection it caches + skips the socket I/O
+        # -- exercise that (the operator's real HL2+ mode) so the
+        # object() stub is never asked to .sendto.
+        s.inject_audio_tx = True
         return s
 
     def test_not_started_guard(self) -> None:
@@ -45,33 +50,39 @@ class PaEnableStreamTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             s.set_pa_on(True)
 
-    def test_default_off_frame10_bit_clear(self) -> None:
+    def test_default_off_frame10(self) -> None:
+        # §15.26 R1' (HL2+ gateware-proven): PA OFF => C2 bit2
+        # (0x04 tr_disable) set, C2 bit3 (0x08 pa_enable) clear,
+        # C2 bit7 (0x80 VNA) clear, C3 bit7 NOT written.
         s = self._stream()
         s._refresh_frame_10()
-        # Fresh default: C3 bit 7 (PA) clear; C2 keeps the 0x40
-        # HL2 constant.  No RF can be keyed.
-        self.assertEqual(s._cc_registers[0x12][2] & 0x80, 0)
-        self.assertEqual(s._cc_registers[0x12], (0x00, 0x40, 0x00, 0x00))
+        self.assertEqual(s._cc_registers[0x12], (0x00, 0x44, 0x00, 0x00))
+        self.assertEqual(s._cc_registers[0x12][1] & 0x08, 0)   # no PA
+        self.assertEqual(s._cc_registers[0x12][1] & 0x80, 0)   # no VNA
+        self.assertEqual(s._cc_registers[0x12][2] & 0x80, 0)   # no C3b7
 
-    def test_enable_sets_apollo_c2_and_legacy_bit7(self) -> None:
-        # D-2: PA-on => C2 0x4C (0x40 const | 0x08 Apollo tuner |
-        # 0x04 Apollo filter) AND legacy C3 bit 7.  Off restores
-        # C2 0x40 / C3 bit 7 clear.
+    def test_enable_sets_c2_bit3_only(self) -> None:
+        # PA-on => C2 = 0x40|0x08 = 0x48 (bit3 pa_enable; NO 0x04
+        # tr_disable, NO 0x80 VNA); C3 bit7 stays clear.  Off =>
+        # C2 = 0x40|0x04 = 0x44.
         s = self._stream()
         s.set_pa_on(True)
         self.assertTrue(s._pa_on)
-        self.assertEqual(s._cc_registers[0x12][1], 0x4C)   # C2
-        self.assertEqual(s._cc_registers[0x12][2] & 0x80, 0x80)  # C3 b7
+        self.assertEqual(s._cc_registers[0x12][1], 0x48)        # C2
+        self.assertEqual(s._cc_registers[0x12][1] & 0x80, 0)    # VNA 0
+        self.assertEqual(s._cc_registers[0x12][2] & 0x80, 0)    # C3b7 0
         s.set_pa_on(False)
         self.assertFalse(s._pa_on)
-        self.assertEqual(s._cc_registers[0x12][1], 0x40)   # C2 const
-        self.assertEqual(s._cc_registers[0x12][2] & 0x80, 0)
+        self.assertEqual(s._cc_registers[0x12][1], 0x44)        # tr_dis
+        self.assertEqual(s._cc_registers[0x12][1] & 0x08, 0)    # PA off
 
-    def test_apollo_bits_clear_when_pa_off(self) -> None:
-        # Belt-and-suspenders: no Apollo bit may leak with PA off.
+    def test_vna_bit_never_set(self) -> None:
+        # C2 bit7 (0x80, 0x09[23] vna) must be clear in both
+        # states -- pwr_envpa = int_tx_on & ~vna & pa_enable.
         s = self._stream()
-        s._refresh_frame_10()
-        self.assertEqual(s._cc_registers[0x12][1] & (0x08 | 0x04), 0)
+        for on in (True, False):
+            s.set_pa_on(on)
+            self.assertEqual(s._cc_registers[0x12][1] & 0x80, 0)
 
 
 class PaEnableRadioTest(unittest.TestCase):

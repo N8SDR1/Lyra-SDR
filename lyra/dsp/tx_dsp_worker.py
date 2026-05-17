@@ -202,11 +202,30 @@ class TxDspWorker:
         """Drain the queue, process each chunk through TxChannel,
         push resulting I/Q to HL2Stream when transmit is active.
         """
+        import numpy as _np
+        # §15.26 R2 (HL2+ gateware-proven, G3): the HL2 gateware
+        # generates NO tune carrier -- it needs the host to stream
+        # continuous nonzero TX I/Q while keyed.  The TUN PostGen
+        # tone is produced INSIDE fexchange0 regardless of mic
+        # content, so the chain just has to be CLOCKED.  The
+        # AK4951 codec mic slot may be silence/absent (the still-
+        # open §10 Q#1), so do NOT depend on the _on_hl2_mic path
+        # to clock TX: while inject_tx_iq is set, self-clock with
+        # a synthetic zero block on queue-empty.  The HL2Stream
+        # _tx_iq deque + _drain_tx_iq_be wire-pace any over-
+        # production (overrun drops oldest -- freshness wins).
+        # 38 = the documented per-EP6-datagram mic-chunk size, so
+        # the TxChannel input accumulation behaves identically to
+        # the real mic-fed path.
+        _ZERO_TX_BLK = _np.zeros(38, dtype=_np.float32)
         while not self._stop_event.is_set():
             try:
-                samples = self._queue.get(timeout=0.1)
+                samples = self._queue.get(timeout=0.02)
             except queue.Empty:
-                continue
+                if self._hl2_stream.inject_tx_iq:
+                    samples = _ZERO_TX_BLK   # keyed: keep TXA clocked
+                else:
+                    continue                 # RX idle: nothing to do
             if samples is None:
                 # Sentinel -- stop was called.
                 break

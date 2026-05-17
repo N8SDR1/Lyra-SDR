@@ -1582,25 +1582,31 @@ class HL2Stream:
         PA-on (D-2): C2 -> 0x4C (0x40|0x08|0x04) + C3 bit 7.
         """
         c1 = self._tx_drive_level & 0xFF
-        c2 = 0x40  # HL2 constant (legacy Apollo-flag bit position)
+        # §15.26 R1' -- GATEWARE-PROVEN (HL2+ ak4951v4
+        # control.v:209-220): C&C addr 0x09 decodes ONLY
+        #   bit23 -> vna        (= C2 bit 7, 0x80) MUST stay 0
+        #   bit19 -> pa_enable  (= C2 bit 3, 0x08) ACTIVE-HIGH
+        #                         -- THE onboard-PA enable
+        #   bit18 -> tr_disable (= C2 bit 2, 0x04)
+        # C3 bit 7 is NOT decoded by the HL2 gateware at all
+        # (it was the legacy Apollo/Alex tx[0].pa path; pihpsdr
+        # zeroes C3 for HL2).  So: drive C2 bit3 for PA enable,
+        # never set C2 bit7 (VNA), and do NOT write C3 bit7.
+        c2 = 0x40  # HL2 constant (0x09 bit22)
         if self._mic_boost_enabled:
             c2 |= 0x01
         if self._line_in_route_enabled:
             c2 |= 0x02
         if self._pa_on:
-            # Commit D-2 (§15.26, Thetis-verified + independent
-            # red-team confirmed): the HL2 PA-enable mechanism is
-            # C2 bit 3 (0x08, "Apollo tuner") + bit 2 (0x04,
-            # "Apollo filter").  Operator's working rig has BOTH
-            # set, so PA-on C2 = 0x40|0x08|0x04 = 0x4C.  This is
-            # THE bit pair that emits RF on an Apollo-gated HL2+;
-            # the C3-bit-7 path below is the legacy/non-XVTR bit
-            # (kept for non-Apollo gateware, NOT the mechanism on
-            # N8SDR's unit -- UNCERTAIN, do not rely on it alone).
-            c2 |= 0x08 | 0x04
-        c3 = self._bpf_filter_bits & 0x7F
-        if self._pa_on:
-            c3 |= 0x80
+            c2 |= 0x08            # bit19 pa_enable=1 (emit RF)
+        else:
+            c2 |= 0x04            # bit18 tr_disable when PA off
+                                  # (no point keying the T/R
+                                  # relay with no PA -- matches
+                                  # pihpsdr/wiki 0x09[18])
+        c2 &= ~0x80               # guard: bit23 vna MUST be 0
+                                  # (pwr_envpa = ... & ~vna)
+        c3 = self._bpf_filter_bits & 0x7F   # C3 bit7 left clear
         c4 = self._lpf_filter_bits & 0xFF
         return (c1, c2, c3, c4)
 
@@ -2972,16 +2978,18 @@ class HL2Stream:
         layer, NOT the operator power control -- the operator
         "TX power %" maps HERE, to drive level.
 
-        No direct _send_cc: round-robin re-emit (same
-        imperceptible-latency / no-audio-pop discipline as
-        set_lna_gain_db / set_tx_step_attn_db).
+        §15.26 R5: immediate 0x12 emit via _send_cc (Thetis
+        CmdGeneral-faithful) so a quick enable-then-key doesn't
+        race the round-robin.  _send_cc still caches + registers
+        the slot, and under AK4951 audio-injection it safely
+        falls back to round-robin re-emit (no codec click).
         """
         if not 0 <= level <= 255:
             raise ValueError("level must be in 0..255")
         if self._sock is None:
             raise RuntimeError("stream not started")
         self._tx_drive_level = int(level)
-        self._refresh_frame_10()
+        self._send_cc(0x12, *self._compose_frame_10())
 
     def set_pa_on(self, on: bool):
         """Enable/disable the HL2 PA (frame 10 / register 0x12).
@@ -2989,29 +2997,26 @@ class HL2Stream:
         even when MOX is asserted -- this is the transmit power
         amplifier enable.
 
-        Commit D-2 (§15.26): when ON the composer sets C2 bit 3
-        (0x08 Apollo tuner) + bit 2 (0x04 Apollo filter) -- the
-        Thetis-verified HL2 PA-enable mechanism (operator's working
-        rig has chkApolloTuner=chkApolloFilter=True) -- AND keeps
-        C3 bit 7 (the legacy/non-Apollo path).
+        §15.26 R1' (HL2+ gateware-PROVEN, control.v:209-220):
+        the HL2 PA-enable is C&C 0x09 bit19 = frame-10 **C2
+        bit 3 (0x08), ACTIVE-HIGH** -- and nothing else.  C3
+        bit 7 is NOT decoded by the HL2 gateware (it was the
+        legacy Apollo/Alex path; pihpsdr zeroes C3 for HL2),
+        so the composer no longer writes it.  When OFF the
+        composer sets C2 bit 2 (0x04, tr_disable) per the wiki
+        / pihpsdr.  The earlier "Apollo-I2C side-channel"
+        theory is DEAD -- the gateware enable is pure C&C
+        (control.v has no I2C/companion gate on pa_enable).
 
-        Updates the cached frame 10 via the composer so all four
-        bytes stay coherent; no direct _send_cc -- the EP2 writer
-        re-emits the cached register on its next round-robin tick
-        (same imperceptible-latency / no-audio-pop discipline as
-        set_lna_gain_db / set_tx_step_attn_db).
-
-        NOTE (the dual-path caveat): the in-frame Apollo C2 bits
-        ARE driven here, but some community-gateware variants ALSO
-        gate the PA behind an Apollo-tuner I2C side-channel that
-        this register does NOT drive.  That side-channel is a
-        separate, later, gated change; callers/UI must warn the
-        operator rather than silently half-enable.
+        §15.26 R5: immediate 0x12 emit via _send_cc (Thetis
+        CmdGeneral-faithful); caches + registers the slot, and
+        falls back to round-robin under AK4951 audio-injection
+        (no codec click).
         """
         if self._sock is None:
             raise RuntimeError("stream not started")
         self._pa_on = bool(on)
-        self._refresh_frame_10()
+        self._send_cc(0x12, *self._compose_frame_10())
 
     def stop(self):
         self._stop_event.set()

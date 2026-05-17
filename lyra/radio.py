@@ -2775,18 +2775,20 @@ class Radio(QObject):
                 / (1000.0 / 1270.0))
 
     def set_pa_enabled(self, on: bool) -> None:
-        """Arm/disarm the transmit power amplifier (frame-10 C3
-        bit 7).  Default OFF -- with it off, MOX produces NO RF.
-        Persists + signals + pushes to the stream.  A safety
-        stand-down (force_release_all / TX timeout) calls this
-        with False to disarm.
+        """Arm/disarm the transmit power amplifier.  Default OFF
+        -- with it off, MOX produces NO RF.  Persists + signals +
+        pushes to the stream.  A safety stand-down
+        (force_release_all / TX timeout) calls this with False.
 
-        Dual-path caveat (capability ``pa_enable_uses_apollo_i2c``,
-        HL2 = True): on community-gateware variants the PA is also
-        gated by an Apollo-tuner I2C side-channel this bit does
-        NOT drive -- the operator-facing control warns of this; we
-        never silently half-enable.  The I2C side-channel is a
-        separate later, gated change."""
+        §15.26 R1' (HL2+ gateware-proven): the enable is
+        frame-10 **C2 bit 3 (0x08), active-high** = C&C 0x09
+        bit19 (control.v:209-220); pure C&C, no I2C/companion
+        gate (the old Apollo-I2C-side-channel theory is DEAD).
+        The persisted value is re-asserted onto the wire at
+        ``start()`` via ``_repush_tx_state_to_stream`` (R3) --
+        autoload runs before the stream exists, so this setter
+        no-ops at boot and the start() re-push is what actually
+        lands C2 0x08 on the wire."""
         on = bool(on)
         if on == self._pa_enabled:
             return
@@ -9021,6 +9023,17 @@ class Radio(QObject):
                 self.status_message.emit(
                     f"RX2 initial freq push failed: {e}", 3000,
                 )
+            # §15.26 R3 (PRIME, gateware-proven) + R4: the autoload_*
+            # restores run at app-build BEFORE start(), when
+            # _stream is None, so set_pa_on / set_tx_drive_level
+            # no-op and the operator's "PA enabled / TX drive %"
+            # NEVER reach the wire (C2 0x08 stays clear -> HL2
+            # gateware never biases the PA -> dead air).  Now that
+            # the socket exists, re-assert the full TX C&C state
+            # from Radio's current values.  Also eager-pushes the
+            # TX-NCO regs (R4) so they're populated from stream
+            # start, never a stale 0 Hz on the first keyed frame.
+            self._repush_tx_state_to_stream()
             # v0.2 Phase 2 commit 7-redo (2026-05-15): open TX channel
             # + start the dedicated TX DSP worker thread.  Replaces
             # the broken inline-dispatch path from commit 7 and the
@@ -9936,6 +9949,52 @@ class Radio(QObject):
     # audio + spectrum + telemetry) and Phase 2 commit 7.1's
     # ``LYRA_ENABLE_TX_DISPATCH`` env-var gate (which kept commit 7's
     # broken path in tree but disabled by default).
+
+    def _repush_tx_state_to_stream(self) -> None:
+        """§15.26 R3/R4: re-assert Radio's TX C&C state onto the
+        live stream after the socket exists.
+
+        WHY this is load-bearing (the gateware-proven dead-air
+        root cause): ``autoload_pa_enabled_setting`` /
+        ``autoload_tx_power_settings`` run at app-build, BEFORE
+        ``start()``.  At that point ``self._stream is None``, so
+        ``set_pa_on`` / ``set_tx_drive_level`` silently no-op --
+        the operator's persisted "PA enabled" + "TX drive %" set
+        only the in-memory flags, never the wire.  The HL2+
+        gateware bias is ``int_tx_on & ~vna & pa_enable`` (0x09
+        bit19 = frame-10 C2 bit3); with C2 0x08 never emitted the
+        PA never biases => keys but zero RF.  This re-push closes
+        that gap.  Idempotent; safe if values already match.
+        """
+        s = self._stream
+        if s is None:
+            return
+        from lyra._txdiag import txdbg
+        # Drive level (R3): operator TX-power% -> frame-10 C1.
+        try:
+            lvl = self._tx_pct_to_drive_level(
+                max(0, min(100, int(self._tx_power_pct))))
+            s.set_tx_drive_level(lvl)  # noqa: SLF001
+            txdbg(f"_repush_tx_state: drive_level<-{lvl} "
+                  f"(pct={self._tx_power_pct})")
+        except Exception as exc:  # noqa: BLE001
+            txdbg(f"_repush_tx_state: drive push FAILED: {exc}")
+        # PA enable (R3 -- THE fix): frame-10 C2 bit3.
+        try:
+            s.set_pa_on(bool(self._pa_enabled))  # noqa: SLF001
+            txdbg(f"_repush_tx_state: pa_on<-{self._pa_enabled} "
+                  f"(C2 bit3 0x08 now reaches the wire)")
+        except Exception as exc:  # noqa: BLE001
+            txdbg(f"_repush_tx_state: pa push FAILED: {exc}")
+        # TX-NCO eager-populate (R4): regs 0x02/0x08/0x0a carry
+        # the real TX freq from stream start, never a stale 0 Hz
+        # on the first keyed frame (set_mox still re-pushes on
+        # the MOX edge; this just removes the cold-start hole).
+        try:
+            s._set_tx_freq(self.tx_freq_hz)  # noqa: SLF001
+            txdbg(f"_repush_tx_state: tx_freq<-{self.tx_freq_hz}")
+        except Exception as exc:  # noqa: BLE001
+            txdbg(f"_repush_tx_state: tx_freq push FAILED: {exc}")
 
     def _open_tx_channel(self) -> None:
         """Lazy-construct the TX WDSP channel on stream start.
