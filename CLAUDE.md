@@ -6913,6 +6913,46 @@ forward-compatible with PS.  NO chat-guessed magic
 number.  Likely a focused multi-agent Thetis verify
 (same methodology that's worked all session) BEFORE code.
 
+**⚠ ATT-on-TX 3-AGENT VERIFY — ROUNDS 1-3 (2026-05-17,
+operator: circle back till all agree).** CONVERGED: (1)
+HPSDR-P1 C0=`[addr:7]<<1|MOX` ⇒ wire cmd_addr=C0>>1, proven
+`dsopenhpsdr1.v:296-318`; Thetis `C0|=0x1c`→cmd_addr **0x0e**,
+`C0|=0x14`→**0x0a**, `C0|=0x16`→**0x0b** (Agents B&C were
+same regs, different notation).  (2) variant
+`hl2b5up_ak4951v4` is **`FAST_LNA(1)`** — RX/TX LNA in
+`ad9866.v`: cmd_addr 0x0a=rx_gain (`ad9866.v:133-135`),
+0x0e: `[15]`=en_tx_gain `[14]`=direct `[13:8]`=tx_gain
+(`:137-140`); arbiter `:144-156` `gain<=rx_gain when ~tx_en
+| (~en_tx_gain & ~cw_on)` else `tx_gain when tx_en &
+en_tx_gain`; higher code=more gain; reg 0x1C/0x14/0x16 are
+NOT step-att/NCO/temp on this variant.  (3) **PS-entangled
+REFUTED for this variant** — PS drive=cmd_addr 0x09, a
+different reg; the §15.26 §15.23-trap worry does NOT apply
+here ⇒ far simpler/lower-risk than feared.
+**UNRESOLVED (real contradiction — do NOT implement over
+it):** the "arm 0x0e[15]=1 steady (C3=0xC0)" recommendation
+CONTRADICTS what proven-working Thetis actually emits:
+Thetis case-4 (`C0|=0x1c`=cmd_addr 0x0e) C3=`tx_step_attn
+&0x1F` ⇒ **never sets cmd_data[15]/en_tx_gain**.  Thetis's
+real RX-protect appears to be **MOX-gated case-11**
+(`C0|=0x14`=cmd_addr 0x0a=ad9866 rx_gain): XmitBit→C4 holds
+`tx_step_attn` not `rx_step_attn`, so the RX-LNA-gain reg is
+driven to the low (operator-31 dB → wire 0 = min gain)
+value during TX, and the arbiter keeps gain←rx_gain during
+tx_en when en_tx_gain==0.  IF SO: Lyra already MOX-gates
+frame-11 (cmd_addr 0x0a) but with `_tx_step_attn_db=0` its
+TX branch = `0x40|0x1F` = rx_gain 31 ≈ max gain = NO
+protection (the actual bug); the fix = the `m_bATTonTX`
+POLICY driving `_tx_step_attn_db`→max-atten on TX through
+the EXISTING MOX-gated frame-11 — NOT a new steady 0x0e
+register.  Mechanism (autonomous 0x0e[15] vs MOX-gated
+0x0a/case-11) NOT agreed; Lyra must mirror the
+proven-working Thetis mechanism, not a theoretically-valid
+unused one.  → ROUND 4 dispatched at exactly this
+contradiction.  Agent ids: A=a025cb057db7d05b7,
+B=a06b3a1aa3bc4da99, C(RTL)=a9876bea26e083dd0/
+a98eb352347d9864c.
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
