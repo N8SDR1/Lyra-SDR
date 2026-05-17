@@ -7191,6 +7191,24 @@ verify-don't-guess; await operator toggle result.  (UNRESOLVED
 needing RTL/datasheet: is AD9866 PGA `gain` in the TX
 amplitude path or RX-only — decisive for the mechanism.)
 
+**✅✅✅ SCREENSHOT-CONFIRMED 2026-05-17: banner `HL2 T
+35.6°C  V 12.3 V  PA 1.75 A` (no VDD field) at full TX
+drive, ~5 W Palstar.** PA readout fixed+trustworthy (≈ref
+1.8 A), temp/supply anchor intact, ADC pk −54 dBFS during
+TX (= ATT-on-TX front-end protection working, RX not
+overloaded).  Power+PA+RX-protection+telemetry all
+reference-parity; the two real defects (tone_mag cap,
+PA-decode slot) fixed + hardware-confirmed.  Panadapter
+skirt/smear during TX = EXPECTED display artifact (carrier
+viewed through the deliberately-blinded min-gain RX +
+AGC-Fast residual; −54 dBFS proves it) — NOT a TX-quality
+indicator and NOT TX splatter.  Real TX-cleanliness check =
+EXTERNAL only (Thetis pan / separate SDR on the dummy TUN).
+Known deferred real item: no host TX bandpass (BPF/LPF GAP)
+— benign into dummy, MUST close before antenna/on-air;
+doesn't widen a single tune tone.  Phase-3 TX is
+functionally complete + reference-parity into a dummy.
+
 **✅✅ POWER + PA-CURRENT VALIDATED ON HARDWARE 2026-05-17
 (one keyup, both fixes confirmed).** Operator: 98% TX drive,
 10 m, dummy → **~5 W on the Palstar** (reference 5.1 W —
