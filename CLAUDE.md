@@ -6252,6 +6252,30 @@ gain-sense `(rx_db+12)` to Thetis attenuation-sense
 `(31-att)` for cross-app parity — RX-regression risk, needs
 a bench A/B vs the working v0.0.9.6+ RX, never blind.
 
+**Commit C SHIPPED `73a459b` 2026-05-17.**  `_compose_frame_4`
+C3 → `(31 - _tx_step_attn_db) & 0x1F`; `_compose_frame_11` C4
+TX(mox) branch → `0x40|((31-tx_db)&0x3F)`, RX branch
+UNCHANGED (byte-identical, field-proven).  WIRE NOTE: RX-only
+frame-4 C3 default changes 0→31 (correct (31-0); old 0 was
+the bug) — RX-inert (TX-att, gateware acts only during TX; no
+TX until D; phase0 audio-null green).  Single-actuator/PS-
+corner discipline kept.  ATT-on-TX force-31 layer still
+separate/deferred.  378/0, no RF.
+
+**NEXT = Commit D — HARD OPERATOR GATE (first real RF).**
+`_compose_frame_10` `c2 |= 0x0C` (Apollo tuner 0x08 + filter
+0x04; operator `chkApolloTuner=True`+`chkApolloFilter=True`)
+behind the shipped default-OFF `set_pa_enabled` gate +
+`pa_enable_uses_apollo_i2c=True` cap + force_release_all
+auto-disarm (already wired) + the dual-path tooltip warning.
+This is THE commit that first emits real power on N8SDR's
+Apollo-gated HL2+.  DO NOT land/enable without explicit
+operator go-ahead + bench: dummy load, USB/LSB+mic (NOT
+CWU), watch the Commit-A PA-current/VDD readout, then the
+§15.20/§15.24-C Phase-3-EXIT kill-Lyra-mid-TX test (PA
+current must drop).  Then 3.6 (S-meter-in-TX swap),
+foot-switch, §9.6 pops.
+
 **REVISED LADDER:** A (verified) → B (verified, amp-safety)
 → C-reverify (RX-att encoding) → C (corrected) → D (verified,
 hard RF gate).  Independent agent id `a3e37ee1d8729b19d`
