@@ -6749,6 +6749,20 @@ no RF -- default-OFF PA).**  All 5 findings in one commit:
   only when `int_tx_on`); phase0 RX-audio null gate GREEN.
   Backup `_backups/lyra-2026-05-17-tx-reconcile.bundle`.
 
+**✅ RX-RECOVERY HARDENING SHIPPED `b7e61e6` 2026-05-17**
+(389/0, RX-inert, no RF, backup
+`_backups/lyra-2026-05-17-rx-recovery.bundle`).  Three
+code-confirmed stop/restart hazards fixed (same "always comes
+up clean" class as cb58bcb): (1) `Radio.stop()` +
+`Radio.start()` reset `_tx_rx_muted=False`; (2)
+`Radio.start()` `_request_rx_channel(True)` (the `_wdsp_rx`
+channel is created once in __init__ + reused across
+stop/start, so a keydown-stopped + non-completing-keyup left
+it stopped); (3) `TxPanel._on_tx_active` un-lights `tun_btn`
+on tx_active False (was lit-but-inert; guarded vs release_tun
+re-fire).  +1 regression test.  Lands BEFORE the next bench
+so the VALID kill-test restart comes up clean.
+
 **✅ RX-DEATH INCIDENT 2026-05-17 — NOT hardware (Thetis RX
 fine on same HL2+ = front end UNDAMAGED; QRP into dummy load
 never blew anything; the invalid "kill-test" only killed the
