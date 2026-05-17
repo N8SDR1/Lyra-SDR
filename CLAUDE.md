@@ -6390,20 +6390,35 @@ PA-current/VDD readout, then the Phase-3-EXIT kill-test.
 Amp re-enters only after the operator is confident
 (separate later step).
 
-**NEXT = first-RF bench (D-1 + D-2 both SHIPPED; operator
-go-ahead given for the code).**  The TX wire path is now
+**TUN tune-carrier SHIPPED `468f34f` 2026-05-17** (operator
+design call: SSB is suppressed-carrier + voice-shaped, a
+poor first-RF/PA-current/kill-test instrument; other modes
+= v0.2.2).  The WDSP TXA output-side single-tone generator
+(`TxChannel.set_postgen`, gen1 post-bp0) already existed —
+only operator wiring was missing.  `radio._set_tune_tone`
+(None-safe/idempotent) runs it iff FSM state == TUN_TX
+(MOX_TX keeps the mic chain), stopped on keyup; level still
+governed by TX drive % + PA opt-in.  TUN button ENABLED +
+funnels `request_tun`/`release_tun` (same safe FSM ordering
+as MOX).  385/0.  This brings the §15.26 "TUN ships
+disabled, generator lands later" plan forward — the
+generator was already in the engine.
+
+**NEXT = first-RF bench (D-1 + D-2 + TUN all SHIPPED;
+operator go-ahead given for the code).**  TX wire path
 complete: drive_level (D-1) + Apollo C2 PA-enable (D-2),
-both behind the default-OFF `set_pa_enabled` gate.  The
+both behind the default-OFF `set_pa_enabled` gate; a clean
+steady tune carrier (TUN) for the bench instrument.  The
 remaining gate is HARDWARE, not code: operator opts in
 (`set_pa_enabled(True)` via TxSettingsTab Advanced) + keys
-MOX into **bare HL2+, dummy load, NO amp, USB/LSB+mic (NOT
-CWU), low drive**, watching the Commit-A PA-current/VDD
-readout, THEN the §15.20/§15.24-C Phase-3-EXIT
-kill-Lyra-mid-TX test (PA current must drop within N sec —
-the gateware watchdog is still TX-UNVERIFIED and
-load-bearing).  Band-filter GAP (BPF/LPF =0) stays deferred
-— benign on the bare-HL2 dummy-load bench, HARD gate before
-filter-board / on-air.  Then 3.6 (S-meter-in-TX swap),
+**TUN** into **bare HL2+, dummy load, NO amp, low drive**,
+watching the Commit-A PA-current/VDD readout, THEN the
+§15.20/§15.24-C Phase-3-EXIT kill-Lyra-mid-TX test (PA
+current must drop within N sec — the gateware watchdog is
+still TX-UNVERIFIED and load-bearing).  Band-filter GAP
+(BPF/LPF =0) stays deferred — benign on the bare-HL2
+dummy-load bench, HARD gate before filter-board / on-air.
+Then 3.6 (S-meter-in-TX swap),
 foot-switch, §9.6 pops.
 
 **REVISED LADDER:** A (verified) → B (verified, amp-safety)
