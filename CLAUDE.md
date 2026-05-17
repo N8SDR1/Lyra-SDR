@@ -6978,6 +6978,29 @@ overloading (panadapter no longer wide/off-scale, S-meter
 not pegged) → then re-attempt the HL2 Telemetry Probe
 PA-current-slot capture + kill-test on a clean RX.
 
+**REFERENCE SCREENSHOTS FOLDER (recall): `Y:\hold\
+screenshots\`** — operator's Thetis 2.10.3.13 setup
+captures + `Thetis_database_export_Default_5_16_2026_6_54
+PM.xml`.  The ATT-on-TX UI reference =
+`metering for SWR and ATT on TX and Force ATT .jpg`
+(Setup→General→Ant/Filters): **☑ ATT on Tx**, **ATT: 31
+spin (B20M)**, **☑ Force ATT on Tx to 31 when PS-A is
+off**, **☑ Force ATT on Tx to 31 when Drive/Tune ↑ &
+PS-A on** (☐ or decreased), ☐ Auto ATT when PS-A off (☐
+Undo when Tx off), ☐ RX1 OUT on Tx.  Operator: "we need
+same" → Lyra must surface the ATT-on-TX control operator-
+facing (not the hardcoded `_att_on_tx_enabled`/
+`_ATT_ON_TX_DB` shipped in `7959587`).  v0.2 scope = the
+**master ☑ + dB spin**, default ON/31 (operator rig),
+persisted; the PS-conditional "Force when PS-A off/on"
+sub-options are v0.3 PS-dialog work (PS not entangled on
+this variant — anchor, NOT inert UI now).  Other refs in
+that folder for later: "HL2 PA and full duplex",
+"PA settings for output power", "Puresignal options",
+"TX profiles and Tune-Drive-Mic gain-Source-TX Filter",
+"See multi meter…PO-SWR-ID-Compression-ALC and VDD",
+"AGC and ALC", "PTT Hangtime", "EER", "DSP Buffers".
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
