@@ -1253,8 +1253,9 @@ class MainWindow(QMainWindow):
         spacer3b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer3b)
 
-        # ── 9. HL2 hardware telemetry (temperature + supply V) ────
-        self.hl2_telem_label = QLabel("HL2  T --°C   V --.- V")
+        # ── 9. HL2 hardware telemetry (temp + supply V + PA cur) ──
+        self.hl2_telem_label = QLabel(
+            "HL2  T --°C   V --.- V   PA --.-- A")
         self.hl2_telem_label.setStyleSheet(
             "color: #cdd9e5; font-family: Consolas, monospace; "
             "font-weight: 700; padding: 0 6px;")
@@ -1267,6 +1268,12 @@ class MainWindow(QMainWindow):
             "    divider. Should sit within 11.5-13.0 V on a healthy\n"
             "    PSU; sagging below 11 V points to a weak supply or\n"
             "    a long thin power lead.\n\n"
+            "PA — power-amplifier current (A), from the HL2 user-ADC\n"
+            "    sense.  ~0 A on receive; rises when transmitting.\n"
+            "    This is the first-RF bench observable: on the\n"
+            "    Phase-3-EXIT kill-test it must drop back toward 0 A\n"
+            "    within a few seconds of Lyra being force-killed\n"
+            "    mid-transmit (the HL2 gateware watchdog).\n\n"
             "Reads '--' until the stream is running and a few EP6\n"
             "frames have arrived — the radio rotates which telemetry\n"
             "register it reports each frame.")
@@ -1787,9 +1794,12 @@ class MainWindow(QMainWindow):
         import math
         t = payload.get("temp_c", float("nan"))
         v = payload.get("supply_v", float("nan"))
+        pa = payload.get("pa_a", float("nan"))
         t_str = f"{t:4.1f}°C" if not math.isnan(t) else " n/a "
         v_str = f"{v:4.1f} V" if not math.isnan(v) else " n/a "
-        self.hl2_telem_label.setText(f"HL2  T {t_str}   V {v_str}")
+        pa_str = f"{pa:5.2f} A" if not math.isnan(pa) else " n/a "
+        self.hl2_telem_label.setText(
+            f"HL2  T {t_str}   V {v_str}   PA {pa_str}")
 
     def _tick_cpu(self):
         """1 Hz tick — refresh the CPU% label as a fraction of TOTAL
