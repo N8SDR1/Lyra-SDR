@@ -8121,6 +8121,91 @@ decoupled single-owner wire-thread hand-off; independent
 OS-timer keepalive) stay the **pre-antenna safety gate** —
 NOT shipped here, higher regression risk, need bench cycles.
 
+#### ✅ TESTER BRENT CODE REVIEW 2026-05-17 (independent,
+#### CONVERGES with the audit + EXTENDS it on the PC-Soundcard
+#### path; Vulkan call independently identical).  Recorded
+#### verbatim-substance; verify each file:line before acting.
+
+Brent ran the pushed branch + read the audio path.  He tests
+**PC Soundcard** (N8SDR runs AK4951/HL2-jack) — so B1/B2/B3/B5
+are mostly the PC-Soundcard pop path our agents under-covered
+(they focused on the EP2/AK4951 path); B4/B6/B7 hit both.
+This is a 4th independent reviewer converging on the same
+root family (hard transitions + callback/queue work + GIL),
+NOT a new theory.
+
+* **B1 — `audio_sink.py:851`: PortAudio callback does too
+  much Python work** — `_rmatch.read_complex(frames)`,
+  array alloc/cast, gain multiply, AND reads cffi diagnostics
+  (`_rmatch.underflows`) *inside the RT callback*.  Classic
+  RT-audio antipattern (alloc + variable work + cffi in the
+  callback).  "First place I'd look for PC-Soundcard
+  pops/clicks."  NEW site; same family as the audit's
+  no-alloc-on-hot-path theme, different path.
+* **B2 — `rmatch.py:1014` + `:1039`: `WdspRMatch.read()/
+  read_complex()` can `np.concatenate()` INSIDE the audio
+  callback** when PortAudio asks for a size not aligned to
+  `outsize` → callback jitter.  Wants fixed-size ring/
+  reservoir, no realloc.  NEW, real.
+* **B3 — `rmatch.py:507`: pure-Python `RMatch` fallback's
+  "GIL is enough" is WRONG** — NumPy ops release the GIL, so
+  a concurrent DSP `write()` vs PortAudio-callback `read()`
+  races `n_ring/iin/iout`/ring → intermittent pop / corrupt
+  audio.  Only bites if WDSP-native rmatch fails (fallback),
+  but the comment is a real latent trap.  Converges with the
+  audit's structural-concurrency theme.
+* **B4 — `radio.py:11059` (+ RX2 `:11296`): mute / TX-mute /
+  volume / balance / TX-RX gating are HARD block-edge steps**
+  (`audio*0.0`, `audio*volume`) → click if the edge isn't at
+  a zero crossing.  Wants a 3–5 ms slew on all of them.
+  **This is the most important one: it is the SAME hard-
+  discontinuity class as the audit's D-3 + the shipped Fix #3
+  + the long §15.26 PART-B keyup-fade saga + the §9.6 family
+  — and it GENERALISES the principle: slew EVERY gain/state
+  transition, not just the EP2 underrun.**  Strong 4-way
+  convergence (audit + 2 red-team + Brent).
+* **B5 — `stream.py:1365`/`:1423`: AK4951 close-fade only
+  releases EP2 sem for full 126-sample chunks** — a fade tail
+  < 126 may never be sent before injection is disabled; the
+  linear ramp also doesn't reach exact zero on the last
+  sample.  Small but real click on sink close/swap.  NEW.
+* **B6 — `worker.py:166`: `INPUT_QUEUE_DEPTH=10`** adds tens
+  of ms latency before drop-oldest; on drop it discards raw
+  IQ with NO continuity bridge → demod pop.  Acceptable under
+  overload but MUST be surfaced in diagnostics.  Converges
+  with the audit's uninstrumented-swallow theme.
+* **B7 — `radio.py:11318`: dual-RX combines by truncating to
+  the shorter buffer** — fine for rare transients, but
+  repeated RX1/RX2 queue drift → repeated sample drops +
+  channel skew.  Instrument truncation frequency.  NEW
+  (RX2-specific).
+* **Vulkan — Brent INDEPENDENTLY = the audit verdict:** do
+  NOT move to Vulkan; `spectrum_gpu.py:143` OpenGL path is
+  reasonable; the risk is Python callback work / rmatch
+  buffering / queue drops / hard gain transitions; Vulkan
+  removes neither the GIL nor the callback Python work and is
+  a large rewrite that fights the Qt/QPainter overlay model.
+  Best path: keep OpenGL, reduce callback allocations, make
+  the rmatch fallback truly locked (or disable it for RT
+  use), add gain/mute slews, instrument underrun/overrun/
+  truncation counters during the exact pop events.
+
+**SYNTHESIS (4 independent reviewers now converged):** the
+single unifying principle = **every gain/state/buffer
+transition must be slewed and every producer/consumer hand-
+off must be buffered + decoupled + instrumented; nothing on
+an RT path may allocate, take a variable-work branch, do
+cffi-diagnostics, or step a gain at a block edge.**  Fix #3
+was the first instance (EP2 underrun); B4 is the same fix
+generalised to mute/vol/balance/TX-RX gating; the structural
+rebuild (control off the worker loop + decoupled wire ring +
+OS-timer keepalive) is the producer/consumer half.  Add
+B1/B2/B3/B5 (PC-Soundcard callback + rmatch) and B6/B7
+(queue/dual-RX instrumentation) to the structural-rebuild
+scope — they are the same job, not new patches.  None
+conflict with the audit; all extend it.  Vulkan stays
+rejected by 4/4 reviewers.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-17 EOD)
@@ -8198,8 +8283,15 @@ patch-slapped — explicit):**
    reduced/gone?  `tx_audio_underruns` ticks in the 1 Hz
    status correlate?) AND Brent's RX/TX round on the pushed
    branch.
+   Brent's code review is IN (recorded above as B1–B7,
+   converges + extends) — fold B1/B2/B3/B5 (PC-Soundcard
+   callback + rmatch) + B4 (slew ALL gain/mute/balance/
+   TX-RX-gate transitions — the Fix-#3 principle generalised)
+   + B6/B7 (queue + dual-RX truncation instrumentation) into
+   the structural-rebuild scope; they are the same job.
 2. **The STRUCTURAL REBUILD (the real correct fix — design
-   it, do NOT point-patch).**  To the reference architecture:
+   it, do NOT point-patch).**  To the reference architecture
+   (now also covering B1–B7 — see the Brent-review synthesis):
    (a) get the tab/dock QueuedConnection slot-storm +
    channel-restart/`reset()` OFF the audio worker's
    `QCoreApplication.processEvents()` path (`worker.py:510`,
