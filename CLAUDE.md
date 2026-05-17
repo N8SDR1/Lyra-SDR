@@ -7018,6 +7018,29 @@ wire rx_gain code 0 = MIN LNA gain = MAX RX-ADC protection
 (removes gain on TX, does NOT add — operator's principle
 upheld).  No code change; default correct.
 
+**⚠ BENCH 2026-05-17: ATT-on-TX OK (RX no longer overloads,
+operator-confirmed) BUT Lyra power MUCH lower than Thetis;
+operator suspects PA not enabled (driver-only).** Two
+candidate causes, telemetry discriminates: (A) PA C2-bit3
+(0x08, cmd_addr 0x09) not reaching gateware / bias not
+engaged → driver-only fraction of power (PA current ~0);
+(B) PA on but the deferred **Q1 drive-scaling gap** (Lyra
+flat 255·%/100 vs Thetis per-band GainByBand) → low watts
+WITH PA on (PA current ~1.8 A like Thetis).  NOT a regression
+from today (ATT-on-TX = frame-11/cmd_addr-0x0a; PA = frame-10
+C2/cmd_addr-0x09, separate; PA path unchanged since D-2
+`52bd910` / R3 `_repush_tx_state_to_stream`).  IMMEDIATE
+discriminator (no telemetry): key TUN into dummy, watch watt
+meter, toggle Settings→TX→Advanced "Enable PA" OFF↔ON —
+power jumps ⇒ PA on, deficit = Q1 (deferred cal, not a bug);
+no change ⇒ C2-bit3 enable not reaching gateware (real bug,
+dig _pa_enabled→set_pa_on→start-repush→frame-10 C2).  Also
+want: Lyra full-drive W vs Thetis 5.1 W magnitude
+(<1 W≈driver-only; few W≈PA-on-low-drive).  DEFINITIVE next:
+HL2 Telemetry Probe capture at full tune → real PA-current
+slot on this ak4951v4 (vs Thetis 1.8 A anchor) — then
+A-vs-B is unambiguous + kill-test closeable.
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
