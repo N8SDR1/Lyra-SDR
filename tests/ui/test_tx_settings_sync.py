@@ -58,13 +58,15 @@ class TxSettingsSyncTest(unittest.TestCase):
             {"TX Power & Drive", "TX Safety", "Advanced",
              "TR Sequencing (ms)"})
         # TR Sequencing carries live delay spinboxes; the RF-delay
-        # spin enforces the amp-hot-switch floor as its minimum.
+        # spin is operator-adjustable across the sane hardware
+        # range (1..75 ms; default 50 hot-switch-safe).
         self.assertTrue(boxes["TR Sequencing (ms)"].findChildren(
             QSpinBox))
         from lyra.ptt import TrSequencing
-        self.assertEqual(
-            self.tab._tr_spins["rf"].minimum(),
-            TrSequencing.RF_DELAY_FLOOR_MS)
+        self.assertEqual(self.tab._tr_spins["rf"].minimum(),
+                         TrSequencing.RF_DELAY_MIN_MS)
+        self.assertEqual(self.tab._tr_spins["rf"].maximum(),
+                         TrSequencing.RF_DELAY_MAX_MS)
         # TX Power & Drive carries a live drive control.
         self.assertTrue(boxes["TX Power & Drive"].findChildren(
             StepperReadout))
@@ -80,13 +82,16 @@ class TxSettingsSyncTest(unittest.TestCase):
         self.radio.set_pa_enabled(False)           # Radio -> UI
         self.assertFalse(self.tab.pa_enable_chk.isChecked())
 
-    def test_tr_sequencing_round_trip_and_rf_floor(self) -> None:
+    def test_tr_sequencing_round_trip_and_rf_range(self) -> None:
         self.tab._tr_spins["mox"].setValue(25)     # UI -> Radio
         self.assertEqual(self.radio.tr_delays["mox"], 25)
         self.radio.set_tr_delay("ptt_out", 35)     # Radio -> UI
         self.assertEqual(self.tab._tr_spins["ptt_out"].value(), 35)
-        # RF spin can't even be set below the amp-safety floor.
-        self.assertEqual(self.tab._tr_spins["rf"].minimum(), 50)
+        # RF spin is operator-adjustable across the sane range.
+        self.assertEqual(self.tab._tr_spins["rf"].minimum(), 1)
+        self.assertEqual(self.tab._tr_spins["rf"].maximum(), 75)
+        self.tab._tr_spins["rf"].setValue(5)       # operator's call
+        self.assertEqual(self.radio.tr_delays["rf"], 5)
         from PySide6.QtCore import QSettings
         qs = QSettings("N8SDR", "Lyra")
         for n in ("mox", "ptt_out", "rf", "space_mox", "key_up"):

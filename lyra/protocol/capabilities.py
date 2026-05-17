@@ -173,11 +173,12 @@ class RadioCapabilities:
     # (mox, ptt_out, rf, space_mox, key_up).  The FSM stays
     # hardware-agnostic (§6.7 #5) and is HANDED these; they are
     # NOT hardcoded in ptt.py.  HL2 values are the operator-
-    # verified working set.  rf_delay is AMPLIFIER-SAFETY: it is
-    # the MOX-bit→RF settle that prevents hot-switching an
-    # external linear into mid-transition relays (CLAUDE.md
-    # §15.26) — it has a hard 50 ms floor enforced in
-    # TrSequencing and must never silently shrink.
+    # verified working set.  rf_delay is the MOX-bit->RF settle
+    # that prevents hot-switching an external linear into
+    # mid-transition relays (CLAUDE.md §15.26).  Default 50 =
+    # hot-switch-safe; operator-adjustable 1..75 ms (operator's
+    # station/amp/risk call -- TrSequencing clamps only to that
+    # sane range; the Settings tooltip carries the warning).
     tr_delays_ms: "tuple[int, int, int, int, int]"
 
 

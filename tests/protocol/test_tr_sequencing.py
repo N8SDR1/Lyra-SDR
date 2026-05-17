@@ -28,12 +28,17 @@ class TrSequencingFloorTest(unittest.TestCase):
         self.assertEqual(HL2_CAPABILITIES.tr_delays_ms,
                          (15, 20, 50, 13, 10))
 
-    def test_rf_delay_hard_floor(self) -> None:
-        self.assertEqual(TrSequencing.RF_DELAY_FLOOR_MS, 50)
-        self.assertEqual(TrSequencing(rf_delay_ms=0).rf_delay_ms, 50)
-        self.assertEqual(TrSequencing(rf_delay_ms=10).rf_delay_ms, 50)
-        self.assertEqual(TrSequencing(rf_delay_ms=49).rf_delay_ms, 50)
-        self.assertEqual(TrSequencing(rf_delay_ms=80).rf_delay_ms, 80)
+    def test_rf_delay_adjustable_range(self) -> None:
+        # Operator-adjustable 1..75 ms (default 50 = hot-switch-
+        # safe).  Clamped only to the sane hardware range -- the
+        # operator's amp/risk call, not a paternalistic lockout.
+        self.assertEqual(TrSequencing.RF_DELAY_MIN_MS, 1)
+        self.assertEqual(TrSequencing.RF_DELAY_MAX_MS, 75)
+        self.assertEqual(TrSequencing(rf_delay_ms=0).rf_delay_ms, 1)
+        self.assertEqual(TrSequencing(rf_delay_ms=1).rf_delay_ms, 1)
+        self.assertEqual(TrSequencing(rf_delay_ms=10).rf_delay_ms, 10)
+        self.assertEqual(TrSequencing(rf_delay_ms=75).rf_delay_ms, 75)
+        self.assertEqual(TrSequencing(rf_delay_ms=200).rf_delay_ms, 75)
         self.assertEqual(TrSequencing().rf_delay_ms, 50)   # default
 
 
@@ -71,11 +76,13 @@ class TrSequencingRadioTest(unittest.TestCase):
         r2 = Radio()
         self.assertEqual(r2._ptt_fsm._tr.mox_delay_ms, 30)
 
-    def test_rf_delay_cannot_be_lowered_below_floor(self) -> None:
-        self.radio.set_tr_delay("rf", 5)               # try to defeat
-        self.assertEqual(self.radio.tr_delays["rf"], 50)  # floored
-        self.radio.set_tr_delay("rf", 120)             # raising OK
-        self.assertEqual(self.radio.tr_delays["rf"], 120)
+    def test_rf_delay_operator_adjustable_clamped_to_range(self):
+        self.radio.set_tr_delay("rf", 5)               # operator's call
+        self.assertEqual(self.radio.tr_delays["rf"], 5)   # honoured
+        self.radio.set_tr_delay("rf", 1)
+        self.assertEqual(self.radio.tr_delays["rf"], 1)
+        self.radio.set_tr_delay("rf", 999)             # clamp to max
+        self.assertEqual(self.radio.tr_delays["rf"], 75)
 
     def test_unknown_name_ignored(self) -> None:
         self.radio.set_tr_delay("bogus", 999)          # no crash/effect

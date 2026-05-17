@@ -2909,33 +2909,38 @@ class TxSettingsTab(QWidget):
         d = radio.tr_delays
         self._tr_spins = {}
         # (key, label, min, tooltip)
+        # (key, label, vmin, vmax, tooltip)
         _tr_rows = [
             ("rf", "RF delay",
-             TrSequencing.RF_DELAY_FLOOR_MS,
-             "Gap between asserting transmit and applying RF.\n\n"
-             "⚠ AMPLIFIER PROTECTION: this delay lets the T/R "
-             "sequencing settle so an external linear is never "
-             "hot-switched (RF into mid-transition relays = "
-             "destroyed amp).  Hard floor enforced — you may "
-             "RAISE it for slow relays / big amps, never lower "
-             "it below the floor."),
-            ("mox", "MOX delay", 0,
+             TrSequencing.RF_DELAY_MIN_MS, TrSequencing.RF_DELAY_MAX_MS,
+             "Gap between asserting transmit and applying RF "
+             "(operator-adjustable {0}–{1} ms; default 50).\n\n"
+             "⚠ HOT-SWITCH WARNING: this delay lets the T/R "
+             "sequencing settle so an external linear is not "
+             "hot-switched (RF into mid-transition relays can "
+             "destroy the amp).  50 ms is hot-switch-safe for a "
+             "typical external linear.  Lower it only if you have "
+             "no external amp, or you know your relay timing "
+             "tolerates it — your station, your call.".format(
+                 TrSequencing.RF_DELAY_MIN_MS,
+                 TrSequencing.RF_DELAY_MAX_MS)),
+            ("mox", "MOX delay", 0, 2000,
              "Gap after the transmit down-ramp before the MOX "
              "bit clears (lets in-flight transmit samples clear)."),
-            ("ptt_out", "PTT-out / RX-settle", 0,
+            ("ptt_out", "PTT-out / RX-settle", 0, 2000,
              "Hardware T/R settle after the MOX bit clears, "
              "before the receiver is restarted.  Lower values "
              "may reintroduce an un-key transient — raise if you "
              "hear one."),
-            ("space_mox", "Space-MOX (CW)", 0,
+            ("space_mox", "Space-MOX (CW)", 0, 2000,
              "CW inter-element hold (active when CW TX lands, "
              "v0.2.2)."),
-            ("key_up", "Key-up (CW)", 0,
+            ("key_up", "Key-up (CW)", 0, 2000,
              "CW keyer hang (active when CW TX lands, v0.2.2)."),
         ]
-        for key, label, vmin, tip in _tr_rows:
+        for key, label, vmin, vmax, tip in _tr_rows:
             sp = QSpinBox()
-            sp.setRange(int(vmin), 2000)
+            sp.setRange(int(vmin), int(vmax))
             sp.setSuffix(" ms")
             sp.setValue(int(d.get(key, vmin)))
             sp.setToolTip(tip)
