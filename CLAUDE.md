@@ -6428,6 +6428,87 @@ code):** D-1 TX-drive default = **0 %** ⇒ frame-10 C1
 must also raise **TX Drive %** above 0.  Confirm this BEFORE
 any code change (it may be the entire story).
 
+#### ⚠ 2-AGENT INDEPENDENT TX ZERO-RF AUDIT 2026-05-17
+#### (operator-directed: "you're missing something — send 2 RF
+#### agents to scour Thetis vs Lyra").  Both cited file:line in
+#### BOTH trees, both skeptical/independent, NOT rubber-stamps.
+
+Symptom: TUN @ ~50% drive, PA enabled in Settings, real
+external meter (Palstar AT2K) = ZERO power; rig keys (relay/
+AT2K sees carrier request) but dead air.  Console banner clean
+(no TxChannel-open exception).  Both agents converge: **the
+WDSP/DSP/TUN path is NOT the cause** (gen1 placement correct,
+post-bp0/ALC; Agent 2 explicitly refutes it).  Zero-RF is a
+STACK of compounding defects in the protocol/PA/pump layer
+(the interlinked surface §15.26 always said to reconcile
+whole, not piecemeal):
+
+* **R1 — C3 bit-7 PA polarity INVERTED** (BOTH agents; HIGH).
+  Thetis `DisablePA` (netInterface.c:626-631) PA-ENABLED ⇒
+  `tx[0].pa=0` ⇒ `networkproto1.c:755/:1084` C3 bit7 = **0**;
+  PA-disabled ⇒ bit7=1.  Lyra `_compose_frame_10`
+  (stream.py:1602) `if _pa_on: c3|=0x80` ⇒ bit7=**1**.
+  Backwards.  Independent re-confirm of §15.26 Correction 2.
+  Fix: `if not self._pa_on: c3 |= 0x80`.
+* **R2 — TUN/TX chain only clocked by the mic queue**
+  (Agent 1; HIGH, its top pick).  `TxDspWorker` calls
+  `TxChannel.process()` ONLY when mic samples arrive
+  (`_on_hl2_mic`→submit; empty→early return).  Thetis
+  `sendProtocol1Samples` (networkproto1.c:1204-1267) pumps the
+  TXA chain UNCONDITIONALLY at 48 kHz regardless of mic.  If
+  the HL2+ AK4951 EP6 mic slot is empty/absent (the STILL-OPEN
+  §10 Q#1), gen1 is never clocked ⇒ zero I/Q ⇒ dead air even
+  on TUN.  Fix: pump `process()` on a synthetic zero-mic block
+  at EP2 cadence whenever `inject_tx_iq` (Thetis-faithful
+  unconditional pump); mic content irrelevant for TUN.
+* **R3 — autoload ordering drops the PA/drive WIRE push**
+  (Agent 2; MED-HIGH, its likely "the zero" on the operator's
+  Apollo unit).  `autoload_pa_enabled_setting` / TX-drive
+  autoload run at app-build BEFORE `start()`; `set_pa_on`/
+  `set_tx_drive_level` only push `if _stream is not None`, so
+  the C2 Apollo bits + C1 drive NEVER reach the wire (C2 stays
+  0x40).  "PA enabled in Settings" sets only the in-memory
+  flag.  Fix: re-push frame-10 state (`_refresh_frame_10` +
+  ensure `_pa_on`/`_tx_drive_level` reflect Radio state) in
+  `start()` after the socket exists.
+* **R4 — stale TX NCO 0 Hz on first keyed frames** (Agent 1;
+  MED-HIGH).  0x02/0x08/0x0a lazily registered at the MOX edge,
+  land at round-robin tail; gateware holds 0 Hz for the first
+  keyed frames (Thetis emits TX-VFO every cycle + jumps
+  out_control_idx on the XmitBit edge — Lyra's jump is
+  unwired, stream.py:724-732).  Fix: eager-register 0x02/0x08/
+  0x0a at __init__ + force the round-robin to emit the TX-VFO
+  entry on the MOX edge.
+* **R5 — no immediate frame-10 re-emit** (BOTH; LOW-MED).
+  Thetis `CmdGeneral()/CmdHighPriority()` push immediately;
+  Lyra waits for round-robin — enable-PA-then-quick-key may
+  not have cycled 0x12.  Fix: immediate 0x12 emit on
+  `set_pa_on`/`set_tx_drive_level`, or guarantee a full cycle
+  before the MOX edge.
+* **VERIFIED CORRECT (no defect):** EP2 TX-I/Q byte layout/
+  scaling/sign/MOX-bit (Agent 1 #4); TUN gen1 placement +
+  TxChannel open+start (Agent 2).  drive_level scaling lacks
+  Thetis HL2 GainByBand/93.75/×1.02/swr_protect normalization
+  (Agent 2 #2) — structural divergence, flat 0.5 likely
+  nonzero, **bench-verify**, lower priority than R1-R5.
+* **Bench-only unknowns:** which PA mechanism the operator's
+  gateware honors (C2-bit3 Apollo vs C3-bit7 legacy vs both —
+  Wireshark a working Thetis TUN keydown on the unit + diff);
+  §10 Q#1 mic-slot value (decides R2 certainty — run with
+  `LYRA_TX_DEBUG=1`, watch `_on_hl2_mic submitted N` vs
+  `mic EMPTY` + `TxDspWorker process ok peak=` while keyed).
+
+**LOCKED reconcile plan (ONE Thetis-faithful commit, no RF
+until operator opts in + keys; verify-first per directive):**
+fix R1 (C3 polarity) + R3 (start() re-push of pa/drive) + R2
+(unconditional TXA pump while inject_tx_iq) + R4 (eager TX-NCO
+regs + MOX-edge emit) + R5 (immediate 0x12 on pa/drive set).
+Keep the `LYRA_TX_DEBUG` instrumentation to verify on the
+operator's hardware (esp. R2 mic-slot + R3 wire bytes).  Then
+the bench retry + Phase-3-EXIT kill-test.  Agent ids for
+follow-up: `ad04eac41e9e6e5ed` (wire), `a665f20ad85a000a1`
+(DSP/PA).
+
 **NEXT (verify-first, reconcile-whole-surface — NOT piecemeal,
 per the §15.26 PS-entangled discipline):** one focused
 Thetis-faithful commit over the frame-10-emit + EP6-telemetry-
