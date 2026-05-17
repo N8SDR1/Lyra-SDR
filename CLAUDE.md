@@ -6749,6 +6749,20 @@ no RF -- default-OFF PA).**  All 5 findings in one commit:
   only when `int_tx_on`); phase0 RX-audio null gate GREEN.
   Backup `_backups/lyra-2026-05-17-tx-reconcile.bundle`.
 
+**✅ CORRECTION-3 PA TELEMETRY RE-MAP SHIPPED `b4d45a9`
+2026-05-17** (393/0, decode-only / no RF / §3.9-inert,
+phase0 RX null gate green, backup
+`_backups/lyra-2026-05-17-pa-telemetry-remap.bundle`).
+Re-map: addr 2 (0x10) C3:C4 → `pa_volts_adc` (user_adc0,
+PA VDD -- was the Commit-A mislabel); addr 3 (0x18) C1:C2
+→ `pa_current_adc` (user_adc1, real combined PA Amps);
+0x18 C3:C4 supply unchanged.  Field-proven temp/supply/
+fwd/rev decode deliberately UNTOUCHED.  `Radio.pa_volts`
+added; banner "PA <A>  VDD <V>".  **Operator validation
+yardstick: a correct reading is ~0.2 A at idle bias (not
+the bogus 0.75); VDD ~12-13 V.**  Makes the kill-test
+observable trustworthy -- kill-test now unblocked.
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
