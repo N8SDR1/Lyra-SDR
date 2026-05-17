@@ -2990,6 +2990,18 @@ class Radio(QObject):
             # is still governed by TX drive % (frame-10 C1) + the
             # PA-enable opt-in — this only shapes the modulator.
             self._set_tune_tone(state == PttState.TUN_TX)
+            # §15.26 ATT-on-TX (4-agent-converged, Thetis-byte-
+            # identical): protect the RX ADC from TX coupling.
+            # On this FAST_LNA hl2b5up_ak4951v4 gateware the
+            # RX-LNA-gain register (wire cmd_addr 0x0a = Lyra
+            # frame-11) is MOX-gated; proven-working Thetis forces
+            # operator-31 dB on keydown so the frame-11 TX branch
+            # = 0x40 -> gateware rx_gain=0 = MIN LNA = max
+            # protection (NOT the autonomous 0x0e[15] path, which
+            # Thetis never uses).  Drive it through the SINGLE
+            # writer; v0.3 PS later swaps the SOURCE, not the
+            # encoding (PS = cmd_addr 0x09, NOT entangled here).
+            self._apply_att_on_tx(True)
             return
         # TX -> RX: fires from the FSM's _end_keyup, AFTER the
         # MOX bit cleared and the ptt_out_delay HW-T/R settle.
@@ -2999,6 +3011,7 @@ class Radio(QObject):
         # out) — then un-gate.  Stop the tune tone unconditionally
         # (idempotent — harmless if it was never running).
         self._set_tune_tone(False)
+        self._apply_att_on_tx(False)   # restore resting value
         self._request_rx_channel(True)
         self._tx_rx_muted = False
         # §15.14 (deferred): replace the blanket base behaviour
@@ -3006,6 +3019,39 @@ class Radio(QObject):
         # (is_tx, state) + the operator's per-RX prefs.  No inert
         # code now — the base stop/restart above is the real
         # behaviour until that policy lands.
+
+    # §15.26 ATT-on-TX policy (4-agent + dual-source converged,
+    # 2026-05-17).  Thetis-byte-identical RX-ADC protection on
+    # this FAST_LNA hl2b5up_ak4951v4: keydown forces operator
+    # +31 dB on the signed _tx_step_attn_db axis -> frame-11
+    # (wire cmd_addr 0x0a, MOX-gated TX branch) emits c4 =
+    # 0x40 | ((31-31)&0x3F) = 0x40 -> gateware rx_gain = 0 =
+    # MINIMUM LNA gain = maximum RX-ADC protection (proven
+    # identical to Thetis SetTxAttenData(31-31=0) -> case-11).
+    # Keyup restores 0 (resting; the RX branch governs during
+    # RX so the value is inert there).  Default ON to match the
+    # operator's working rig (chkATTOnTX=True, udATTOnTX=31,
+    # chkForceATTwhenPSAoff=True).  SINGLE WRITER discipline:
+    # stream.set_tx_step_attn_db is the only writer; v0.3 PS
+    # swaps THIS policy's source (the PS auto-attenuator FSM),
+    # never the wire encoding.  No new register; frame-4
+    # (cmd_addr 0x0e) is inert on this FAST_LNA variant.
+    _att_on_tx_enabled: bool = True
+    _ATT_ON_TX_DB: int = 31          # operator-dB, signed axis
+    _ATT_ON_TX_REST_DB: int = 0      # resting (RX-branch governs)
+
+    def _apply_att_on_tx(self, on: bool) -> None:
+        """Drive the RX-ADC-protect step attenuator on the MOX
+        edge through the single writer.  None/exception-safe;
+        never raises into the FSM.  Inert if disabled."""
+        if not self._att_on_tx_enabled or self._stream is None:
+            return
+        db = self._ATT_ON_TX_DB if on else self._ATT_ON_TX_REST_DB
+        try:
+            self._stream.set_tx_step_attn_db(db)  # noqa: SLF001
+        except Exception as exc:  # noqa: BLE001
+            from lyra._txdiag import txdbg
+            txdbg(f"_apply_att_on_tx({on}) failed: {exc}")
 
     # TUN tune-carrier amplitude (modulator domain, 0..1).  The
     # actual radiated level is set by TX drive % (frame-10 C1) and

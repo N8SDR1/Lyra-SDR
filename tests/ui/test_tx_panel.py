@@ -165,6 +165,36 @@ class TxPanelTest(unittest.TestCase):
         self.radio._on_tx_state_changed(False, PttState.RX)
         self.assertEqual(ch.calls, [False, True, False])
 
+    def test_att_on_tx_forces_31_keydown_restores_keyup(self) -> None:
+        # §15.26 ATT-on-TX (4-agent converged): keydown drives the
+        # single writer set_tx_step_attn_db(31) -> frame-11 TX
+        # branch 0x40 -> gateware rx_gain 0 = max RX-ADC
+        # protection; keyup restores 0.  Default ON.
+        from lyra.ptt import PttState
+
+        class _S:
+            def __init__(self) -> None:
+                self.att_calls: list[int] = []
+                self.inject_tx_iq = False
+
+            def set_tx_step_attn_db(self, db: int) -> None:
+                self.att_calls.append(int(db))
+
+        s = _S()
+        self.radio._stream = s
+        self.radio._on_tx_state_changed(True, PttState.MOX_TX)
+        self.assertEqual(s.att_calls[-1], 31)        # keydown -> max
+        self.radio._on_tx_state_changed(False, PttState.RX)
+        self.assertEqual(s.att_calls[-1], 0)         # keyup -> rest
+        self.assertEqual(s.att_calls, [31, 0])
+
+    def test_att_on_tx_none_safe_and_gated(self) -> None:
+        from lyra.ptt import PttState
+        self.radio._stream = None
+        # No stream -> inert, must not raise.
+        self.radio._on_tx_state_changed(True, PttState.MOX_TX)
+        self.radio._on_tx_state_changed(False, PttState.RX)
+
     def test_tune_tone_none_safe(self) -> None:
         from lyra.ptt import PttState
         self.radio._tx_channel = None
