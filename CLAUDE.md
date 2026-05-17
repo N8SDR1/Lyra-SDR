@@ -6146,18 +6146,23 @@ shipped code):
   Lyra already does (`4ce07b9`).  No conflict; defer
   RX-during-TX as non-Phase-3.
 
-**⚠ RF-DELAY = AMPLIFIER PROTECTION (operator 2026-05-16).**
-N8SDR drives a **1 kW solid-state linear** from ~2-3 W HL2+.
-`rf_delay=50 ms` exists so the T/R sequencing fully settles
-before RF is applied — preventing **HOT-SWITCHING** the
-linear (RF into mid-transition relays = destroyed amp).  This
-makes Commit B amp-SAFETY, not cosmetic: HL2 `rf_delay`
-default MUST be ≥50 ms, the keydown order MUST apply RF
-strictly AFTER the MOX-bit + relay settle, and the value must
-never silently shrink (clamp floor, operator-raisable only by
-deliberate action; document the hot-switch risk in the
-Settings tooltip).  Forward: external-PA/QSK sequencing in
-v0.2.x must preserve this invariant.
+**⚠ RF-DELAY = HOT-SWITCH GUIDANCE (operator 2026-05-16,
+REVISED).**  N8SDR drives a **1 kW solid-state linear** from
+~2-3 W HL2+.  `rf_delay` is the MOX-bit→RF settle that
+prevents **HOT-SWITCHING** the linear (RF into mid-transition
+relays = destroyed amp).  **Operator decision (B.1
+`9bc95a2`): this is OPERATOR-ADJUSTABLE 1..75 ms, default 50
+(hot-switch-safe) — NOT a hard floor.**  It's the operator's
+station / amp / risk call; the Settings tooltip carries the
+hot-switch WARNING so a low value is an informed choice, not
+a silent block (consistent with the project's no-nanny,
+operator-curated discipline, cf. §15.20 bypass).  Invariants
+that DO hold: keydown order applies RF strictly AFTER the
+MOX-bit + rf_delay settle; default stays 50; clamp only to
+the sane 1..75 hardware range.  `TrSequencing.RF_DELAY_MIN_MS
+=1 / RF_DELAY_MAX_MS=75` (was the rejected `RF_DELAY_FLOOR_MS`
+).  Forward: external-PA/QSK sequencing must keep the
+"RF strictly after MOX+rf_delay" ordering.
 
 #### INDEPENDENT VERIFICATION 2026-05-16 (2nd agent red-team — caught a plan defect)
 
