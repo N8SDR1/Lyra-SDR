@@ -6794,6 +6794,39 @@ temp is the SAME board, so Lyra's untouched field-proven
 temp decode should also read ~31 °C — agreement validates
 the "don't touch field-proven temp decode" call.
 
+**⚠ POST-RE-MAP BENCH 2026-05-17: VDD works, PA current
+does NOT.** Operator on the b4d45a9 build: the new **VDD
+reads** (→ slot 0x10/addr-2 C3:C4 = `user_adc0` decode
+CONFIRMED correct; half the Corr-3 re-map validated).  But
+**PA current = n/a** → `pa_current_adc` (set to slot 0x18/
+addr-3 C1:C2 = `user_adc1` per the GENERIC Thetis source)
+is NOT populated.  Supply "V" (addr-3 C3:C4) works all
+session → addr-3 frames DO arrive + C3:C4 decodes; so
+addr-3 **C1:C2 is simply not PA-amps on THIS ak4951v4
+gateware**.  Same divergence class already established
+(Lyra's field-proven temp = addr-1 C1:C2 where generic
+Thetis says exciter_power) — the generic networkproto1.c
+label map does NOT match this HL2+ variant; operator-
+empirical > source inference (§3.9).  Thetis DOES show
+1.8 A on this unit, so the gateware emits PA-amps SOMEWHERE
+in the EP6 rotation — location unknown, must be found by
+CAPTURE not guessed.  **NEXT (verify-don't-guess):** use
+the existing **Help → HL2 Telemetry Probe** (the
+`_probe_cb` tap in `_decode_hl2_telemetry`, dialog
+`lyra/ui/telem_probe.py`) to log the live (addr,C1..C4)
+rotation while keyed at FULL tune into the dummy (Thetis
+≈1.8 A condition); find which (addr,byte-pair) raw value
+converts via the verified sense-amp formula
+`((3.26*(raw/4096))/50)/0.04/(1000/1270)` to ≈1.8 A, then
+re-point `pa_current_adc` to THAT slot.  Do NOT speculate
+another slot in code.  KILL-TEST CAVEAT: the intended
+observable is PA *current* dropping; VDD is a poor proxy
+(watchdog cuts PA *bias/current*; the drain VDD rail off
+the 12 V supply likely stays up), so a kill-test run now
+is likely INCONCLUSIVE — a definitive kill-test needs PA
+current reading first.  (Operator electing to run it
+anyway to observe gateware behavior — their call.)
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
