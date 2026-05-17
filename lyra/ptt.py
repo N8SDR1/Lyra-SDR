@@ -321,10 +321,19 @@ class PttStateMachine(QObject):
         self._deferred(self._tr.rf_delay_ms, self._open_tx_iq)
 
     def _open_tx_iq(self) -> None:
+        from lyra._txdiag import txdbg
+        txdbg(f"_open_tx_iq: stream={'OK' if self._stream is not None else 'None'} "
+              f"mox_edge_fade="
+              f"{'OK' if self._mox_edge_fade is not None else 'None'}")
         if self._stream is not None:
             self._stream.inject_tx_iq = True
+            txdbg("_open_tx_iq: SET stream.inject_tx_iq = True")
+        else:
+            txdbg("_open_tx_iq: stream is None -> inject_tx_iq "
+                  "NOT set (FSM not bound -> dead air)")
         if self._mox_edge_fade is not None:
             self._mox_edge_fade.start_fade_in()
+            txdbg("_open_tx_iq: MoxEdgeFade.start_fade_in() called")
 
     # ── keyup ──────────────────────────────────────────────────────
     def _begin_keyup(self) -> None:

@@ -2949,6 +2949,11 @@ class Radio(QObject):
         keyup restarts it.
         """
         from lyra.ptt import PttState
+        from lyra._txdiag import txdbg
+        txdbg(f"_on_tx_state_changed(is_tx={is_tx}, state={state}) "
+              f"_tx_channel={'OK' if self._tx_channel is not None else 'None'} "
+              f"inject_tx_iq="
+              f"{getattr(self._stream, 'inject_tx_iq', '?')}")
         if is_tx:
             # RX -> TX (keydown): gate audio + STOP the RX DSP
             # channel with a blocking flush so nothing of the
@@ -9031,6 +9036,10 @@ class Radio(QObject):
             # edge.  Wire bytes are byte-identical to v0.1.1 until
             # that PTT flip lands.
             self._open_tx_channel()
+            from lyra._txdiag import txdbg
+            txdbg(f"start(): after _open_tx_channel, "
+                  f"_tx_channel is "
+                  f"{'NOT None (proceeding)' if self._tx_channel is not None else 'None -> TX BLOCK SKIPPED (dead air)'}")
             if self._tx_channel is not None:
                 try:
                     from lyra.dsp.mox_edge_fade import MoxEdgeFade
@@ -9050,7 +9059,9 @@ class Radio(QObject):
                         mox_edge_fade=self._mox_edge_fade,
                     )
                     self._tx_dsp_worker.start()
+                    txdbg("start(): TxDspWorker started")
                     self._wire_mic_source()
+                    txdbg("start(): _wire_mic_source done")
                     # v0.2.0 Phase 3 commit 3b (§15.25): inject the
                     # runtime refs into the FSM now that stream +
                     # MoxEdgeFade exist.  The FSM was constructed in
@@ -9062,7 +9073,12 @@ class Radio(QObject):
                         mox_edge_fade=self._mox_edge_fade,
                         on_tx_state_changed=self._on_tx_state_changed,
                     )
+                    txdbg("start(): FSM bind_runtime done -- TX "
+                          "chain fully wired (open->worker->mic->FSM)")
                 except Exception as exc:  # noqa: BLE001
+                    import traceback as _tb
+                    txdbg("start(): TX worker block FAILED:\n"
+                          + _tb.format_exc())
                     print(f"[Radio] TxDspWorker start failed: {exc}")
                     self._tx_dsp_worker = None
                     self._tx_iq_tap = None
@@ -9933,14 +9949,20 @@ class Radio(QObject):
         ``_tx_dsp_worker`` start happens immediately after this
         method returns (when ``_tx_channel`` is not None).
         """
+        from lyra._txdiag import txdbg
         if self._tx_channel is not None:
+            txdbg("_open_tx_channel: already open (idempotent skip)")
             return
         try:
             from lyra.dsp.wdsp_tx_engine import TxChannel, TxConfig
+            txdbg("_open_tx_channel: constructing TxChannel(ch=4)...")
             self._tx_channel = TxChannel(channel=4, cfg=TxConfig())
             self._tx_channel.start()
+            txdbg("_open_tx_channel: TxChannel OPEN + started OK")
         except Exception as exc:  # noqa: BLE001
             print(f"[Radio] TxChannel open failed: {exc}")
+            import traceback as _tb
+            txdbg("_open_tx_channel: FAILED:\n" + _tb.format_exc())
             self._tx_channel = None
 
     def _close_tx_channel(self) -> None:
@@ -10001,9 +10023,15 @@ class Radio(QObject):
                 except Exception:
                     pass
 
+        from lyra._txdiag import txdbg
         if mic_int16.size == 0:
+            txdbg("_on_hl2_mic: mic_int16 EMPTY (no submit)",
+                  every_s=2.0, key="mic_empty")
             return
         if self._tx_dsp_worker is None:
+            txdbg("_on_hl2_mic: _tx_dsp_worker is None (no submit) "
+                  "-> TX chain not wired", every_s=2.0,
+                  key="mic_noworker")
             return
         # int16 BE -> float32 [-1, 1].  Sample slot is 16-bit signed,
         # full-scale = ±32767.  Use 32768.0 divisor for symmetric
@@ -10011,6 +10039,8 @@ class Radio(QObject):
         # threshold.
         mic_f32 = (mic_int16.astype("float32") / 32768.0)
         self._tx_dsp_worker.submit(mic_f32)
+        txdbg(f"_on_hl2_mic: submitted {mic_f32.size} samples to "
+              f"worker (mic flowing)", every_s=2.0, key="mic_ok")
 
     def _wire_mic_source(self) -> None:
         """Wire (or rewire) the active mic-source path to the TX worker.
@@ -10033,11 +10063,16 @@ class Radio(QObject):
         Both paths submit to the same TX worker, which is the single
         threading boundary between producers and the WDSP TXA chain.
         """
+        from lyra._txdiag import txdbg
         if self._stream is None:
+            txdbg("_wire_mic_source: _stream is None -> NOT wired")
             return
         source = self._mic_source
+        txdbg(f"_wire_mic_source: source={source!r}")
         if source == "hl2_jack":
             self._stream.register_mic_consumer(self._on_hl2_mic)
+            txdbg("_wire_mic_source: hl2_jack mic consumer "
+                  "registered (_on_hl2_mic)")
             return
         # source == "pc_soundcard" -- the operator's hardware choice
         # stands.  Standard HL2 operators (no AK4951 codec) MUST be

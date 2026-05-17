@@ -215,8 +215,21 @@ class TxDspWorker:
             except Exception as exc:  # noqa: BLE001
                 self.errors += 1
                 print(f"[TxDspWorker] process error: {exc}")
+                from lyra._txdiag import txdbg as _td
+                import traceback as _tb
+                _td("TxDspWorker.process EXC:\n" + _tb.format_exc())
                 continue
             self.processed += 1
+            from lyra._txdiag import txdbg as _td
+            try:
+                import numpy as _np
+                _pk = float(_np.max(_np.abs(iq))) if iq.size else 0.0
+            except Exception:
+                _pk = -1.0
+            _td(f"TxDspWorker: process ok iq.size={iq.size} "
+                f"peak={_pk:.4f} inject_tx_iq="
+                f"{self._hl2_stream.inject_tx_iq}",
+                every_s=1.0, key="worker")
             # Gate I/Q forwarding on the HL2Stream's inject flag.
             # When False (default, RX-only), the WDSP chain stayed
             # warm but the result is dropped on the floor.  Phase 3
@@ -240,9 +253,15 @@ class TxDspWorker:
                 try:
                     self._hl2_stream.queue_tx_iq(iq)
                     self.queued_iq_blocks += 1
+                    _td(f"TxDspWorker: PACKED iq -> queue_tx_iq "
+                        f"(blocks={self.queued_iq_blocks})",
+                        every_s=1.0, key="packed")
                 except Exception as exc:  # noqa: BLE001
                     self.errors += 1
                     print(f"[TxDspWorker] queue_tx_iq error: {exc}")
+                    import traceback as _tb
+                    _td("TxDspWorker.queue_tx_iq EXC:\n"
+                        + _tb.format_exc())
                 # v0.2 Phase 2 commit 9: sip1 tap (when wired) gets
                 # a copy of the same I/Q that went on the wire.  v0.3
                 # PS calcc thread snapshots this for time-alignment
