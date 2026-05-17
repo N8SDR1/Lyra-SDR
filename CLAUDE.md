@@ -6749,6 +6749,26 @@ no RF -- default-OFF PA).**  All 5 findings in one commit:
   only when `int_tx_on`); phase0 RX-audio null gate GREEN.
   Backup `_backups/lyra-2026-05-17-tx-reconcile.bundle`.
 
+**OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
+knowledge, outranks inference per §3.9 discipline):** the
+HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
+style): disable device 2 → set device 1 to ~100-105 mA →
+enable device 2 → match → **combined ≈ ~200 mA idle**.  Bias
+is set via TWO MCP4662 bias-DAC channels over I²C (a
+*control/calibration* surface).  But the gateware *current
+telemetry* is ONE combined drain-current value (wiki reply
+packet single "Bias current"; EP6 `user_adc1`/"PA Amps").
+=> two PA *bias controls*, one PA *current readout*.
+Implications: (a) the §15.26 Correction-3 re-map readout is
+the single combined current -- VALIDATION YARDSTICK: a
+correctly-decoded `user_adc1` should read ≈ **0.2 A at idle
+bias**, rising under TUN/drive, NOT the bogus ~0.75 we get
+now decoding `user_adc0` (PA Volts) as amps; (b) a two-pot
+PA-bias-set helper (MCP4662 writes, Spark/Thetis-style) is a
+legitimate FUTURE feature, OUT of scope for the kill-test;
+(c) the kill-test observable = that single combined current
+dropping toward idle/zero when the watchdog cuts bias.
+
 **✅ RX-RECOVERY HARDENING SHIPPED `b7e61e6` 2026-05-17**
 (389/0, RX-inert, no RF, backup
 `_backups/lyra-2026-05-17-rx-recovery.bundle`).  Three
