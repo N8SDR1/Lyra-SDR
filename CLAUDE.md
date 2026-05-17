@@ -6405,7 +6405,40 @@ confirmation — verified clean in unit/smoke only so far).
 
 ---
 
-*Last updated: 2026-05-15 EOD — **§15.24 pre-Phase-3
+*Last updated: 2026-05-16 EOD — **v0.2.0 Phase 3 TX bring-up
+deep session (authoritative detail = §15.26).**  Day arc:
+HW-PTT phantom-TX regression root-caused + fixed (`ff5f128`,
+opt-in default-OFF; §10 Q#1 answered — N8SDR HL2+ ptt_in not
+clean at rest) + §3.9 protocol-byte consumption discipline
+LOCKED.  Commit 3.4 (TxPanel + TxSettingsTab +
+`set_tx_power_pct`) + MOX-disable safety + re-enable.  PART A
+hidden-TX-dock (3.4 RX-pops fix, operator-confirmed).  PART B
+RX-stand-down-on-TX + 4 keyup iterations — v1 AGC-reset / v2
+cos²-fade / v3 flush+settle all REVERTED; the **Thetis-verify-
+first** methodology cracked it: keyup "broom" + keydown relay-
+chatter BOTH operator-confirmed fixed via the Thetis-faithful
+RX-channel stop-on-keydown / restart-after-ptt_out-settle
+(`4ce07b9`) + non-blocking keydown RX-stop (`47ae18d`).
+§15.20 host TX-timeout (`1a0da74`).  PART C default-OFF PA
+frame-10 bit (`52bd910`).  Safety: no-auto-key-on-restart +
+Auto-LNA-frozen-in-TX (`cb58bcb`).  Whole-surface
+Thetis-ground-truth verification + an **independent red-team
+that caught a real wrong-wire-byte in the plan before code**
+(frame-11 C4 is RX-att `&0x1F|0x20`, NOT tx/not-MOX-gated;
+tx_step_attn ONLY via reg 0x1C C3 `(31−dB)&0x1F`; HL2
+PA-enable = frame-10 C2 bit3 0x08 Apollo + bit2 0x04 filter,
+which Lyra never sets → why no RF on N8SDR's gateway).
+Commit A PA-current/VDD readout (`4b4170a`).  Commit B/B.1
+capability-sourced TR sequencing + `rf_delay`
+operator-adjustable 1–75 ms default 50 (`9bc95a2`; the hard
+floor was over-reach — operator's amp/risk call + informed
+warning).  378/0; tree clean; backup
+`_backups/lyra-2026-05-16-eod.bundle`; NOT pushed (main
+stays v0.1.1).  NO RF ever enabled.  Resume at C-REVERIFY →
+Commit C (TX-att, no RF) → Commit D (Apollo C2 bits — first
+real RF, HARD operator gate).  See the 2026-05-16 EOD
+NEXT-SESSION block + §15.26.  Earlier:
+2026-05-15 EOD — **§15.24 pre-Phase-3
 reconciliation COMPLETE.**  Day arc: §15.23 TX SSB defect
 root-caused (5-agent: extraneous `SetTXABandpassRun` toggling
 stale `bp1`) + fixed (`86ac228`); 2-agent forward audit then
