@@ -6199,16 +6199,58 @@ encoding was WRONG (caught pre-code):**
   XmitBit.  tx_step_attn itself is NOT mox-gated anywhere —
   it only ever appears in case-4 C3.
 => Commit C must be RE-PLANNED with this corrected truth.
-**Caution:** Lyra's RX-LNA path also uses
-`_compose_frame_11` C4 and RX has worked in production since
-v0.0.9.6 — so either Lyra's RX encoding is correct via a
-different effective path or the HL2 LNA range differs.  DO
-NOT blind-rewrite the RX C4 encoding; a focused
-RX-step-att-encoding verification (Lyra working RX vs Thetis
-`rx_step_attn&0x1F|0x20`, incl. the override/0x20 vs 0x40
-bit + the +12 bias + the -12..+48 vs 0..31 range) is
-required before touching C.  TX side (case-4 0x1C C3 =
-`(31-db)&0x1F`) is the clear, safe part.
+
+#### ⚠ C-REVERIFY 2026-05-17 — the PRIOR "REFUTED" block above
+#### was itself WRONG (read the wrong Thetis loop).  SUPERSEDED.
+
+3rd independent verification (read-only): the prior agent
+cited the **generic `WriteMainLoop`** (`networkproto1.c:588`,
+C4@`:770`).  **HL2 dispatches to `WriteMainLoop_HL2`
+(`:1261-1262`, fn @ `:869`) — it NEVER runs the generic
+loop.**  Corrected HL2 ground truth:
+
+* **reg 0x14 / case-11 C4 (`networkproto1.c:1099-1102`):**
+  `if(XmitBit) C4=(tx_step_attn&0x3F)|0x40; else C4=
+  (rx_step_attn&0x3F)|0x40;` — **6-bit (`&0x3F`), enable bit
+  `0x40`, MOX-gated.**  Lyra's `_compose_frame_11` C4
+  (`0x40|((x+12)&0x3F)`, mox-gated) is **STRUCTURALLY CORRECT
+  + Thetis-faithful for HL2** — NOT a fabrication.  RX works
+  in production because it IS correct (gain-sense operator
+  axis `rx_db+12` over LNA_MIN/MAX_DB=-12..+31 vs Thetis
+  attenuation-sense `31-att`; same correct 6-bit field).
+* **reg 0x1C / case-4 C3 (`:1019`):** `C3=tx_step_attn&0x1F`
+  (5-bit).  HL2 caller `SetTxAttenData(31 - _tx_attenuator_
+  data)` (`console.cs:10658/19165/27815`, HERMESLITE-gated;
+  m_bATTonTX off → SetTxAttenData(0)).  ⇒ on-wire =
+  `(31 - signed_tx_db) & 0x1F`.  **Lyra `_compose_frame_4`
+  C3 = `_tx_step_attn_db & 0x1F` — MISSING the `31-x`.  THE
+  bug.**
+* The frame-11 C4 MOX-gate is **correct for HL2 and must
+  STAY** (case-12/0x16 forcing is a separate adc[1]
+  mechanism, not a replacement).
+
+**CORRECTED LOCKED Commit-C scope (minimal, byte-verified,
+no RX regression):**
+1. `stream.py _compose_frame_4` C3:
+   `int(_tx_step_attn_db) & 0x1F`
+   → `(31 - int(_tx_step_attn_db)) & 0x1F`.
+2. `stream.py _compose_frame_11` C4: KEEP the mox-gate; fix
+   ONLY the TX (mox=True) branch to
+   `(31 - tx_db) & 0x3F | 0x40`.  **Leave the RX (else)
+   branch `0x40|((rx_db+12)&0x3F)` BYTE-IDENTICAL** (field-
+   proven; do NOT touch).
+3. `set_tx_step_attn_db(signed_db)` stays the SINGLE writer;
+   `31-x` lives ONLY in the composer (v0.3-PS forward-compat:
+   PS swaps the source, never the encoding — §15.23/PS-corner
+   discipline).
+4. ATT-on-TX policy / m_bATTonTX-equivalent (force-31 /
+   SetTxAttenData(0)-when-off) = SEPARATE later layer, OUT of
+   scope for this byte-correctness fix.
+**GO** for the corrected Commit C.  **UNCERTAIN (defer, NOT
+in Commit C):** migrating Lyra's RX operator axis from
+gain-sense `(rx_db+12)` to Thetis attenuation-sense
+`(31-att)` for cross-app parity — RX-regression risk, needs
+a bench A/B vs the working v0.0.9.6+ RX, never blind.
 
 **REVISED LADDER:** A (verified) → B (verified, amp-safety)
 → C-reverify (RX-att encoding) → C (corrected) → D (verified,
