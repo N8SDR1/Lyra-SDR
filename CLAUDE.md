@@ -6763,6 +6763,29 @@ yardstick: a correct reading is ~0.2 A at idle bias (not
 the bogus 0.75); VDD ~12-13 V.**  Makes the kill-test
 observable trustworthy -- kill-test now unblocked.
 
+**OPERATOR THETIS PA-CURRENT ANCHOR 2026-05-17 (A/B
+ground truth, same HL2+):** Thetis DOES have a PA-current
+readout (operator stood corrected).  **10 M, FULL tune
+power, dummy load: Thetis shows PA = 1.8 A** (+ Thetis
+lower-left also shows V / temp / fwd-rev watt meters).
+This is the calibration target for Lyra's re-mapped
+`pa_current_amps`: under IDENTICAL conditions (10 M, full
+drive, TUN, dummy load) Lyra should read ≈ 1.8 A if the
+Corr-3 slot (user_adc1, 0x18 C1:C2) AND the verified
+sense-amp formula are both right.  (Earlier "~0.2 A" was
+IDLE BIAS, not full tune -- the full progression is
+~0.2 A idle → ~1.8 A full tune.)  Outcomes: Lyra ≈1.8 A
+→ slot+formula validated, kill-test trustworthy; Lyra
+proportionally off → conversion-constant operator-cal
+(§10 Q#4, easy trim, NOT a slot bug); Lyra ~0/garbage →
+slot still wrong (unlikely post-b4d45a9, re-check).  This
+same full-tune A/B (Lyra vs Thetis current AND watt-meter
+power) is ALSO the Q1 drive-scaling anchor (flat
+255*pct/100 vs Thetis per-band GainByBand): if Lyra full
+drive draws ≪1.8 A / less power, that quantifies the
+deferred Q1 cal gap.  NOTE: image not received in-thread;
+working from operator's stated 1.8 A.
+
 **OPERATOR PA-BIAS GROUND TRUTH 2026-05-17 (domain
 knowledge, outranks inference per §3.9 discipline):** the
 HL2 final is a push-pull PAIR.  Bias *procedure* (SparkSDR-
