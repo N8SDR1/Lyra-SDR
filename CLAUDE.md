@@ -6372,6 +6372,74 @@ decision):**
 * First-RF bench unchanged otherwise: bare HL2+, dummy load,
   NO amp, USB/LSB+mic, low drive, watch PA-current, kill-test.
 
+#### ⚠ OPERATOR-BENCH 2026-05-17 + SOURCE RE-VERIFY — three
+#### corrections (operator: "no power out, PA current always
+#### n/a, PA enabled in settings").  Verified against Thetis
+#### (`netInterface.c` / `networkproto1.c`), NOT guessed.
+
+**CORRECTION 1 — the "Apollo-tuner I²C side-channel REQUIRED
+for RF" claim (§15.26 PART C / Plan-agent / "independent
+verification") is WRONG.  Source-disproven.**
+`EnableApolloTuner(bits)` (netInterface.c:578-585) does NOTHING
+but set a global `ApolloTuner = 0x8` (or 0).  `DisablePA(bit)`
+(:625-636) on HL2 calls `EnableApolloTuner(!bit)` then
+`CmdGeneral()`.  There is **NO I²C transaction anywhere** —
+the HL2 PA-enable mechanism IS exactly frame-10 (case 10 /
+0x12) **C2 bit 3 (0x08)**, which D-2 (`cbba63a`) already sets.
+The Plan-agent + red-team laundered a global-flag-set into an
+"I²C side-channel" (the 3rd agent-laundered-assumption this
+project — §3.9 pattern).  **No new I²C surface is needed; the
+"Apollo-I²C side-channel commit" is CANCELLED.**  D-2's C2
+bit-3 IS the correct, sufficient PA-enable.  Exact Thetis C2:
+`(mic_boost | line_in<<1 | ApolloFilt(0x4) | ApolloTuner(0x8)
+| ApolloATU(0x10) | ApolloFiltSelect(0x20) | 0x40) & 0x7f`.
+
+**CORRECTION 2 — Lyra's frame-10 C3 bit 7 polarity is
+INVERTED vs Thetis.**  `DisablePA`: PA-ENABLE ⇒ `tx[0].pa=0`
+⇒ C3 bit7 = **0**; PA-DISABLE ⇒ bit7 = 1.  Lyra D-2 sets C3
+bit7 = **1** when `_pa_on`.  Backwards.  C3-bit7 is the
+"legacy/UNCERTAIN" path but it must MATCH Thetis (PA-on ⇒
+bit7=0).  Fix: drive C3 bit7 = `0 if _pa_on else 1`, or drop
+the Lyra C3-bit7 write entirely (Thetis's tx[0].pa default is
+0 for non-XVTR) — verify which on the reconciled pass.
+
+**CORRECTION 3 — Commit A decodes the WRONG ADC as "PA
+current"; that's why it's ALWAYS n/a.**  Thetis HL2 EP6
+(`networkproto1.c` HL2 read loop :498-518, generic :330-353):
+* slot **0x10** C3:C4 = `user_adc0` = **"AIN3 MKII PA Volts"**
+  (PA *voltage* / VDD) — Commit A decodes THIS and mislabels
+  it `pa_current_adc` + applies an *amps* formula = garbage.
+* slot **0x18** C1:C2 = `user_adc1` = **"AIN4 MKII PA Amps"**
+  (the actual PA *current*); 0x18 C3:C4 = `supply_volts`
+  ("AIN6 Hermes Volts").
+* slot 0x08 C1:C2 = `exciter_power` (AIN5 drive), C3:C4 =
+  `fwd_power` (AIN1); slot 0x10 C1:C2 = `rev_power` (AIN2).
+So PA *amps* = slot 0x18 C1:C2 (`user_adc1`).  PA *volts*
+(VDD) = slot 0x10 C3:C4 (`user_adc0`).  Lyra also masks a 0
+ADC → NaN → "n/a", so "no telemetry slot" and "genuine 0"
+are indistinguishable (a real diagnostic weakness for this
+bench).  The "MKII" labels imply these AIN maps may be
+HL2-rev-specific (cf. §10 Q#4) — reconcile, do not blind-patch.
+
+**MOST-LIKELY "no power" cause (operator-confirmable, zero
+code):** D-1 TX-drive default = **0 %** ⇒ frame-10 C1
+`drive_level` = 0 ⇒ ZERO RF by design (the fail-safe).
+"PA enabled in settings" alone is insufficient — the operator
+must also raise **TX Drive %** above 0.  Confirm this BEFORE
+any code change (it may be the entire story).
+
+**NEXT (verify-first, reconcile-whole-surface — NOT piecemeal,
+per the §15.26 PS-entangled discipline):** one focused
+Thetis-faithful commit over the frame-10-emit + EP6-telemetry-
+decode surface — (a) confirm 0x12 is in Lyra's EP2 round-robin
+`_cc_cycle` + `set_pa_enabled→set_pa_on→_refresh_frame_10`
+reaches the wire; (b) C3-bit7 polarity fix (Corr. 2);
+(c) re-map telemetry: PA-amps ← slot 0x18 C1:C2 (`user_adc1`),
+PA-volts/VDD ← slot 0x10 C3:C4 (`user_adc0`), supply ← 0x18
+C3:C4; show raw ADC (not 0→n/a) in a diag mode so "slot
+absent" vs "genuine 0" is distinguishable; (d) bench the
+TX-drive % first.  Independent re-verify before landing.
+
 **OPERATOR DECISION 2026-05-17: NO external amplifier until
 "a really good feel of things" — first RF is BARE HL2+ into
 a dummy load only (~few W).**  Materially de-risks first RF:
