@@ -6589,7 +6589,75 @@ family `pa_calibration` formula; Quisk per-band `tx_level`
 table) + the HL2 16-step coarse + fine TX-IQ scale.  Defer as
 v0.2.x power-calibration polish; NOT the dead-air cause.
 
-**LOCKED reconcile plan (ONE commit, multi-source-verified,
+#### ✅ HL2+ AK4951 GATEWARE RTL — GROUND TRUTH 2026-05-17
+#### (operator pointed to the softerhardware/Hermes-Lite2
+#### gateware repo; agent read the actual Verilog of the
+#### EXACT "+" variant `hl2b5up_ak4951v4`).  This is the
+#### authoritative HL2+ answer the host-app refs could not
+#### give.  Local copies saved `Y:\Claude local\_hl2src\`.
+
+**G1 — §10 Q#1 ANSWERED (mic slot):** HL2+ AK4951 gateware
+emits a populated **16-bit mic sample in EVERY EP6 frame,
+UNCONDITIONALLY** — `usopenhpsdr1.v:449-482` FSM always
+appends MIC1/MIC0; content = free-running AK4951 codec
+L-channel latched every audio frame (`hermeslite_core.v:735`
+`wr_tuser=(AK4951)?au_rdata:rx_tuser`; `i2s_ak4951.v:116-123`,
+no PTT/level gating).  So the slot is ALWAYS present (16-bit,
+vs zero-MSB on std HL2).  A host pumping on mic-slot arrival
+is safe on HL2+ — BUT it carries codec audio (often silence),
+so the §15.26 R2 "wire-cadence pump independent of mic
+content" is still the right design (we want the PostGen tone
+regardless of codec silence).
+
+**G2 — what keys the PA (gateware-proven):**
+`control.v:209-220`: addr 0x09 → `vna<=data[23];
+pa_enable<=data[19]; tr_disable<=data[18]`.  Drive
+(`control.v:357-365`): `int_tx_on=(tx_on|ext_ptt) &
+~ext_txinhibit & run & temp_enabletx`;
+`pwr_envpa = pwr_envbias = int_tx_on & ~vna & pa_enable`.
+⇒ **PA bias/RF needs ALL of: 0x09 bit19=1 (=frame-10 C2
+bit3 0x08, ACTIVE-HIGH) AND bit23=0 (VNA off = C2 bit7
+0x80 must stay clear) AND tx_on(MOX/PTT) AND run=1 AND not
+thermal-overheat AND ~ext_txinhibit.**  C3 bit7 is **NOT
+decoded at all** on HL2+ → Lyra's C3-bit7 `_pa_on` write is
+a literal no-op (R1′ confirmed: drop it; C2 0x08 = D-2's
+already-correct bit IS the enable).  PA enable is **pure
+C&C, no I²C/companion gate** (kills the last remnant of the
+old "Apollo-I²C" theory).
+
+**G3 — TX I/Q → RF (gateware-proven):**
+`dsopenhpsdr1.v:297` `ds_cmd_ptt=eth_data[0]` (EP2 C0 bit0);
+`:351-371` TX-I/Q enters the DAC FIFO **only when
+`ds_cmd_ptt|cwx`** — i.e. ONLY when the EP2 frame's C0 bit0
+(MOX) is set.  **There is NO gateware tune-carrier**
+(no 0x09[20]/tune decode).  ⇒ TUN MUST be host-streamed:
+MOX C0-bit0 set on the I/Q-bearing EP2 frames + continuous
+NONZERO TX I/Q.  This validates Lyra's TUN architecture
+(PostGen tone streamed as TX I/Q) and makes the
+verification concrete: confirm Lyra sets EP2 C0 bit0=mox on
+the **I/Q data frames** (not only C&C frames) while keyed,
+and that nonzero I/Q flows continuously.
+
+**Minimal host→radio set for RF on TUN (HL2+ ground truth):**
+(1) run=1; (2) C&C 0x09 bit19=1, bit23=0; (3) EP2 frames C0
+bit0=1 (MOX); (4) continuous nonzero TX I/Q in them; (5)
+~ext_txinhibit / not overheat / ATU not mid-tune.
+
+**G4 deltas:** AK4951 Mic/Line select is a codec **I²C
+register**, NOT a P1 C&C bit (generic-HL2 host can't toggle
+it via P1) — irrelevant to TUN (PostGen tone is mic-
+independent), matters for future SSB mic.  HL2+ `io_ptt_in`
+(external PTT) can key TX independent of host MOX (the
+foot-switch path; later).
+
+**Net effect on the plan:** the locked reconcile is
+CONFIRMED + gateware-justified, plus two added guards —
+(G2) ensure 0x09 C2 bit7 (0x80, VNA) stays 0; (G3) verify
+EP2 **I/Q-frame** C0 bit0=mox while keyed.  Prime cause
+unchanged: **R3** (the correct C2 0x08 bit never reaching
+the wire due to autoload-before-start()).
+
+**LOCKED reconcile plan (ONE commit, gateware-verified,
 no RF until opt-in+key):**
 1. **R3 (prime):** `start()` re-pushes `_pa_on`+`_tx_drive_
    level` to the wire after socket exists.
