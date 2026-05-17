@@ -7616,6 +7616,482 @@ Apollo-I²C = later §3.9-gated commit).  Phase-3-EXIT
 kill-Lyra-mid-TX dummy-load PA-bias-drop test still gates
 real-antenna PA-enable keying.
 
+#### ✅ RELAY-CHATTER / THREAD-STALL ROOT CAUSE — 2-AGENT
+#### INVESTIGATION CONVERGED 2026-05-17 (operator-requested:
+#### "investigate the relay chatter and thread stall ... also
+#### whether it's the cause of the RX audio pops AND the quick
+#### volume increases ... and the earlier AK4951+Python concern
+#### I called a bluff ... and Vulkan").  No code changed —
+#### operator asked to INVESTIGATE.  Two independent agents
+#### (Qt-main-stall↔EP2-writer ; RX-pops/surge unifying root +
+#### Vulkan) both returned, fully converged.
+
+**SHARED ROOT — CONFIRMED (both agents independently):**
+transient **Qt main-thread GIL monopolisation** is the single
+root of BOTH the GUI-event relay chatter AND the GIL-
+attributable §9.6 RX pops.  Mechanism: a heavy *synchronous*
+main-thread unit of work — `QOpenGLWidget paintEvent`
+(`spectrum_gpu.py:1811-1832`) + full-`QPainter` EiBi text-
+layout overlay (`_draw_eibi_overlay`) + framebuffer swap +
+dock relayout/`tabifyDockWidget`+`raise_()` on a tab/window/
+focus event — holds the GIL long enough that the EP2-writer
+and DSP-worker Python threads cannot run.  MMCSS 'Pro Audio'
+priority is set but **cannot preempt a held GIL** (a thread
+that wants the GIL still waits for the holder to release it;
+OS priority does not break that).  The coupling is the GIL,
+**not a data dependency** — the wire MOX bit does NOT flap;
+it is purely an EP2 *cadence/keepalive gap*.
+
+**GAP-LENGTH SELECTS THE SYMPTOM (the unifying insight):** the
+EP2 writer has **no pre-buffer** (`stream.py` ~2215/2233/
+2292-2296: producer-paced semaphore, `EP2_HEARTBEAT_TIMEOUT
+=0.010`, `EP2_KEEPALIVE_MAX_GAP=0.050`).  It survives a
+~20-50 ms GIL hold; a hold >~50 ms trips the keepalive fence.
+- **Short gap (~tens of ms)** → EP2 underrun → audio sink
+  underrun-recovery step → the §9.6 "occasional pop louder
+  than the rest" (the residual class parked since v0.0.7.1;
+  reproducible into a dummy load, all-DSP-off — consistent
+  with a delivery-jitter, not a DSP, cause).
+- **Long gap (>~50 ms, the heaviest paint/dock-relayout
+  events)** → keepalive fence trips → HL2 gateware sees the
+  EP2 cadence break → **T/R relay reacts/chatters** (the new
+  GUI-event defect; the actual chatter threshold is gateware-
+  set, not pinned in Lyra).
+Same root, two faces — exactly the operator's hypothesis.
+
+**VOLUME-SURGE IS SEPARATE AND ALREADY FIXED — do NOT fold it
+in (honest correction of the operator's third symptom):** the
+"quick volume increases" is NOT this root.  It was the
+`ff5f128` phantom-TX defect (HW-PTT-in mis-read at RX rest →
+spurious MOX → loud surge), root-caused + fixed earlier this
+session.  Independently, the per-sample-AGC upward-pop
+mechanism is GONE (deleted `radio.py:11405` in the cleanup
+arc) and Auto-LNA is back-off-only (`radio.py:6973-6987`) so
+it structurally cannot produce an upward surge.  Two distinct
+defects; the surge does not share the chatter/pop root.
+
+**THE AK4951+PYTHON-GIL CONCERN WAS REAL — honest
+acknowledgement (operator's "bluff" point):** the operator
+was right that the underlying GIL/AK4951 concern is genuine
+and is in fact the SAME class of problem that forced the
+entire v0.0.9.6 cffi pivot (§14.3 — "Python's writer/sink
+threads no longer compete with the DSP for the GIL" was the
+architectural fix that ended the click/motorboat saga).  What
+I had pushed back on earlier was ONLY the specific *false*
+web-doc claims (the refuted "HL2+ = 2-RX-max / 4-slice-packets-
+break-it / frame-repurpose" myth — RTL-disproven, §15.26).
+The mechanism the operator was pointing at (heavy synchronous
+Python on the GIL starving the wire/audio threads) is real,
+documented, and is exactly this root.  Not a bluff; I
+conflated the false packet-myth with the valid GIL concern and
+should have separated them.  Corrected.
+
+**VULKAN IS NOT THE FIX (verdict, with reasoning — §15.8
+item #1 reaffirmed):** Vulkan/GPU-compute buys *CPU headroom
+under contest load*, NOT *latency* and NOT *GIL-serialisation
+relief*.  The bottleneck here is the **GIL being held by a
+synchronous main-thread paint/relayout**, not FFT CPU cost
+(FFT is already off the main thread in the DSP worker).
+Moving FFT to a Vulkan compute shader would not shorten the
+paintEvent+overlay+framebuffer-swap+dock-relayout critical
+section that is actually holding the GIL.  Vulkan stays a
+legitimate v0.2-window CPU-headroom item (now reinforced by
+the operator's AMD RX 9070XT — cross-vendor advantage over
+Thetis's CUDA-only path) but it is the wrong tool for the
+chatter/pop root.  Keep parked per §15.8.
+
+**RANKED REMEDIATION (investigation output — NOT yet
+authorised; operator asked to investigate, decision pending):**
+1. **Cheap immediate mitigation (~0.5 day):** throttle
+   spectrum FPS (40 → 20-25 Hz) + cap the waterfall multi-
+   emit multiplier.  Directly shortens and rate-limits the
+   heaviest main-thread paint unit → fewer/shorter GIL holds.
+   Low risk, no protocol/DSP touch.
+2. **Decouple repaint/vsync from the event loop (~1-2 days):**
+   move the EiBi overlay text-layout off the synchronous
+   paintEvent (pre-rendered/cached), insulate dock relayout.
+   Reduces the worst-case hold below the keepalive fence.
+3. **Durable safety-critical structural fix (~3-5 days):
+   insulate/decouple the EP2 keepalive from main-thread Python
+   stalls.**  Either a deep EP2 pre-buffer OR a native/OS-timer
+   keepalive send so the wire cadence cannot be starved by ANY
+   Python main-thread stall.  Win32 waitable-timer scaffolding
+   already exists, unused, at `stream.py:1980-2049`.  This is
+   the real fix for the relay-chatter SAFETY item (relay
+   chatter is mechanically hard on the T/R relay and is a
+   hot-switch hazard if it ever coincides with antenna/amp TX
+   — a pre-on-air gate alongside the no-TX-bandpass GAP).
+4. **Vulkan full path (~2 wk):** NOT warranted for this root
+   (see verdict).  Parked per §15.8.
+
+**PRIORITY/SEQUENCING:** per the operator's standing
+direction, get an actual RF-producing TX keyup + the
+Phase-3-EXIT kill-test done FIRST (this is functionally
+complete + hardware-validated into a dummy as of the
+2026-05-17 bench).  The relay-chatter structural fix (#3) is
+a pre-antenna/heavy-on-air SAFETY gate — schedule it with
+the no-TX-bandpass (BPF/LPF) GAP close, BEFORE any antenna
+work.  The §9.6 pops (#1/#2 mitigations) remain the dedicated
+post-RF workstream (network-throttle registry / FFTW WISDOM /
+this GIL root — all now point at the same family).  Operator
+decision required on whether to take #1 (cheap, now) opp-
+ortunistically vs bundle #1+#3 into the pre-antenna gate.
+
+#### ⚠ SUPERSEDES THE ABOVE — 2-SENIOR-AGENT FULL-CODEBASE
+#### AUDIT 2026-05-17 (operator REFUTED the "throttle FPS /
+#### EiBi paint" conclusion empirically: AMD 9900X / 32GB /
+#### RX 9070XT 16GB / Gen5 SSD, already 25 FPS, EiBi OFF in
+#### ham bands.  "Something isn't right.")  Two independent
+#### senior agents (concurrency lens + whole-tree defect
+#### sweep) read the real RX→audio→EP2 hot paths IN FULL and
+#### CONVERGED.  The prior FPS/EiBi/paint diagnosis was
+#### SHALLOW and is WITHDRAWN.  No code changed — investigate
+#### first (operator directive).
+
+**THE REAL ROOT IS STRUCTURAL, NOT THROUGHPUT — high-end
+hardware cannot rescue it.**  Three confirmed structural
+defects, both agents independent + file:line-cited:
+
+* **D-1 (Critical) — the wire cadence is a GIL-serialized
+  cross-thread lockstep round-trip with NO pre-buffer.**
+  `audio_mixer.py:540-544` → `audio_sink.py:265-297`
+  (`_lockstep_outbound`) → `stream.py:2265-2389`.  The mixer
+  thread, per 126-sample frame, takes `_tx_audio_lock`,
+  `.extend`s a deque from `samples_lr.tolist()`, releases
+  `_ep2_send_sem`, then **blocks** on
+  `_lockstep_slot.acquire()` until the EP2 writer's `sendto`
+  returns; the writer must re-acquire the GIL after its
+  semaphore wait, build the frame under `_cc_lock`, `sendto`
+  under `_send_lock`, then release the slot.  The 380 Hz
+  wire cadence is a mixer→writer→mixer handshake, EVERY leg
+  needing the GIL.  Any GIL holder (a UI signal storm, a
+  blocking DLL call, GC) injects latency into BOTH legs.  The
+  **AK4951/EP2 path has ZERO pre-buffer** while `SoundDeviceSink`
+  pre-fills 100 ms (`audio_sink.py:496-515`) — so the
+  operator's HL2-jack path has nothing to ride out even a
+  small stall.  `EP2_HEARTBEAT_TIMEOUT=0.010`,
+  `EP2_KEEPALIVE_MAX_GAP=0.050`.
+* **D-2 (Critical) — `fexchange0` is called BLOCKING while
+  holding the WDSP per-channel `_lock` that the Qt main
+  thread also takes.**  `wdsp_engine.py:124,928-932`; lock at
+  every setter (`:236-542`).  The DSP worker parks in a
+  blocking `fexchange0` *holding `_lock`*; every UI-driven
+  WDSP mutation (mode/AGC/filter/notch — **and everything a
+  tab/dock activation re-applies**, `app.py:2903-2917`,
+  `:2972-2984`, `restoreState` `:3041`) runs on the Qt main
+  thread and must take the SAME `_lock`.  Worker mode also
+  calls `QCoreApplication.processEvents()` every loop
+  (`worker.py:501-510`) and config updates arrive via
+  `QueuedConnection` (`radio.py:9587-9613`) — so a tab-open
+  Qt-signal storm executes those slots *inside the worker
+  loop*, each taking `_lock`, stalling the audio block →
+  lockstep slip (D-1) → **the "open a tab → relay chatter"
+  is a LOCK + event-pump coupling, NOT paint cost.**  This is
+  the precise mechanism the FPS/EiBi audit missed.
+* **D-3 (High) — EP2/AK4951 underrun zero-pads with a HARD
+  discontinuity, no slew.**  `stream.py:2310-2327`: on
+  `avail<126` the remainder is literal `(0.0,0.0)` pairs =
+  a full-scale step mid-frame into the codec = "a pop louder
+  than the rest."  `rmatch.py:463-503` half-cosine `_dslew`
+  protects ONLY `SoundDeviceSink`; the operator's AK4951
+  path has NO equivalent.  This is the long-parked §9.6
+  residual pop (dummy load, all-DSP-off, network-ruled-out):
+  it is delivery jitter, not DSP, which is exactly why it
+  survives with DSP off.  The reverted Option Z (`022d1fd`
+  half-cosine fill) was reverted for the WRONG reason — the
+  underrun-step itself is real and needs graceful fill
+  regardless of the keepalive cause.
+
+**GAP LENGTH STILL SELECTS THE SYMPTOM (the unifying
+insight survives the re-diagnosis):** short stall (10-50 ms)
+→ D-3 underrun-step → §9.6 RX pop; long stall (>50 ms,
+keepalive fence) → HL2 sees EP2 cadence break → D-1/D-2 →
+T/R relay chatter.  One root, two faces — confirmed, but the
+root is GIL-serialized unbuffered cadence plumbing + a
+blocking DLL call under a UI-shared lock, NOT paint load.
+
+**SECONDARY CONTRIBUTORS (both agents):** per-datagram
+allocation on the RX recv thread — `radio.py:9764-9768`
+(`_rx_batch.extend(samples.tolist())`), `stream.py:227-330`
+(`_decode_iq_samples` allocates ~6 numpy + 4 complex64
+buffers/USB-block ×2 ×~5053 dgram/s, **and decodes DDC2/DDC3
+which are always zeros on HL2**), `_decode_hl2_telemetry`
+run TWICE per datagram (~10000×/s; needs ~1 Hz) — steady GC
+pressure on the most timing-sensitive thread → GC pause →
+socket backlog → EP6 drop → pop.
+
+**REAL CORRECTNESS BUGS surfaced (independent of the two
+symptoms, fix regardless):**
+* `stop()` joins the EP2 writer `timeout=1.0` then nulls the
+  ref + closes socket regardless — a wedged writer is leaked
+  as a zombie with the ref nulled masking it
+  (`stream.py:3090-3104`).
+* Keyup race: `_request_rx_channel(True)` (async, worker
+  between-blocks) then `_tx_rx_muted=False` (immediate, Qt
+  thread) — a block can run through a stale RX channel
+  un-gated before the worker restarts it
+  (`radio.py:3006-3009`).
+* **Self-introduced this session:** the §15.26 "R5 immediate
+  emit" change made `set_tx_drive_level`/`set_pa_on` call
+  `_send_cc` → a synchronous `sendto` on the Qt main thread
+  under `_send_lock` when `inject_audio_tx` is False
+  (PC-Soundcard / pre-sink) — regressed the
+  defer-to-writer-round-robin discipline the codebase
+  adopted for `_set_rx1_freq`/`set_tx_step_attn_db`
+  (`stream.py:1925-1929,3021`).  A speculative parity patch;
+  flag honestly.
+* Worker `worker.py` docstring still says "SHELL only,
+  process_block is a no-op stub" — it is the LIVE production
+  DSP path (stale/dangerous given the guess-fix history).
+* Swallowed bare-`except` on RX/worker/probe/att paths
+  collectively mask exactly the intermittent failure class
+  producing symptom 1 — need rate-limited surfaced counters.
+
+**VULKAN — NOT THE FIX FOR THESE SYMPTOMS (both agents,
+concrete reasoning, NOT a brush-off):** DSP arithmetic is
+ALREADY off the GIL (WDSP cffi runs in the DLL's own C
+thread, §14.3); FFT is ALREADY off the Qt main thread;
+symptom 1 reproduces with **all DSP off**.  The FFT is not
+in the critical section that holds the GIL.  A Vulkan
+compute shader removes work that is not on the critical path
+and adds a host↔GPU sync that itself needs the GIL to
+dispatch — it would make the spectrum cheaper and change
+nothing audible.  Vulkan stays a GENUINE separate item for
+CPU headroom under contest load (more compelling now on the
+operator's RX 9070XT since Thetis is CUDA-only — §15.8) but
+it is the wrong instrument for relay chatter / RX pops.
+
+**MORE THREADS/CORES — also not it; a SEPARATE PROCESS is
+the only "more isolation" answer that helps (both agents):**
+the 9900X is >90% idle here; the constraint is structural
+GIL serialization + a blocking DLL call under a contended
+lock, not CPU saturation.  Adding in-process threads adds
+GIL contenders on the very cadence path that is already too
+jitter-sensitive.  A separate PROCESS for the EP2/wire
+thread genuinely would help — but only because it achieves
+the real fix (decoupling the keepalive from Python/GIL/Qt),
+which an in-process OS-timer keepalive achieves far more
+cheaply.
+
+**RANKED STRUCTURAL FIX (investigation output — NOT
+authorised; operator decision pending):**
+1. **Stop holding WDSP `_lock` across the blocking
+   `fexchange0` (D-2).**  Either `block=0` + pull-when-ready,
+   or give the audio path its own channel/lock so UI setters
+   never serialize against a blocking DSP call.  Both agents:
+   **this alone likely kills the relay chatter.**  Highest
+   value-to-risk.
+2. **Decouple the EP2 keepalive from the Python producer
+   (D-1).**  OS/Win32 waitable-timer keepalive sender (the
+   UNUSED scaffolding already at `stream.py:1980-2049`) OR a
+   genuine multi-hundred-ms EP2 pre-buffer; make the
+   mixer→writer handoff a lock-free ring with no cross-thread
+   blocking acquire.  Removes the structural starvation for
+   BOTH symptoms.
+3. **Give the AK4951 path the slewed-silence-fill + pre-fill
+   the SoundDeviceSink/rmatch path already has (D-3).**
+   Robustness backstop; directly addresses the §9.6 pop.
+4. Move IQ/mic batching off `.tolist()`/`.extend` to a
+   preallocated numpy ring; skip DDC2/DDC3 decode on HL2;
+   rate-limit telemetry decode to ~1 Hz (secondary GC
+   contributor).
+5. Fix the real correctness bugs (zombie-writer join, keyup
+   un-gate race, the self-introduced R5 main-thread `sendto`
+   regression, worker docstring, swallowed-except counters).
+6. Vulkan / separate-process — deferred, different problems
+   (CPU headroom / true isolation); NOT this root.
+
+**STATUS: investigation complete, converged, recorded.  NO
+code changed.  Operator decision required** on sequencing vs
+the first-RF/Phase-3-EXIT priority.  Fix #1 is the
+highest-leverage, lowest-risk single change and is a strong
+candidate to take before the pre-antenna gate; #2+#3 are the
+durable SAFETY structural fixes (relay chatter is mechanically
+hard on the T/R relay + a hot-switch hazard on antenna/amp TX)
+and belong with the no-TX-bandpass GAP close BEFORE any
+antenna work.  Agent ids for continuation:
+`a2aa14216d723a17f` (concurrency), `af89e59555c97e345`
+(defect sweep).
+
+#### ⚠ RED-TEAM RE-LOOP + REFERENCE STUDY 2026-05-17
+#### (operator directive: "loop through the findings again,
+#### agree/disagree, if disagree why — then look again at how
+#### the reference achieves this correctly (yes, C not
+#### Python/Qt)").  3 independent agents: 2 skeptical
+#### re-verifiers of D-1/D-2/D-3 + 1 reference-C-source
+#### architecture study.  CONVERGED — and they CAUGHT A REAL
+#### ERROR in the prior pass.  NO code changed.
+
+**D-1 (GIL-serialized unbuffered EP2 lockstep) — BOTH
+re-verifiers AGREE, verified end-to-end.**  Confirmed:
+`audio_mixer.py:541-544` → `audio_sink.py:265-297`
+(`_lockstep_outbound` does `tolist()`+deque.extend under
+`_tx_audio_lock`, releases `_ep2_send_sem`, then **blocks on
+`self._stream._lockstep_slot.acquire()`** at `:297`) →
+writer `stream.py:2265/2350/2362-2366/2389`.  Every leg GIL.
+**WORSE than first stated:** `AK4951Sink.__init__`
+(`audio_sink.py:191-222`) builds **NO ring at all** (vs
+`SoundDeviceSink` 100 ms pre-fill `:496-515`); and the
+`SoundDeviceSink:499` comment "mirrors the AK4951 sink
+pre-fill above" is **stale/false — there is no AK4951
+pre-fill to mirror.**  NEW latent bug the prior pass MISSED:
+`_lockstep_slot.acquire()` (`audio_sink.py:297`) has **NO
+timeout** → if the writer wedges, the mixer thread hangs
+**forever**, not "slips."
+
+**D-2 (blocking `fexchange0` under WDSP `_lock` shared with
+Qt setters) — BOTH re-verifiers DISAGREE: the stated
+mechanism is FACTUALLY WRONG.**  Read in full: `process_block()`
+/ `process()` (`wdsp_engine.py:883-990`) take **NO `self._lock`
+at all** — explicitly lock-free by design (docstring `:897`
+"Not thread-safe within a single channel").  The blocking
+`fexchange0` runs under `radio._iq_capture_lock`
+(`radio.py:10965`, comment `:11016`), a *radio-level* lock —
+**NOT** the WDSP per-channel `_lock`.  The Qt-thread setters
+take `RxChannel._lock` (`:236-542`) which is held only for
+the microseconds of one DLL setter call, **never across
+`fexchange0`**.  ⇒ **the prior pass's ranked Fix #1 ("stop
+holding `_lock` across the blocking `fexchange0`") targets a
+lock that is not held there — it would be a NO-OP and must
+NOT be implemented as written.**  The REAL "tab-open → relay
+chatter" coupling (both agents independently): `worker.py:510`
+calls `QCoreApplication.processEvents()` **every loop
+iteration**; tab/dock activation fires a QueuedConnection
+slot-storm (`radio.py:9586-9613`) that runs *inside the
+worker loop between audio blocks* — including `_rx_chan_req`
+→ `rx.stop()`/`reset()` (`worker.py:536-561`) which **does**
+take `_lock` + flush WDSP — perturbing block production →
+D-1 lockstep slip → wire-cadence break → gateware T/R
+chatter.  Right neighbourhood, wrong mechanism; the corrected
+Fix #1 is "get the slot-storm + `reset()`/channel-restart
+OFF the audio worker's `processEvents()` path (dedicated
+control queue applied between blocks), not a WDSP-lock
+change."
+
+**D-3 (AK4951 underrun hard zero-pad, no slew) — BOTH
+AGREE, the leading mechanical cause of symptom 1.**
+`stream.py:2310-2327` `pulled.extend([(0.0,0.0)]*(126-avail))`
+= literal full-scale step mid-frame, no slew; `rmatch._dslew`
+half-cosine (`rmatch.py:463-503`) protects **only**
+`SoundDeviceSink`.  Matches symptom 1 exactly (dummy load,
+DSP off, network-ruled-out, since v0.0.7.1) — delivery
+jitter, not DSP.  Caveat (one agent, fair): the code's own
+`un=0` comment claims it doesn't fire in steady state — it
+is the *leading hypothesis*, confirm with the
+`tx_audio_underruns` counter / `LYRA_AUDIO_DEBUG`, not yet
+proven to fire.
+
+**Secondary allocations — AGREE (contributor, NOT primary;
+prior pass slightly overstated).**  `radio.py:9764-9765`
+list round-trip, `_decode_iq_samples` decodes always-zero
+DDC2/3, `_decode_hl2_telemetry` literally twice/datagram —
+all confirmed, but vectorised + microseconds on a >90%-idle
+9900X; a jitter amplifier feeding D-3, not an independent
+loud-pop source.  "Red herring as a primary cause, valid as
+cleanup."
+
+**Correctness bugs — AGREE all real**, incl. the
+honestly-flagged self-introduced R5 main-thread `sendto`
+regression (only bites PC-Soundcard/pre-sink, NOT the
+operator's AK4951 path — so it does NOT explain his
+symptoms, but is a real regression to revert).  Zombie-writer
+join, keyup un-gate race, stale worker docstring, swallowed
+bare-excepts: all confirmed.
+
+**KEEPALIVE-FENCE-TRIPS-RELAY claim — one agent pushed back:
+SPECULATIVE.**  The fence's *purpose* is to keep EP2 alive;
+a C&C-only keepalive frame is a *valid* frame; nothing in
+the code shows it toggles T/R.  The gateware threshold is
+unpinned (`stream.py:2229-2232` admits it).  Treat the
+"long-gap → relay" link as conjecture on unpinned gateware
+behaviour, not established; symptom 2 is better explained by
+the processEvents slot-storm perturbing the cadence than by
+the fence itself.
+
+**REFERENCE ARCHITECTURE (C source studied for architecture
+ONLY — Lyra implements native; the reference name stays out
+of shipped code/commits per the standing no-attribution rule;
+provenance lives only here).  HOW THE KNOWN-GOOD REF AVOIDS
+ALL THREE — it never collapses producer+consumer into one
+blocking rendezvous:**
+- **Three decoupled threads, never one:** (1) RX/network
+  read thread clocked by EP6 packet arrival = the radio's
+  48 kHz ADC clock is the master time base; (2) a DSP pump
+  thread blocked on a counting semaphore draining an elastic
+  multi-block ring; (3) a **dedicated wire-send thread** that
+  is the ONLY thing that builds+sends the host→radio frame.
+  DSP output **never calls `sendto`** and **never blocks on
+  it** — it hands off through a semaphore-gated double buffer;
+  the wire thread can send frame N while DSP computes N+1.
+  (D-1 answer.)
+- **Per-stream partitioned pump lock**, and the blocking
+  DSP-exchange is only ever called once a full input block
+  is ring-confirmed available → the locked section is
+  bounded/short, never "UI waits arbitrarily on a blocking
+  DSP call."  Fast scalar UI param changes go through the
+  DSP engine's own fine-grained per-channel guard, NOT the
+  coarse pump lock.  (D-2 answer.)
+- **Underrun is never zero-stuffed mid-stream:** the wire
+  thread will not emit a frame until real data exists; the
+  elastic ring is **pre-filled** (consumer cannot start
+  draining until ≥1 full output block is queued) and the
+  DSP engine slews the envelope on every start/stop.  (D-3
+  answer.)
+- **Independent OS waitable-timer keepalive** (fixed 500 ms
+  period) on its own thread, fully decoupled from DSP — the
+  command cadence floor never drops because audio stalled.
+- **The one principle Lyra is missing:** decouple every
+  producer from every consumer with an elastic, pre-filled
+  ring + a dedicated single-owner thread per resource, and
+  clock the whole chain off the radio's sample arrival,
+  never off a thread that can block.  D-1/D-2/D-3 are three
+  faces of this ONE missing principle.
+
+**CORRECTED RANKED FIX (supersedes the earlier ranking —
+note Fix #1 is re-scoped because the original was a no-op):**
+1. **Get the tab/dock QueuedConnection slot-storm +
+   `reset()`/channel-restart OFF the audio worker's
+   `QCoreApplication.processEvents()` path** (`worker.py:510`,
+   `:536-561`) — apply control/config changes via a dedicated
+   command queue drained between blocks, not pumped inside
+   the audio loop.  This is the real relay-chatter fix
+   (NOT a WDSP-lock change).
+2. **Insert a buffered, single-owner wire-thread hand-off
+   (D-1):** the mixer must never block on the writer's
+   `sendto`; a bounded pre-filled ring + a dedicated daemon
+   wire thread owning the socket; add a TIMEOUT to
+   `_lockstep_slot.acquire()` (or remove the lockstep
+   entirely in favour of the ring) to kill the latent
+   infinite-hang.
+3. **Give the AK4951/EP2 path the pre-fill + slewed
+   underrun-fill the SoundDeviceSink/rmatch path already has
+   (D-3)** — directly fixes the §9.6 pop; fix the stale
+   `audio_sink.py:499` comment.
+4. **Independent OS/Qt-timer keepalive** decoupled from DSP
+   production (the unused Win32 waitable-timer scaffolding at
+   `stream.py:1980-2049` is the seam) so a DSP/mixer stall
+   can never also drop the command cadence.
+5. RX-thread allocation cleanup (skip DDC2/3 decode on HL2,
+   batch mic, telemetry decode ~1 Hz not 2×/datagram).
+6. Correctness bugs incl. reverting the self-introduced R5
+   main-thread `sendto`; zombie-writer join; keyup un-gate
+   race; worker docstring; surfaced error counters.
+7. Vulkan / more-threads — still NOT this root (both
+   re-verifiers concur with the prior verdict): DSP already
+   off-GIL, FFT off-main, symptom 1 reproduces DSP-off; a
+   separate process only helps because it achieves the same
+   decoupling #2/#4 achieve in-process more cheaply.
+
+**STATUS: re-loop + reference study COMPLETE, converged,
+ONE prior error corrected (D-2 / old Fix #1 = no-op,
+re-scoped).  NO code changed.  The whole thing is ONE
+architectural change (buffered decoupled hand-off + control
+off the audio loop + pre-fill/slew + independent keepalive),
+not 3+ patches.  Operator decision required on sequencing vs
+the first-RF / Phase-3-EXIT priority.**  Agent ids:
+`a547a1e68ee90f8e7` + `af7484949addaa28d` (re-verifiers),
+`a90630117a915dace` (reference study).
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-16 EOD)

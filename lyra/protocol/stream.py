@@ -900,6 +900,38 @@ class HL2Stream:
         self.tx_audio_underruns: int = 0
         self.tx_audio_overruns: int = 0
 
+        # ── Slewed underrun fill (raised-cosine, click-free) ────────
+        # When the host audio producer can't supply a full EP2 frame,
+        # the legacy behaviour was to splice literal (0.0, 0.0) pairs
+        # onto the tail -- a hard full-scale step into the AK4951
+        # codec = a broadband click "louder than the audio" (the
+        # long-standing residual pop reproducible into a dummy load
+        # with all DSP off).  The host-PC-soundcard egress path
+        # already fades gracefully on underflow via a raised-cosine
+        # slew; the on-board-codec EP2 path had no equivalent.  These
+        # two precomputed half-cosine tables give the EP2 path the
+        # same treatment Lyra-native: ``_SLEW_FADE_OUT`` ramps the
+        # last real sample down to silence over ~0.67 ms; on the
+        # first healthy frame after an underrun ``_SLEW_FADE_IN``
+        # ramps the resumed audio back up over the same span so the
+        # recovery edge is not a step either.  Latency-neutral: the
+        # steady-state (no-underrun) path only records the last
+        # sample and takes one branch.
+        import math as _math
+        _SLEW_N = 32  # ~0.67 ms @ 48 kHz -- kills the click,
+        #               short enough to be inaudible as a fade.
+        self._ep2_slew_n = _SLEW_N
+        # fade-out: 1.0 -> 0.0 (raised cosine), index 0..N-1
+        self._ep2_fade_out = tuple(
+            0.5 * (1.0 + _math.cos(_math.pi * (k + 1) / _SLEW_N))
+            for k in range(_SLEW_N))
+        # fade-in: 0.0 -> 1.0 (raised cosine), index 0..N-1
+        self._ep2_fade_in = tuple(
+            0.5 * (1.0 - _math.cos(_math.pi * (k + 1) / _SLEW_N))
+            for k in range(_SLEW_N))
+        self._ep2_underrun_active: bool = False
+        self._ep2_last_lr: tuple = (0.0, 0.0)
+
         # ── v0.2 TX bring-up Phase 0 scaffolding ────────────────────
         # TX center frequency in Hz for DDC2/DDC3 NCO writes (C0=0x02,
         # 0x08, 0x0a per HPSDR P1 networkproto1.c:949-1001).  Phase 0
@@ -1222,16 +1254,14 @@ class HL2Stream:
         with self._tx_audio_lock:
             avail = min(len(self._tx_audio), n_samples)
             pulled = [self._tx_audio.popleft() for _ in range(avail)]
-        if avail < n_samples:
-            # Underrun — TX queue had less data than EP2 wants to send.
-            # Pad with zeros so the EP2 frame is always the right size,
-            # but COUNT the event so the operator can see it in the
-            # status bar.  Each underrun = silent samples injected into
-            # the AK4951 audio stream = audible click on the codec
-            # output.  Counter is read by the UI's 1 Hz status tick
-            # (lyra/ui/app.py::_tick_cpu).  v0.0.9.1+
-            self.tx_audio_underruns += 1
-            pulled.extend([(0.0, 0.0)] * (n_samples - avail))
+        # Underrun handling is delegated to _slew_fill_pairs: instead
+        # of splicing a hard (0.0, 0.0) step (= a broadband click on
+        # the AK4951 codec), it ramps the last real sample down to
+        # silence with a raised-cosine and fades the audio back in on
+        # recovery.  It also increments tx_audio_underruns (surfaced
+        # in the UI's 1 Hz status tick) so the operator still sees
+        # the event count.  Steady-state cost: one branch + one read.
+        pulled = self._slew_fill_pairs(pulled, n_samples)
         # pulled is a list of (L, R) tuples — split into separate arrays.
         lr = np.asarray(pulled, dtype=np.float32)        # shape (N, 2)
         lr *= self.tx_audio_gain
@@ -2307,24 +2337,17 @@ class HL2Stream:
                         avail = min(len(self._tx_audio), 126)
                         pulled = [self._tx_audio.popleft()
                                   for _ in range(avail)]
-                    if avail < 126:
-                        # Should be impossible under Path C/C.1/C.2
-                        # semantics (semaphore signaled => >= 126
-                        # samples were queued, no _send_cc drain
-                        # path active during injection).  Count it
-                        # as a diagnostic if it ever happens (e.g.,
-                        # clear_tx_audio raced with a signal that
-                        # wasn't drained, or a future code path
-                        # introduces a regression).  The Path C.2
-                        # diagnostic added in bc5713f -- which
-                        # printed each event with a delta-timestamp
-                        # so we could measure the underrun rate --
-                        # is removed now that we're back to ov=0
-                        # un=0 in steady state.  Restore it from
-                        # commit bc5713f if a future regression
-                        # ever puts un back on the meter.
-                        self.tx_audio_underruns += 1
-                        pulled.extend([(0.0, 0.0)] * (126 - avail))
+                    # Underrun should be impossible under Path
+                    # C/C.1/C.2 semantics (semaphore signaled =>
+                    # >= 126 samples were queued, no _send_cc drain
+                    # path active during injection), but a raced
+                    # clear_tx_audio or a future regression can put
+                    # it back.  _slew_fill_pairs makes that case
+                    # click-free (raised-cosine fade-out + recovery
+                    # fade-in instead of a hard zero step) and
+                    # increments tx_audio_underruns (single source
+                    # of truth shared with the _send_cc drain).
+                    pulled = self._slew_fill_pairs(pulled, 126)
                     try:
                         audio_bytes = self._pack_audio_bytes_pairs(
                             pulled)
@@ -2401,6 +2424,67 @@ class HL2Stream:
             # removed -- semaphore is a pure Python primitive).
             while self._ep2_send_sem.acquire(blocking=False):
                 pass
+
+    def _slew_fill_pairs(self, pulled: list, target: int) -> list:
+        """Click-free underrun fill for the EP2 audio path.
+
+        ``pulled`` is a list of (L, R) float pairs drained from the
+        TX-audio deque (``len(pulled) == avail <= target``).  Returns
+        a list of exactly ``target`` pairs.
+
+        * Healthy frame (avail == target): if recovering from an
+          underrun, apply a rising raised-cosine to the first
+          ``_ep2_slew_n`` samples so the resume edge is not a step;
+          record the last sample for fade continuity; return as-is.
+        * First underrun frame: ramp the last real value down to
+          silence with a falling raised-cosine, pad the remainder
+          with zeros, and arm the recovery fade-in.
+        * Sustained underrun (already faded): keep any real prefix,
+          then pure silence -- do NOT re-fade from the last real
+          value every frame (that would be a frame-rate sawtooth /
+          buzz).  The fade-out happened once on entry.
+
+        ``tx_audio_underruns`` is incremented here so both EP2 drain
+        sites (the writer loop and ``_send_cc``) share one source of
+        truth.  Latency-neutral: the steady-state path only reads the
+        last sample + takes one branch -- no fade work, no buffering.
+        """
+        avail = len(pulled)
+        if avail >= target:
+            if self._ep2_underrun_active:
+                n = (self._ep2_slew_n
+                     if self._ep2_slew_n < target else target)
+                g = self._ep2_fade_in
+                for k in range(n):
+                    lv, rv = pulled[k]
+                    f = g[k]
+                    pulled[k] = (lv * f, rv * f)
+                self._ep2_underrun_active = False
+            if target:
+                self._ep2_last_lr = pulled[target - 1]
+            return pulled
+
+        # ── underrun ───────────────────────────────────────────────
+        self.tx_audio_underruns += 1
+        need = target - avail
+        if self._ep2_underrun_active:
+            # Sustained underrun -- already faded out on entry.  Keep
+            # whatever real prefix arrived, then pure silence.  Never
+            # re-fade from the last real value (frame-rate sawtooth).
+            pulled.extend([(0.0, 0.0)] * need)
+            return pulled
+        # First underrun frame: fade the last real value out.
+        start = pulled[avail - 1] if avail > 0 else self._ep2_last_lr
+        sl, sr = start
+        fo = self._ep2_fade_out
+        n = self._ep2_slew_n if self._ep2_slew_n < need else need
+        for k in range(n):
+            f = fo[k]
+            pulled.append((sl * f, sr * f))
+        if need > n:
+            pulled.extend([(0.0, 0.0)] * (need - n))
+        self._ep2_underrun_active = True
+        return pulled
 
     def _build_ep2_frame_with_audio(
         self, c0: int, c1: int, c2: int, c3: int, c4: int,
