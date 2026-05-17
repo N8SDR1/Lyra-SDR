@@ -6283,10 +6283,70 @@ separate/deferred.  378/0, no RF.
   correctly OUT of Phase-3 scope, no Commit-D action (revisit
   in the v0.3 PS commit).  §15.26 ground truth independently
   CONFIRMED against source; no UNCERTAIN items.
-* **Auditor 2 (RF-production completeness) — PENDING**
-  (Apollo bitset completeness, BPF/LPF band filters,
-  modulation→EP2, drive-level safety).  Synthesise both +
-  GO/NO-GO before Commit D.
+* **Auditor 2 (RF-production completeness) — DONE (re-run
+  synchronous; the 1st background instance dropped silently).
+  VERDICT: NO-GO for "Commit D as planned alone produces RF."**
+  Caught a DECISIVE 2nd independent blocker:
+  1. **🔴 `frame-10 (0x12) C1 = `prn->tx[0].drive_level`` is
+     hardwired 0 with NO setter anywhere in Lyra**
+     (`stream.py:965` init, `:1584` used as C1, grep-confirmed
+     no writer).  This C1 byte is the HL2 gateware's PRIMARY
+     digital TX amplitude scalar — Thetis's real power knob:
+     `SetOutputPower(f) → i=int(255*f*swr) → SetOutputPower
+     Factor → tx[0].drive_level → case-10 C1`
+     (`networkproto1.c:1078`; `NetworkIO.cs:199-211`;
+     `netInterface.c:524-533`).  **drive_level=0 ⇒ zero RF
+     regardless of PA-enable / step-att / modulation.**
+     Commit D (Apollo C2) is NECESSARY-BUT-NOT-SUFFICIENT.
+  2. PA-enable C2: confirmed necessary+sufficient =
+     `0x40|0x08(ApolloTuner)|0x04(ApolloFilter)=0x4C`
+     (`networkproto1.c:1076-1089`; `netInterface.c:524-635`;
+     operator DB chkApolloTuner=chkApolloFilter=True; HL2 UI
+     labels: ApolloTuner="Enable PA", ApolloFilter="Enable
+     Full Duplex").  Lyra hardcodes `c2=0x40` (`stream.py:
+     1585`).  Commit D closes THIS gap correctly.  The
+     PART-C `_pa_on`→C3-bit-7 (`stream.py:1591`) is NOT the
+     HL2 RF mechanism (Thetis sets `tx[0].pa`=0 for
+     non-XVTR keydown) — likely benign, UNCERTAIN, do NOT
+     rely on it.
+  3. **GAP (benign on bare-HL2 dummy load, MUST fix before
+     filter-board/on-air):** BPF/LPF `_bpf_filter_bits`/
+     `_lpf_filter_bits`=0 no setter (`stream.py:973-974`);
+     case-10 C3/C4 ship 0.  HL2 auto-selects on-board LPF +
+     Alex bits inert with no board → incorrect-but-benign
+     for the dummy-load bench; NOT a Commit-D blocker.
+  4. CONFIRM (no action): TX-NCO freq (regs 0x02/0x08/0x0a,
+     RIT-free, before MOX edge); modulation chain mic→
+     TxChannel(WDSP TXA, ALC on)→EP2 I/Q cols 2/3 gated by
+     `inject_tx_iq` — complete + correctly gated; MOX-edge
+     ordering; current zero-drive state is fail-safe.
+  5. **DESIGN CORRECTION (operator decision needed):** Lyra's
+     `set_tx_power_pct` maps the operator "TX power %" to the
+     AD9866 **step attenuator** (`set_tx_step_attn_db`).
+     Thetis's power slider maps to **drive_level (C1)**
+     (`SetOutputPower`).  The step attenuator (-28..+31) is
+     the PS auto-attenuator / ATT-on-TX layer, NOT the power
+     knob.  Operator TX-power% likely should drive C1
+     drive_level (Thetis-faithful) — a real behaviour change
+     to decide before coding.
+
+**CORRECTED Commit-D scope (was 1 commit; now 2 + a
+decision):**
+* **D-1 (NEW, CRITICAL):** add `set_tx_drive_level` (single
+  writer → `_refresh_frame_10` C1); wire operator TX-power%
+  → C1 per Thetis `i=int(255*f)`; **LOW default** (~≤20% →
+  C1≈25-50) for a conservative first key.  Resolve the §5
+  TX-power%↔step-att-vs-drive_level mapping (operator
+  decision).  Without D-1, first RF is impossible.
+* **D-2 (= the original D):** `set_pa_on` → frame-10 C2
+  `|= 0x08 | 0x04` (behind default-OFF `set_pa_enabled`;
+  `pa_enable_uses_apollo_i2c` cap).  Keep C3-bit-7 gated but
+  documented not-the-mechanism / UNCERTAIN.
+* Both behind the shipped default-OFF `set_pa_enabled`; BOTH
+  required for RF; band-filter (GAP #3) deferred (benign on
+  the bare-HL2 dummy-load bench, hard gate before on-air).
+* First-RF bench unchanged otherwise: bare HL2+, dummy load,
+  NO amp, USB/LSB+mic, low drive, watch PA-current, kill-test.
 
 **OPERATOR DECISION 2026-05-17: NO external amplifier until
 "a really good feel of things" — first RF is BARE HL2+ into
