@@ -8289,9 +8289,72 @@ validate the structural rebuild (control off the worker
 OS-timer keepalive, folding Brent B1–B7) before any code on
 the safety-critical wire path — verify-don't-guess.
 
----
+#### ✅ INSTRUMENTED PROOF 2026-05-18 — `lyra_wire.log` +
+#### screenshot.  D-1 CONFIRMED + RE-SCOPED: the wire-cadence
+#### break is CHRONIC steady-state, not just GUI-event-driven.
+#### Verification complete; the structural rebuild is now
+#### evidence-locked, not theory.
 
-## ▶ NEXT SESSION STARTS HERE (2026-05-17 EOD)
+`LYRA_WIRE_DEBUG=1` run, HL2-jack/dummy, RX DIGU 40 m @192 k,
+CPU **5.1 %** (machine bored).  Hard numbers:
+
+* **Startup MAINSTALLs:** ~1043 / 343 / **2642** / 83 ms
+  (theme+WDSP-open+first-paint — heavy construction; acute but
+  one-shot, lower priority).
+* **THE FINDING — sustained baseline:** ~150 back-to-back
+  `[WIRE] EP2 gap=` events, **every one 25–56 ms, un=0 ov=0
+  the entire time**, deque 386–740/48000.  Nominal lockstep
+  cadence is **2.6 ms** (380 Hz); the wire is delivering in
+  **25–56 ms lumps = 10–20× too slow, CONTINUOUSLY**, not on
+  an event.  Many gaps (50–56 ms) **exceed the 50 ms HL2
+  keepalive fence** outright.  Status bar "lit up like a
+  Christmas tree" = the `gap≥25 ms` RED state is the *steady
+  state*, not an exception.
+* **un/ov stayed 0 across all 150** — the structural-blindness
+  prediction is now empirically PROVEN: the deque cushion
+  (386–740 samples ≈ 8–15 ms) absorbs the lumps so the
+  counters never move while the wire cadence is grossly
+  broken.  The old un/ov instrument was blind to a
+  *continuous* pathology.
+* **GUI/compositor events = acute spikes ON TOP:** a ~268 ms
+  MAINSTALL mid-run; the 2642 ms startup one; the operator's
+  window-drag bursts.  Same root, bigger amplitude.
+* **`Stream: 91 errors`** (EP6 seq) — the RX recv thread is
+  ALSO being starved (datagram drops), same GIL root, both
+  directions.
+
+**THE MECHANISM, now precise:** CPU 5 % rules out compute
+(operator was right — not the PC, not paint cost).  The
+25–56 ms baseline ≈ the operator's **25 FPS spectrum/waterfall
+paint period (~40 ms)**.  The wire send is structurally
+quantised to the Qt-main paint/event-loop frame because the
+chain is GIL-coupled: DSP worker calls
+`QCoreApplication.processEvents()` every loop iteration
+(`worker.py:510`), the mixer→writer hand-off is a blocking
+GIL lockstep (`audio_sink.py:297` / `stream.py`), and the
+QOpenGLWidget paint + queued-slot storm hold the GIL for a
+frame at a time.  So the entire produce→mixer→writer chain
+advances **once per paint frame (~40 ms)** instead of every
+2.6 ms.  Not because paint is heavy (it isn't — 5 % CPU) but
+because the wire path is *serialised behind the paint frame*.
+This is exactly D-1 + the worker-`processEvents` coupling the
+red-team identified, now with hard numbers and the precise
+quantiser (the frame clock).
+
+**SCOPE LOCKED — the structural rebuild is the fix, evidence-
+backed, no more investigation needed:** decouple the EP2
+wire egress from the Python/GIL/Qt-frame entirely — a
+dedicated single-owner wire thread draining a pre-filled
+elastic ring at its own monotonic cadence (or the OS
+waitable-timer at `stream.py:1980-2049`), the mixer→writer
+hand-off lock-free (no blocking lockstep acquire), and the
+control/slot-storm off the DSP worker's `processEvents` path.
+Fold Brent B1–B7 + the AGC-resume-overshoot.  This is THE
+job; design it properly (plan-before-code on the safety-
+critical wire path, the §15.25/§15.26 methodology), staged +
+tested + benched, NOT a patch.  Backup
+`_backups/lyra-2026-05-18-wire-instrument.bundle`; instrument
+commit `8630403`.
 
 **AUTHORITATIVE RESUME DOC = §15.26** (full locked plan +
 Thetis-verified ground truth + the audit/red-team/reference
