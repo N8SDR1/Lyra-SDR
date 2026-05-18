@@ -3856,6 +3856,29 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    # ── WISDOM-build subprocess sentinel (FROZEN-SAFE) ──────────────
+    # In a PyInstaller --windowed build ``sys.executable`` is the app
+    # exe and ``python -m lyra.dsp._wisdom_build`` is IGNORED by the
+    # bootloader, so wdsp_native.ensure_wisdom() spawns
+    # ``<exe> --wisdom-build <dir>``.  We MUST handle that here,
+    # BEFORE QApplication / MainWindow / Radio / the HL2 socket —
+    # otherwise the child would launch a second full Lyra (a second
+    # QApplication + Radio + HL2 UDP bind) which itself finds wisdom
+    # missing and spawns again: unbounded recursive double-radio
+    # contending the hardware.  Pure native call, then exit.  (Qt may
+    # already be imported by this module's load; that is benign — we
+    # never construct QApplication on this path.)
+    if "--wisdom-build" in sys.argv:
+        try:
+            _bdir = sys.argv[sys.argv.index("--wisdom-build") + 1]
+        except (ValueError, IndexError):
+            sys.exit(2)
+        try:
+            from lyra.dsp._wisdom_build import build as _wb
+            sys.exit(_wb(_bdir))
+        except Exception:  # noqa: BLE001
+            sys.exit(5)
+
     # If the user has selected OpenGL in Visuals settings, request a
     # default GL surface format *before* QApplication is constructed —
     # Qt requires this ordering. The format is permissive (OpenGL 2.0

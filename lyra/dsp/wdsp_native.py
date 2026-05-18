@@ -784,49 +784,234 @@ def delete_wisdom() -> bool:
     return removed
 
 
+# 20 min hard cap — WDSP PATIENT across the full size range is
+# legitimately "several minutes" (the reference modal says "5 minutes
+# or more"); generous so a slow CPU's real build is never killed
+# mid-plan into a permanent re-spawn loop.  On timeout: hard kill +
+# continue WITHOUT cached wisdom this run (WDSP re-plans at
+# channel-open — slower but console-free and safe; never block
+# forever, never crash).
+_WISDOM_BUILD_TIMEOUT_S = 1200.0
+
+
+def _spawn_wisdom_builder(build_dir: str):
+    """Spawn the throwaway WDSP-wisdom builder subprocess.
+
+    Frozen-aware (the critical hazard): in a PyInstaller --windowed
+    build ``sys.executable`` is the app exe and ``-m`` is ignored, so
+    we spawn ``<exe> --wisdom-build <dir>`` (handled by the early
+    sentinel in ``lyra/ui/app.py:main`` BEFORE Qt/Radio/socket).
+    From source we use ``-m lyra.dsp._wisdom_build``.  DEVNULL std
+    handles + close_fds + CREATE_NO_WINDOW so the child's WDSP
+    ``AllocConsole``/``freopen`` cannot inherit or flash anything at
+    the parent.  Returns the Popen or None on spawn failure.
+    """
+    import subprocess
+    if getattr(sys, "frozen", False):
+        argv = [sys.executable, "--wisdom-build", build_dir]
+    else:
+        argv = [sys.executable, "-m", "lyra.dsp._wisdom_build",
+                build_dir]
+    kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+              stderr=subprocess.DEVNULL, close_fds=True)
+    if sys.platform.startswith("win"):
+        kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    try:
+        return subprocess.Popen(argv, **kw)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WISDOM] builder spawn failed (non-fatal): {exc}",
+              file=sys.stderr, flush=True)
+        return None
+
+
+def _wisdom_splash():
+    """Mandatory first-run feedback.  The subprocess removes the
+    only prior feedback (the [WISDOM] print now happens invisibly
+    in the child); a silent multi-minute hang is worse than the
+    old crash for a tester.  Returns (close, pump) callables —
+    both no-op when Qt isn't up (the throwaway child / headless /
+    unit tests), so this never imposes a UI dependency."""
+    try:
+        from PySide6.QtWidgets import QApplication, QSplashScreen
+        from PySide6.QtGui import QPixmap, QColor, QPainter
+        from PySide6.QtCore import Qt
+        appinst = QApplication.instance()
+        if appinst is None:
+            return (lambda: None, lambda: None)
+        pm = QPixmap(580, 130)
+        pm.fill(QColor(16, 20, 26))
+        p = QPainter(pm)
+        p.setPen(QColor(220, 230, 240))
+        p.drawText(
+            pm.rect(), Qt.AlignCenter,
+            "Lyra — optimizing FFT plans (one-time).\n\n"
+            "This can take several minutes.\n"
+            "Please wait; do not close this window.")
+        p.end()
+        sp = QSplashScreen(pm)
+        sp.show()
+        appinst.processEvents()
+        return (sp.close, appinst.processEvents)
+    except Exception:  # noqa: BLE001
+        return (lambda: None, lambda: None)
+
+
+def _load_wisdom_in_process(lib_handle) -> bool:
+    """Load an EXISTING wisdom file into FFTW's per-process global.
+
+    Safe ONLY when the file is present: WDSP ``wisdom.c:51`` then
+    takes the import-only branch and SKIPS the AllocConsole/
+    freopen/FreeConsole block entirely (that block is the crash, and
+    it only runs on the missing-file build path).  Caller MUST have
+    verified ``wisdom_present()`` first.  Returns True on success.
+    """
+    try:
+        d = os.path.join(str(wisdom_dir()), "")
+        lib_handle.WDSPwisdom(_ffi.new("char[]", d.encode("utf-8")))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WISDOM] in-process cache load failed (non-fatal): "
+              f"{exc}", file=sys.stderr, flush=True)
+        return False
+
+
 def ensure_wisdom(lib_handle=None) -> bool:
     """Build-or-load the FFTW wisdom cache BEFORE the first channel
-    open.  Idempotent per process (guarded) — safe to call ahead of
-    every OpenChannel.  Returns True if it had to (re)build.
+    open.  Idempotent per process.  Returns True if it (re)built.
 
-    Fast when the file exists (FFTW just imports the cached plans);
-    a one-time multi-minute PATIENT search only when the file is
-    missing (fresh install, a cleared cache, or a DLL bump).
+    Cached path: in-process import-only (fast, console-free, safe).
+    Build path: the dangerous WDSP ``AllocConsole``/``freopen
+    (stdout)``/``FreeConsole`` runs ONLY in a THROWAWAY SUBPROCESS
+    (it would otherwise hijack+free the main process's redirected
+    stdout and abort startup before the UI).  The subprocess builds
+    into a private temp dir; the parent atomically publishes it so
+    "present" always means "valid".  Spawn/wait is OUTSIDE ``_lock``
+    (shared with ``load()``).  A failed/timed-out build leaves the
+    cache absent + ``_wisdom_loaded`` False (retry not suppressed)
+    and does NOT touch the in-process build branch (no crash);
+    WDSP just re-plans at channel-open — slower but safe.
     """
     global _wisdom_loaded
+    if lib_handle is None:
+        lib_handle = _lib
+    if lib_handle is None:
+        # No WDSP context (unit/headless/misconfig) — safe no-op,
+        # never spawn a builder.
+        return False
+
+    # ── Fast/cached path: _lock held ONLY here (NOT across spawn) ──
     with _lock:
         if _wisdom_loaded:
             return False
-        if lib_handle is None:
-            lib_handle = _lib
-        if lib_handle is None:
+        if wisdom_present():
+            if _load_wisdom_in_process(lib_handle):
+                _wisdom_loaded = True
             return False
-        try:
-            d = wisdom_dir()
-            d.mkdir(parents=True, exist_ok=True)
-            # WDSP builds "<directory>wdspWisdom00" — pass a trailing
-            # separator so it lands inside the folder, not beside it.
-            dir_arg = os.path.join(str(d), "")
-            building = not wisdom_present()
-            if building:
-                print(
-                    "[WISDOM] FFT optimization cache missing — building "
-                    "now (ONE-TIME, can take several minutes; Lyra will "
-                    "be unresponsive until done).  Path: " + str(d),
-                    flush=True)
-            rebuilt = bool(lib_handle.WDSPwisdom(
-                _ffi.new("char[]", dir_arg.encode("utf-8"))))
-            _wisdom_loaded = True
-            if building:
-                print("[WISDOM] FFT optimization cache built + saved.",
+
+    # ── Build path (file missing): everything below is OUTSIDE
+    # ``_lock`` so a minutes-long build can't block a concurrent
+    # ``load()`` (TX channel open) on the shared lock. ──────────────
+    import shutil
+    import tempfile
+    import time as _t
+    wdir = wisdom_dir()
+    try:
+        wdir.mkdir(parents=True, exist_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Single-flight: one builder at a time across instances (two
+    # Lyras must not both burn minutes writing the same cache).
+    lockf = wdir / ".building"
+    try:
+        _fd = os.open(str(lockf),
+                      os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(_fd)
+    except FileExistsError:
+        print("[WISDOM] another instance is building the FFT cache; "
+              "continuing without it this run (WDSP re-plans — "
+              "slower but safe).", flush=True)
+        return False
+    except Exception:  # noqa: BLE001
+        # Couldn't take the lock for an odd reason — don't spawn;
+        # degrade gracefully.
+        return False
+
+    tmpdir = None
+    close_splash, pump = _wisdom_splash()
+    rebuilt = False
+    try:
+        tmpdir = tempfile.mkdtemp(prefix=".wbuild-", dir=str(wdir))
+        print("[WISDOM] FFT optimization cache missing — building in "
+              "a subprocess (ONE-TIME, several minutes).  Target: "
+              + str(wisdom_file()), flush=True)
+        proc = _spawn_wisdom_builder(tmpdir)
+        if proc is not None:
+            deadline = _t.monotonic() + _WISDOM_BUILD_TIMEOUT_S
+            rc = None
+            while True:
+                rc = proc.poll()
+                if rc is not None:
+                    break
+                if _t.monotonic() > deadline:
+                    try:
+                        proc.kill()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    print("[WISDOM] builder timed out; continuing "
+                          "without cached wisdom this run.",
+                          file=sys.stderr, flush=True)
+                    rc = -1
+                    break
+                pump()              # keep the splash painted
+                _t.sleep(0.15)
+            built = os.path.join(tmpdir, "wdspWisdom00")
+            if rc == 0 and os.path.isfile(built):
+                try:
+                    # Atomic same-volume publish: "present" ⇒ "valid"
+                    # (a killed/concurrent child can never leave a
+                    # half-written canonical cache that would route
+                    # the in-process load back into the crash).
+                    os.replace(built, str(wisdom_file()))
+                    rebuilt = True
+                    print("[WISDOM] FFT optimization cache built + "
+                          "published.", flush=True)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[WISDOM] publish failed (non-fatal): "
+                          f"{exc}", file=sys.stderr, flush=True)
+            else:
+                print(f"[WISDOM] builder produced no cache (rc={rc}); "
+                      f"continuing without it (WDSP re-plans — "
+                      f"slower but safe).", file=sys.stderr,
                       flush=True)
-            return rebuilt
-        except Exception as exc:  # noqa: BLE001
-            # Never let wisdom block channel open — WDSP still works
-            # (it just re-plans in-process this run).
-            print(f"[WISDOM] ensure failed (non-fatal): {exc}",
-                  file=sys.stderr, flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WISDOM] build orchestration failed (non-fatal): "
+              f"{exc}", file=sys.stderr, flush=True)
+    finally:
+        try:
+            close_splash()
+        except Exception:  # noqa: BLE001
+            pass
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        try:
+            lockf.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Load the just-published cache in-process (re-take _lock).  If
+    # the build failed the file is still absent ⇒ DO NOT call WDSP
+    # (that hits the AllocConsole/stdout-hijack crash branch); leave
+    # _wisdom_loaded False so a later retry / Settings rebuild works.
+    with _lock:
+        if _wisdom_loaded:
             return False
+        if not wisdom_present():
+            return False
+        if _load_wisdom_in_process(lib_handle):
+            _wisdom_loaded = True
+            return rebuilt
+        return False
 
 
 def dll_dir() -> Optional[Path]:
