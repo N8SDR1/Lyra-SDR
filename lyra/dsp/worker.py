@@ -154,18 +154,9 @@ class DspWorker(QObject):
     """Linear-power running average for S-meter, sampled at meter
     cadence (~6 Hz today).  Migrated from Radio in B.4/B.5."""
 
-    lna_peak_update = Signal(float, float, float)
-    """peak_max, rms_max, rms_mean — IQ peak + RMS for the Auto-LNA
-    logic + toolbar readout on the main thread (B.6).
-
-    S4a (2026-05-18): COALESCED.  Was a per-block (~90 Hz) 2-arg
-    emit; that cross-thread Qt emit storm contended the GIL with
-    the paint frame.  Now accumulated over ``_LNA_EMIT_BLOCKS``
-    (~100 ms ≈ 10 Hz) and emitted once per interval as the
-    interval MAX peak, MAX rms (``_evaluate_pullup`` wants the
-    worst case) and MEAN rms (the toolbar quadratic-mean would
-    read high off the max).  ``max(_lna_peaks)`` over a feed of
-    interval-maxes is lossless vs the old per-block max."""
+    lna_peak_update = Signal(float, float)
+    """peak_dbfs, rms_dbfs — per-block IQ peak + RMS for the
+    Auto-LNA logic on the main thread.  Migrated in B.6."""
 
     state_changed = Signal(str)
     """Lifecycle observability: emits "running", "stopped" on
@@ -214,17 +205,6 @@ class DspWorker(QObject):
         # start, False = stop-with-flush.  Applied between blocks
         # like _reset_requested so it never races process_block.
         self._rx_chan_req: "bool | None" = None
-        # S4a — LNA peak/RMS coalescer.  Accumulate per-block over
-        # ~_LNA_EMIT_BLOCKS (≈100 ms at the ~90 Hz block rate ≈
-        # 10 Hz emit) then emit one interval reduction, instead of
-        # a per-block cross-thread Qt emit (the GIL-contending
-        # storm S4a removes).  Reset on the MOX→RX edge so a
-        # TX-coupled max can't poison the post-keyup decision.
-        self._LNA_EMIT_BLOCKS = 9
-        self._lna_acc_n = 0
-        self._lna_acc_peak = 0.0
-        self._lna_acc_rms_max = 0.0
-        self._lna_acc_rms_sum = 0.0
         # ── S3: plain thread-safe control queue (replaces the Qt
         # event pump).  Config / sink-swap / fft-ring-flush from the
         # main thread are enqueued here (DirectConnection → runs on
@@ -652,44 +632,6 @@ class DspWorker(QObject):
                 print(f"[DspWorker] final ctl drain error: {exc}")
             self.state_changed.emit("stopped")
 
-    def _feed_lna(self, samples, mox):
-        """S4a LNA peak/RMS coalescer (pure; testable in isolation).
-
-        Accumulate one block's max-peak / mean-RMS into the rolling
-        interval; return ``(peak_max, rms_max, rms_mean)`` once per
-        ``_LNA_EMIT_BLOCKS`` (≈10 Hz) else ``None``.
-
-        ``mox`` True (transmitting) drops the partial accumulator and
-        returns ``None`` — a TX-coupled peak/RMS must never survive
-        into the first post-keyup Auto-LNA decision (red-team
-        correction #3).  Never emits a spurious 0.0 sample: an
-        interval is only published when ≥1 RX block contributed.
-        """
-        if mox:
-            self._lna_acc_n = 0
-            self._lna_acc_peak = 0.0
-            self._lna_acc_rms_max = 0.0
-            self._lna_acc_rms_sum = 0.0
-            return None
-        if samples.size <= 0:
-            return None
-        mag_sq = samples.real * samples.real + samples.imag * samples.imag
-        peak = float(np.sqrt(np.max(mag_sq)))
-        rms = float(np.sqrt(np.mean(mag_sq)))
-        self._lna_acc_peak = max(self._lna_acc_peak, peak)
-        self._lna_acc_rms_max = max(self._lna_acc_rms_max, rms)
-        self._lna_acc_rms_sum += rms
-        self._lna_acc_n += 1
-        if self._lna_acc_n < self._LNA_EMIT_BLOCKS:
-            return None
-        out = (self._lna_acc_peak, self._lna_acc_rms_max,
-               self._lna_acc_rms_sum / self._lna_acc_n)
-        self._lna_acc_n = 0
-        self._lna_acc_peak = 0.0
-        self._lna_acc_rms_max = 0.0
-        self._lna_acc_rms_sum = 0.0
-        return out
-
     def process_block(
         self,
         samples: np.ndarray,
@@ -753,26 +695,22 @@ class DspWorker(QObject):
         if mode == "Off":
             return
 
-        # B.6 / S4a — LNA peak / RMS tracking (was on main thread in
+        # B.6 — LNA peak / RMS tracking (was on main thread in
         # _on_samples_main_thread).  In worker mode the main-thread
         # path is bypassed (rx-thread routes IQ straight to the
         # worker queue), so the worker has to do this measurement
-        # or Auto-LNA goes blind.  Cheap: two scalar reductions per
-        # block, ACCUMULATED and emitted once per ~100 ms interval
-        # (≈10 Hz) — the per-block cross-thread Qt emit was a
-        # GIL-contending storm (S4a target).  Reset on MOX so a
-        # TX-coupled peak/RMS can't survive into the first post-
-        # keyup _adjust_lna_auto (mandatory red-team correction #3;
-        # mirrors radio.py _adjust_lna_auto's mox early-return +
-        # the single-thread coalescer reset).
+        # or Auto-LNA goes blind.  Cheap: two scalar reductions
+        # over the IQ block.  Result is emitted to the main thread
+        # via ``lna_peak_update`` so Radio's existing _lna_peaks /
+        # _lna_rms history (read by Auto-LNA + toolbar readout)
+        # stays current.
         try:
-            # GIL-coherent single-attribute read; no extra snapshot
-            # allocation on the hot path.
-            mox = bool(getattr(radio, "_dispatch_state", None)
-                       and radio._dispatch_state.mox)
-            out = self._feed_lna(samples, mox)
-            if out is not None:
-                self.lna_peak_update.emit(out[0], out[1], out[2])
+            if samples.size > 0:
+                mag_sq = (samples.real * samples.real
+                          + samples.imag * samples.imag)
+                peak = float(np.sqrt(np.max(mag_sq)))
+                rms = float(np.sqrt(np.mean(mag_sq)))
+                self.lna_peak_update.emit(peak, rms)
         except Exception as exc:
             print(f"[DspWorker] lna peak/rms error: {exc}")
             # Never block DSP on a measurement glitch.

@@ -9298,28 +9298,45 @@ All red-team-corrected items implemented:
   suppression, no-spurious-0.0, 3-arg signal/slot, radio
   trim/window-retune, toolbar-uses-mean.
 
-**OPERATOR HL2 RE-GATE — judge on lna-rate / GIL, NOT chop
-(no RF, dummy load, normal RX):**
-1. `set LYRA_WIRE_DEBUG=1` then
-   `python -u -m lyra.ui.app > %USERPROFILE%\lyra_wire.log
-   2>&1`; HL2-jack, DSP off, ~1 min + a few Chrome-open /
-   cross-monitor window-drags.  Send the log; I run
-   `summarize_capture`.
-2. **PASS (computed, honest NBNS scope):** the worker→main
-   `lna_peak_update` emit rate dropped ~9× (≈90→≈10 Hz) →
-   measurable GIL-contention reduction; Auto-LNA back-off /
-   pull-up + the toolbar ADC/peak readout still behave
-   correctly (no sluggish back-off, no high-reading toolbar
-   RMS — the silent-regression checks).  The continuous
-   ~55 ms MAINSTALL *metric* MAY persist and the chop MAY
-   remain — that is **S4b's** target, **NOT an S4a failure**
-   (the R-B corner-painting trap; S4a was always honestly
-   necessary-but-not-sufficient).  S4b stays MANDATORY.
-3. On PASS → **S4b** (move `_process_spec_db` off-main — an
-   S2/S3-scale threading rebuild; its own design + red-team
-   + HL2 gate).  On a true Auto-LNA/toolbar regression →
-   numbers back here, diagnose, no guess.  `origin/main`
-   stays v0.1.1.
+**⚠ S4a HL2 RE-GATE → REVERTED 2026-05-18 (operator-empirical
+authority; do NOT re-attempt S4a in isolation).**  Operator
+bench (HL2-jack, DSP off, dummy load, Auto-LNA on — same
+config as S2/S3): ear "**seems worse, lots of audio
+stumbles**".  Objective `lyra_wire.log` vs the S3 baseline:
+
+| metric | S3 (known-good) | S4a |
+|---|---|---|
+| MAINSTALL | ~55, mean ~92, p50 55 | comparable (~50, mean ~57) |
+| EP2 gaps | 19, 25–50 ms, p95 42 | ~20, 25–42 ms — comparable |
+| `un` underrun storm | ~1851 | ~1569 — comparable |
+| **producer deque swing** | **~3000 max** | **21072 (one burst)** |
+
+S4a did NOT reduce the MAINSTALL or the `un` storm — exactly
+the red-team's necessary-but-not-sufficient prediction
+(the continuous freeze is `_process_spec_db`+paint = S4b, NOT
+the lna emit).  Worse: a deque burst to **21072** (S3 held
+~3000) + the operator's ear = net-negative-to-neutral.  Per
+the locked discipline (operator-empirical outranks inference;
+do NOT defend; no patch-slap) S4a was **REVERTED to the S3
+baseline** (`git revert 9b6f699`).  The S4a code/tests/
+red-team record + the `_backups/lyra-2026-05-18-S4a.bundle`
+are retained for archaeology (recoverable if a future S4b
+design wants the coalescer back as a sub-component) but S4a
+is NOT a standalone fix and must not be re-tried alone.
+
+**EMPIRICALLY CONFIRMED: the continuous MAINSTALL / chop is
+`_process_spec_db`+QOpenGLWidget-paint dominated — S4b is the
+fix, not an option.**  S4a's whole premise (the lna emit was
+a meaningful GIL contributor) is disproven on hardware: ~9×
+fewer worker→main emits moved none of the metrics.  **NEXT =
+S4b ONLY** (move `_process_spec_db` off the Qt main thread —
+an S2/S3-scale threading rebuild touching S-meter / Auto-LNA
+/ auto-scale / zoom / peak-hold / EiBi / click-to-tune /
+§15.7 / RX2).  Its own grounded design → 2-agent red-team →
+operator decision → implement → HL2 gate, exactly the locked
+methodology.  Do NOT carry the reverted S4a coalescer into
+S4b uncritically — re-derive whether it's even wanted.
+`origin/main` stays v0.1.1.
 
 ---
 
