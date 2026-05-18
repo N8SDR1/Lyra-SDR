@@ -8469,6 +8469,101 @@ S2 explicitly gated on the HL2 bench, not slipped in).**
   cross-monitor window-drag — BEFORE S3+.  Not "done" until
   that gate passes.
 
+#### ⚠ S2 DESIGN RED-TEAMED 2026-05-18 (operator: "what do 2
+#### independent agents think?") — caught 2 real design
+#### defects; strategy CONFIRMED, design CORRECTED + re-locked.
+#### My first S2 design draft was WRONG on the timer object +
+#### prefill sizing.  Implement the CORRECTED design only.
+
+Two independent senior agents (RT/timer-mechanics lens;
+safety/contract/regression lens) reviewed the proposed S2.
+Both: strategy right + S2 strictly safer than the shipped
+producer-rendezvous writer for the stuck-carrier mode; but
+must-fix defects before code.  CONVERGED, complementary, no
+conflicts.
+
+**DEFECT 1 (Agent-A, decisive — would re-detonate round-12):**
+the proposed pacing said "Win32 WaitableTimer absolute
+deadline averages 380.95 Hz."  FALSE for the timer
+`_setup_win32_waitable_timer` actually builds —
+`CreateWaitableTimerW` is **NOT** high-resolution; the kernel
+coalesces every absolute due-time UP to the ~1 ms tick, so
+the 2.625 ms sequence rounds 3,3,2,3,3… ≈ 2.8–3.0 ms →
+~333–360 Hz → AK4951 starvation = exactly round-12
+(`stream.py:2280-2300`).  Absolute scheduling does NOT rescue
+the average (kernel can't fire off-tick).  **MANDATORY:
+rewrite to `CreateWaitableTimerExW(NULL,NULL,
+CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS)`**
+(Win10 1803+; baseline satisfied — `installer.iss`
+MinVersion=10.0.17763) + absolute drift-corrected deadline +
+explicit **no-catch-up reset** (`now > next_fire + N·PERIOD`
+→ `next_fire = now + PERIOD`, drop backlog, never replay).
+
+**DEFECT 2 (Agent-A — guarantees motorboat):** 512-sample
+(~10.7 ms) prefill is ~4× undersized vs the measured paint
+lumps (40 ms ≈ 1920 samples, worst 56 ms ≈ 2688).  Writer
+drains 512 in ~4 fires then underruns ~30 ms every paint
+cycle → `_slew_fill_pairs` decays to silence ~25 Hz = the
+motorboat class (§9.6/§13.2).  **MANDATORY:** either size
+prefill ≈ **4096 samples (~85 ms) / ring ≥6000** (latency
+cost — honest, NOT the ≤15 ms I claimed), OR make S2's
+audio-smoothness explicitly contingent on S3 (de-quantise
+the producer so lumps shrink <15 ms).  **STRATEGIC SPLIT
+(operator decision):** S2 alone DOES fix the *wire-cadence
+/ relay-chatter / EP6-drop / stuck-carrier* root regardless;
+the *RX-audio-pop smoothness* needs the big prefill (~85 ms)
+NOW or waits for S3.  Can't have both ≤15 ms latency and
+56 ms-lump immunity until the producer is de-quantised.
+
+**MANDATORY ADDITIONS (Agent-B, safety/contract):**
+* (a) **MOX-gate the TX-IQ columns**: today TX I/Q is gated
+  on `inject_tx_iq` only; that flag vs the live MOX bit are
+  set on different threads at different times — under a
+  free-running timer writer the skew makes "not-keyed ⇒ zero
+  TX I/Q" *incidental, not contractual*.  Add
+  `if self.inject_tx_iq and self._snapshot_mox_bit():` in
+  `_pack_audio_bytes_pairs` so contract-pt-1 is structurally
+  enforced.  (Good news: `_drain_tx_iq_be` zero-pads on
+  starve, never repeat-last → no stuck *modulated* carrier;
+  reference posture preserved — the gate is the only gap.)
+* (b) **Lock-ordering spec LOCKED:** the WaitableTimer wait
+  is strictly OUTSIDE `_cc_lock`/`_send_lock`; per-fire holds
+  minimal (dict-read / sendto), NEVER across the wait — else
+  a slow Qt-thread `set_mox`→`_set_tx_freq` (3 reg writes
+  under `_cc_lock`) jitters the keepalive.  Removing
+  `_lockstep_slot` is a net safety win (kills the unbounded
+  acquire hang).
+* (c) **Re-validate keydown frame timing on the dummy load:**
+  a free-running writer can emit a MOX=1/zero-I/Q frame in
+  the `rf_delay` window before `inject_tx_iq` flips — benign
+  (that is exactly what `rf_delay` is for) but it shifts the
+  first-RF-validated behavior → dummy-load re-confirm before
+  any antenna (not a redesign blocker).
+
+**ALSO (Agent-A, completeness):** fully RETIRE `_ep2_send_sem`
+across all 5 sites (`stream.py` ~1140 decl, ~1364
+queue_tx_audio, ~1378 clear_tx_audio, ~1436-1441
+fade_and_replace, ~2311 writer, ~2444 finally) — the
+"fall back to the semaphore path" clause is INCOHERENT after
+the lock-free push (writer would block forever on a
+never-released sem → permanent silent wire → HL2 EP6 halt).
+The non-timer fallback is the **spin-assisted hybrid**
+(coarse wait + QPC residual spin), semaphore path DELETED.
+
+**Verdicts:** Agent-A "needs redesign before implementation"
+(central timer mechanism wrong as written); Agent-B
+"implement-with-required-additions (a)(b)(c)".  Reconciled:
+**strategy GO, design CORRECTED + re-locked** with the 6
+mandatory items above; my original draft is SUPERSEDED — do
+NOT implement it.  Agent ids `a78e26006dfc1adb6` (RT),
+`a4b836471dc14803b` (safety).
+
+**STATUS: corrected S2 design LOCKED, awaiting operator
+direction on the ONE strategic split (big ~85 ms prefill in
+S2 now, vs gate RX-audio-pop smoothness on S3 — wire-cadence
+/ relay-chatter / stuck-carrier safety is fixed by S2 either
+way).  No wire-path code until that call.**
+
 #### ✅ FFTW WISDOM RE-EVALUATED 2026-05-18 (operator
 #### re-raised — "things have changed since you said no").
 #### They were right.  Verdict: scoped YES.
