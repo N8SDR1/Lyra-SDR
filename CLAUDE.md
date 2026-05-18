@@ -8432,6 +8432,43 @@ and LOCKED.  Awaiting operator go-ahead to start S0/S1 (both
 low-risk) + the explicit Stage-2 sign-off (now precisely =
 the 3-point contract above).  NO code until then.**
 
+**✅ S0 + S1 SHIPPED 2026-05-18 (operator okay-to-proceed;
+S2 explicitly gated on the HL2 bench, not slipped in).**
+* **S0 `bed1e67`** — pure wire-cadence analysis harness in
+  `_wirediag` (`bucket_gaps`/`parse_wire_log`/
+  `summarize_capture`) + `tests/protocol/test_wire_cadence_
+  bench.py` (6).  Buckets `<12/12-25/25-50/>=50 ms`;
+  `healthy` = 0 STALL/FENCE samples AND p95<12 ms = the
+  COMPUTED S2 success gate.  The verbatim 2026-05-18 broken
+  capture is codified as a regression fixture (every gap
+  STALL/FENCE, 2642 ms MAINSTALL) so post-S2 is judged by
+  math.  Zero production behavior change (diagnostics module
+  only, off the wire path).
+* **S1 `95d09c3`** — bounded the mixer's
+  `_lockstep_slot.acquire()` (was UNBOUNDED → wedged-writer
+  parked the mixer FOREVER = latent permanent stuck/silent,
+  the worst-case the audit flagged).  Now
+  `_LOCKSTEP_ACQUIRE_TIMEOUT_S=0.050` (== EP2 keepalive
+  fence): DORMANT in health (writer releases ≪50 ms →
+  byte-identical to old path, wire bytes unchanged), and on
+  a wedged writer it returns within the bound, counts
+  `_lockstep_timeouts`, logs `[WIRE] LOCKSTEP`, mixer STAYS
+  ALIVE (chunk already queued → no audio lost).
+  `tests/dsp/test_lockstep_timeout.py` (4).  Strictly safer,
+  no steady-state change — the de-risking step before S2.
+* Suite **437 passed / 0** (427 + 6 S0 + 4 S1; lone
+  pre-existing `scratch/test_tx_dsp_bench` fixture artifact
+  unchanged).  Backup `_backups/lyra-2026-05-18-S0-S1.bundle`;
+  pushed to `origin/feature/...`; `origin/main` still v0.1.1.
+* **NEXT = S2** (lock-free mixer→ring + kernel/OS-timer-paced
+  EP2 writer to the 3-point contract).  Implemented carefully
+  with its tests, then **brought to the operator for the HL2
+  bench GATE** — post-S2 `LYRA_WIRE_DEBUG` capture run through
+  `summarize_capture` must report `healthy=True` (gap mass
+  collapsed 25–56 ms → <12 ms) AND survive a Chrome-open /
+  cross-monitor window-drag — BEFORE S3+.  Not "done" until
+  that gate passes.
+
 #### ✅ FFTW WISDOM RE-EVALUATED 2026-05-18 (operator
 #### re-raised — "things have changed since you said no").
 #### They were right.  Verdict: scoped YES.
