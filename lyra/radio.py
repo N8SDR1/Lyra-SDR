@@ -9585,25 +9585,40 @@ class Radio(QObject):
         # locking needed (see threading.md §6).
         from PySide6.QtCore import Qt as _Qt
         _qc = _Qt.QueuedConnection
+        # S3: the 5 INBOUND (main→worker) controls use
+        # DirectConnection.  The worker no longer pumps a Qt event
+        # loop (processEvents removed — it yoked the worker cadence
+        # to the paint frame: producer-quantisation + tab-open
+        # relay-chatter, §15.26 S3).  DirectConnection runs the
+        # worker's ``set_*``/``flush_fft_ring``/``_on_audio_sink_
+        # changed`` on THIS (main) thread as a fast lock+append into
+        # the worker's ``_ctl_q``; the worker drains+applies it
+        # strictly between blocks (same race-free invariant Qt's
+        # serialized delivery used to give).  Do NOT revert these to
+        # QueuedConnection — with no worker event pump they'd never
+        # run = the permanent-NullSink-silence / stale-config trap.
+        _dc = _Qt.DirectConnection
         self.agc_profile_changed.connect(
-            self._dsp_worker.set_agc_profile, _qc)
+            self._dsp_worker.set_agc_profile, _dc)
         self.bin_enabled_changed.connect(
-            self._dsp_worker.set_bin_enabled, _qc)
+            self._dsp_worker.set_bin_enabled, _dc)
         self.bin_depth_changed.connect(
-            self._dsp_worker.set_bin_depth, _qc)
+            self._dsp_worker.set_bin_depth, _dc)
         # Phase 3.E.1 v0.1: flush the worker's FFT sample ring when
         # panadapter source switches RX1 <-> RX2.  Without this, the
         # first FFT after the switch would be a mix of old + new
         # source samples and render as a garbage frame.
         self.panadapter_source_changed.connect(
-            self._dsp_worker.flush_fft_ring, _qc)
+            self._dsp_worker.flush_fft_ring, _dc)
         # B.5 — sink swap channel.  When Radio rebuilds the audio
         # sink (start/stop, set_audio_output, PC device change), the
         # worker swaps its local reference between blocks AND closes
         # the old sink (so PortAudio/AK4951 close() never runs while
-        # the worker is mid-write to that same object).
+        # the worker is mid-write to that same object).  S3: enqueue
+        # (DirectConnection) → applied on the worker between blocks
+        # AND in the run-loop finally (§15.21 bug-3 preserved).
         self.worker_audio_sink_changed.connect(
-            self._dsp_worker._on_audio_sink_changed, _qc)
+            self._dsp_worker._on_audio_sink_changed, _dc)
         # B.6 — LNA peak / RMS feed from worker.  The single-thread
         # path computes peak/RMS in _on_samples_main_thread (which
         # is bypassed in worker mode); the worker computes them in

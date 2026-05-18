@@ -205,6 +205,18 @@ class DspWorker(QObject):
         # start, False = stop-with-flush.  Applied between blocks
         # like _reset_requested so it never races process_block.
         self._rx_chan_req: "bool | None" = None
+        # ── S3: plain thread-safe control queue (replaces the Qt
+        # event pump).  Config / sink-swap / fft-ring-flush from the
+        # main thread are enqueued here (DirectConnection → runs on
+        # the emitter/main thread as a quick lock+append) and
+        # DRAINED BY THE WORKER between blocks.  This removes the
+        # per-iteration ``QCoreApplication.processEvents()`` that
+        # yoked the worker cadence to the Qt paint frame (the
+        # producer-quantisation / tab-open relay-chatter coupling,
+        # §15.26 S3).  Same race-free invariant as before (applied
+        # strictly between blocks, never mid-``process_block``).
+        self._ctl_q: list = []
+        self._ctl_lock = threading.Lock()
         # Phase 3.B B.3 — back-reference to Radio for the audio chain.
         # The worker calls radio._do_demod_wdsp() (the WDSP cffi
         # engine), radio._emit_tone(), and reads radio._mode +
@@ -335,13 +347,20 @@ class DspWorker(QObject):
         self._rx_chan_req = bool(on)
 
     def flush_fft_ring(self) -> None:
-        """Phase 3.E.1 v0.1 (2026-05-12): flush the FFT sample ring
-        so the next emitted spec_db is clean (no mixed-source bins).
-        Called by the main thread when ``panadapter_source_rx``
-        changes -- the ring currently holds samples from the
-        previous source RX, and FFT-ing across a mix produces a
-        single garbage frame.  Cheap operation (ring is a deque,
-        clear is O(1) amortized)."""
+        """Phase 3.E.1: flush the FFT sample ring so the next
+        spec_db is clean (no mixed-source bins) when
+        ``panadapter_source_rx`` changes.
+
+        S3: this is the connected-but-undecorated slot the
+        red-team flagged.  Called from the MAIN thread (Radio
+        DirectConnection from ``panadapter_source_changed``); the
+        real clear runs in ``_apply_flush_fft_ring`` on the WORKER
+        thread between blocks (it touches ``_sample_ring`` /
+        ``_fft_block_counter`` which ``_maybe_run_fft`` reads — must
+        not race ``process_block``)."""
+        self._post_ctl(self._apply_flush_fft_ring)
+
+    def _apply_flush_fft_ring(self) -> None:
         ring = self._sample_ring
         if ring is not None:
             ring.clear()
@@ -384,47 +403,84 @@ class DspWorker(QObject):
         for cross-thread atomic read; no lock required."""
         return self._blocks_processed
 
-    # ── Config update slots (called via Qt.QueuedConnection) ──
-    # These slots run on the WORKER thread because of the queued
-    # connection from main-thread Radio setters.  Updates between
-    # ``process_block`` calls are safe — Qt serializes slot delivery
-    # on the worker's event loop, not in the middle of a block.
+    # ── S3 control plane: plain queue, NOT Qt slots ────────────
+    # These are deliberately NOT @Slot and NOT QueuedConnection-
+    # wired.  Radio connects the 5 cross-thread ones with
+    # Qt.DirectConnection (or calls them directly pre-moveToThread)
+    # so they execute on the MAIN/emitter thread as a quick
+    # lock+append into ``_ctl_q``; the worker drains+applies
+    # ``_ctl_q`` BETWEEN blocks.  This removed the per-iteration
+    # ``QCoreApplication.processEvents()`` that yoked the worker's
+    # cadence to the Qt paint frame (the producer-quantisation /
+    # tab-open relay-chatter coupling — §15.26 S3).
+    #
+    # DO NOT re-add @Slot or a QueuedConnection to any of these:
+    # that would route them onto the worker's (now un-pumped)
+    # event loop and they would NEVER run = the
+    # "permanent-NullSink-silence / stale config" trap.  The
+    # config-vs-process_block race-free invariant is preserved
+    # because the drain runs strictly between blocks (never
+    # mid-block), exactly as Qt's serialized delivery used to.
 
-    @Slot(str)
+    def _post_ctl(self, fn) -> None:
+        """Enqueue a control command.  Runs on the CALLING (main/
+        emitter) thread — a fast lock+append, no Qt event pump."""
+        with self._ctl_lock:
+            self._ctl_q.append(fn)
+
+    def _drain_ctl(self) -> None:
+        """Apply all queued control commands.  Bounded-snapshot:
+        swap the list out under the lock, then run each command
+        OUTSIDE the lock (one command — the sink swap — may block
+        ~7 ms on close; that is a between-blocks cost today too).
+        Re-entrant-safe; an individual command error never kills
+        the worker."""
+        with self._ctl_lock:
+            cmds = self._ctl_q
+            self._ctl_q = []
+        for fn in cmds:
+            try:
+                fn()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[DspWorker] ctl command error: {exc}")
+
+    # -- the 5 cross-thread inbound controls (enqueue → applied
+    #    between blocks).  Names unchanged so Radio's existing
+    #    DirectConnection + pre-moveToThread seed calls keep working.
     def set_agc_profile(self, name: str) -> None:
-        self._config.agc_profile = str(name)
+        n = str(name)
+        self._post_ctl(lambda: setattr(self._config, "agc_profile", n))
 
-    @Slot(float)
+    def set_bin_enabled(self, on: bool) -> None:
+        b = bool(on)
+        self._post_ctl(lambda: setattr(self._config, "bin_enabled", b))
+
+    def set_bin_depth(self, depth: float) -> None:
+        d = float(depth)
+        self._post_ctl(lambda: setattr(self._config, "bin_depth", d))
+
+    # -- dead-as-slots: NOT connected anywhere (Radio reads
+    #    _volume/_muted/_af_gain_db directly each block; release/
+    #    target/hang_blocks are advisory-only).  Direct calls only
+    #    (pre-moveToThread seed).  No @Slot — so a future wiring
+    #    can't silently re-arm the NullSilence trap.
     def set_agc_release(self, release: float) -> None:
         self._config.agc_release = float(release)
 
-    @Slot(float)
     def set_agc_target(self, target: float) -> None:
         self._config.agc_target = float(target)
 
-    @Slot(int)
     def set_agc_hang_blocks(self, blocks: int) -> None:
         self._config.agc_hang_blocks = int(blocks)
 
-    @Slot(int)
     def set_af_gain_db(self, db: int) -> None:
         self._config.af_gain_db = int(db)
 
-    @Slot(float)
     def set_volume(self, vol: float) -> None:
         self._config.volume = float(vol)
 
-    @Slot(bool)
     def set_muted(self, muted: bool) -> None:
         self._config.muted = bool(muted)
-
-    @Slot(bool)
-    def set_bin_enabled(self, on: bool) -> None:
-        self._config.bin_enabled = bool(on)
-
-    @Slot(float)
-    def set_bin_depth(self, depth: float) -> None:
-        self._config.bin_depth = float(depth)
 
     # ── Audio-sink ownership (B.5) ─────────────────────────────
     # Sink lifecycle in worker mode: main thread CONSTRUCTS the sink
@@ -437,27 +493,26 @@ class DspWorker(QObject):
     # still be writing to, eliminating the "PortAudio close-while-
     # writing" race.
 
-    @Slot(object)
     def _on_audio_sink_changed(self, new_sink) -> None:
-        """Replace the worker's audio-sink reference.
+        """Enqueue an audio-sink swap (S3).
 
-        Called via Qt::QueuedConnection from
-        ``Radio.worker_audio_sink_changed`` whenever Radio constructs
-        a new sink (start, stop=NullSink, set_audio_output, PC device
-        change).  Runs on the WORKER thread between blocks — no race
-        with ``process_block``'s ``self._audio_sink.write(audio)``.
+        Called from the MAIN thread (Radio DirectConnection from
+        ``worker_audio_sink_changed``: start, stop=NullSink,
+        set_audio_output, PC device change).  The actual swap+close
+        runs in ``_apply_sink_swap`` on the WORKER thread between
+        blocks (via the ``_ctl_q`` drain) — and ALSO in the run-loop
+        ``finally:`` final drain, so a stop racing this post still
+        closes the old sink + sets ``_sink_swap_done`` (§15.21
+        bug-3: else ``Radio.stop()`` hangs its 1 s wait and the
+        real PortAudio/AK4951 device leaks)."""
+        self._post_ctl(lambda: self._apply_sink_swap(new_sink))
 
-        Steps:
-        1. Save the current sink reference as ``old``.
-        2. Install the new sink.
-        3. Close ``old`` if it's a different instance — drains any
-           internal buffers (PortAudio CallbackStream stop, AK4951
-           inject_audio_tx=False + clear_tx_audio).
-
-        Errors during close are logged but never propagate; a half-
-        closed sink is acceptable (worst case: a sliver of stale
-        audio finishes draining; new sink starts clean).
-        """
+    def _apply_sink_swap(self, new_sink) -> None:
+        """Worker-thread sink swap (between blocks — no race with
+        ``process_block``'s ``self._audio_sink.write``).  Install
+        new, close old (drains PortAudio/AK4951 buffers), then set
+        the §15.21-bug-3 barrier unconditionally (only ``stop()``
+        clears+waits on it; other callers ignore it)."""
         old = self._audio_sink
         self._audio_sink = new_sink
         if old is not None and old is not new_sink:
@@ -465,10 +520,6 @@ class DspWorker(QObject):
                 old.close()
             except Exception as exc:
                 print(f"[DspWorker] old sink close error: {exc}")
-        # §15.21 bug 3: signal the (possibly-waiting) Radio.stop()
-        # that this swap has been fully applied on the worker
-        # thread.  Set unconditionally for every swap -- only
-        # stop() ever clears+waits on it; other callers ignore it.
         self._sink_swap_done.set()
 
     # ── Run loop (worker thread) ───────────────────────────────
@@ -481,33 +532,33 @@ class DspWorker(QObject):
         Blocks briefly on the input queue, then calls ``process_block``
         on each batch.  Exits when ``request_stop()`` is set.
 
-        **Qt event-loop pumping (v0.0.9.2 audio rebuild Commit 1
-        fixup):** every iteration we call
-        ``QCoreApplication.processEvents()`` so QueuedConnection
-        slots delivered to this worker (sink swap, AGC profile
-        change, BIN config change) actually run.  Without this
-        pump, run_loop hogs the worker thread's event loop and
-        signals queue up indefinitely — meaning the sink-swap
-        signal that hands the real audio sink to the worker on
-        ``Radio.start()`` never delivers, the worker keeps writing
-        to the initial NullSink seed, and the operator gets
-        silence.  Latent since Phase 3.B B.5 (sink ownership
-        migration); never observed because the QSettings ordering
-        bug fixed earlier in Commit 1 prevented worker mode from
-        actually running.
+        **S3 — NO Qt event pump.**  The old per-iteration
+        ``QCoreApplication.processEvents()`` (it delivered the
+        QueuedConnection config/sink-swap slots) is GONE: it yoked
+        this loop's cadence to the Qt paint frame (producer
+        quantisation + tab-open relay-chatter, §15.26 S3).
+        Control now arrives via the plain ``_ctl_q`` (Radio posts
+        with Qt.DirectConnection → runs on the main thread as a
+        lock+append) and is DRAINED HERE between blocks.
 
-        SHELL ONLY in B.1 — ``process_block`` is a no-op stub.
-        Subsequent sub-tasks (B.3 onwards) wire up actual DSP."""
-        from PySide6.QtCore import QCoreApplication
+        Drain ordering is load-bearing (§15.21 bug-3): the drain
+        runs at the TOP of the loop BEFORE the stop check AND the
+        blocking ``get()`` (so an about-to-stop or empty-queue
+        iteration still applies a posted sink-swap), AND a FINAL
+        drain runs in ``finally:`` (so a stop racing a posted
+        sink-swap still closes the old sink + sets
+        ``_sink_swap_done`` — else ``Radio.stop()`` hangs its 1 s
+        wait and the real PortAudio/AK4951 device leaks)."""
         self.state_changed.emit("running")
         try:
-            while not self._stop_requested:
-                # Pump queued slot deliveries from main thread BEFORE
-                # processing the next block, so any pending sink-swap
-                # / config-update signals take effect on this iteration
-                # rather than the next one.  Cheap when no events are
-                # queued (returns immediately).
-                QCoreApplication.processEvents()
+            while True:
+                # S3: drain control commands FIRST — before the
+                # stop test and the blocking get — so an
+                # about-to-stop / empty-queue iteration still
+                # applies a posted sink-swap (§15.21 bug-3).
+                self._drain_ctl()
+                if self._stop_requested:
+                    break
                 try:
                     samples = self._input_queue.get(
                         timeout=self.RUN_LOOP_TIMEOUT_S)
@@ -570,6 +621,15 @@ class DspWorker(QObject):
                     # lines, which is the right diagnostic signal.
                     print(f"[DspWorker] process_block error: {exc}")
         finally:
+            # S3 §15.21 bug-3: FINAL drain so a stop that raced a
+            # posted sink-swap still runs old.close() +
+            # _sink_swap_done.set() — otherwise Radio.stop()'s
+            # synchronous _sink_swap_done.wait() eats its full
+            # timeout and the real audio device is leaked.
+            try:
+                self._drain_ctl()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[DspWorker] final ctl drain error: {exc}")
             self.state_changed.emit("stopped")
 
     def process_block(

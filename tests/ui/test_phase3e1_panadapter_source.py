@@ -176,12 +176,13 @@ class Phase3e1WorkerFlushTest(unittest.TestCase):
         self.assertTrue(hasattr(DspWorker, "flush_fft_ring"))
 
     def test_flush_is_safe_when_ring_uninitialised(self) -> None:
-        """Worker lazy-initializes the ring on first sample; flush
-        before that must be a no-op (no AttributeError)."""
+        """S3: flush_fft_ring() enqueues; the apply (drain) must be
+        a no-op (no AttributeError) when the ring isn't built yet."""
         from lyra.dsp.worker import DspWorker
         w = DspWorker()
         try:
-            w.flush_fft_ring()  # should not raise
+            w.flush_fft_ring()       # enqueue — must not raise
+            w._drain_ctl()           # apply — must not raise
         finally:
             try:
                 w.stop()
@@ -189,6 +190,10 @@ class Phase3e1WorkerFlushTest(unittest.TestCase):
                 pass
 
     def test_flush_clears_ring_and_block_counter(self) -> None:
+        """S3: flush_fft_ring() now ENQUEUES (main-thread, no Qt
+        pump); the worker applies it between blocks via _drain_ctl.
+        Pre-drain the ring is untouched (proves not applied
+        mid-block); post-drain it's cleared."""
         from lyra.dsp.worker import DspWorker
         from collections import deque
         w = DspWorker()
@@ -196,6 +201,10 @@ class Phase3e1WorkerFlushTest(unittest.TestCase):
             w._sample_ring = deque(range(10), maxlen=100)
             w._fft_block_counter = 5
             w.flush_fft_ring()
+            # Enqueued, NOT yet applied (between-blocks discipline).
+            self.assertEqual(len(w._sample_ring), 10)
+            self.assertEqual(w._fft_block_counter, 5)
+            w._drain_ctl()
             self.assertEqual(len(w._sample_ring), 0)
             self.assertEqual(w._fft_block_counter, 0)
         finally:
