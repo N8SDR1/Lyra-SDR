@@ -9258,7 +9258,7 @@ ADDITIONS".  Reconciled: **strategy GO, design CORRECTED +
 re-locked** with the 3 mandatory window/rms/MOX-edge
 corrections + block-count clock + no-spurious-0.0; honest
 NBNS scope (S4b mandatory; S4a gate = lna-rate/GIL not chop).
-**✅ S4a SHIPPED `<pending>` 2026-05-18** (operator
+**✅ S4a SHIPPED `9b6f699` 2026-05-18** (operator
 "continue" = go-ahead; suite 457/0, zero regressions; backup
 `_backups/lyra-2026-05-18-S4a.bundle`; pushed; main v0.1.1).
 All red-team-corrected items implemented:
