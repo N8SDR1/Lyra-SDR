@@ -8862,9 +8862,15 @@ MAINSTALL) = precisely **S4a's** target — exactly the
 honest NBNS scope + Agent-A's convergence warning, NOT an
 S3 regression / NOT an in-scope failure (the locked R-B
 guidance: do NOT fail S3 / do NOT redesign over the
-residual — proceed to S4a).  Operator-empirical authority
-on the *audible* outcome (better/same/worse vs S2) PENDING
-operator ear report.  S3 = the event-pump decouple + the
+residual — proceed to S4a).  **Operator ear report 2026-05-18: "slightly better,
+seemed to recover quicker"** — matches the data exactly
+(4× shallower lumps → milder + faster-recovering chop;
+un-count unchanged → not gone).  A confirmed net-positive
+in-scope improvement → **S3 PASSES its R-B gate** (the
+locked guidance: residual chop expected until S4a, "sub-
+stantially reduced" acceptable, do NOT fail S3 — and the
+operator-empirical outcome is *better*, not worse/regressed).
+S3 = the event-pump decouple + the
 §15.21 stop/restart safety + ~4× shallower lumps + 5×
 fewer EP6 errors — all real, all shipped, all confirmed;
 the chop-clear Option-B payoff is **S4a**, now
