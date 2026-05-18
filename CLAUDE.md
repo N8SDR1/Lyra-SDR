@@ -8558,11 +8558,53 @@ mandatory items above; my original draft is SUPERSEDED — do
 NOT implement it.  Agent ids `a78e26006dfc1adb6` (RT),
 `a4b836471dc14803b` (safety).
 
-**STATUS: corrected S2 design LOCKED, awaiting operator
-direction on the ONE strategic split (big ~85 ms prefill in
-S2 now, vs gate RX-audio-pop smoothness on S3 — wire-cadence
-/ relay-chatter / stuck-carrier safety is fixed by S2 either
-way).  No wire-path code until that call.**
+**OPERATOR DECISION 2026-05-18 — OPTION B LOCKED:** keep low
+latency; S2 fixes the wire-cadence / relay-chatter / EP6-drop
+/ stuck-carrier root NOW (unconditional), the RX-audio-pop
+smoothness is gated on S3 (de-quantise the producer).
+Rationale (operator + agreed): Option A would bake a
+permanent-feeling latency regression into the safety-critical
+wire path to fix a non-safety parked pop that S3 removes
+anyway, AND force a second perturbation of the dangerous code
+(rip the big prefill back out at S3).  B converges to the
+best end-state with the fewest wire-path changes.  HONEST
+COST recorded: pre-S3, with a small prefill + still-paint-
+quantised producer, S2 can produce a ~25 Hz soft "chop"
+(click-free `_slew_fill_pairs` decay, NOT the old hard pops —
+not a click regression, but not clean until S3).  MITIGATION
+(part of the lock): the S2 prefill is a **bench-tuned knob**
+— at the HL2 gate pick the SMALLEST prefill that doesn't chop
+on the operator's machine (env override
+`LYRA_EP2_PREFILL_SAMPLES`, default small); and **S3 is
+sequenced immediately after S2** so the soft-chop window is
+brief (S3 is also the real relay-chatter fix, already next in
+the plan).
+
+**DISPLAY-FFT → FFTW: EVALUATED, PARKED 2026-05-18** (operator
+asked "wouldn't we benefit using FFTW instead of numpy for the
+panadapter?").  Verdict NO, same family as Vulkan/§15.8: the
+panadapter FFT (`worker.py:~857` `np.fft`) is already OFF the
+Qt main thread; the proven defect is GIL/paint serialisation
+at 5% CPU, not FFT compute — a faster transform changes none
+of cadence/chatter/pops/latency.  numpy = pocketfft (releases
+the GIL during the transform, no plan step) — within a small
+factor of FFTW for the pow2 display sizes = microseconds at
+5% CPU.  Switching to FFTW would *re-introduce* a planning
+surface (ESTIMATE = slower, or MEASURE/PATIENT = a NEW
+multi-second stall — the exact class WISDOM just fixed for
+WDSP) plus a pyfftw/cffi + plan-thread-safety + wisdom-
+interplay surface, for ZERO symptom payoff.  Only conceivable
+benefit = panadapter smoothness under heavy contest load at
+very large FFT sizes = a §15.8-class CPU-headroom item, NOT a
+fix; revisit ONLY if a tester traces display sluggishness
+specifically to FFT cost.  Parked alongside §15.8 item #1
+(Vulkan).  No code.
+
+**STATUS: Option B LOCKED; corrected S2 design LOCKED (6
+mandatory items).  Implementing the CORRECTED S2 now.  HL2
+bench GATE before S3+ (post-S2 `summarize_capture`
+`healthy=True` + survive a window-drag, prefill bench-tuned).
+`origin/main` stays v0.1.1.**
 
 #### ✅ FFTW WISDOM RE-EVALUATED 2026-05-18 (operator
 #### re-raised — "things have changed since you said no").
