@@ -8432,6 +8432,69 @@ and LOCKED.  Awaiting operator go-ahead to start S0/S1 (both
 low-risk) + the explicit Stage-2 sign-off (now precisely =
 the 3-point contract above).  NO code until then.**
 
+#### ✅ FFTW WISDOM RE-EVALUATED 2026-05-18 (operator
+#### re-raised — "things have changed since you said no").
+#### They were right.  Verdict: scoped YES.
+
+Read-only dig (reference + Lyra).  Definitive findings:
+* **WDSP plans EVERY filter FFT at `FFTW_PATIENT`** (the most
+  expensive planner tier) on every channel open —
+  `wisdom.c:38-113` `WDSPwisdom()`, filter cores
+  `firmin.c:148-152`/`313-318`, all `double` (`fftw_plan_dft_1d`).
+* **The reference calls `WDSPwisdom(app_data_path)` BEFORE
+  opening channels** (`radio.cs:103-158`), caches
+  `wdspWisdom00` in `%APPDATA%`, one-time multi-minute first
+  run (explicit modal "can take 5 minutes or more"), instant
+  load every launch after, >3-month staleness re-prompt.  THAT
+  is why the reference shows no per-launch channel-open stall.
+* **Lyra does NOTHING with wisdom** (grep: only CLAUDE.md; no
+  `*_wisdom` cdef in `wdsp_native.py`; no file in
+  `_native/`).  Every Lyra process start re-runs the full
+  `FFTW_PATIENT` search in-process at OpenChannel — the direct,
+  sufficient mechanism for the instrumented **~1043 ms /
+  ~2642 ms channel-open startup MAINSTALLs**.
+* Lyra's panadapter FFT is **numpy** (`worker.py:857`,
+  `radio.py`, `captured_profile_iq.py`) — NOT FFTW.  Wisdom
+  helps ONLY WDSP's internal filter FFTs, not the display.
+
+**SCOPE (honest):** kills the multi-second startup/channel-
+open MAINSTALLs (reference is the existence-proof: same DLL,
+same `FFTW_PATIENT`, no per-launch stall once `wdspWisdom00`
+exists → realistically seconds → sub-100 ms).  Does NOT touch
+the chronic 25–56 ms steady-state cadence (that is S0–S7) and
+is only a minor §9.6 jitter bonus.  Sold honestly as "kill
+the channel-open stalls," not theatre.
+
+**FIX (small, isolated):** add `int WDSPwisdom(char*)` (+ opt.
+status getter) to `wdsp_native.py` cdef; call once, pointing
+at `%APPDATA%\Lyra`, BEFORE the first `OpenChannel`; OWN the
+first-run UX with a modal ("optimizing, one-time, ~minutes")
+because `WDSPwisdom` calls `AllocConsole()` (`wisdom.c:55`)
+which is wrong for the `--windowed` build; invalidate on
+WDSP/FFTW DLL-version bump.  ~20–40 LOC.
+
+**RISK (all benign):** wisdom is CPU/SIMD-specific → **MUST be
+per-host generated, NEVER bundled** (a build-box file would be
+ignored at best, sub-optimal at worst).  Stale/corrupt/wrong-
+version file is safely ignored → one extra regeneration, not
+fatal.  One-time multi-minute first-run cost — front-load it
+modal like the reference, before channel open.
+
+**SCOPE CHECK:** fully INDEPENDENT of S0–S7 — touches only the
+WDSP init path (cdef + one call + a `%APPDATA%\Lyra` file),
+zero shared state with the EP2 wire/lockstep/keepalive, does
+NOT touch the safety-critical wire path.  Ships as its own
+isolated commit + bench gate (verify via the existing
+`LYRA_WIRE_DEBUG` MAINSTALL probe: channel-open stall drops
+from seconds to sub-100 ms).  No dependency either direction
+vs S0–S7 — can land before/parallel.  Agent
+`a1ec7a5cee90c2e5b`.
+
+**STATUS: verified + scoped, NOT yet coded.**  Sequencing is
+an operator call: it is small/low-risk/independent and could
+ship before or in parallel with S0/S1; it does not affect the
+Stage-2 sign-off.  No code until operator direction.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-17 EOD)
