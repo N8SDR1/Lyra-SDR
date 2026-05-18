@@ -838,15 +838,16 @@ def _wisdom_splash():
         appinst = QApplication.instance()
         if appinst is None:
             return (lambda: None, lambda: None)
-        pm = QPixmap(580, 130)
+        pm = QPixmap(600, 165)
         pm.fill(QColor(16, 20, 26))
         p = QPainter(pm)
         p.setPen(QColor(220, 230, 240))
         p.drawText(
             pm.rect(), Qt.AlignCenter,
             "Lyra — optimizing FFT plans (one-time).\n\n"
-            "This can take several minutes.\n"
-            "Please wait; do not close this window.")
+            "This can take several minutes — please wait\n"
+            "and do not close this window.\n\n"
+            "Lyra will open automatically once this completes.")
         p.end()
         sp = QSplashScreen(pm)
         sp.show()
