@@ -10,10 +10,20 @@ Critical regression gate: any future change to the EP2 packer must
 keep the inject_tx_iq=False path bit-exact, since that is what
 RX-only Lyra (the shipping v0.1.1 GA and the v0.2.0 pre-TX path)
 emits on the wire.
+
+S2 update (contract pt-1, operator-locked §15.26): TX I/Q is now
+MOX-GATED — it is packed only when ``inject_tx_iq`` AND the live
+MOX snapshot are BOTH set.  Under the free-running timer writer,
+``inject_tx_iq`` (FSM/producer-owned) and the wire MOX bit are set
+on different threads at different times; gating on both makes
+"not-keyed => zero TX I/Q" structural, not incidental to thread
+skew.  Tests that exercise the packing path therefore key the
+stream via ``_key`` (a mox=True dispatch-state provider).
 """
 from __future__ import annotations
 
 import struct
+import types
 
 import numpy as np
 
@@ -30,6 +40,13 @@ def _make_stream() -> HL2Stream:
     # IQ rate doesn't matter for byte-packing tests (the 48 kHz audio
     # cadence is independent); pick the smallest valid value.
     return HL2Stream("10.10.10.1", sample_rate=96000)
+
+
+def _key(s: HL2Stream) -> None:
+    """Simulate MOX keyed (S2 contract pt-1): TX I/Q only flows
+    when both inject_tx_iq AND _snapshot_mox_bit() are set."""
+    s._dispatch_state_provider = lambda: types.SimpleNamespace(
+        mox=True)
 
 
 def test_default_tx_iq_stays_zero():
@@ -55,6 +72,7 @@ def test_inject_tx_iq_packs_into_columns_2_3():
     carry the BE int16 quantization of the complex samples."""
     s = _make_stream()
     s.inject_tx_iq = True
+    _key(s)
     iq = np.full(126, 0.5 + 0.25j, dtype=np.complex64)
     s.queue_tx_iq(iq)
     pairs = [(0.0, 0.0)] * 126
@@ -77,6 +95,7 @@ def test_tx_iq_negative_values_round_correctly():
     """Negative real/imag quantize to negative int16 BE (two's-complement)."""
     s = _make_stream()
     s.inject_tx_iq = True
+    _key(s)
     iq = np.full(126, -0.5 - 0.25j, dtype=np.complex64)
     s.queue_tx_iq(iq)
     pairs = [(0.0, 0.0)] * 126
@@ -94,6 +113,7 @@ def test_tx_iq_clips_at_full_scale():
     """Values outside [-1, 1] clip rather than wrap."""
     s = _make_stream()
     s.inject_tx_iq = True
+    _key(s)
     # 2.0 + 1.5j -> clip both to ±1 -> ±32767
     iq = np.full(126, 2.0 + 1.5j, dtype=np.complex64)
     s.queue_tx_iq(iq)
@@ -110,6 +130,7 @@ def test_tx_iq_underrun_increments_counter():
     """Drain with empty queue → padded with zeros + counter ticks."""
     s = _make_stream()
     s.inject_tx_iq = True  # enable consumer
+    _key(s)                # keyed: TX-IQ path active
     # No queue_tx_iq call → queue is empty
     pairs = [(0.0, 0.0)] * 126
     assert s.tx_iq_underruns == 0
@@ -153,6 +174,7 @@ def test_tx_iq_gain_applied():
     """tx_iq_gain scales both real and imag before quantization."""
     s = _make_stream()
     s.inject_tx_iq = True
+    _key(s)
     s.tx_iq_gain = 0.5
     iq = np.full(126, 1.0 + 0.0j, dtype=np.complex64)
     s.queue_tx_iq(iq)
@@ -170,6 +192,7 @@ def test_lr_audio_unaffected_by_iq_injection():
     bytes -- the two paths are independent."""
     s = _make_stream()
     s.inject_tx_iq = True
+    _key(s)
     s.queue_tx_iq(np.full(126, 0.3 + 0.7j, dtype=np.complex64))
     # Use a recognizable non-zero L/R signal
     pairs = [(0.25, -0.5)] * 126
@@ -183,3 +206,21 @@ def test_lr_audio_unaffected_by_iq_injection():
         assert abs(got_l - 4096) <= 1, f"L drifted: {got_l}"
         # -0.5 * 0.5 * 32767 = -8191.75 → ~-8192 ± 1
         assert abs(got_r - (-8192)) <= 1, f"R drifted: {got_r}"
+
+
+def test_inject_tx_iq_true_but_not_keyed_stays_zero():
+    """S2 contract pt-1: inject_tx_iq=True but NOT keyed
+    (no MOX) MUST still emit zero TX I/Q.  This is the
+    structural anti-stale/anti-stray-carrier guard for the
+    free-running timer writer — TX I/Q only on the wire when
+    the radio is actually keyed."""
+    s = _make_stream()
+    s.inject_tx_iq = True
+    # Deliberately NOT keyed (_snapshot_mox_bit() -> 0).
+    s.queue_tx_iq(np.full(126, 0.9 + 0.9j, dtype=np.complex64))
+    out = s._pack_audio_bytes_pairs([(0.0, 0.0)] * 126)
+    for i in range(126):
+        slot = out[i * 8:i * 8 + 8]
+        assert slot[4:8] == b"\x00\x00\x00\x00", (
+            f"Not-keyed slot {i} leaked TX I/Q: {slot[4:8].hex()}"
+        )

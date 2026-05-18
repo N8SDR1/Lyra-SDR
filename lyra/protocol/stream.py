@@ -1117,44 +1117,37 @@ class HL2Stream:
         self._first_ep6_event = threading.Event()
         self._ep2_writer_thread: Optional[threading.Thread] = None
 
-        # ── EP2 producer-paced cadence (v0.0.9.2 Path C) ────────────
-        # HPSDR P1 producer-paced cadence pattern.  Every time the
-        # DSP worker pushes 126 audio samples into ``_tx_audio``,
-        # ``queue_tx_audio`` releases ``_ep2_send_sem`` once.  The
-        # EP2 writer loop blocks on this semaphore, so the writer's
-        # wake-up cadence is locked to the DSP's *audio output
-        # rate*, which in turn is locked to the EP6 input rate,
-        # which is locked to the HL2's own codec crystal.  Result:
-        # no PC-vs-HL2 clock drift, no producer overrun, no
-        # consumer underrun.
+        # ── S2: decoupled timer-paced EP2 egress ────────────────────
+        # The producer-paced semaphore (`_ep2_send_sem`) and the
+        # mixer rendezvous (`_lockstep_slot`) are RETIRED.  They
+        # coupled the wire cadence to the GIL/Qt-paint-frame-
+        # quantised producer (proven: chronic 25-56 ms gap at 5%
+        # CPU, un/ov blind).  The EP2 writer is now driven by a
+        # HIGH_RESOLUTION kernel timer (drift-corrected ~380.95 Hz),
+        # the mixer push is lock-free (extend `_tx_audio`, return —
+        # never blocks on the wire), and `_tx_audio` is the elastic
+        # SP-SC ring the writer drains 126/fire.  Short ring ->
+        # `_slew_fill_pairs` (decays to silence, never repeats);
+        # every fire walks the C&C round-robin stamping the live
+        # MOX bit (keepalive inherent, can't be starved).
         #
-        # ``_unsignaled_audio_samples`` carries the < 126-sample
-        # remainder between calls so a producer that pushes 500
-        # samples in one call signals the writer 3 times (3 * 126 =
-        # 378) and stashes the leftover 122 for next call.
-        #
-        # The semaphore is drained on ``clear_tx_audio`` /
-        # ``fade_and_replace_tx_audio`` so a sink swap doesn't leave
-        # stale signals that would cause the writer to spin against
-        # an empty deque.
-        self._ep2_send_sem = threading.Semaphore(0)
-        self._unsignaled_audio_samples: int = 0
-        # ── Audio mixer lockstep slot (v0.0.9.6 Thetis-mirror) ──────
-        # When the AudioMixer thread (lyra/dsp/audio_mixer.py) is
-        # paced by lockstep with the EP2 writer, the mixer's
-        # outbound callback releases this slot semaphore at 0
-        # (representing "no slot has been drained yet") and waits.
-        # Each successful EP2 audio send releases the slot,
-        # unblocking the mixer's NEXT outbound dispatch.  Net
-        # effect: wire cadence becomes exactly 380.95 Hz steady,
-        # mirroring Thetis WaitForSingleObject(hobbuffsRun[1])
-        # at network.c:1322.  The slot is unused (always
-        # available) when no mixer is connected (PC Sound or
-        # NullSink modes); the writer just releases into a
-        # semaphore counter no one is waiting on, which is a
-        # no-op for any blocked-on-it caller and harmless for
-        # the writer.
-        self._lockstep_slot: threading.Semaphore = threading.Semaphore(0)
+        # Pre-fill gate (Option B, operator-locked 2026-05-18): the
+        # writer does not start draining AUDIO until the ring has
+        # reached `_ep2_prefill_samples` at least once since
+        # start/clear (`_ep2_prefilled`).  Kept SMALL for low
+        # latency — the RX-audio-pop smoothness is gated on S3
+        # (de-quantise the producer), not on a big prefill.  The
+        # operator bench-tunes the smallest non-chopping value via
+        # the env override; C&C frames flow from fire 1 regardless
+        # (keepalive never waits on prefill).
+        import os as _os
+        try:
+            self._ep2_prefill_samples: int = max(
+                0, int(_os.environ.get(
+                    "LYRA_EP2_PREFILL_SAMPLES", "256")))
+        except (TypeError, ValueError):
+            self._ep2_prefill_samples = 256
+        self._ep2_prefilled: bool = False
         # Deque high-water mark (v0.0.9.2 audio rebuild Commit 1).
         # Tracks the maximum deque depth observed since the last UI
         # read.  After v0.0.9.2 Commit 3 lands real backpressure,
@@ -1347,21 +1340,12 @@ class HL2Stream:
             if len(pairs) > free_slots:
                 self.tx_audio_overruns += len(pairs) - free_slots
             self._tx_audio.extend(pairs)
-
-            # Producer-paced EP2 cadence (Path C).  Release one
-            # semaphore signal per 126-sample EP2 frame's worth of
-            # audio that just became available.  Carry the < 126
-            # remainder forward in ``_unsignaled_audio_samples`` so
-            # bursty producers (DSP block of 512 samples = 4 EP2
-            # frames + 8 leftover) signal the writer the right number
-            # of times overall.  Both counters are protected by
-            # ``_tx_audio_lock`` (already held here).
-            self._unsignaled_audio_samples += len(pairs)
-            n_signals = self._unsignaled_audio_samples // 126
-            if n_signals > 0:
-                self._unsignaled_audio_samples -= n_signals * 126
-                for _ in range(n_signals):
-                    self._ep2_send_sem.release()
+            # S2: lock-free SP-SC ring — no semaphore signal.  The
+            # timer-paced writer drains `_tx_audio` on its own
+            # kernel cadence; the producer just deposits and the
+            # ring depth itself is the availability signal.  This
+            # extend is the ONLY producer-side work (no rendezvous,
+            # no GIL-coupled wire-cadence dependency).
 
     def clear_tx_audio(self):
         """Drain any pending samples from the TX audio queue. Called
@@ -1370,13 +1354,12 @@ class HL2Stream:
         was "digitized robotic" sound right after switching sinks."""
         with self._tx_audio_lock:
             self._tx_audio.clear()
-            # Path C: also reset the producer-paced cadence state.
-            # If we leave stale signals in the semaphore, the writer
-            # would wake N extra times against an empty deque,
-            # under-running every iteration until the signals drain.
-            self._unsignaled_audio_samples = 0
-            while self._ep2_send_sem.acquire(blocking=False):
-                pass
+            # S2: re-arm the pre-fill gate + reset slew state so a
+            # fresh session/sink starts cleanly (the writer holds
+            # C&C-only — keepalive still flows — until the ring
+            # re-fills to `_ep2_prefill_samples`).
+            self._ep2_prefilled = False
+            self._ep2_underrun_active = False
 
     def fade_and_replace_tx_audio(self, fade_ms: float = 5.0) -> int:
         """Replace the TX audio queue with a short fade-out tail.
@@ -1427,18 +1410,13 @@ class HL2Stream:
                 self._tx_audio.append(
                     (float(l) * ramp, float(r) * ramp))
 
-            # Path C: reset producer-paced cadence state and re-signal
-            # the writer for the fade tail.  Drain whatever stale
-            # signals were sitting in the semaphore from the discarded
-            # tail, then re-signal once per 126-sample chunk of the
-            # fade itself.
-            self._unsignaled_audio_samples = 0
-            while self._ep2_send_sem.acquire(blocking=False):
-                pass
-            n_signals = fade_n // 126
-            self._unsignaled_audio_samples = fade_n - n_signals * 126
-            for _ in range(n_signals):
-                self._ep2_send_sem.release()
+            # S2: no semaphore re-signal — the timer-paced writer
+            # drains the faded tail from `_tx_audio` on its own
+            # kernel cadence.  Keep the pre-fill gate satisfied so
+            # the writer actually emits the fade (rather than
+            # holding C&C-only): the tail IS real audio we want on
+            # the wire before close.
+            self._ep2_prefilled = True
             return fade_n
 
     # ── v0.2 Phase 2 commit 8: TX I/Q queue API ──────────────────────
@@ -2093,30 +2071,63 @@ class HL2Stream:
             CloseHandle.restype = wintypes.BOOL
             CloseHandle.argtypes = [wintypes.HANDLE]
 
-            # Auto-reset timer (signals once per fire, then resets).
-            handle = CreateWaitableTimerW(None, False, None)
-            if not handle:
-                err = ctypes.get_last_error()
-                print(f"[HL2Stream] CreateWaitableTimer failed "
-                      f"(GetLastError={err}); falling back to "
-                      f"time.sleep cadence")
-                return None
+            # ── S2 DEFECT-1 FIX: HIGH-RESOLUTION timer is MANDATORY.
+            # The legacy ``CreateWaitableTimerW`` object coalesces
+            # every due-time UP to the ~1 ms system tick.  Our period
+            # is 2.625 ms (non-integer): a tick-rounded sequence runs
+            # 3,3,2,3,3… ≈ 2.8-3.0 ms ⇒ ~333-360 Hz ⇒ AK4951 FIFO
+            # starvation = the "round 12 REVERTED" failure.  Absolute
+            # scheduling does NOT rescue the average (the kernel
+            # cannot fire off-tick).  ``CreateWaitableTimerExW`` with
+            # ``CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`` (Win10 1803+,
+            # our installer baseline 10.0.17763 guarantees it) honors
+            # sub-tick relative due-times against the platform timer,
+            # so a drift-corrected accumulator genuinely averages
+            # 380.95 Hz with bounded jitter and zero cumulative drift.
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002
+            TIMER_ALL_ACCESS = 0x1F0003
+            handle = None
+            mode = "highres"
+            try:
+                CreateWaitableTimerExW = kernel32.CreateWaitableTimerExW
+                CreateWaitableTimerExW.restype = wintypes.HANDLE
+                CreateWaitableTimerExW.argtypes = [
+                    wintypes.LPVOID, wintypes.LPCWSTR,
+                    wintypes.DWORD, wintypes.DWORD]
+                handle = CreateWaitableTimerExW(
+                    None, None,
+                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                    TIMER_ALL_ACCESS)
+            except (AttributeError, OSError):
+                handle = None
 
-            print(f"[HL2Stream] EP2 cadence using Win32 WaitableTimer "
-                  f"(kernel-precision, GIL-released wait)")
+            if not handle:
+                # Pre-1803 / Ex unavailable.  Do NOT fall back to a
+                # legacy coalesced timer (re-detonates round-12) and
+                # do NOT fall back to the now-deleted producer
+                # semaphore path (would deadlock the wire silent).
+                # Signal the writer to use the spin-assisted hybrid
+                # (coarse sleep to ~1 ms short + perf_counter spin).
+                err = ctypes.get_last_error()
+                print(f"[HL2Stream] HIGH_RESOLUTION WaitableTimer "
+                      f"unavailable (GetLastError={err}); EP2 cadence "
+                      f"falling back to spin-assisted hybrid")
+                return {"mode": "spin"}
+
+            print(f"[HL2Stream] EP2 cadence using HIGH_RESOLUTION "
+                  f"Win32 WaitableTimer (kernel-precision, "
+                  f"GIL-released wait, drift-corrected)")
             return {
+                "mode": mode,
                 "handle": handle,
                 "SetWaitableTimer": SetWaitableTimer,
                 "WaitForSingleObject": WaitForSingleObject,
-                "GetSystemTimePreciseAsFileTime":
-                    GetSystemTimePreciseAsFileTime,
                 "CloseHandle": CloseHandle,
-                "FILETIME": wintypes.FILETIME,
             }
         except Exception as e:  # noqa: BLE001
             print(f"[HL2Stream] Win32 WaitableTimer setup failed: "
-                  f"{e} (falling back to time.sleep cadence)")
-            return None
+                  f"{e}; EP2 cadence falling back to spin hybrid")
+            return {"mode": "spin"}
 
     @staticmethod
     def _maybe_apply_mmcss_pro_audio(profile_name: str = "Pro Audio"):
@@ -2241,150 +2252,132 @@ class HL2Stream:
         except Exception as e:  # noqa: BLE001
             print(f"[HL2Stream] setswitchinterval failed: {e}")
 
-        # ── Path C: producer-paced cadence ─────────────────────────
-        # HPSDR P1 producer-paced cadence pattern.  The writer blocks
-        # on ``_ep2_send_sem`` which is released once per 126 audio
-        # samples queued by the producer (DSP worker -> AK4951Sink ->
-        # queue_tx_audio).  The DSP runs at exactly 48 kHz audio out
-        # (locked to EP6 input rate, locked to HL2 codec crystal),
-        # so the writer fires at exactly 380.95 Hz EP2 cadence -- in
-        # phase with the HL2's own clock.  No PC clock involvement,
-        # zero drift, zero possibility of producer overrun.
+        # ── S2: decoupled, timer-paced EP2 egress ──────────────────
+        # The writer no longer waits on the producer.  It fires on a
+        # HIGH_RESOLUTION kernel timer at a drift-corrected ~380.95
+        # Hz, draining `_tx_audio` (the elastic SP-SC ring) 126
+        # samples/fire.  This breaks the GIL/Qt-paint-frame coupling
+        # that quantised the wire to 25-56 ms (proven §15.26).  Every
+        # fire walks the C&C round-robin and stamps the live MOX bit
+        # (contract pt 2/3: keepalive is INHERENT — a frame goes out
+        # every period regardless of producer state, far inside any
+        # HL2 watchdog; it cannot be starved by a DSP/paint stall).
         #
-        # The acquire() timeout is the C&C heartbeat fallback for the
-        # case where audio is not being injected (e.g., PC Soundcard
-        # mode) or DSP has stalled.  When audio is flowing the
-        # semaphore signals at 380 Hz so the timeout never trips;
-        # when audio stops, we still emit C&C-only frames at
-        # ~100 Hz so register state changes (frequency, AGC, etc.)
-        # propagate to the radio promptly.
-        EP2_HEARTBEAT_TIMEOUT = 0.010  # 10 ms = sem.acquire timeout
-        # Path C.3: keepalive fence.  When injecting audio, Path C.1
-        # made us skip the heartbeat to avoid silence-frame insertion
-        # during the normal ~11 ms inter-DSP-block gap.  But when
-        # the producer stops for a longer stretch -- band change
-        # triggers DSP reset (100-200 ms), or DSP worker stalls --
-        # silently skipping kept the EP2 line completely quiet,
-        # which violated the HL2's mandatory EP2-keepalive contract
-        # and caused EP6 streaming to halt (operator-visible as
-        # "display freezes on band change, only Stop/Start fixes").
-        # Fix: only skip the heartbeat while we've sent a frame
-        # recently.  Past EP2_KEEPALIVE_MAX_GAP since the last send,
-        # let the heartbeat fire C&C-only frames so the HL2 stays
-        # connected.  50 ms threshold = comfortably past one DSP
-        # block (~11 ms) but well under any plausible HL2 keepalive
-        # timeout (HL2 spec doesn't pin a number; field-tested
-        # tolerance is at least hundreds of ms, but we don't want
-        # to push it).
-        EP2_KEEPALIVE_MAX_GAP = 0.050  # 50 ms
-        # ── Cadence-gate experiment (round 12, REVERTED) ────────────
-        # Tried adding a soft sleep gate inside the writer to enforce
-        # a steady 2.625 ms inter-packet interval (mirroring Thetis's
-        # WaitForSingleObject(hobbuffsRun) lockstep pattern).  Failed
-        # because Windows time.sleep snaps to 1 ms granularity even
-        # with timeBeginPeriod(1), so every requested 2.625 ms sleep
-        # actually slept ~3 ms.  Wire cadence dropped to ~333 Hz =
-        # only 42 kHz output sample rate -- AK4951 drains its FIFO
-        # at 48 kHz so the codec output starved cyclically (audible
-        # as "horrid pulsing"), AND the producer-side deque hit its
-        # 48000 cap with ov=333,956 in ~10 s.  Operator confirmed
-        # the symptom + metrics 2026-05-06.
+        # DEFECT-1 (red-team): the timer MUST be HIGH_RESOLUTION; a
+        # legacy coalesced timer rounds the 2.625 ms period UP to the
+        # 1 ms tick = the round-12 ~333 Hz starvation.  See
+        # `_setup_win32_waitable_timer`.  Fallback (pre-1803 / Ex
+        # missing / non-Windows) = spin-assisted hybrid (coarse sleep
+        # + perf_counter residual spin) — NEVER the deleted producer
+        # semaphore (would deadlock the wire silent).
         #
-        # If we ever want a real cadence gate it would need either
-        # spin-wait (CPU burn), a higher-resolution timer API
-        # (CreateWaitableTimerEx with WAITABLE_TIMER_HIGH_RESOLUTION),
-        # or a producer-side rewrite to lockstep (matching Thetis's
-        # network.c:1287-1339 pattern -- aamix produces 126, signals,
-        # blocks on hobbuffsRun until consumer sends, repeats).
-        # Lockstep is the cleanest fix but it's a producer-pipeline
-        # restructure.  Parked.
-        print(f"[HL2Stream] EP2 cadence: producer-paced via "
-              f"semaphore; "
-              f"{EP2_HEARTBEAT_TIMEOUT*1000:.0f} ms heartbeat "
-              f"timeout, {EP2_KEEPALIVE_MAX_GAP*1000:.0f} ms "
-              f"keepalive fence")
+        # Lock ordering (contract pt b): the timer wait is its own
+        # step, OUTSIDE `_cc_lock`/`_send_lock`/`_tx_audio_lock`.
+        # Per-fire lock holds are minimal (one dict read, one
+        # sendto, one short drain) and NEVER span the wait — so a
+        # slow Qt-thread set_mox/_set_tx_freq can at worst jitter
+        # one period (~2.6 ms), never wedge the keepalive.
+        PERIOD = 1.0 / 380.95     # ≈ 2.6251 ms, the HL2 audio cadence
+        # No-catch-up reset: if we fall this far behind (stall /
+        # suspend) do NOT rapid-fire to "catch up" (that bursts the
+        # wire + over-feeds the AK4951 FIFO = round-12 inverted).
+        # Drop the backlog and re-anchor the deadline to now.
+        CATCHUP_RESET = 8 * PERIOD          # ≈ 21 ms
 
-        last_ep2_send_t = time.monotonic()
+        timer_ctx = HL2Stream._setup_win32_waitable_timer()
+        if timer_ctx is None:               # non-Windows
+            timer_ctx = {"mode": "spin"}
+        timer_mode = timer_ctx.get("mode", "spin")
+        _hires = (timer_mode == "highres")
+        if _hires:
+            _set_timer = timer_ctx["SetWaitableTimer"]
+            _wait_obj = timer_ctx["WaitForSingleObject"]
+            _timer_h = timer_ctx["handle"]
+        print(f"[HL2Stream] EP2 cadence: timer-paced "
+              f"({'HIGH_RESOLUTION kernel timer' if _hires else 'spin-hybrid fallback'}), "
+              f"{1.0/PERIOD:.2f} Hz, drift-corrected; "
+              f"pre-fill {self._ep2_prefill_samples} samples")
+
+        def _wait_until(deadline: float) -> None:
+            """Sleep until ``deadline`` (perf_counter seconds).
+            GIL-released kernel wait on the hi-res path; coarse
+            sleep + short residual spin on the fallback.  Returns
+            immediately if already past the deadline (the loop's
+            no-catch-up reset prevents a runaway backlog)."""
+            rel = deadline - time.perf_counter()
+            if rel <= 0:
+                return
+            if _hires:
+                # Negative relative due time, units of 100 ns.
+                due = ctypes.c_longlong(-int(rel * 1.0e7))
+                _set_timer(_timer_h, ctypes.byref(due), 0,
+                           None, None, False)
+                # Cap the wait so a missed signal can never hang
+                # the thread (rel ms + 50 ms slack).
+                _wait_obj(_timer_h, int(rel * 1000.0) + 50)
+            else:
+                # Coarse sleep to ~1.2 ms short, then spin the
+                # residual on the monotonic clock (degraded path
+                # only; ~one core-third at 380 Hz — acceptable
+                # fallback, logged at startup).
+                coarse = rel - 0.0012
+                if coarse > 0:
+                    time.sleep(coarse)
+                while time.perf_counter() < deadline:
+                    pass
+
+        next_fire = time.perf_counter() + PERIOD
         try:
             while not self._stop_event.is_set():
-                # ── Wait for audio-ready signal OR heartbeat tick ──
-                signaled = self._ep2_send_sem.acquire(
-                    timeout=EP2_HEARTBEAT_TIMEOUT)
+                now = time.perf_counter()
+                if now > next_fire + CATCHUP_RESET:
+                    # Fell badly behind — re-anchor, drop backlog,
+                    # never replay (no burst-send).
+                    next_fire = now + PERIOD
+                _wait_until(next_fire)
+                # Drift-corrected accumulator: advance by exactly
+                # one period regardless of wake jitter so the
+                # AVERAGE tracks 380.95 Hz with zero cumulative
+                # drift (the ring absorbs ±jitter).
+                next_fire += PERIOD
+                if self._stop_event.is_set():
+                    break
 
-                # ── Path C.1 / C.3: heartbeat handling under inject
-                # When ``inject_audio_tx`` is True and the heartbeat
-                # fired (no signal arrived within
-                # EP2_HEARTBEAT_TIMEOUT), we have two cases:
-                #
-                # (a) Recent send (gap < KEEPALIVE_MAX_GAP):
-                #     Normal DSP inter-block gap.  Skip the iteration
-                #     -- firing a C&C-only frame here would insert
-                #     2.625 ms of silence between real-audio frames
-                #     and the AK4951 hears it as a click.  This is
-                #     the original Path C.1 fix.
-                #
-                # (b) Long gap (>= KEEPALIVE_MAX_GAP):
-                #     Producer is stalled (band change DSP reset,
-                #     worker hiccup, etc.).  Fall through to the
-                #     send branch and emit a C&C-only frame.  HL2
-                #     needs EP2 keepalive to keep streaming EP6;
-                #     the audio is already silent so a few zero-
-                #     audio frames don't add a click.  This is the
-                #     Path C.3 fix.
-                #
-                # When ``inject_audio_tx`` is False (PC Soundcard
-                # mode), heartbeat always fires C&C-only frames --
-                # there's no audio to click.
-                if not signaled and self.inject_audio_tx:
-                    if (time.monotonic() - last_ep2_send_t
-                            < EP2_KEEPALIVE_MAX_GAP):
-                        continue
-                    # else: long gap, fall through to send keepalive
-
-                # ── Drain audio + build + send EP2 frame ───────────
-                # If we got an audio signal AND injection is enabled,
-                # drain 126 samples and send an audio frame.
-                # Otherwise (heartbeat-fired with injection disabled)
-                # send a C&C-only frame so register state still
-                # propagates to the radio.
+                # ── Drain audio (gated on pre-fill) ────────────────
+                # C&C frames flow every fire from t0 (keepalive never
+                # waits on pre-fill).  AUDIO only once the ring has
+                # filled to `_ep2_prefill_samples` at least once
+                # since start/clear; thereafter `_slew_fill_pairs`
+                # handles any shortfall (decays to silence, never
+                # repeats — Option B: small pre-fill, RX-pop
+                # smoothness gated on S3).
                 audio_bytes: Optional[bytes] = None
-                if signaled and self.inject_audio_tx:
+                if self.inject_audio_tx:
+                    pulled = None
                     with self._tx_audio_lock:
-                        avail = min(len(self._tx_audio), 126)
-                        pulled = [self._tx_audio.popleft()
-                                  for _ in range(avail)]
-                    # Underrun should be impossible under Path
-                    # C/C.1/C.2 semantics (semaphore signaled =>
-                    # >= 126 samples were queued, no _send_cc drain
-                    # path active during injection), but a raced
-                    # clear_tx_audio or a future regression can put
-                    # it back.  _slew_fill_pairs makes that case
-                    # click-free (raised-cosine fade-out + recovery
-                    # fade-in instead of a hard zero step) and
-                    # increments tx_audio_underruns (single source
-                    # of truth shared with the _send_cc drain).
-                    pulled = self._slew_fill_pairs(pulled, 126)
-                    try:
-                        audio_bytes = self._pack_audio_bytes_pairs(
-                            pulled)
-                    except Exception as exc:  # noqa: BLE001
-                        _log.warning(
-                            "EP2 audio packing error: %s", exc)
-                        audio_bytes = None
+                        depth = len(self._tx_audio)
+                        if (not self._ep2_prefilled
+                                and depth >= self._ep2_prefill_samples):
+                            self._ep2_prefilled = True
+                        if self._ep2_prefilled:
+                            avail = min(depth, 126)
+                            pulled = [self._tx_audio.popleft()
+                                      for _ in range(avail)]
+                    if pulled is not None:
+                        pulled = self._slew_fill_pairs(pulled, 126)
+                        try:
+                            audio_bytes = (
+                                self._pack_audio_bytes_pairs(pulled))
+                        except Exception as exc:  # noqa: BLE001
+                            _log.warning(
+                                "EP2 audio packing error: %s", exc)
+                            audio_bytes = None
 
-                # Pick next C&C round-robin entry, build the frame,
-                # send it.  All wrapped in a single try/except so a
-                # transient socket / build error does not kill the
-                # writer thread; we just log and continue.
-                #
-                # v0.2 Phase 1: cycle walks ``_cc_cycle`` (the
-                # operator-ordered list) instead of ``sorted(keys)``.
-                # Setters that mutate ``_cc_registers`` also call
-                # ``_register_cc_slot(c0)`` so the cycle stays in
-                # sync.  The writer never falls through to the
-                # "empty registers" branch in practice (the dict
-                # is seeded at __init__ with 0x00 and 0x2e), but
-                # the fallback stays as belt-and-suspenders.
+                # ── C&C round-robin + build + send ─────────────────
+                # Every fire emits a frame: live MOX bit (contract
+                # pt 2) + page rotation incl. duplex(0)/reset-on-
+                # disconnect(18).  Locks held minimally, never across
+                # the timer wait above (contract pt b).
                 try:
                     with self._cc_lock:
                         if self._cc_cycle:
@@ -2403,32 +2396,7 @@ class HL2Stream:
                             self._sock.sendto(
                                 frame,
                                 (self.radio_ip, DISCOVERY_PORT))
-                    # Path C.3: stamp the send so the keepalive
-                    # fence above can measure gap-since-last-send.
-                    last_ep2_send_t = time.monotonic()
-                    # Non-blind wire-cadence instrument (reuses the
-                    # same monotonic read; fence logic unchanged).
-                    self._note_wire_send(last_ep2_send_t)
-                    # ── v0.0.9.6 Thetis-mirror lockstep ack ────────
-                    # If this iteration drained audio (i.e., the
-                    # AudioMixer pushed and is now waiting on
-                    # _lockstep_slot), release the slot so the
-                    # mixer can dispatch its NEXT outbound frame.
-                    # Mirrors Thetis ReleaseSemaphore(hobbuffsRun
-                    # [1], 1, 0) at WriteMainLoop_HL2 line 1200.
-                    # Net effect: wire cadence becomes exactly
-                    # 380.95 Hz, paced by HL2's own audio crystal
-                    # via the mixer's blocking outbound.
-                    #
-                    # Released ONLY for audio-bearing frames
-                    # (signaled + inject_audio_tx).  C&C-only
-                    # heartbeat frames don't correspond to a
-                    # mixer outbound dispatch, so don't release
-                    # for those -- otherwise the slot count
-                    # would drift up and the lockstep would
-                    # stop being lockstep.
-                    if signaled and self.inject_audio_tx:
-                        self._lockstep_slot.release()
+                    self._note_wire_send(time.perf_counter())
                 except OSError:
                     # Socket likely closed during stop().  Exit
                     # cleanly.
@@ -2437,12 +2405,11 @@ class HL2Stream:
                     _log.warning(
                         "EP2 writer iteration error: %s", exc)
         finally:
-            # Drain any leftover semaphore signals so a subsequent
-            # start() begins from a clean count.  No kernel resources
-            # to release under Path C (Win32 WaitableTimer was
-            # removed -- semaphore is a pure Python primitive).
-            while self._ep2_send_sem.acquire(blocking=False):
-                pass
+            if _hires:
+                try:
+                    timer_ctx["CloseHandle"](timer_ctx["handle"])
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _note_wire_send(self, now: float) -> None:
         """Record the EP2 inter-send interval (the non-blind
@@ -2635,7 +2602,17 @@ class HL2Stream:
         # False (default), columns stay zero -- wire-identical to v0.1
         # RX-only behavior.  Underrun pads with zeros + bumps
         # tx_iq_underruns counter (see _drain_tx_iq_be docstring).
-        if self.inject_tx_iq:
+        # S2 contract pt-1 (asymmetric MOX-gated TX guard): gate on
+        # the LIVE MOX snapshot in addition to inject_tx_iq.  Under
+        # the free-running timer writer, inject_tx_iq (FSM/producer-
+        # owned) and the wire MOX bit are set on different threads at
+        # different times; gating on both makes "not-keyed => zero
+        # TX I/Q" STRUCTURALLY enforced, not incidental to thread
+        # skew.  (`_drain_tx_iq_be` already zero-pads on starve and
+        # never repeats a stale buffer, so a keyed-but-starved frame
+        # is silent modulation, never a looping carrier — the
+        # reference's structural anti-stale-carrier posture.)
+        if self.inject_tx_iq and self._snapshot_mox_bit():
             iq_real_be, iq_imag_be = self._drain_tx_iq_be(126)
             out_arr[:, 2] = iq_real_be
             out_arr[:, 3] = iq_imag_be

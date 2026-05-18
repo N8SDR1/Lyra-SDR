@@ -12,17 +12,13 @@ from typing import Callable, Optional, Protocol
 
 import numpy as np
 
-# S1 — bound the lockstep rendezvous.  Equals the EP2 keepalive
-# fence (stream.py EP2_KEEPALIVE_MAX_GAP = 0.050).  Under healthy
-# ~2.6 ms wire cadence the writer releases the slot long before
-# this, so the timeout is DORMANT — zero behavior change in
-# health.  It only converts the pathological "EP2 writer wedged ->
-# mixer thread parked on .acquire() FOREVER" (a latent permanent
-# stuck/silent state, the worst-case the audit flagged) into a
-# bounded skip: the 126-sample chunk was already pushed to the TX
-# deque, so dropping this rendezvous loses no audio — it just
-# stops the mixer blocking on a dead writer.
-_LOCKSTEP_ACQUIRE_TIMEOUT_S = 0.050
+# S2 superseded S1: the lockstep rendezvous is GONE entirely (the
+# EP2 writer is now HIGH_RESOLUTION-timer-paced and drains the
+# `_tx_audio` ring itself — see stream.py `_ep2_writer_loop`).
+# `_lockstep_outbound` is now a lock-free push: extend the ring,
+# return.  No semaphore, no rendezvous, no bounded-acquire — the
+# mixer thread never blocks on the wire, which is what removes the
+# GIL/paint-frame cadence coupling.
 
 
 # ── Host API enumeration (v0.0.9.6) ─────────────────────────────────
@@ -204,20 +200,12 @@ class AK4951Sink:
         self._stream = stream
         self._mixer = mixer
         self._closed = False
-        # S1: count bounded-acquire timeouts (writer-wedged events).
-        # Surfaced only via the env-gated [WIRE] log for now; the
-        # important property is it can no longer hang forever.
-        self._lockstep_timeouts = 0
         # Drain any leftover TX audio from a previous session before
-        # we start enqueuing fresh samples.
+        # we start enqueuing fresh samples (also re-arms the S2
+        # pre-fill gate + slew state via clear_tx_audio).
         if hasattr(stream, "clear_tx_audio"):
             stream.clear_tx_audio()
-        # Drain any stale lockstep tokens from a previous sink life.
-        try:
-            while stream._lockstep_slot.acquire(blocking=False):  # noqa: SLF001
-                pass
-        except Exception:
-            pass
+        # S2: no lockstep semaphore to drain — the rendezvous is gone.
 
         self._stream.inject_audio_tx = True
         # Stereo balance gains. Default = equal-power center
@@ -282,20 +270,21 @@ class AK4951Sink:
         """Mixer thread consumer side -- BLOCKS in lockstep.
 
         Called by the AudioMixer thread once per 126-sample output
-        chunk with a (126, 2) float32 array of (L, R) pairs.  Pushes
-        to the HL2 EP2 deque, signals the EP2 writer there's an
-        audio frame ready, then waits on ``_lockstep_slot`` until
-        the writer has sent the packet.  This is the wire-cadence
-        pacer: while we're waiting, the mixer thread is paused, so
-        the next dispatch can't run until the wire has caught up.
+        chunk with a (126, 2) float32 array of (L, R) pairs.
 
-        Mirrors Thetis ``ChannelMaster\\network.c::WriteUDPFrame``
-        lines 1316-1322 (the L-R producer side of the lockstep
-        handshake).
+        S2: LOCK-FREE PUSH.  Extend the `_tx_audio` ring under its
+        short lock and RETURN immediately.  No semaphore signal, no
+        rendezvous, no blocking wait — the mixer never blocks on the
+        wire.  The HIGH_RESOLUTION-timer-paced EP2 writer
+        (stream.py `_ep2_writer_loop`) drains the ring on its own
+        kernel cadence.  This is the change that removes the
+        GIL/Qt-paint-frame coupling that quantised the wire to
+        25-56 ms (proven §15.26).  SP-SC: one producer (this mixer
+        callback), one consumer (the writer); `_tx_audio_lock`
+        serialises the extend vs the writer's popleft.
         """
         if self._closed:
             return
-        n = samples_lr.shape[0]
         # Convert ndarray rows to the deque's tuple format.  At
         # 126 rows × ~380 Hz = ~48k tuples/sec; small Python overhead
         # vs bulk numpy.  list-comp + tolist is faster than per-row
@@ -304,32 +293,9 @@ class AK4951Sink:
         pairs = [(row[0], row[1]) for row in arr_list]
         with self._stream._tx_audio_lock:  # noqa: SLF001
             self._stream._tx_audio.extend(pairs)  # noqa: SLF001
-        # Signal the EP2 writer there's a 126-sample frame available.
-        # The writer's drain path will release ``_lockstep_slot``
-        # after sendto() returns.
-        self._stream._ep2_send_sem.release()  # noqa: SLF001
-        # Block until writer has sent the packet (lockstep gate).
-        # This is what produces steady 380.95 Hz wire cadence.
-        # S1: BOUNDED wait.  In health the writer releases within
-        # ~2.6 ms so this returns immediately and behavior is
-        # byte-identical to the old unbounded acquire().  If the
-        # writer is wedged, we no longer park here forever — we
-        # skip the rendezvous (the chunk is already queued) so the
-        # mixer thread stays alive instead of permanently stuck.
-        if not self._stream._lockstep_slot.acquire(  # noqa: SLF001
-                timeout=_LOCKSTEP_ACQUIRE_TIMEOUT_S):
-            self._lockstep_timeouts += 1
-            try:
-                from lyra._wirediag import wiredbg
-                wiredbg(
-                    "LOCKSTEP acquire timed out "
-                    f"({_LOCKSTEP_ACQUIRE_TIMEOUT_S*1000:.0f}ms) -- "
-                    "EP2 writer wedged; skipping rendezvous "
-                    f"(total={self._lockstep_timeouts}). Audio "
-                    "already queued; mixer stays alive.",
-                    every_s=1.0, key="lockstep_to")
-            except Exception:  # noqa: BLE001
-                pass
+        # Done — non-blocking.  Ring depth itself is the writer's
+        # availability signal; overrun (producer racing far ahead)
+        # is bounded by the deque maxlen + counted in queue_tx_audio.
 
     def set_lr_gains(self, left: float, right: float) -> None:
         """Update the L/R channel gains. Called by Radio whenever the
@@ -379,18 +345,9 @@ class AK4951Sink:
         # past us once the new sink calls set_outbound; until that
         # happens, our outbound returns immediately due to _closed.
         self._closed = True
-        # Release the lockstep slot a few times to unblock any
-        # in-flight mixer outbound that's waiting on it.  The
-        # mixer's outbound will return immediately because _closed
-        # is True; the next mixer iteration will use the new
-        # (null) outbound.  Stale tokens left in the semaphore are
-        # harmless -- the next AK4951Sink (or future re-attach)
-        # drains them in __init__ before the first outbound.
-        try:
-            for _ in range(4):
-                self._stream._lockstep_slot.release()  # noqa: SLF001
-        except Exception:
-            pass
+        # S2: nothing to release — `_lockstep_outbound` is now a
+        # non-blocking push, so a concurrent mixer call cannot be
+        # parked waiting on us.  It checks `_closed` and returns.
 
         # Quiet-pass v0.0.7.1 (audio_pops_audit P0.3): apply a brief
         # fade-out before disabling EP2 audio injection.  Pre-fix this
