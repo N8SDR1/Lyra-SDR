@@ -917,8 +917,41 @@ class Radio(QObject):
         # percentile over this window drives the control loop (ignores
         # brief transient spikes).
         self._lna_peaks: list[float] = []
-        self._lna_rms: list[float] = []      # parallel to _lna_peaks
-        self._lna_peaks_max = 120
+        self._lna_rms: list[float] = []      # parallel — per-interval RMS *max*
+        self._lna_rms_mean: list[float] = []  # parallel — per-interval RMS *mean*
+        # S4a (2026-05-18): the worker→main lna_peak_update emit is
+        # COALESCED to ~10 Hz (block-count clock in DspWorker; the
+        # single-thread path coalesces inline below).  Each appended
+        # sample is therefore a ~100 ms interval reduction:
+        #   _lna_peaks      = max peak over the interval (Auto-LNA
+        #                     back-off reads max(_lna_peaks) — max-of-
+        #                     maxes is lossless vs the old per-block max)
+        #   _lna_rms        = max RMS over the interval (_evaluate_pullup
+        #                     reads max(_lna_rms) — wants the worst case)
+        #   _lna_rms_mean   = mean RMS over the interval (the toolbar
+        #                     quadratic-mean reads this; max-coalescing
+        #                     it would read systematically high)
+        # _lna_peaks_max was 120 (≈1.3 s at the old ~90 Hz per-block
+        # feed); at the coalesced ~10 Hz it MUST shrink to keep the
+        # same ~1.3 s Auto-LNA history window (else back-off / pull-up
+        # release goes ~9× sluggish — a silent regression invisible to
+        # a MAINSTALL gate; mandatory red-team correction #1).
+        self._lna_peaks_max = 13
+        # Toolbar short window (was [-20:] ≈ 0.2 s at ~90 Hz; re-derived
+        # for the ~10 Hz coalesced feed — 4 samples ≈ 0.4 s worst case,
+        # each itself a 100 ms interval reduction so the responsiveness
+        # the toolbar idiom intends is preserved).
+        self._LNA_TOOLBAR_WIN = 4
+        # Single-thread-path LNA coalescer accumulators (worker mode
+        # coalesces inside DspWorker; the legacy single-thread path
+        # coalesces here so BOTH feed _lna_* at the same ~10 Hz and
+        # one window constant is correct for both).  ~9 blocks ≈ 100 ms
+        # at the ~90 Hz per-block rate.
+        self._LNA_COALESCE_BLOCKS = 9
+        self._lna_acc_n = 0
+        self._lna_acc_peak = 0.0
+        self._lna_acc_rms_max = 0.0
+        self._lna_acc_rms_sum = 0.0
         self._lna_current_peak_dbfs = -120.0
         # Auto-LNA pull-up — opt-in bidirectional Auto-LNA. When True,
         # the auto loop ALSO raises gain on sustained quiet bands, in
@@ -6847,6 +6880,8 @@ class Radio(QObject):
             # Reset history so we evaluate from current conditions
             self._lna_peaks = []
             self._lna_rms = []
+            self._lna_rms_mean = []
+            self._reset_lna_single_thread_acc()
             self._lna_pullup_quiet_streak = 0
             self._lna_auto_timer.start()
         else:
@@ -6884,10 +6919,16 @@ class Radio(QObject):
         # history window that _lna_peaks_max holds. The longer window
         # is still tracked for Auto-LNA's overload-protection logic,
         # which legitimately wants the worst-case peak.
-        recent_peaks = (self._lna_peaks[-20:]
-                        if len(self._lna_peaks) >= 20 else self._lna_peaks)
-        recent_rms = (self._lna_rms[-20:]
-                      if len(self._lna_rms) >= 20 else self._lna_rms)
+        # S4a: feed is ~10 Hz coalesced; the short toolbar window is
+        # re-derived (was [-20:] ≈ 0.2 s at the old ~90 Hz per-block
+        # rate).  Quadratic-mean RMS uses _lna_rms_mean (the per-
+        # interval MEAN) — using _lna_rms (per-interval MAX) here
+        # would read systematically high (mandatory correction #2).
+        w = self._LNA_TOOLBAR_WIN
+        recent_peaks = (self._lna_peaks[-w:]
+                        if len(self._lna_peaks) >= w else self._lna_peaks)
+        recent_rms = (self._lna_rms_mean[-w:]
+                      if len(self._lna_rms_mean) >= w else self._lna_rms_mean)
         p = max(recent_peaks) if recent_peaks else 0.0
         r = (sum(x * x for x in recent_rms) / len(recent_rms)) ** 0.5 if recent_rms else 0.0
         # Convert to dBFS; floor at something sensible to avoid -inf
@@ -7084,6 +7125,8 @@ class Radio(QObject):
         })
         self._lna_peaks = []
         self._lna_rms = []
+        self._lna_rms_mean = []
+        self._reset_lna_single_thread_acc()
         # Reset quiet streak after any auto adjustment — let conditions
         # re-prove themselves before we climb again.
         self._lna_pullup_quiet_streak = 0
@@ -9426,6 +9469,8 @@ class Radio(QObject):
         self._request_dsp_reset_channel_only()
         self._lna_peaks = []
         self._lna_rms = []
+        self._lna_rms_mean = []
+        self._reset_lna_single_thread_acc()
         self.stream_state_changed.emit(False)
 
     def close(self) -> None:
@@ -9740,25 +9785,49 @@ class Radio(QObject):
         self._rx_channel.reset()
         # NOTE: legacy `self._leveler.reset()` removed Phase 4.
 
-    def _on_worker_lna_peak(self, peak: float, rms: float) -> None:
-        """Slot for ``DspWorker.lna_peak_update`` (B.6).
+    def _append_lna_coalesced(self, peak_max: float,
+                              rms_max: float, rms_mean: float) -> None:
+        """Append ONE ~100 ms-interval-coalesced LNA sample + trim.
 
-        Runs on the main thread because the connection is queued.
-        Mirrors the per-block append that
-        ``_on_samples_main_thread`` does in single-thread mode, so
-        Auto-LNA logic + the toolbar peak/RMS readout sees the same
-        history regardless of threading mode.
-
-        Cheap — two list appends + bounded trim.  Called at IQ-batch
-        cadence (~tens to low-hundreds of Hz), well within the main
-        thread's signal-handling capacity.
+        Shared by the worker slot and the single-thread coalescer so
+        both feed the same ~10 Hz history (S4a).  See the _lna_*
+        history docstring in __init__ for the per-list semantics.
         """
-        self._lna_peaks.append(float(peak))
-        self._lna_rms.append(float(rms))
+        self._lna_peaks.append(float(peak_max))
+        self._lna_rms.append(float(rms_max))
+        self._lna_rms_mean.append(float(rms_mean))
         if len(self._lna_peaks) > self._lna_peaks_max:
             self._lna_peaks.pop(0)
         if len(self._lna_rms) > self._lna_peaks_max:
             self._lna_rms.pop(0)
+        if len(self._lna_rms_mean) > self._lna_peaks_max:
+            self._lna_rms_mean.pop(0)
+
+    def _reset_lna_single_thread_acc(self) -> None:
+        """Drop the single-thread-path LNA coalescer accumulator.
+
+        Called on the MOX→RX edge so a TX-poisoned peak/RMS max from
+        a partial pre-keyup interval can never leak into the first
+        post-keyup _adjust_lna_auto (mandatory red-team correction
+        #3; mirrors DspWorker's accumulator reset)."""
+        self._lna_acc_n = 0
+        self._lna_acc_peak = 0.0
+        self._lna_acc_rms_max = 0.0
+        self._lna_acc_rms_sum = 0.0
+
+    def _on_worker_lna_peak(self, peak: float, rms_max: float,
+                            rms_mean: float) -> None:
+        """Slot for ``DspWorker.lna_peak_update`` (B.6; S4a-coalesced).
+
+        Runs on the main thread (queued connection).  The worker now
+        emits at ~10 Hz with each value already reduced over a
+        ~100 ms interval (peak=max, rms_max=max, rms_mean=mean) — so
+        this is a cheap 3-append + bounded trim at ~10 Hz instead of
+        the old ~90 Hz per-block storm (the GIL-contending cross-
+        thread emit S4a removes).  Auto-LNA + the toolbar readout see
+        the same time-windowed history regardless of threading mode.
+        """
+        self._append_lna_coalesced(peak, rms_max, rms_mean)
 
     # ── Internal: sample flow ─────────────────────────────────────────
     def _stream_cb(self, samples, _stats):
@@ -10058,16 +10127,33 @@ class Radio(QObject):
         # diagnostics — responds predictably to LNA gain changes).
         # Cheap to compute per block; history size clamped.
         if len(samples) > 0:
-            mag_sq = (samples.real * samples.real
-                      + samples.imag * samples.imag)
-            peak = float(np.sqrt(np.max(mag_sq)))
-            rms = float(np.sqrt(np.mean(mag_sq)))
-            self._lna_peaks.append(peak)
-            self._lna_rms.append(rms)
-            if len(self._lna_peaks) > self._lna_peaks_max:
-                self._lna_peaks.pop(0)
-            if len(self._lna_rms) > self._lna_peaks_max:
-                self._lna_rms.pop(0)
+            # S4a: MOX→RX edge protection — never let a TX-coupled
+            # peak/RMS poison the post-keyup Auto-LNA decision
+            # (mirrors the DspWorker accumulator reset + the
+            # _adjust_lna_auto mox early-return; correction #3).
+            if self._dispatch_state.mox:
+                self._reset_lna_single_thread_acc()
+            else:
+                mag_sq = (samples.real * samples.real
+                          + samples.imag * samples.imag)
+                peak = float(np.sqrt(np.max(mag_sq)))
+                rms = float(np.sqrt(np.mean(mag_sq)))
+                # Coalesce ~9 per-block measurements → one ~10 Hz
+                # sample (max peak / max RMS / mean RMS over the
+                # interval) so the single-thread path feeds _lna_*
+                # at the same cadence the worker now does.
+                self._lna_acc_peak = max(self._lna_acc_peak, peak)
+                self._lna_acc_rms_max = max(self._lna_acc_rms_max, rms)
+                self._lna_acc_rms_sum += rms
+                self._lna_acc_n += 1
+                if self._lna_acc_n >= self._LNA_COALESCE_BLOCKS:
+                    self._append_lna_coalesced(
+                        self._lna_acc_peak, self._lna_acc_rms_max,
+                        self._lna_acc_rms_sum / self._lna_acc_n)
+                    self._lna_acc_n = 0
+                    self._lna_acc_peak = 0.0
+                    self._lna_acc_rms_max = 0.0
+                    self._lna_acc_rms_sum = 0.0
         self._do_demod(samples)
         if self._radio_debug:
             _rd_dt_ms = (_rdtime.perf_counter() - _rd_t0) * 1000.0

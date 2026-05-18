@@ -9258,10 +9258,68 @@ ADDITIONS".  Reconciled: **strategy GO, design CORRECTED +
 re-locked** with the 3 mandatory window/rms/MOX-edge
 corrections + block-count clock + no-spurious-0.0; honest
 NBNS scope (S4b mandatory; S4a gate = lna-rate/GIL not chop).
-**STATUS: corrected S4a design LOCKED.  Awaiting operator
-go-ahead to implement (same cadence as S2/S3: plan→red-team→
-[this]→implement→HL2 re-gate).  NO code until then.**
-`origin/main` stays v0.1.1.
+**✅ S4a SHIPPED `<pending>` 2026-05-18** (operator
+"continue" = go-ahead; suite 457/0, zero regressions; backup
+`_backups/lyra-2026-05-18-S4a.bundle`; pushed; main v0.1.1).
+All red-team-corrected items implemented:
+* **worker.py** — `lna_peak_update` Signal `(float,float)`→
+  `(float,float,float)` = (peak_max, rms_max, rms_mean);
+  new pure `DspWorker._feed_lna(samples, mox)` accumulates
+  per-block (max peak / max rms / sum rms / n) and returns
+  the interval triple once per `_LNA_EMIT_BLOCKS=9` (≈10 Hz
+  at the ~90 Hz block rate) else None; `process_block`
+  reads `radio._dispatch_state.mox` (GIL-coherent single
+  attr, no snapshot alloc) and emits only on a non-None
+  return.  MOX True drops the partial accumulator + returns
+  None (correction #3).  Never a spurious 0.0 (only emits
+  when ≥1 RX block contributed).
+* **radio.py** — `_lna_peaks_max` 120→**13** (now ≈1.3 s at
+  the coalesced 10 Hz — correction #1); new `_lna_rms_mean`
+  list; `_LNA_TOOLBAR_WIN=4`; `_append_lna_coalesced` shared
+  helper (3-list append+trim); `_on_worker_lna_peak` now
+  3-arg (peak→`_lna_peaks`, rms_max→`_lna_rms`,
+  rms_mean→`_lna_rms_mean`); `_emit_peak_reading` reads
+  `_lna_rms_mean[-4:]` for the quadratic mean (correction
+  #2 — `_evaluate_pullup` keeps `max(_lna_rms)` = true max,
+  lossless); the legacy single-thread `_on_samples_main_
+  thread` path coalesces inline at the same ≈10 Hz (so ONE
+  window constant is correct for both paths — no dual-cap
+  regression) with the same MOX-edge reset
+  (`_reset_lna_single_thread_acc`); all 3 history-clear
+  sites + the new reset added.
+* `peak`=max-over-interval is provably lossless for Auto-LNA
+  back-off (`max(_lna_peaks)` over interval-maxes == max of
+  per-block maxes — test-pinned).  Fully independent of
+  S2/S3/Phase-3/§15.21 (frequency-only change to one
+  worker→main emit; no wire-path/lock/teardown surface).
+* `tests/dsp/test_s4a_lna_coalesce.py` (10): block-count
+  clock, no-emit-before-interval, lossless max,
+  mean-vs-max-rms separation, MOX→RX reset + poison
+  suppression, no-spurious-0.0, 3-arg signal/slot, radio
+  trim/window-retune, toolbar-uses-mean.
+
+**OPERATOR HL2 RE-GATE — judge on lna-rate / GIL, NOT chop
+(no RF, dummy load, normal RX):**
+1. `set LYRA_WIRE_DEBUG=1` then
+   `python -u -m lyra.ui.app > %USERPROFILE%\lyra_wire.log
+   2>&1`; HL2-jack, DSP off, ~1 min + a few Chrome-open /
+   cross-monitor window-drags.  Send the log; I run
+   `summarize_capture`.
+2. **PASS (computed, honest NBNS scope):** the worker→main
+   `lna_peak_update` emit rate dropped ~9× (≈90→≈10 Hz) →
+   measurable GIL-contention reduction; Auto-LNA back-off /
+   pull-up + the toolbar ADC/peak readout still behave
+   correctly (no sluggish back-off, no high-reading toolbar
+   RMS — the silent-regression checks).  The continuous
+   ~55 ms MAINSTALL *metric* MAY persist and the chop MAY
+   remain — that is **S4b's** target, **NOT an S4a failure**
+   (the R-B corner-painting trap; S4a was always honestly
+   necessary-but-not-sufficient).  S4b stays MANDATORY.
+3. On PASS → **S4b** (move `_process_spec_db` off-main — an
+   S2/S3-scale threading rebuild; its own design + red-team
+   + HL2 gate).  On a true Auto-LNA/toolbar regression →
+   numbers back here, diagnose, no guess.  `origin/main`
+   stays v0.1.1.
 
 ---
 
