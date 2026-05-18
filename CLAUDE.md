@@ -8841,6 +8841,41 @@ weakened).
    residual chop) → capture + numbers back here, diagnose,
    no guess.  `origin/main` stays v0.1.1.**
 
+**✅ S3 HL2 RE-GATE RESULT 2026-05-18 (objective
+`summarize_capture` + screenshot; operator-empirical):**
+S3's IN-SCOPE deliverables CONFIRMED on hardware, AND the
+F3/F4 load-bearing assumption is now EMPIRICALLY RESOLVED.
+Numbers vs the S2 bench: producer lump (deque swing)
+8000–11000 → **~3000 max** (~4× shallower); EP6 recv errors
+**790 → 153** (~5× fewer); MAINSTALL **90 → 55** events
+(mean 92, p50 55 — magnitude unchanged); EP2 gaps 19, all
+25–50, p95 42 (spike-correlated, not continuous); **3
+Stop/Start cycles → no hang, no dead-RX, RX back S9+16 =
+the §15.21-bug-3 final-drain WORKS**.  BUT `un` underrun
+storm **1851 ≈ S2's 1763 — NOT reduced** → the chop is
+NOT cleared by S3.  **This empirically RESOLVES the F3/F4
+unverified assumption ("S3 de-quantises the producer so the
+256 prefill clears the chop"): FALSE — S3 alone does NOT
+clear the chop.**  The residual producer-lumping/underrun
+is GIL-vs-continuous-main-paint driven (the ~55 ms
+MAINSTALL) = precisely **S4a's** target — exactly the
+honest NBNS scope + Agent-A's convergence warning, NOT an
+S3 regression / NOT an in-scope failure (the locked R-B
+guidance: do NOT fail S3 / do NOT redesign over the
+residual — proceed to S4a).  Operator-empirical authority
+on the *audible* outcome (better/same/worse vs S2) PENDING
+operator ear report.  S3 = the event-pump decouple + the
+§15.21 stop/restart safety + ~4× shallower lumps + 5×
+fewer EP6 errors — all real, all shipped, all confirmed;
+the chop-clear Option-B payoff is **S4a**, now
+evidence-mandated (operator-empirical over inference, the
+session discipline).  **NEXT = S4a (rate-limit/coalesce
+the worker→main `spectrum_raw_ready`/`lna_peak_update`
+emit — frees the GIL from the continuous paint hold →
+should collapse BOTH the MAINSTALL and the residual
+lump/un-storm/chop).  Same procedure: plan→red-team→
+implement→HL2 re-gate.**  `origin/main` stays v0.1.1.
+
 #### ✅ WHOLE-DAY CONVERGENCE CHECK 2026-05-18 (operator:
 #### "take more agents, go through what we've done today +
 #### where S3/S4 leads; all must agree or loop").  3
