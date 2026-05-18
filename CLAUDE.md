@@ -8646,6 +8646,58 @@ the prefill can shrink and the chop fully clears).  On FAIL
 → capture + `summarize_capture` numbers back here, diagnose,
 do NOT guess.  `origin/main` stays v0.1.1.**
 
+**✅ S2 HL2 BENCH RESULT 2026-05-18 (operator: "better but
+still issues — improved"; objective `summarize_capture`):**
+S2 DID its job, quantified:
+* EP2 wire-gap ≥25 ms events: BEFORE = **~150 continuous**
+  (every gap 25–56 ms, the chronic pathology); AFTER S2 =
+  **15 total** across a multi-minute run (2 stream starts),
+  max 42 ms, p95 40 ms, ALL in the 25–50 bucket, ZERO ≥50.
+  The 15 are sparse + **1:1 correlated with the big main-
+  thread freezes**, NOT continuous.  Steady-state wire is
+  now sub-25 ms (un-logged; live status `gap=13ms`).  The
+  chronic continuous wire-cadence break — the relay-chatter
+  / stuck-carrier root — is STRUCTURALLY GONE.
+* S0 gate `healthy=False` — **honest, but for the RIGHT
+  reason**: the strict binary needs 0 ≥25 ms samples; the
+  15 residual are the **S3 defect bleeding into the wire
+  during the biggest Qt freezes**, NOT the chronic S2
+  target.  90 MAINSTALL events, mean 88.8 ms, p50 58.5 ms,
+  16 ≥100 ms, max 1034 ms = the Qt main thread freezing
+  ~50–150 ms CONTINUOUSLY (also "Stream: 790 errors" = RX
+  recv starved by the same freezes).  That is precisely
+  S3's target; S2 only ever scoped the *wire* decouple and
+  it succeeded (150→15).  S2+S3 together is the unit that
+  passes `healthy=True`.
+* The chop the operator hears = `un` →thousands + `deque`
+  oscillating 0↔11000 = producer delivering ~200 ms lumps
+  (main-thread-quantised) vs the small Option-B prefill 256
+  → underrun-decay between lumps.  This is the EXACT
+  pre-S3 cost Option B explicitly accepted (click-free
+  decay, not the old hard pops).
+* VERDICT: S2 correct + measurably working — do NOT rework.
+  Strict gate passes only after S3 removes the main-thread
+  freezes (locked plan).  Interim prefill-bump SKIPPED
+  (lumps ~200 ms ⇒ masking now ≈ Option-A latency the
+  operator rejected).  **PROCEED TO S3.**
+* Side note: 2 `EP2 cadence` start blocks in the log = an
+  operator stop/restart mid-capture; both segments same
+  pattern → b7e61e6 RX-recovery hardening held (clean
+  restart, no dead RX).
+* TRACKED separate defect: WISDOM first-run/rebuild EXITS
+  the process after planning (WDSP `WDSPwisdom()`
+  `AllocConsole()` → console-close event terminates Python
+  before it continues to OpenChannel/UI).  File IS written
+  (32 KB) so the cached path + 2nd run are fine — but every
+  rebuild (incl. the operator Settings "Clear & rebuild")
+  strands the operator at a relaunch.  My earlier
+  "non-blocking follow-up" call was WRONG (operator-
+  empirical).  FIX (queued, after S3): generate wisdom in
+  a throwaway subprocess (AllocConsole/close kills only the
+  helper) + a proper "one-time, ~minutes" modal; main
+  process waits then continues.  NOT a guess-patch — verify
+  the console-close mechanism first.
+
 #### ✅ FFTW WISDOM RE-EVALUATED 2026-05-18 (operator
 #### re-raised — "things have changed since you said no").
 #### They were right.  Verdict: scoped YES.
