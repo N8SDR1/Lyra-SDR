@@ -8356,6 +8356,86 @@ tested + benched, NOT a patch.  Backup
 `_backups/lyra-2026-05-18-wire-instrument.bundle`; instrument
 commit `8630403`.
 
+#### ✅ STAGED REBUILD PLAN + STAGE-2 REFERENCE SAFETY
+#### VERIFICATION 2026-05-18 (plan-before-code, operator asked
+#### "anything from the reference to protect Stage 2?" BEFORE
+#### any code — the §15.25/§15.26 methodology).
+
+**Staged plan (Plan-agent, grounded in real file:line; LOCKED
+pending operator go-ahead):** S0 bench harness + baseline
+capture (test-only) · S1 bound the lockstep `acquire()` with a
+timeout = kill the latent infinite-hang/stuck vector
+(`audio_sink.py:297`), dormant in health · **S2 = THE prime
+fix:** lock-free mixer→ring push + EP2 writer paced by a
+monotonic/OS-waitable-timer (the dormant `stream.py:1980-2049`
+seam), not the producer rendezvous; wire bytes byte-identical,
+only the clock changes · S3 control/slot-storm off the DSP
+worker `processEvents` (`worker.py:510`) = the real relay-
+chatter fix · S4 independent keepalive · S5 Brent-B4 slew all
+gain/mute/balance/TX-RX-gate edges · S6 Brent B1/B2/B3/B5
+(PC-SC callback + rmatch) · S7 B6/B7 + AGC-resume surfacing.
+One revertable commit + suite + per-stage bench gate + bundle
+per stage; S2 must be proven on operator HL2 (gap distribution
+must collapse 25–56 ms → ~2.6 ms and survive a window-drag)
+before S3+.  Out of scope: AGC-resume *fix*, BPF/LPF GAP,
+Phase-3-EXIT kill-test, Vulkan.  Do NOT touch WDSP
+`_lock`/`fexchange0` (prior-agent no-op).
+
+**Reference C-source study (architecture/safeties only,
+Lyra-native, no copy, no name in shipped code — provenance
+here):** the reference's own P1/HL2 EP2 wire is *itself*
+producer-rendezvous-quantised (a strict 1-frame two-semaphore
+double-handshake, `networkproto1.c:1204-1267`/`network.c:
+1285-1340`) — the SAME coupling Lyra is removing; it only
+tolerates it because its DSP runs high-priority off-GIL.  Its
+stuck-carrier safety is purely STRUCTURAL: a TX frame reaches
+the wire only on a fresh single-use producer token ⇒ no fresh
+data ⇒ writer blocks ⇒ **silent wire, never a looping
+carrier**; plus RX-side MOX-gated I-Q zeroing
+(`networkproto1.c:1227`) and the FPGA watchdog
+(`network.c:885`) + `reset_on_disconnect` (`:1170-1176`)
+firmware backstops.  No host software watchdog; the separate
+timer keepalive (`network.c:1404-1428`) is **P2-only**.
+
+**VERDICT: Lyra Stage 2 is sufficient AND strictly STRONGER
+than the reference's P1 behavior** (timer-paced + C&C-only
+past the fence = exactly the reference's P2 posture, applied
+where P1 has none), **provided the LOCKED hardened Stage-2
+safety contract:**
+1. **Asymmetric MOX-gated TX guard (the single most safety-
+   critical point):** not-keyed ⇒ emitted frames carry ZERO
+   I-Q (never slew-fill of stale content); keyed-but-ring-
+   short ⇒ slew-fill must **decay to zero** (raised-cosine to
+   silence), NEVER hold/repeat a last-good TX sample. A keyed
+   stall must produce a decaying-then-silent envelope, not a
+   sustained carrier.
+2. **C&C-only keepalive must stay live:** every emitted frame
+   (incl. keepalive past the 50 ms fence) restamps the live
+   `XmitBit` into C0, keeps the duplex bit (page 0,
+   `networkproto1.c:967`) and reset-on-disconnect (page 18,
+   `:1170-1176`), and keeps the control round-robin
+   advancing.  A frozen-C0 / non-rotating keepalive regresses
+   HL2 keying and defeats the firmware dead-man.
+3. **Keep the firmware backstops enabled** and ensure the
+   50 ms C&C fence sits well inside the HL2 FPGA-watchdog
+   window; the keepalive path must use the OS timer and never
+   a producer-coupled wait so it cannot itself wedge.
+Plus a CW note (v0.2.2, not Phase-3 SSB): CW keying rides TX
+I-Q LSBs (`networkproto1.c:1247-1256`) — slew-fill must never
+corrupt live CW PTT bits.  No additional host software
+watchdog required (the reference has none; Lyra's timer C&C
+keepalive is the superior equivalent).  Ref agent
+`af5cba3b4d28529e2`; design agent (Plan) output recorded.
+
+**STATUS: plan + Stage-2 safety contract reference-verified
+and LOCKED.  Awaiting operator go-ahead to start S0/S1 (both
+low-risk) + the explicit Stage-2 sign-off (now precisely =
+the 3-point contract above).  NO code until then.**
+
+---
+
+## ▶ NEXT SESSION STARTS HERE (2026-05-17 EOD)
+
 **AUTHORITATIVE RESUME DOC = §15.26** (full locked plan +
 Thetis-verified ground truth + the audit/red-team/reference
 corrections + every operator decision).  Read §15.26 first
