@@ -8600,11 +8600,51 @@ fix; revisit ONLY if a tester traces display sluggishness
 specifically to FFT cost.  Parked alongside §15.8 item #1
 (Vulkan).  No code.
 
-**STATUS: Option B LOCKED; corrected S2 design LOCKED (6
-mandatory items).  Implementing the CORRECTED S2 now.  HL2
-bench GATE before S3+ (post-S2 `summarize_capture`
-`healthy=True` + survive a window-drag, prefill bench-tuned).
-`origin/main` stays v0.1.1.**
+**✅ S2 SHIPPED `663154e` 2026-05-18 (suite 445/0; backup
+`_backups/lyra-2026-05-18-S2.bundle`; pushed; main v0.1.1).**
+All 6 red-team-corrected mandatory items implemented:
+HIGH_RESOLUTION `CreateWaitableTimerExW` + drift-corrected
+`next_fire+=PERIOD` + no-catch-up reset; `_ep2_writer_loop`
+timer-paced; `_lockstep_outbound` lock-free push; `_ep2_send_
+sem`/`_lockstep_slot`/`_unsignaled_audio_samples` FULLY
+retired (spin-hybrid fallback, never the semaphore); Option-B
+bench-tunable pre-fill `LYRA_EP2_PREFILL_SAMPLES` (default
+256); TX-IQ MOX-gated (`inject_tx_iq AND _snapshot_mox_bit`)
++ new not-keyed-zero regression guard; timer wait strictly
+outside `_cc_lock`/`_send_lock`.  S1's bounded-acquire
+superseded (its test replaced by the lock-free-push test);
+pre-S2 TX-IQ packing tests updated to the locked MOX-gated
+contract (NOT weakened).  Unit-pinned what's unit-testable;
+**cadence correctness is the OPERATOR HL2 BENCH GATE — S2 is
+NOT "done" until it passes there.**
+
+**HL2 BENCH GATE (operator, no antenna — dummy load, normal
+RX):**
+1. `set LYRA_WIRE_DEBUG=1` then
+   `python -u -m lyra.ui.app > %USERPROFILE%\lyra_wire.log
+   2>&1`; HL2-jack out, DSP off, run ~1 min; **open Chrome /
+   drag the window across monitors a few times**; then
+   normal listen.
+2. PASS criteria (computed, not eyeballed): feed the log to
+   S0 `lyra._wirediag.summarize_capture` — must report
+   `healthy=True` (the chronic 25–56 ms gap mass collapsed
+   to <12 ms, p95<12, zero STALL/FENCE) AND the window-drag
+   no longer produces a RED `gap=` / `[WIRE]` spike on the
+   wire (a MAINSTALL may still log — that's the Qt main
+   thread; the WIRE must now be decoupled from it).
+3. Prefill bench-tune: if a ~25 Hz soft chop is audible
+   (expected pre-S3 with the smallest prefill), bump
+   `LYRA_EP2_PREFILL_SAMPLES` (try 512, 1024…) to the
+   SMALLEST value with no chop — that's the Option-B knob;
+   record the chosen value.
+4. Startup: with WISDOM already built, the WDSP-open
+   MAINSTALL should be sub-100 ms (separate, already-shipped
+   win).
+On PASS → S3 (control off the worker `processEvents` loop —
+the real relay-chatter fix + de-quantises the producer so
+the prefill can shrink and the chop fully clears).  On FAIL
+→ capture + `summarize_capture` numbers back here, diagnose,
+do NOT guess.  `origin/main` stays v0.1.1.**
 
 #### ✅ FFTW WISDOM RE-EVALUATED 2026-05-18 (operator
 #### re-raised — "things have changed since you said no").
