@@ -8989,9 +8989,18 @@ independent of S2/S3 (WDSP-init only, off the wire path).
 plans, one-time" splash, the child builds (several min),
 then **Lyra continues into the normal UI — NO exit to the
 prompt** (and every future rebuild / fresh install no longer
-strands).  **STATUS: SHIPPED; R-A resolved.  NEXT = corrected
-S3 (5 mandatory items) → HL2 re-gate with the R-B hard
-criteria.**
+strands).  **✅ OPERATOR-BENCH-CONFIRMED 2026-05-18** ("bench test fft
+built and launched"): cleared/rebuilt the wisdom cache →
+the build ran in the throwaway subprocess → **Lyra
+continued into the UI, NO exit to the prompt.**  The
+verified mechanism + the subprocess isolation are correct
+on real hardware; R-A definitively closed (fresh install /
+every future Settings "Clear & rebuild" no longer strands
+the operator or a tester).  Splash-text refinement
+`acc92e8` ("Lyra will open automatically once this
+completes").  **STATUS: SHIPPED + bench-confirmed; R-A
+DONE.  NEXT = corrected S3 (5 mandatory items) → HL2
+re-gate with the R-B hard criteria.**
 
 #### ✅ FFTW WISDOM RE-EVALUATED 2026-05-18 (operator
 #### re-raised — "things have changed since you said no").
