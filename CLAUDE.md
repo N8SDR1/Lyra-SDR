@@ -8794,6 +8794,53 @@ SUPERSEDED — do NOT implement it.  Awaiting operator
 go-ahead to implement corrected S3 (same as the S2 gate:
 plan→red-team→[this]→implement→HL2 re-gate).**
 
+**✅ S3 SHIPPED `162a109` 2026-05-18** (suite 457/0; backup
+`_backups/lyra-2026-05-18-S3.bundle`; pushed; main v0.1.1).
+All 5 mandatory items: per-iteration
+`QCoreApplication.processEvents()` + import REMOVED from
+`run_loop`; plain `_ctl_q` + `_post_ctl`/`_drain_ctl`; the 5
+inbound controls enqueue, real work in `_apply_*` applied
+BETWEEN blocks; radio.py flipped the 5 inbound connects
+`QueuedConnection→DirectConnection` (run on main/emitter
+thread as a fast lock+append; worker→main
+`spectrum_raw_ready`/`lna_peak_update` stay QueuedConnection,
+untouched); `@Slot` stripped from all config methods + an
+explicit "do NOT re-add @Slot/QueuedConnection" comment
+(NullSilence-trap guard); drain at the TOP of the loop
+before the stop-test + the blocking get, AND a FINAL drain
+in `finally:` running sink-close + `_sink_swap_done.set()`
+(§15.21 bug-3 — `Radio.stop()` can't hang / device can't
+leak); bounded-snapshot drain.  Phase-3-TX/RX-recovery
+untouched (`_rx_chan_req`/`_reset_requested` stay inline
+flags).  `tests/dsp/test_s3_ctl_queue.py` (6) +
+panadapter-source flush test updated to enqueue+drain (NOT
+weakened).
+
+**OPERATOR HL2 RE-GATE — R-B HARD CRITERIA (no RF):**
+1. `set LYRA_WIRE_DEBUG=1` then
+   `python -u -m lyra.ui.app > %USERPROFILE%\lyra_wire.log
+   2>&1`; HL2-jack out, DSP off, ~1 min steady RX + a few
+   Chrome-open / cross-monitor window-drags + a couple of
+   Stop/Start cycles (the stop/restart-under-stress check).
+2. Send the log; I run S0 `summarize_capture`.  **PASS
+   (computed, not eyeballed):** the producer LUMPS have
+   collapsed (MAINSTALL count + the 0↔11000 deque swing
+   down sharply; `un` no longer storms) AND the audible
+   chop is GONE or **"substantially reduced" (acceptable —
+   a residual ~25 Hz GIL-beat is EXPECTED until S4a; do
+   NOT fail S3 on it / do NOT trigger a redesign — the one
+   corner-painting risk the convergence-check flagged)**
+   AND no Stop/Start hang / no dead-RX / no leaked-device
+   (the §15.21-bug-3 final-drain working).  The continuous
+   89 ms MAINSTALL *metric* itself may persist — that is
+   S4a's target, NOT an S3 failure (honest NBNS scope).
+3. On PASS → **S4a** (emit rate-limit/coalesce of
+   `spectrum_raw_ready`/`lna_peak_update`; ship+gate
+   FIRST) → re-gate → S4b only if the continuous MAINSTALL
+   still shows.  On a true regression (NOT the expected
+   residual chop) → capture + numbers back here, diagnose,
+   no guess.  `origin/main` stays v0.1.1.**
+
 #### ✅ WHOLE-DAY CONVERGENCE CHECK 2026-05-18 (operator:
 #### "take more agents, go through what we've done today +
 #### where S3/S4 leads; all must agree or loop").  3
