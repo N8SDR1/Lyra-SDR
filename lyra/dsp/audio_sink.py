@@ -12,6 +12,18 @@ from typing import Callable, Optional, Protocol
 
 import numpy as np
 
+# S1 — bound the lockstep rendezvous.  Equals the EP2 keepalive
+# fence (stream.py EP2_KEEPALIVE_MAX_GAP = 0.050).  Under healthy
+# ~2.6 ms wire cadence the writer releases the slot long before
+# this, so the timeout is DORMANT — zero behavior change in
+# health.  It only converts the pathological "EP2 writer wedged ->
+# mixer thread parked on .acquire() FOREVER" (a latent permanent
+# stuck/silent state, the worst-case the audit flagged) into a
+# bounded skip: the 126-sample chunk was already pushed to the TX
+# deque, so dropping this rendezvous loses no audio — it just
+# stops the mixer blocking on a dead writer.
+_LOCKSTEP_ACQUIRE_TIMEOUT_S = 0.050
+
 
 # ── Host API enumeration (v0.0.9.6) ─────────────────────────────────
 #
@@ -192,6 +204,10 @@ class AK4951Sink:
         self._stream = stream
         self._mixer = mixer
         self._closed = False
+        # S1: count bounded-acquire timeouts (writer-wedged events).
+        # Surfaced only via the env-gated [WIRE] log for now; the
+        # important property is it can no longer hang forever.
+        self._lockstep_timeouts = 0
         # Drain any leftover TX audio from a previous session before
         # we start enqueuing fresh samples.
         if hasattr(stream, "clear_tx_audio"):
@@ -294,7 +310,26 @@ class AK4951Sink:
         self._stream._ep2_send_sem.release()  # noqa: SLF001
         # Block until writer has sent the packet (lockstep gate).
         # This is what produces steady 380.95 Hz wire cadence.
-        self._stream._lockstep_slot.acquire()  # noqa: SLF001
+        # S1: BOUNDED wait.  In health the writer releases within
+        # ~2.6 ms so this returns immediately and behavior is
+        # byte-identical to the old unbounded acquire().  If the
+        # writer is wedged, we no longer park here forever — we
+        # skip the rendezvous (the chunk is already queued) so the
+        # mixer thread stays alive instead of permanently stuck.
+        if not self._stream._lockstep_slot.acquire(  # noqa: SLF001
+                timeout=_LOCKSTEP_ACQUIRE_TIMEOUT_S):
+            self._lockstep_timeouts += 1
+            try:
+                from lyra._wirediag import wiredbg
+                wiredbg(
+                    "LOCKSTEP acquire timed out "
+                    f"({_LOCKSTEP_ACQUIRE_TIMEOUT_S*1000:.0f}ms) -- "
+                    "EP2 writer wedged; skipping rendezvous "
+                    f"(total={self._lockstep_timeouts}). Audio "
+                    "already queued; mixer stays alive.",
+                    every_s=1.0, key="lockstep_to")
+            except Exception:  # noqa: BLE001
+                pass
 
     def set_lr_gains(self, left: float, right: float) -> None:
         """Update the L/R channel gains. Called by Radio whenever the
