@@ -8876,6 +8876,103 @@ the R-A operator decision (WISDOM-exit before S3 vs tester
 note).  R-B/R-C are locked into the S3 re-gate + the ranked
 plan.**
 
+#### ✅ R-A DECIDED + WISDOM-EXIT FIX RED-TEAMED 2026-05-18.
+#### Operator: "tell Brent NOT to use until under control;
+#### proceed with [option] 1" = do the WISDOM-exit fix BEFORE
+#### S3 (Brent stands down → tester-urgency removed, but still
+#### strands the operator every rebuild; small/isolated/off
+#### the wire path).  Same procedure: verify→plan→red-team→
+#### implement.
+
+**VERIFIED MECHANISM (source-read `wisdom.c`, corrected the
+hypothesis):** NOT a console CTRL-close event.  `WDSPwisdom()`
+on a MISSING file: `AllocConsole()`+`freopen_s(stdout,
+"conout$")` (`wisdom.c:55-56`) HIJACKS the process C stdout
+onto the new console, FFTW_PATIENT-plans, `FreeConsole()`
+(`:109`) dismisses it WITHOUT restoring stdout → Lyra's
+redirected stdout (`python -u … > log`) now points at a
+freed handle → next startup stdout write raises OSError →
+abort before UI.  The whole block is INSIDE `if(!fftw_import
+_wisdom_from_filename)` (`:51`): file-present path is
+import-only, console-free, SAFE — and is what loads wisdom
+into FFTW's per-process-global (consumed by `firmin.c`
+PATIENT plans at channel-open), so it MUST still run
+in-process when the file exists or the multi-second stall
+returns.  So the fix is precise: route ONLY the build path
+to a throwaway subprocess; keep the cached import-only path
+in-process.
+
+**2-agent red-team verdict: implement-with-required-
+additions** (core strategy mechanically complete + verified;
+NOT a redesign).  Confirmed: subprocess fully isolates the
+hijack (separate process, own CRT stdout — impossible to
+touch the parent w/ DEVNULL+close_fds spawn); "skip+continue"
+fallback genuinely safe (channel-open `firmin.c` plan path
+has no `AllocConsole`); killed child leaves NO file (export
+`:106` is the last op, not partial); FULLY independent of
+S2/S3/S4 (zero file/state overlap — wisdom is WDSP-init-only,
+off the wire path) → safe + correct before S3.
+
+**LOCKED corrected design (the 4 mandatory additions):**
+1. 🔴 **Frozen-build recursion (highest risk).** Naive
+   `sys.executable -m lyra.dsp._wisdom_build` in the
+   `--windowed` PyInstaller build re-launches the WHOLE app
+   (`-m` ignored by the bootloader) → 2nd QApplication +
+   Radio + **HL2 socket bind**, which itself finds wisdom
+   missing → unbounded recursive double-radio contending the
+   hardware.  REQUIRED: a `--wisdom-build <dir>` argv
+   sentinel handled at the very TOP of `app.py:main()`
+   (before QApplication / MainWindow / Radio / socket) doing
+   only `wdsp_native.load(); lib.WDSPwisdom(dir);
+   sys.exit(0 if wisdom_present() else 3)`; parent selects
+   spawn argv on `getattr(sys,"frozen",False)` (frozen →
+   `[exe,"--wisdom-build",dir]`; source →
+   `[sys.executable,"-m","lyra.dsp._wisdom_build",dir]`);
+   spawn `stdin/stdout/stderr=DEVNULL, close_fds=True,
+   creationflags=CREATE_NO_WINDOW`.  Standalone module is
+   necessary but NOT sufficient — the app.py sentinel is.
+2. **Mandatory (NOT optional) first-run modal/splash.** The
+   subprocess removes the only existing feedback (the
+   `[WISDOM]` print now happens invisibly in the child); a
+   silent multi-minute no-window hang is WORSE than today's
+   crash for a tester.  Shown BEFORE the wait, main thread,
+   event loop pumped (QSplash / always-on-top dialog
+   "Optimizing FFT plans — one-time, several minutes, do not
+   close").  §15.26's earlier "modal = documented follow-up,
+   not blocking" is DOWNGRADED-WRONG for the subprocess model
+   — it is now load-bearing.
+3. **Spawn/wait OUTSIDE `wdsp_native._lock`.** `ensure_wisdom`
+   currently holds `_lock` across the whole `WDSPwisdom`;
+   `load()` shares `_lock`.  A rate-change-triggered rebuild
+   (post-threads) holding it for minutes blocks concurrent
+   `load()` (TX channel open).  Take `_lock` only for the
+   `_wisdom_loaded` guard check + the final fast in-process
+   import; spawn/wait lock-free.
+4. **Atomic publish + single-flight.** Subprocess builds into
+   a private temp dir (`WDSPwisdom(<tempdir>/)` → writes
+   `<tempdir>/wdspWisdom00`); on success the PARENT
+   `os.replace()`s temp→final (atomic same-volume) so
+   "present" ⇒ "valid" by construction — closes the
+   truncated/concurrent-leftover hole that would otherwise
+   route the in-process load back into the build/console-
+   hijack crash (Agent-A's subtle killer: `wisdom_present()`
+   is `is_file()`-only).  Plus a `wisdom_dir()/.building`
+   lockfile so two Lyra instances don't both spend minutes
+   building.  And: do NOT set `_wisdom_loaded=True` on a
+   failed/timed-out build (else retry is permanently
+   suppressed).
+
+Other: generous timeout (minutes — match "5+ min"; hard
+`kill()` not `terminate()`; on timeout skip-in-process +
+continue slow-but-safe, never block forever / never crash).
+Settings "Clear & rebuild"/`delete_wisdom` flow stays
+coherent (verified) + now no longer strands the operator
+(the R-A point).  Agent ids `a840f7e88155d5640`,
+`ab28dd57584b3c771`.  **STATUS: corrected design LOCKED;
+proceeding to implement (operator pre-authorised "proceed
+with 1"; additions are mandatory technical requirements,
+not new decisions).  origin/main stays v0.1.1.**
+
 #### ✅ FFTW WISDOM RE-EVALUATED 2026-05-18 (operator
 #### re-raised — "things have changed since you said no").
 #### They were right.  Verdict: scoped YES.
