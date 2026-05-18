@@ -8698,6 +8698,102 @@ S2 DID its job, quantified:
   process waits then continues.  NOT a guess-patch — verify
   the console-close mechanism first.
 
+#### ⚠ S3 DESIGN RED-TEAMED 2026-05-18 (2 independent agents,
+#### same procedure as S2) — caught a scope overclaim + a
+#### §15.21-class regression; design CORRECTED + re-locked.
+#### Implement the CORRECTED design only.
+
+Both agents (concurrency/GIL lens; safety/regression lens)
+CONVERGED, complementary, no conflicts.  Core thesis SOUND
+(remove worker `processEvents()` + plain `_ctl_q` drained
+between blocks; the 5 inbound QueuedConnections —
+`agc_profile→set_agc_profile`, `bin_enabled`, `bin_depth`,
+`panadapter_source→flush_fft_ring`, `worker_audio_sink_changed
+→_on_audio_sink_changed` — are the COMPLETE inbound set,
+exhaustively grep-verified, no other `.connect(*worker*)` /
+`invokeMethod`; `started→run_loop` unaffected; worker→main
+emit does NOT need the worker to pump).  Verdict BOTH:
+**implement-with-required-additions** (not a redesign).
+
+**FINDING 1 (scope correction — my overclaim, honest):**
+S3 is **NECESSARY-BUT-NOT-SUFFICIENT for the continuous
+~89 ms MAINSTALL.**  At 5% CPU the dominant *continuous*
+main-thread freeze is the worker emitting `spectrum_raw_ready`
+/`lna_peak_update` every FFT → main `_on_worker_spectrum_raw`
+→`_process_spec_db`→panadapter/waterfall→QOpenGLWidget
+repaint (~25 fps, ~40 ms/frame holding the GIL) — the
+§15.26 "decouple repaint" path S3 explicitly deferred.  S3
+will NOT collapse the 89 ms MAINSTALL metric.  **NEW
+follow-on S4 = decouple the worker→main spectrum/paint
+emit** (rate-limit / coalesce / move `_process_spec_db`
+off-main) — that is what collapses the residual continuous
+freeze + the EP6-recv starvation ("Stream: N errors").
+HONEST SPLIT: **S3 fixes what the operator HEARS** —
+producer-quantisation (the worker loop is yoked to the Qt
+frame *because* it pumps processEvents every iteration;
+remove it → steady DSP-rate production → no ~200 ms lumps →
+S2's small low-latency prefill suffices → **chop clears**)
++ **relay-chatter gone** + tab/dock-open event bursts gone.
+**S4 fixes the residual continuous main-thread freeze
+metric + EP6 starvation.**  Do S3 now (operationally
+decisive, on the locked plan, latency stays low); S4 next.
+
+**FINDING 2 (HIGHEST RISK — both agents — my drain
+placement reintroduces §15.21 bug-3 WORSE than today):**
+"drain after `_input_queue.get()`, before process_block" is
+MISLOCATED.  On the `Empty` timeout `continue` the queue
+never drains; a stop racing the posted sink-swap → worker
+exits `while not _stop_requested` WITHOUT draining →
+`_on_audio_sink_changed` never runs → `_sink_swap_done`
+never `set()` → `Radio.stop()` blocks the full 1.0 s
+timeout AND the real PortAudio/AK4951 sink is leaked
+(device held → the exact transient-silence/device-held
+class b7e61e6/cb58bcb hardened against).  **MANDATORY
+(NO-GO without): (a)** drain `_ctl_q` at the TOP of the
+loop body, BEFORE the blocking `_input_queue.get()` AND the
+`_stop_requested` test (mirror where `processEvents()` runs
+today — before the get, so an empty-input/about-to-stop
+iteration still services a posted command); **(b)** a
+MANDATORY final `_ctl_q` drain in `run_loop`'s `finally:`
+that runs `_on_audio_sink_changed`'s `old.close()` +
+`_sink_swap_done.set()` for any pending sink command, so
+`Radio.stop()`'s synchronous `_sink_swap_done.wait(1.0)`
+(radio.py ~9322) can never hang the timeout and the sink
+is never leaked on the stop()-races-shutdown path (the
+§15.21/§15.24 `final_teardown` discipline).
+
+**ALSO MANDATORY:** (c) convert by CONNECTION-SITE not
+`@Slot` decorator — `flush_fft_ring` (worker.py ~337) is
+connected-but-UNDECORATED (the most fragile silent-breakage
+point); (d) strip `@Slot` from / add "no Qt connection —
+plain call only" comment to the dead-as-slots methods
+(`set_volume`/`set_muted`/`set_af_gain_db`/`set_agc_release`
+/`set_agc_target`/`set_agc_hang_blocks` — grep-confirmed
+ZERO connect sites; the pre-moveToThread direct seed calls
+radio.py ~9562-9567 are fine) so a future wiring can't
+silently re-arm the docstring's NullSilence trap; (e)
+bounded-snapshot drain (`for _ in range(n): pop` over a
+snapshot, not re-entrant) so a config burst can't itself
+become a worker-loop stall — the only heavy command is the
+infrequent ~7 ms sink-close which already runs between
+blocks today and S2's ring absorbs it (no WHERE-it-runs
+change).  Phase-3-TX/RX-recovery NON-regression CONFIRMED
+by both: `_rx_chan_req`/`_reset_requested` are inline flags
+(worker.py ~532/536), never Qt-slot-driven, untouched —
+servicing latency identical-or-better; cb58bcb/b7e61e6 only
+touch sink-swap via the Radio.stop()/start() path which is
+covered by mitigation (b).  Config-vs-process_block
+race-free invariant preserved IF the drain is strictly
+between blocks (it is, with (a)).
+
+Agent ids `a347819e8e50ba5a4` (concurrency),
+`aa4f7bf0ecd3d8d24` (safety).  **STATUS: corrected S3 design
+LOCKED (5 mandatory items: a–e + honest NBNS scope + S4
+added to the ranked plan after S3).  Original draft
+SUPERSEDED — do NOT implement it.  Awaiting operator
+go-ahead to implement corrected S3 (same as the S2 gate:
+plan→red-team→[this]→implement→HL2 re-gate).**
+
 #### ✅ FFTW WISDOM RE-EVALUATED 2026-05-18 (operator
 #### re-raised — "things have changed since you said no").
 #### They were right.  Verdict: scoped YES.
