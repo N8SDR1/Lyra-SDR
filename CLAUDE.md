@@ -8490,10 +8490,31 @@ from seconds to sub-100 ms).  No dependency either direction
 vs S0–S7 — can land before/parallel.  Agent
 `a1ec7a5cee90c2e5b`.
 
-**STATUS: verified + scoped, NOT yet coded.**  Sequencing is
-an operator call: it is small/low-risk/independent and could
-ship before or in parallel with S0/S1; it does not affect the
-Stage-2 sign-off.  No code until operator direction.
+**STATUS: SHIPPED `9d270e3` 2026-05-18** (operator okay-to-
+proceed + two locked requirements, both delivered).  The
+cache is **Lyra-PRIVATE** at `%APPDATA%\Lyra\fftw\`
+(`wdsp_native.wisdom_dir()` via `default_user_data_dir()` —
+WDSP hard-codes the filename so isolation is by directory;
+explicitly NOT any other HPSDR app's path → dual-run
+operators flipping Thetis↔Lyra cannot cross-contaminate;
+test asserts no thetis/openhpsdr/powersdr in the path).
+**Settings → Radio → "FFT optimization (WISDOM)"** group:
+status line + **"Clear && rebuild on next start"** button
+(confirm → `delete_wisdom()` → next launch regenerates) —
+the operator-required easy rebuild after a CPU/RAM/SSD/board/
+GPU change or a DSP-DLL bump (cache is per-host CPU/SIMD-
+specific).  `ensure_wisdom()` called once before the first
+`OpenChannel` (`wdsp_engine._open`), idempotent + non-fatal
+(never blocks the open).  Per-host generated, NEVER bundled.
+`tests/dsp/test_wisdom.py` (6).  Suite **427 passed / 0**;
+backup `_backups/lyra-2026-05-18-wisdom.bundle`.  Independent
+of S0–S7, off the safety-critical wire path.  First-run UX is
+a clear `[WISDOM]` stdout log (a Qt modal for the `--windowed`
+build is a documented follow-up, not operator-blocking).
+NEXT: operator bench — first start builds (one-time, minutes,
+unresponsive); a restart's channel-open MAINSTALL should drop
+from seconds to sub-100 ms (measure via the existing
+`LYRA_WIRE_DEBUG=1` MAINSTALL probe).
 
 ---
 
