@@ -8968,10 +8968,30 @@ continue slow-but-safe, never block forever / never crash).
 Settings "Clear & rebuild"/`delete_wisdom` flow stays
 coherent (verified) + now no longer strands the operator
 (the R-A point).  Agent ids `a840f7e88155d5640`,
-`ab28dd57584b3c771`.  **STATUS: corrected design LOCKED;
-proceeding to implement (operator pre-authorised "proceed
-with 1"; additions are mandatory technical requirements,
-not new decisions).  origin/main stays v0.1.1.**
+`ab28dd57584b3c771`.
+
+**✅ WISDOM-EXIT FIX SHIPPED `f936b2e` 2026-05-18** (suite
+451/0; backup `_backups/lyra-2026-05-18-wisdom-exit-fix.
+bundle`; pushed; main v0.1.1).  All 4 mandatory additions
+implemented: `lyra/dsp/_wisdom_build.py` throwaway builder;
+`app.py:main()` `--wisdom-build` argv sentinel BEFORE
+QApplication/Radio/socket (frozen anti-recursion);
+`ensure_wisdom()` rewrite — cached=in-process import-only;
+build=subprocess spawned OUTSIDE `_lock`, frozen-aware argv,
+DEVNULL/close_fds/CREATE_NO_WINDOW, private temp dir + parent
+`os.replace()` atomic publish, `.building` single-flight,
+mandatory QSplash, 20-min timeout+hard-kill, `_wisdom_loaded`
+NOT set on fail.  6 new tests (frozen-vs-source spawn argv,
+single-flight, no-lib-never-spawns, arg-guard).  Fully
+independent of S2/S3 (WDSP-init only, off the wire path).
+**OPERATOR BENCH (the proof, no RF):** Settings → Radio →
+"Clear & rebuild" → restart Lyra → expect a "optimizing FFT
+plans, one-time" splash, the child builds (several min),
+then **Lyra continues into the normal UI — NO exit to the
+prompt** (and every future rebuild / fresh install no longer
+strands).  **STATUS: SHIPPED; R-A resolved.  NEXT = corrected
+S3 (5 mandatory items) → HL2 re-gate with the R-B hard
+criteria.**
 
 #### ✅ FFTW WISDOM RE-EVALUATED 2026-05-18 (operator
 #### re-raised — "things have changed since you said no").
