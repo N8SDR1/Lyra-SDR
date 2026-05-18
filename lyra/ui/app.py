@@ -100,6 +100,12 @@ from PySide6.QtWidgets import (
 )
 
 from lyra.radio import Radio
+from lyra._wirediag import (
+    MAIN_STALL_LOG_MS as _MAIN_STALL_LOG_MS,
+    WIRE_GAP_LOG_MS as _WIRE_GAP_LOG_MS,
+    wire_debug_on as _wire_debug_on,
+    wiredbg as _wiredbg,
+)
 from lyra.ui import theme
 from lyra.ui.panels import (
     TuningPanel, ModeFilterPanel, DspPanel, TxPanel,
@@ -558,10 +564,17 @@ class MainWindow(QMainWindow):
             "          Pre-Commit 3: oscillates between ~0 and\n"
             "          ~5000 samples (the 100 ms pre-fill).\n\n"
             "un / ov -- TX audio underrun / overrun counts since\n"
-            "          stream start.  Each tick correlates with\n"
-            "          an audible click.  Healthy: both stay 0.\n"
-            "          Pre-Commit 3: small numbers expected;\n"
-            "          post-Commit 3: should stay 0.")
+            "          stream start.  STRUCTURALLY BLIND to a\n"
+            "          coherent whole-chain freeze (the lockstep\n"
+            "          pauses producer+writer together) -- can stay\n"
+            "          0/green through an audible glitch.\n\n"
+            "gap     -- max EP2 inter-send interval in the last\n"
+            "          second (ms).  THE non-blind readout: a\n"
+            "          system GPU/compositor event (open a browser,\n"
+            "          drag a window between monitors) shows here\n"
+            "          as a big gap + turns this label RED while\n"
+            "          un/ov stay flat.  Nominal <~12 ms; >=25 ms\n"
+            "          = a real main-thread/wire stall.")
         self._audio_telem_label.setStyleSheet(
             "color: #4a8a4a; font-family: Consolas, monospace; "
             "padding: 0 8px;")
@@ -1331,6 +1344,21 @@ class MainWindow(QMainWindow):
         self._cpu_timer.timeout.connect(self._tick_cpu)
         self._cpu_timer.start()
 
+        # ── Main-thread stall detector (env-gated, off by default)
+        # un/ov are blind to a coherent whole-chain freeze; this
+        # 20 ms probe times its OWN scheduling latency, so a system
+        # GPU/compositor event that blocks the Qt main thread shows
+        # up as a [WIRE] MAINSTALL line with the freeze duration --
+        # the hard number behind the audible click + the EP2 gap.
+        if _wire_debug_on():
+            import time as _t
+            self._mainstall_last = _t.monotonic()
+            self._mainstall_timer = QTimer(self)
+            self._mainstall_timer.setInterval(20)
+            self._mainstall_timer.timeout.connect(
+                self._tick_mainstall)
+            self._mainstall_timer.start()
+
         # GPU readout removed (operator UX cleanup).  Was a system-
         # wide GPU% indicator that operators reasonably read as
         # Lyra-specific even though Lyra's QPainter panadapter
@@ -1906,10 +1934,24 @@ class MainWindow(QMainWindow):
                 un = int(getattr(stream, "tx_audio_underruns", 0))
                 ov = int(getattr(stream, "tx_audio_overruns", 0))
             ctr_str = f" | un={un} ov={ov}"
-            self._audio_telem_label.setText(hz_str + deque_str + ctr_str)
-            # Color: red if heartbeat is 0 while running, amber if
-            # any counter is non-zero, green otherwise.
+            # Wire-cadence gap -- the NON-blind readout.  un/ov are
+            # structurally blind to a coherent whole-chain freeze
+            # (system GPU/compositor event); this field MOVES on
+            # exactly that trigger (open browser / drag window
+            # across monitors) while un/ov stay flat.
+            gap_ms = 0.0
+            if running and hasattr(stream, "read_max_wire_gap_ms"):
+                gap_ms = float(stream.read_max_wire_gap_ms())
+            gap_str = f" | gap={gap_ms:.0f}ms"
+            self._audio_telem_label.setText(
+                hz_str + deque_str + ctr_str + gap_str)
+            # Color precedence: red if the worker stalled (hz<1)
+            # OR a wire-cadence STALL gap happened this second (the
+            # blind-spot event the operator can now SEE the moment
+            # it fires); amber if un/ov nonzero; green otherwise.
             if running and worker is not None and hz < 1.0:
+                color = "#ff4040"
+            elif gap_ms >= _WIRE_GAP_LOG_MS:
                 color = "#ff4040"
             elif un > 0 or ov > 0:
                 color = "#d8a040"
@@ -1920,6 +1962,30 @@ class MainWindow(QMainWindow):
                 "padding: 0 8px;")
         except Exception:
             # Never let a telemetry update crash the UI tick.
+            pass
+
+    def _tick_mainstall(self):
+        """Env-gated (LYRA_WIRE_DEBUG) Qt main-thread freeze probe.
+
+        A 20 ms QTimer; we time how late it actually fired.  If the
+        main thread was blocked (system GPU/compositor event, heavy
+        synchronous paint/relayout), the lateness == the freeze
+        duration.  Pairs with the EP2 ``gap=NNms`` reading: a
+        MAINSTALL of ~X ms should coincide with a wire gap of ~X ms
+        while un/ov stay flat -- the smoking gun for the structural
+        root, with hard numbers instead of a theory.
+        """
+        try:
+            import time as _t
+            now = _t.monotonic()
+            late_ms = (now - self._mainstall_last) * 1000.0 - 20.0
+            self._mainstall_last = now
+            if late_ms >= _MAIN_STALL_LOG_MS:
+                _wiredbg(
+                    f"MAINSTALL Qt main thread blocked ~{late_ms:.0f}"
+                    f"ms (20ms probe fired that late) -- expect a "
+                    f"matching EP2 gap with un/ov flat")
+        except Exception:
             pass
 
     # _tick_gpu and the GPU label widget were removed — see git

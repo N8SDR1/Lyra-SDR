@@ -85,6 +85,7 @@ from typing import Callable, Dict, Optional
 
 import numpy as np
 
+from lyra._wirediag import WIRE_GAP_LOG_MS, wire_debug_on, wiredbg
 from lyra.radio_state import ConsumerID, DispatchState
 
 _log = logging.getLogger(__name__)
@@ -899,6 +900,21 @@ class HL2Stream:
         # with audible clicks.  v0.0.9.1+
         self.tx_audio_underruns: int = 0
         self.tx_audio_overruns: int = 0
+
+        # ── Wire-cadence gap tracker (the NON-blind instrument) ─────
+        # un/ov above are structurally blind to the dominant glitch:
+        # a system GPU/compositor event freezes the whole Python
+        # chain coherently (producer AND EP2 writer), so the deque
+        # never im-balances -- un/ov stay 0 -- yet the HL2 sees a
+        # wire-cadence gap (click on freeze, AGC "volume slam" on
+        # unfreeze).  _note_wire_send() records the max EP2 inter-
+        # send gap; read_max_wire_gap_ms() (reset-on-read, mirrors
+        # read_tx_audio_high_water) feeds the status-bar ``gap=NNms``
+        # field so the operator finally has a readout that MOVES on
+        # the trigger.  Plain attrs read cross-thread by the Qt tick
+        # -- same benign-race posture as tx_audio_underruns.
+        self._last_wire_send_t: Optional[float] = None
+        self._max_wire_gap_ms: float = 0.0
 
         # ── Slewed underrun fill (raised-cosine, click-free) ────────
         # When the host audio producer can't supply a full EP2 frame,
@@ -2390,6 +2406,9 @@ class HL2Stream:
                     # Path C.3: stamp the send so the keepalive
                     # fence above can measure gap-since-last-send.
                     last_ep2_send_t = time.monotonic()
+                    # Non-blind wire-cadence instrument (reuses the
+                    # same monotonic read; fence logic unchanged).
+                    self._note_wire_send(last_ep2_send_t)
                     # ── v0.0.9.6 Thetis-mirror lockstep ack ────────
                     # If this iteration drained audio (i.e., the
                     # AudioMixer pushed and is now waiting on
@@ -2424,6 +2443,46 @@ class HL2Stream:
             # removed -- semaphore is a pure Python primitive).
             while self._ep2_send_sem.acquire(blocking=False):
                 pass
+
+    def _note_wire_send(self, now: float) -> None:
+        """Record the EP2 inter-send interval (the non-blind
+        wire-cadence instrument).
+
+        Called once per actual ``sendto`` with ``time.monotonic()``.
+        Tracks the max gap since the last ``read_max_wire_gap_ms``
+        and, under ``LYRA_WIRE_DEBUG``, logs any gap over the stall
+        threshold together with the un/ov/deque snapshot -- which
+        proves the counters stayed flat across the very gap that
+        produced the audible click (the structural-blindness
+        evidence).  Pure + side-effect-only on instance state so it
+        is unit-testable with synthetic timestamps.
+        """
+        prev = self._last_wire_send_t
+        self._last_wire_send_t = now
+        if prev is None:
+            return                       # first send: no interval
+        gap_ms = (now - prev) * 1000.0
+        if gap_ms > self._max_wire_gap_ms:
+            self._max_wire_gap_ms = gap_ms
+        if gap_ms >= WIRE_GAP_LOG_MS and wire_debug_on():
+            try:
+                depth = len(self._tx_audio)
+            except Exception:            # noqa: BLE001
+                depth = -1
+            wiredbg(
+                f"EP2 gap={gap_ms:.0f}ms  un={self.tx_audio_underruns}"
+                f" ov={self.tx_audio_overruns} deque={depth}"
+                f" inject={self.inject_audio_tx}  <- counters flat"
+                f" across this gap = the blind-spot")
+
+    def read_max_wire_gap_ms(self) -> float:
+        """Return the max EP2 inter-send gap (ms) seen since the
+        last call, then reset.  Mirrors ``read_tx_audio_high_water``
+        (reset-on-read) so the 1 Hz status tick shows the worst gap
+        in the last second as ``gap=NNms``."""
+        g = self._max_wire_gap_ms
+        self._max_wire_gap_ms = 0.0
+        return g
 
     def _slew_fill_pairs(self, pulled: list, target: int) -> list:
         """Click-free underrun fill for the EP2 audio path.

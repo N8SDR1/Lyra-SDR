@@ -8206,6 +8206,89 @@ scope — they are the same job, not new patches.  None
 conflict with the audit; all extend it.  Vulkan stays
 rejected by 4/4 reviewers.
 
+#### ⚠ DECISIVE OPERATOR-EMPIRICAL 2026-05-18 AM — the
+#### `un/ov` counter is STRUCTURALLY BLIND; "volume surge" is
+#### NOT the closed `ff5f128`.  (Operator data overrides prior
+#### inference, §3.9 discipline — 4th time this arc.)
+
+Bench: HL2-jack out, dummy load, all DSP off.  Fix #3 = "1
+slightly less noticed" (confirms: it softens each underrun
+but does not stop the stalls — minor face, root upstream,
+exactly as flagged).  **The decisive datum:** opening Chrome
+/ another app, OR **dragging an open browser window between
+monitors**, → "all hell breaks loose" — clicking/popping +
+a **quick volume slam** ("comfortable → wide open → quickly
+back to comfortable") — **while the telemetry stays GREEN,
+no `un`, no `ov`.**
+
+**Why green = the proof, not the absence of a problem.**
+`un/ov` only count deque IM-balance.  The wire path is a
+lockstep (mixer producer ⇄ EP2 writer rendezvous).  A system
+GPU/compositor event (Chrome, GPU app, cross-monitor surface
+migration on the AMD 9070XT) blocks the Qt main thread →
+holds the GIL → the WHOLE Python chain freezes *coherently*
+(producer AND writer together).  The deque neither underruns
+(nothing drains it) nor overruns (nothing fills it) — `un/ov`
+stay 0/green — yet the HL2 gets a wire-cadence gap: click on
+the freeze, and on the unfreeze the kernel-buffered RX-IQ
+backlog floods WDSP's RXA whose AGC mis-tracks across the
+discontinuity → one loud gain slam → fast-attack hauls it
+back in ms = the "volume burst."  The counter is blind to
+this by construction; the lockstep makes it blind.
+
+**§15.26 CORRECTION (supersedes the "VOLUME-SURGE IS SEPARATE
+AND ALREADY FIXED — ff5f128" line in the 2026-05-17 2-agent
+block):** that was inference.  The operator's on-demand repro
+(no TX, DSP off, triggered by a window drag) DISPROVES it.
+The "quick volume increases" reported long ago and hand-waved
+as ff5f128 phantom-TX / environmental AGC-chasing is NOT
+closed — it is the amplitude face of this same whole-process
+stall (AGC overshoot on stall-resume).  ff5f128 fixed a real
+DIFFERENT defect (HW-PTT phantom-TX); it did not fix this.
+Don't re-merge the two.
+
+This VINDICATES the operator ("something isn't right", "not
+my PC") and the structural diagnosis: a 9070XT doing a normal
+cross-monitor surface move must not be able to glitch radio
+audio — it only can because the Qt main thread is coupled to
+BOTH the system GPU stack AND (via the worker `processEvents`
++ GIL + the unbuffered lockstep) the wire path.  This is
+D-1/D-2, now with an explicit system-GPU/compositor trigger
+dimension, not just Lyra's own tab-open.
+
+**INSTRUMENT SHIPPED 2026-05-18 (the readout that is NOT
+blind).**  `HL2Stream._note_wire_send()` /
+`read_max_wire_gap_ms()` (reset-on-read, mirrors
+`read_tx_audio_high_water`) track the max EP2 inter-send gap;
+the status-bar telemetry gains a **`gap=NNms`** field that
+turns the label **RED** when a stall gap (≥25 ms) occurred
+that second — so the operator finally SEES the blind-spot
+event the instant it fires while `un/ov` sit flat.  Env-gated
+`LYRA_WIRE_DEBUG=1` adds `[WIRE]` per-event console logging
+(gap + un/ov/deque snapshot = the blindness on the record)
+**+ a Qt main-thread stall probe** (`_tick_mainstall`, a
+20 ms QTimer timing its own lateness → `[WIRE] MAINSTALL
+~Xms`).  A MAINSTALL of ~X ms should coincide with an EP2
+`gap` of ~X ms while `un/ov` stay flat = the smoking gun
+with hard numbers.  Measurement-only: the wire path / fence
+logic is byte-unchanged (reuses the existing monotonic read;
+one added call).  Zero cost when the env var is unset.
+`tests/protocol/test_wire_gap_tracker.py` (6) +
+`lyra/_wirediag.py`.  Suite **421 passed + 0 regress**.
+NO RF; safe to bench (dummy load, DSP off).
+
+**NEXT (operator repro, no RF):** run normally (HL2 jack,
+dummy, DSP off), watch the status bar — open Chrome / drag
+the window across monitors — report the `gap=NNms` value +
+whether the label flashed RED while `un/ov` stayed 0.  For
+hard numbers run `set LYRA_WIRE_DEBUG=1 & python -u -m
+lyra.ui.app > %USERPROFILE%\lyra_wire.log 2>&1` and read the
+`[WIRE]` / `[WIRE] MAINSTALL` lines.  Those numbers scope +
+validate the structural rebuild (control off the worker
+`processEvents` loop + decoupled single-owner wire ring +
+OS-timer keepalive, folding Brent B1–B7) before any code on
+the safety-critical wire path — verify-don't-guess.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-17 EOD)
