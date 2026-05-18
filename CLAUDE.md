@@ -9174,6 +9174,95 @@ unresponsive); a restart's channel-open MAINSTALL should drop
 from seconds to sub-100 ms (measure via the existing
 `LYRA_WIRE_DEBUG=1` MAINSTALL probe).
 
+#### ⚠ S4a DESIGN RED-TEAMED 2026-05-18 (2 independent
+#### agents, same procedure as S2/S3 — operator: "yes same
+#### procedure- plan- red team agree/disagree re do it
+#### needed").  BOTH converged FIRST PASS:
+#### **implement-with-required-additions** (NOT a redesign).
+#### Design CORRECTED + re-locked; implement the corrected
+#### design only.  Awaiting operator go-ahead.
+
+Per the R-C convergence-check split: **S4a = rate-limit/
+coalesce the worker→main `lna_peak_update` emit (cheap,
+frequency-only, near-zero regression — ship + HL2-gate
+FIRST); S4b = move `_process_spec_db` off-main (an S2/S3-
+scale threading rebuild — ONLY if S4a's gate still shows the
+continuous MAINSTALL).**  Two independent senior agents
+reviewed the grounded S4a design (concurrency/GIL-sufficiency
+lens; safety/regression lens).  CONVERGED, complementary, no
+conflicts.
+
+**FINDING 1 (scope — honest, both agents): S4a is
+NECESSARY-BUT-NOT-SUFFICIENT.**  `lna_peak_update` fires
+per-process-block (~90 Hz) worker→main (radio.py ~9756
+`_on_worker_lna_peak`).  `spectrum_raw_ready` is ALREADY
+threshold-coalesced (`_maybe_run_fft` one emit per
+`blocks_per_fft`); `smeter_reading` is DEAD (declared, never
+emitted — the S-meter rides the spectrum path).  So the
+worker→main per-block storm S4a removes is the **lna_peak**
+emit alone.  The continuous ~55 ms MAINSTALL is DOMINATED by
+main-thread `_process_spec_db` + QOpenGLWidget paint at
+~40 fps (= S4b's target), NOT the lna emit.  **S4a will NOT
+collapse the continuous MAINSTALL / fully clear the chop
+alone — S4b stays MANDATORY.  The S4a HL2 re-gate MUST be
+judged on lna-event-rate / GIL-contention reduction (~90 Hz
+→ ~10 Hz) + no Auto-LNA/toolbar regression, NOT on
+chop-clear** (the R-B corner-painting trap — do NOT fail S4a
+because the chop persists; that is S4b).
+
+**FINDING 2 (lossless-coalesce proof, both agents):**
+`peak = float(np.sqrt(np.max(mag_sq)))` (worker.py ~711) is
+a true per-block max; the Auto-LNA back-off consumer is
+`p_max = max(self._lna_peaks)` (radio.py ~7009).  Therefore
+coalescing `peak` as **max-over-interval** is provably
+LOSSLESS for Auto-LNA back-off (max-of-maxes == max).
+
+**3 MANDATORY corrections (both agents; without these S4a is
+a silent Auto-LNA / toolbar regression invisible to a
+MAINSTALL-only gate):**
+1. **Retune the window constants.**  `_lna_peaks_max=120`
+   (radio.py ~921) is sized for ~90 Hz (~1.3 s history); at
+   ~10 Hz coalesced it becomes ~12 s = Auto-LNA back-off /
+   pull-up release ~9× too sluggish.  MUST shrink to ~12–15
+   (≈1.3 s @10 Hz) AND re-derive the `_emit_peak_reading`
+   `[-20:]` slices (radio.py ~6887-6890) so the toolbar ADC
+   meter's ~0.2 s window is preserved (else the toolbar
+   degrades silently).
+2. **Coalesce `rms` as a MEAN, not max (or emit both).**
+   `_evaluate_pullup` wants `rms_max_lin = max(self._lna_rms)`
+   (radio.py ~7148) — max-coalesce is fine THERE.  But
+   `_emit_peak_reading` computes a **quadratic-mean RMS**
+   (radio.py ~6892) for the toolbar — max-coalescing rms
+   makes that read systematically HIGH.  Coalesce rms as a
+   mean (or emit max+mean and let each consumer pick).
+3. **Reset the accumulators on the MOX→RX edge** (or gate
+   the LNA-tracking emit on `dispatch_state.mox`).  A
+   TX-poisoned `peak`/`rms` max must not survive into the
+   first post-keyup `_adjust_lna_auto` (radio.py ~7004-7005
+   already early-returns on `_dispatch_state.mox` = cb58bcb;
+   the coalescer must honour the same edge so a pre-keyup
+   max can't leak across).
+
+**ALSO (both agents):** clock = a BLOCK-COUNT trigger
+(matches the `_maybe_run_fft` idiom; ~8 blocks ≈ 100 ms ≈
+10 Hz) — NO `perf_counter` on the hot path; and do NOT emit
+a spurious `0.0` accumulator before any block has
+contributed since the last reset.  Both confirmed S4a is
+FULLY INDEPENDENT of S2/S3/Phase-3/§15.21 (frequency-only
+change to one worker→main emit; no wire-path / lock /
+teardown surface).
+
+**Verdicts:** Agent-1 (concurrency) "implement-with-required-
+additions"; Agent-2 (safety) "IMPLEMENT-WITH-REQUIRED-
+ADDITIONS".  Reconciled: **strategy GO, design CORRECTED +
+re-locked** with the 3 mandatory window/rms/MOX-edge
+corrections + block-count clock + no-spurious-0.0; honest
+NBNS scope (S4b mandatory; S4a gate = lna-rate/GIL not chop).
+**STATUS: corrected S4a design LOCKED.  Awaiting operator
+go-ahead to implement (same cadence as S2/S3: plan→red-team→
+[this]→implement→HL2 re-gate).  NO code until then.**
+`origin/main` stays v0.1.1.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-17 EOD)
