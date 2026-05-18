@@ -8794,6 +8794,88 @@ SUPERSEDED — do NOT implement it.  Awaiting operator
 go-ahead to implement corrected S3 (same as the S2 gate:
 plan→red-team→[this]→implement→HL2 re-gate).**
 
+#### ✅ WHOLE-DAY CONVERGENCE CHECK 2026-05-18 (operator:
+#### "take more agents, go through what we've done today +
+#### where S3/S4 leads; all must agree or loop").  3
+#### independent senior agents (shipped-code integrity;
+#### S3→S4 forward soundness; day-arc safety/coherence).
+#### CONVERGED first pass — no loop needed.
+
+**ALL THREE AGREE:**
+* Today's SHIPPED work (S0 `bed1e67`, S1 `95d09c3`
+  superseded, S2 `663154e`, WISDOM `9d270e3`) is **SOLID** —
+  re-verified against the ACTUAL current code (not diffs) +
+  a real `pytest` run 445/0.  Zero dangling refs (sem/
+  lockstep fully retired, no executable remnant); S2 timer
+  correctly HIGH_RESOLUTION + spin-only fallback; contract
+  pts 1/2/b structurally enforced.  **`radio.py`/`worker.py`/
+  `ptt.py` provably UNTOUCHED by today's commits → no
+  Phase-3/§15.21 shipped-behavior regression possible.**
+* Corrected S3 design sound; the §15.21-class drain
+  regression was correctly caught + the `finally:`/top-of-
+  loop drain fix is right; S2+S3 compose with NO new lock/
+  teardown hazard; the 5 inbound connections are the
+  complete set.
+* Path is non-thrashing, NO roadmap corner-painting; the
+  per-stage red-team→HL2-gate discipline is WORKING (it
+  keeps catching the optimism) and must NOT be relaxed.
+* **Q2 — Option B STILL COHERENT.** The S3 scope
+  correction quarantined a *different* metric (continuous
+  89 ms MAINSTALL → S4) away from the producer-quantisation
+  /chop that Option B's predicate actually depends on; S3's
+  chop-clear predicate was RE-AFFIRMED, not invalidated.
+  The operator did NOT choose low-latency on a pulled-out
+  premise.
+
+**THREE REFINEMENTS (converged; none a redesign):**
+* **R-A 🔴 HIGH (tester-flight landmine, 2/3 agents
+  recommend the fix):** tester Brent is on the pushed
+  branch which (a) will likely PROCESS-EXIT on his FIRST
+  launch (WISDOM first-run build → the tracked AllocConsole/
+  console-close exit) AND (b) audibly CHOPS on RX (S2's
+  accepted pre-S3 Option-B cost) — and NEITHER is
+  communicated to him.  → He hits a silent exit at minute
+  one, then a chop, files both as new defects / loses a
+  cycle / erodes trust.  Recommended: **re-prioritise the
+  WISDOM-exit fix to BEFORE S3** (small, isolated, off the
+  wire path, ZERO S0–S7 dependency, also strands the
+  operator on every rebuild) — or at minimum push a tester
+  note.  OPERATOR DECISION.
+* **R-B MED (pin the last unverified assumption):** the one
+  inference still un-measured + load-bearing for Option B's
+  *payoff* = "remove worker processEvents → steady-rate
+  production → 256-prefill clears the chop" (the exact class
+  of optimism caught every round).  Not wrong — but the **S3
+  HL2 re-gate MUST make it a HARD COMPUTED criterion**
+  (post-S3 `summarize_capture`: lumps collapsed AND
+  256-prefill chop-free on the operator's HL2), **accept
+  "chop substantially reduced, not necessarily 100%" as
+  PASS** (residual GIL-beat expected until S4 — an
+  over-strict S3 chop gate is the ONE corner-painting risk),
+  and **add a stop/restart-under-stress check** to the
+  re-gate (not just cadence collapse).  Do NOT ship S3
+  calling the chop "fixed" on inference.
+* **R-C (forward-plan correction): SPLIT S4.** S4a = emit
+  rate-limit/coalesce (`spectrum_raw_ready`/`lna_peak_update`
+  → capped fps / ~10 Hz; frequency-only, near-zero
+  regression — ship + gate FIRST).  S4b = move
+  `_process_spec_db` off-main (an S2/S3-scale threading
+  rebuild touching S-meter/Auto-LNA/auto-scale/zoom/peak-
+  hold/EiBi/click-to-tune/§15.7/RX2 — ONLY if S4a's gate
+  still shows continuous MAINSTALL).  S4-as-one-undesigned-
+  cut understated a major rebuild.
+
+(LOW/no-action: S1 is documented dead-weight history —
+do NOT rebase a pushed branch a tester tracks; accept.)
+
+Agent ids `a5f61492171e5ee27` (integrity),
+`a33f197e015a39848` (forward), `aa2ce037ad039f076`
+(coherence).  **NET: day's work + plan SOLID + coherent;
+convergence reached first pass.  Blocking-before-more-code:
+the R-A operator decision (WISDOM-exit before S3 vs tester
+note).  R-B/R-C are locked into the S3 re-gate + the ranked
+plan.**
+
 #### ✅ FFTW WISDOM RE-EVALUATED 2026-05-18 (operator
 #### re-raised — "things have changed since you said no").
 #### They were right.  Verdict: scoped YES.
