@@ -9340,7 +9340,98 @@ S4b uncritically — re-derive whether it's even wanted.
 
 ---
 
-## ▶ NEXT SESSION STARTS HERE (2026-05-17 EOD)
+## ▶ NEXT SESSION STARTS HERE (2026-05-18 EOD)
+
+**AUTHORITATIVE RESUME DOC = §15.26.**  Read the LAST
+subsection of §15.26 first ("⚠ S4a HL2 RE-GATE → REVERTED
+2026-05-18") — it has the full state.  The 2026-05-17 EOD
+block below is historical (still valid for the TX/first-RF
+arc, but the audio-root-cause work has moved past it).
+
+**State (2026-05-18 EOD):** branch
+`feature/v0.0.9.6-audio-foundation`, HEAD **`7f35a10`**,
+pushed to `origin/...` (in sync); `origin/main` deliberately
+untouched at `0b730f2` v0.1.1.  Tree clean (only untracked
+docs/PDFs/screenshots, no source).  Full suite **447
+passed / 0** (lone `scratch/test_tx_dsp_bench.py` error =
+pre-existing manual-bench `mode`-fixture artifact,
+unrelated).  Backups today: `_backups/lyra-2026-05-18-`
+`{S0-S1,S2,wisdom,wisdom-exit-fix,S3,wire-instrument,S4a,`
+`S4a-reverted}.bundle`.
+
+**Today's arc (2026-05-18) — the audio-root-cause staged
+rebuild + a clean disciplined negative result:**
+* Instrumented PROOF the wire-cadence break is CHRONIC
+  (not just GUI-event) — `8630403` wire-gap/MAINSTALL
+  instrument.  Staged plan S0–S7 + the 3-point Stage-2
+  reference-verified safety contract LOCKED.
+* SHIPPED + operator-bench-confirmed: **S0** `bed1e67`
+  (cadence-analysis harness + computed gate), **S1**
+  `95d09c3` (bounded lockstep — superseded by S2),
+  **WISDOM** `9d270e3` + splash `acc92e8` + **WISDOM-exit
+  fix** `f936b2e` (operator-confirmed: FFT builds in a
+  throwaway subprocess, Lyra continues — R-A CLOSED),
+  **S2** `663154e` (lock-free mixer→ring + HIGH_RESOLUTION
+  timer-paced EP2 writer; HL2 bench: chronic wire break
+  150→15 gaps = STRUCTURALLY GONE; Option-B chop accepted
+  pre-S3), **S3** `162a109` (worker `processEvents` pump
+  removed → `_ctl_q` between-blocks; HL2 re-gate: deque
+  lumps 11000→3000, EP6 errs 790→153, Stop/Start safe;
+  operator ear "slightly better, recovered quicker" =
+  PASSED its R-B gate).  Whole-day 3-agent convergence
+  check (`4c43615`) — work+plan SOLID, R-A/R-B/R-C
+  refinements applied.
+* **S4a** (`9b6f699`) red-teamed (both agents
+  implement-with-corrections), implemented to the corrected
+  design, shipped — then the operator HL2 re-gate:
+  ear "**worse, lots of audio stumbles**", `lyra_wire.log`
+  showed MAINSTALL/`un` UNCHANGED vs S3 + a deque burst to
+  21072 (S3 ~3000).  Per the locked discipline
+  (operator-empirical > inference, no patch-slap) **S4a
+  REVERTED** → `7f35a10` (back to the exact S3 baseline,
+  447/0).  This is a PRODUCTIVE negative result: it
+  empirically PROVED S4a's premise wrong and localised the
+  fix to **S4b** (the continuous chop = `_process_spec_db`
+  + QOpenGLWidget paint on the Qt main thread — exactly the
+  red-team's necessary-but-not-sufficient call).
+
+**RESUME HERE — next action = S4b, nothing else:**
+1. The operator is on the **S3 build** (HEAD `7f35a10` ==
+   S3 code).  If anything, confirm a fresh `git pull` gives
+   them the no-stumbles S3 behaviour they had ("slightly
+   better, recovered quicker").  No bench needed to start.
+2. **S4b** = move `_process_spec_db` OFF the Qt main thread.
+   This is an S2/S3-scale threading rebuild — it touches
+   S-meter / Auto-LNA / auto-scale / zoom / peak-hold /
+   EiBi / click-to-tune / §15.7 / RX2.  Follow the LOCKED
+   methodology exactly (same as S2/S3/S4a): produce a
+   GROUNDED design (real file:line in `radio.py`
+   `_process_spec_db` / `_on_worker_spectrum_raw` +
+   `worker.py` `spectrum_raw_ready` + the UI consumers) →
+   2 independent senior red-team agents (concurrency/GIL
+   lens + safety/regression lens) → reconcile (loop until
+   converged) → present corrected design + agree/disagree
+   to the operator → operator decision → implement → HL2
+   gate.  Do NOT touch the main-thread paint path before
+   that red-team clears.  Do NOT carry the reverted S4a
+   coalescer in uncritically — re-derive if it's even
+   wanted as an S4b sub-component.
+3. Parked, unchanged (do NOT lose): Phase-3-EXIT
+   kill-Lyra-mid-TX dummy-load PA-bias-drop test
+   (§15.20/§15.24-C, gateware watchdog still TX-unverified)
+   before ANY real-antenna keying; no-host-TX-bandpass
+   (BPF/LPF) GAP before on-air; foot-switch HW-PTT opt-in +
+   §10 Q#1; commit 3.6 (TX meter source-swap / §15.9 /
+   §15.15); §9.6 secondary leads (NetworkThrottlingIndex
+   registry, the WISDOM win already shipped); Vulkan
+   (CPU-headroom only, NOT this root — §15.8).
+
+Agent ids for continuation are in the §15.26 dated
+subsections (S2/S3/S4a red-team blocks).
+
+---
+
+## ▶ (historical) NEXT SESSION (2026-05-17 EOD)
 
 **AUTHORITATIVE RESUME DOC = §15.26** (full locked plan +
 Thetis-verified ground truth + the audit/red-team/reference
