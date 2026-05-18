@@ -28,6 +28,7 @@ monitors) and read the [WIRE]/[MAINSTALL] lines.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 
@@ -62,3 +63,83 @@ def wiredbg(msg: str, *, every_s: float | None = None,
             return
         _last[key] = now
     print(f"[WIRE] {msg}", file=sys.stdout, flush=True)
+
+
+# ---------------------------------------------------------------------------
+# S0 — wire-cadence analysis helpers (PURE; off the wire path).
+#
+# These turn a captured `LYRA_WIRE_DEBUG` log (or a synthetic gap
+# series) into an OBJECTIVE before/after yardstick for the S0..S7
+# wire-egress rebuild.  Nominal lockstep cadence is ~2.6 ms; the
+# proven pathology is a sustained 25-56 ms baseline.  Buckets are
+# chosen around that: HEALTHY (<12 ms = within a DSP-block gap),
+# MARGINAL (12-25), STALL (25-50), FENCE (>=50 = crosses the HL2
+# keepalive fence).  S2 succeeds when the captured mass moves out
+# of STALL/FENCE into HEALTHY.  No production behavior here.
+# ---------------------------------------------------------------------------
+
+_EP2_GAP_RE = re.compile(r"\[WIRE\]\s+EP2\s+gap=(\d+(?:\.\d+)?)ms")
+_MAINSTALL_RE = re.compile(
+    r"\[WIRE\]\s+MAINSTALL[^~]*~\s*(\d+(?:\.\d+)?)\s*ms")
+
+
+def _pct(sorted_vals: list, q: float) -> float:
+    """Nearest-rank percentile (q in 0..1); 0.0 for empty."""
+    if not sorted_vals:
+        return 0.0
+    idx = int(round(q * (len(sorted_vals) - 1)))
+    return float(sorted_vals[idx])
+
+
+def bucket_gaps(samples_ms) -> dict:
+    """Classify EP2 inter-send gaps into cadence-health buckets.
+
+    Returns counts + max/p50/p95 + a ``healthy`` bool (the
+    objective S2 gate: no STALL/FENCE samples and p95 < 12 ms).
+    """
+    vals = sorted(float(x) for x in samples_ms)
+    b = {"<12": 0, "12-25": 0, "25-50": 0, ">=50": 0}
+    for v in vals:
+        if v < 12.0:
+            b["<12"] += 1
+        elif v < 25.0:
+            b["12-25"] += 1
+        elif v < 50.0:
+            b["25-50"] += 1
+        else:
+            b[">=50"] += 1
+    n = len(vals)
+    p95 = _pct(vals, 0.95)
+    return {
+        "n": n,
+        "buckets": b,
+        "max_ms": (vals[-1] if vals else 0.0),
+        "p50_ms": _pct(vals, 0.50),
+        "p95_ms": p95,
+        "stall_or_fence": b["25-50"] + b[">=50"],
+        # The S2 success criterion, computed not eyeballed.
+        "healthy": (n > 0 and b["25-50"] == 0 and b[">=50"] == 0
+                    and p95 < 12.0),
+    }
+
+
+def parse_wire_log(text: str) -> dict:
+    """Extract EP2 gap (ms) and MAINSTALL (ms) series from a
+    captured ``[WIRE]`` log.  Pure text in -> numbers out, so an
+    operator's before/after captures diff objectively.
+    """
+    gaps = [float(m) for m in _EP2_GAP_RE.findall(text)]
+    stalls = [float(m) for m in _MAINSTALL_RE.findall(text)]
+    return {"ep2_gaps_ms": gaps, "mainstalls_ms": stalls}
+
+
+def summarize_capture(text: str) -> dict:
+    """One-call before/after yardstick for an operator capture:
+    parsed series + the gap health verdict + worst MAINSTALL.
+    """
+    parsed = parse_wire_log(text)
+    summary = bucket_gaps(parsed["ep2_gaps_ms"])
+    stalls = parsed["mainstalls_ms"]
+    summary["mainstall_n"] = len(stalls)
+    summary["mainstall_max_ms"] = max(stalls) if stalls else 0.0
+    return summary
