@@ -496,6 +496,20 @@ int  RXANBPEditNotch(int channel, int notch, double fcenter, double fwidth, int 
 void RXANBPGetNumNotches(int channel, int* nnotches);
 void RXANBPSetNotchesRun(int channel, int run);
 void RXANBPSetTuneFrequency(int channel, double tunefreq);
+
+/*
+ * WDSPwisdom(directory): build-or-load the FFTW plan cache.
+ * WDSP plans every filter FFT at FFTW_PATIENT (the most expensive
+ * planner tier) at channel-open.  With no cached wisdom that search
+ * re-runs in-process on every launch -> multi-second channel-open
+ * stalls.  Called ONCE before the first OpenChannel pointing at a
+ * Lyra-PRIVATE directory: imports the cached plans if the file
+ * exists (fast), else runs the one-time PATIENT search and writes
+ * <directory>wdspWisdom00 (slow, minutes).  Returns 1 if it had to
+ * (re)build, 0 if it loaded an existing file.  The filename is
+ * fixed by WDSP; isolation is by DIRECTORY only.
+ */
+int  WDSPwisdom(char* directory);
 """
 
 
@@ -703,6 +717,116 @@ def lib():
     if _lib is None:
         load()
     return _lib
+
+
+# ---------------------------------------------------------------------------
+# FFTW WISDOM (WDSP plan cache) — Lyra-PRIVATE, never shared with any
+# other HPSDR app.  WDSP hard-codes the filename "wdspWisdom00", so
+# isolation MUST be by directory: we use Lyra's own user-data folder
+# (%APPDATA%\Lyra\fftw on Windows).  Operators (and testers) routinely
+# run another HPSDR client side-by-side; a shared file would cross-
+# contaminate and is explicitly forbidden.  Wisdom is CPU/SIMD-
+# specific -> generated per-host, NEVER bundled.  A stale/incompatible
+# file is safely ignored by FFTW (one extra rebuild, not fatal); the
+# Settings -> Radio "clear & rebuild" control deletes the file so the
+# next launch regenerates it (needed after a CPU/RAM/board change or
+# a WDSP/FFTW DLL bump).
+# ---------------------------------------------------------------------------
+
+_WISDOM_FILENAME = "wdspWisdom00"   # fixed by WDSP (wisdom.c) — do not change
+_wisdom_loaded = False              # per-process idempotence guard
+
+
+def wisdom_dir() -> Path:
+    """Lyra-PRIVATE directory that holds the FFTW wisdom file.
+
+    ``<Lyra user-data>/fftw`` — deliberately NOT any other HPSDR
+    app's data path (dual-run cross-contamination is a hard no).
+    Returned even if it doesn't exist; ``ensure_wisdom`` creates it.
+    """
+    # Lazy import keeps this low-level module import-cycle-free.
+    from lyra.dsp.noise_profile_store import default_user_data_dir
+    return default_user_data_dir() / "fftw"
+
+
+def wisdom_file() -> Path:
+    """Full path of the wisdom file (may not exist yet)."""
+    return wisdom_dir() / _WISDOM_FILENAME
+
+
+def wisdom_present() -> bool:
+    """True if a wisdom file currently exists on disk."""
+    try:
+        return wisdom_file().is_file()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def delete_wisdom() -> bool:
+    """Delete the wisdom file (operator 'clear & rebuild' action).
+
+    Returns True if a file was actually removed.  Safe to call when
+    absent.  Effect: the next Lyra start regenerates it (one-time,
+    may take minutes).  Also clears the per-process guard so a
+    same-session re-open rebuilds rather than relying on FFTW's
+    already-loaded in-memory plans.
+    """
+    global _wisdom_loaded
+    removed = False
+    try:
+        f = wisdom_file()
+        if f.is_file():
+            f.unlink()
+            removed = True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WISDOM] delete failed: {exc}", file=sys.stderr)
+    _wisdom_loaded = False
+    return removed
+
+
+def ensure_wisdom(lib_handle=None) -> bool:
+    """Build-or-load the FFTW wisdom cache BEFORE the first channel
+    open.  Idempotent per process (guarded) — safe to call ahead of
+    every OpenChannel.  Returns True if it had to (re)build.
+
+    Fast when the file exists (FFTW just imports the cached plans);
+    a one-time multi-minute PATIENT search only when the file is
+    missing (fresh install, a cleared cache, or a DLL bump).
+    """
+    global _wisdom_loaded
+    with _lock:
+        if _wisdom_loaded:
+            return False
+        if lib_handle is None:
+            lib_handle = _lib
+        if lib_handle is None:
+            return False
+        try:
+            d = wisdom_dir()
+            d.mkdir(parents=True, exist_ok=True)
+            # WDSP builds "<directory>wdspWisdom00" — pass a trailing
+            # separator so it lands inside the folder, not beside it.
+            dir_arg = os.path.join(str(d), "")
+            building = not wisdom_present()
+            if building:
+                print(
+                    "[WISDOM] FFT optimization cache missing — building "
+                    "now (ONE-TIME, can take several minutes; Lyra will "
+                    "be unresponsive until done).  Path: " + str(d),
+                    flush=True)
+            rebuilt = bool(lib_handle.WDSPwisdom(
+                _ffi.new("char[]", dir_arg.encode("utf-8"))))
+            _wisdom_loaded = True
+            if building:
+                print("[WISDOM] FFT optimization cache built + saved.",
+                      flush=True)
+            return rebuilt
+        except Exception as exc:  # noqa: BLE001
+            # Never let wisdom block channel open — WDSP still works
+            # (it just re-plans in-process this run).
+            print(f"[WISDOM] ensure failed (non-fatal): {exc}",
+                  file=sys.stderr, flush=True)
+            return False
 
 
 def dll_dir() -> Optional[Path]:

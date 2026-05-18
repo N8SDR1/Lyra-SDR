@@ -218,6 +218,16 @@ class RxChannel:
     def _open(self) -> None:
         if self._opened:
             return
+        # Load (or one-time build) the FFTW plan cache BEFORE the
+        # first channel open.  WDSP plans every filter FFT at
+        # FFTW_PATIENT here; cached wisdom collapses that search to
+        # a fast import (no multi-second channel-open stall).
+        # Idempotent + non-fatal — never blocks the open.
+        try:
+            from lyra.dsp.wdsp_native import ensure_wisdom
+            ensure_wisdom(self._lib)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[WDSP] wisdom ensure skipped: {exc}")
         c = self.cfg
         self._lib.OpenChannel(
             self.channel,

@@ -979,6 +979,36 @@ class RadioSettingsTab(QWidget):
 
         v.addWidget(grp_bp)
 
+        # ── FFT optimization (WISDOM) ────────────────────────────
+        # WDSP plans every filter FFT at the most expensive planner
+        # tier on channel-open.  A per-host cached "wisdom" file
+        # turns a multi-second first-open stall into a fast load.
+        # The file is Lyra-PRIVATE (never shared with any other
+        # HPSDR app — dual-run cross-contamination is forbidden).
+        # The cache is CPU/SIMD-specific, so after a CPU / RAM /
+        # SSD / motherboard / GPU change (or a DSP DLL bump) it
+        # should be cleared so the next start rebuilds it.
+        grp_w = QGroupBox("FFT optimization (WISDOM)")
+        gw = QVBoxLayout(grp_w)
+        self._wisdom_status = QLabel("")
+        self._wisdom_status.setWordWrap(True)
+        self._wisdom_status.setStyleSheet("color: #8a9aac;")
+        gw.addWidget(self._wisdom_status)
+        self.wisdom_clear_btn = QPushButton(
+            "Clear && rebuild on next start")
+        self.wisdom_clear_btn.setToolTip(
+            "Delete the cached FFT optimization file.  Lyra rebuilds\n"
+            "it automatically on the NEXT start (one-time, can take\n"
+            "several minutes).  Do this after a hardware change\n"
+            "(CPU / RAM / SSD / motherboard / GPU) or whenever a new\n"
+            "build changes the DSP engine — the cache is specific to\n"
+            "this machine.  The file is Lyra-private and never\n"
+            "shared with any other SDR program.")
+        self.wisdom_clear_btn.clicked.connect(self._on_clear_wisdom)
+        gw.addWidget(self.wisdom_clear_btn)
+        v.addWidget(grp_w)
+        self._refresh_wisdom_status()
+
         # ── Toolbar readouts (cosmetic) ──────────────────────────
         # CPU% toggle.  Defaults to hidden — most operators don't
         # want a load percentage on the toolbar all the time.
@@ -1084,6 +1114,60 @@ class RadioSettingsTab(QWidget):
 
     def _commit_ip(self):
         self.radio.set_ip(self.ip_edit.text().strip())
+
+    def _refresh_wisdom_status(self) -> None:
+        """Update the WISDOM status label (present/path vs not built)."""
+        try:
+            from lyra.dsp.wdsp_native import wisdom_present, wisdom_file
+            if wisdom_present():
+                self._wisdom_status.setText(
+                    "Optimized FFT cache: <b>present</b><br>"
+                    f"<span style='color:#6a7a8c;'>{wisdom_file()}</span>")
+            else:
+                self._wisdom_status.setText(
+                    "Optimized FFT cache: <b>not built yet</b> — Lyra "
+                    "builds it automatically on the next start "
+                    "(one-time, can take several minutes).")
+        except Exception as exc:  # noqa: BLE001
+            self._wisdom_status.setText(
+                f"FFT cache status unavailable ({exc}).")
+
+    def _on_clear_wisdom(self) -> None:
+        """Operator: delete the wisdom file -> forced rebuild on the
+        next Lyra start.  Confirm first; never touches the running
+        DSP (FFTW keeps its already-loaded in-memory plans for this
+        session)."""
+        from PySide6.QtWidgets import QMessageBox
+        from lyra.dsp.wdsp_native import (
+            delete_wisdom, wisdom_present, wisdom_file)
+        if not wisdom_present():
+            QMessageBox.information(
+                self, "FFT optimization",
+                "No cached FFT optimization file exists yet.\n\n"
+                "Lyra will build one automatically on the next "
+                "start (one-time, may take several minutes).")
+            self._refresh_wisdom_status()
+            return
+        resp = QMessageBox.question(
+            self, "Clear FFT optimization?",
+            "Delete the cached FFT optimization file?\n\n"
+            f"{wisdom_file()}\n\n"
+            "Lyra will rebuild it automatically on the NEXT start "
+            "(one-time, can take several minutes; Lyra is "
+            "unresponsive while it builds).  The current session is "
+            "unaffected.\n\nDo this after a hardware change or a new "
+            "build that changes the DSP engine.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if resp != QMessageBox.Yes:
+            return
+        removed = delete_wisdom()
+        QMessageBox.information(
+            self, "FFT optimization",
+            ("Cleared.  Lyra will rebuild the FFT optimization on "
+             "the next start (one-time, may take several minutes)."
+             if removed else
+             "Nothing to clear (file already absent)."))
+        self._refresh_wisdom_status()
 
     @_swallow_dead_widget
     def _on_ip_changed(self, ip: str):
