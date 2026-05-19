@@ -10553,9 +10553,61 @@ posture).  W1.3's routed surface is now thin but provably
 safe — the correct outcome (better a minimal correct W1.3
 than one deferring the RF-enable gate).
 
-**STATUS: W1.3 v3 written.  LOOPING once more per the
-charter — v3 → BOTH agents for confirm-or-loop.  NO code
-until convergence.**  `origin/main` stays v0.1.1.
+#### ✅ W1.3 v3 ROUND-3 = CONVERGED 2026-05-19.  BOTH fresh
+#### agents (deadlock/cadence `ad79dc95ea0bb3269`; safety/
+#### exclusion-audit `acca8aa3fc94c5b77`) returned **CONFIRM
+#### — NO LOOP**.  "Loop until all agree" SATISFIED (W1.3:
+#### round-1 LOOP → v2 → round-2 still-LOOP → v3 → round-3
+#### CONFIRM ×2; thesis held, narrowed to a provably-safe
+#### minimal routed set).  1 bounded doc-completeness gate
+#### (G1) folded; no code defect, no redesign.
+
+Both did the exhaustive per-c0 audit independently and
+agree: the only `_cc_registers`/`_cc_cycle` mutation forms
+are `[k]=v`/`.append()` (no bypass); EXCLUDED (synchronous
+pass-through, byte-identical to HEAD) =
+{0x12,0x14,0x1C,0x02,0x08,0x0a} covers ALL MOX-correlated
+(0x14 gated@1578-81 / 0x1C correlated@1728) + §15.25-ordered
+(TXNCO 0x02/0x08/0x0a) + TX-safety (0x12 PA-enable C2 bit3 +
+drive C1) with ZERO gap; ROUTED (cc_cmd ring) =
+{0x04,0x06,0x74,0x00} = category-(iv) genuinely-idempotent
+latest-value only.  D-W13a closed by v2-1 (atomic combined
+record), D-W13b/d by exclusion + v3-A synchronous
+pass-through, D-W13c by v2-3 + W0 `Ring.get`'s verified
+`finally`-release (lock-order acyclic: W `_cc_lock`→ring-lock;
+D ring-lock-released-then-`_cc_lock`; E `_cc_lock` only),
+D-W13e by v3-A.  no-worse-than-HEAD = PASS; §6(a) nothing
+worse than HEAD; §6(b) ≥ Thetis/pihpsdr/Quisk (safety/MOX
+synchronous = frame-together parity; idempotent deferred =
+cached-re-emit-one-tick-later, observationally identical).
+
+* **G1 (MANDATORY doc-completeness, folded):** v3-B's "raw
+  `_send_cc` filters by c0" must explicitly enumerate the
+  CROSS-MODULE caller **`radio.py:7643` `_stream._send_cc(
+  0x00, …)`** (the `_set_oc_bits`/`_send_full_config` OC-pins
+  path) — the only raw `_send_cc` callers in the whole tree
+  are 3, all literal c0: `stream.py:3141`/`3168`→0x12
+  (excluded by the filter), `radio.py:7643`→0x00 (routed,
+  tripwire).  The **0x00 TRIPWIRE** must name it: 0x00 C2
+  carries the OC pins driving the **PA TX/RX relay +
+  BPF band-select**; all current OC callers
+  (`_apply_oc_for_current_freq` @radio.py:3511 band-change /
+  7583 filter-toggle / 9277 startup) are freq/config-driven
+  (NOT MOX/PTT/PA edges — verified, so deferring 0x00 is
+  safe TODAY), but a FUTURE OC-relay-on-TX or v0.4 antenna/
+  PTT-coupled setter that calls `_set_oc_bits` on a MOX edge
+  MUST reclassify 0x00 → synchronous/W1.4.  Landmine-
+  prevention at the exact D-W1b zone; current code safe.
+
+**STATUS: W1.3 DESIGN CONVERGED & LOCKED (v3 + v3-A/v3-B +
+A1 + G1; thesis + every fix confirmed by 6 independent
+senior agents across 3 rounds; no charter row FAIL/
+CONDITIONAL; no-worse-than-HEAD PASS).  PROCEEDING TO W1.3
+CODE per the locked v3.**  Routed cc_cmd set =
+{0x04,0x06,0x74,0x00}; all MOX/§15.25/TX-safety registers
+stay synchronous pass-through (byte-identical HEAD).
+In-process, NO HL2 bench (first HL2 A/B-vs-S3 bench-gate is
+W1.4 — the tx_ring hot path).  `origin/main` stays v0.1.1.
 
 ---
 
