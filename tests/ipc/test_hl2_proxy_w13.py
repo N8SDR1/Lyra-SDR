@@ -209,6 +209,7 @@ class W13LifecycleTest(unittest.TestCase):
         p._w1_stream = _StubStream()
         p.start()                              # no rx cbs
         self.addCleanup(p._w1_teardown_cc)
+        self.addCleanup(p._w1_teardown_tx)     # W1.4 tx-drain spun by start()
         self.assertIsNotNone(p._w1_cc)         # cc routing active
         self.assertTrue(p._w1_cc_drain_thread.is_alive())
         self.assertIsInstance(p._w1_stream._cc_registers, _GuardCcRegisters)

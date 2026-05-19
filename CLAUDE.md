@@ -11084,6 +11084,185 @@ A/B-vs-S3 bench-gate (post-implement) — the multi-capture
 gate of v3 item 5.  W1 stays the W2 fallback.  NO code until
 operator go-ahead.**  `origin/main` stays v0.1.1.
 
+#### ✅ W1.4 SHIPPED 2026-05-19.  tx_ring CONTROL-ONLY ordered-
+#### seam rehearsal — entirely in `lyra/ipc/hl2_proxy.py`; NO
+#### stream.py/ptt.py/radio.py change (independently revertible
+#### like every prior W1.x).
+
+* Constants `_TX_SLOT=64`/`_TX_SLOTS=256` (W0 24-byte slot
+  header floor); kinds `_TX_MOX_ON=1` / `_TX_MOX_OFF=2` /
+  `_TX_INJECT_ON=3` / `_TX_INJECT_OFF=4`; record
+  `_TXREC = struct.Struct("<BI")` (kind + producer_seq).
+  `_PROXY_OWN` extended with `_w1_tx` / `_w1_tx_drain_thread`
+  / `_w1_tx_stop` / `_w1_tx_lost_logged` / `_w1_tx_gen` /
+  `_w1_tx_seq` / `_w1_wire_mox` / `_w1_tx_last_seq`.
+* **The non-invasive seam = proxy `__setattr__` intercepting
+  `inject_tx_iq`.**  ptt.py writes it at exactly two sites
+  (code-verified): True in `_open_tx_iq` (the DEFERRED
+  keydown step, AFTER `_on_tx_state_changed(True)`→sync
+  STEPATT and AFTER `set_mox(True)`→sync TXNCO — so the
+  rising-edge token is correctly ordered TXNCO(sync)→STEPATT
+  (sync)→MOX_ON→INJECT_ON BY CONSTRUCTION = v3-1); False in
+  `_finalize_keyup` (AFTER the MoxEdgeFade fade-poll gate
+  `fade.is_off()` true, the faded tail already on the S2
+  deque ahead = v3-4(b) GRACEFUL: ordered MOX_OFF/INJECT_OFF,
+  NO ring discard); re-key-collapse never flips the flag ⇒
+  no edge ⇒ no token = v3-4(c) NEITHER, by construction.
+  Idempotent re-set ⇒ no edge ⇒ no token (no churn).
+* **P1**: the REAL `inject_tx_iq` flag is delegated verbatim
+  in the interpose BEFORE the token enqueue
+  (`setattr(self._w1_stream, name, value)`);
+  `_snapshot_mox_bit` / the C4 ATT-on-TX gate / the EP2
+  packer all read the real flag + the real
+  `_dispatch_state.mox` on the UNCHANGED HEAD wire path —
+  `_w1_wire_mox` is REHEARSAL-ONLY and never read by the
+  wire path (holds BY CONSTRUCTION: no stream.py edit).
+* **P2 HARD teardown**: `proxy.stop()` calls
+  `_w1_tx_hard_predisconnect()` BEFORE
+  `self._w1_stream.stop()` (i.e. before the EP2-writer join
+  inside the contained §15.21 teardown).  It latches the
+  stop flag, forces `_w1_wire_mox=False`, bumps
+  `_w1_tx_gen` (D5 stale-discard: drain reads
+  `expected_generation=self._w1_tx_gen` fresh each iter;
+  any in-flight token at the prior gen is discarded by W0
+  Ring.get), `ring.set_generation(new)` then
+  `ring.close()` (drain's get raises RingClosed → it
+  exits).  Tx-drain join is in the §15.21 bounded `finally`
+  AFTER the EP2-writer + cc-drain joins (mirrors the W1.3
+  order, also bounded 2 s).  cb58bcb come-up-not-keyed
+  stays on the UNCHANGED MAIN-direct
+  `_dispatch_state.mox=False` path; a discarded/stale-gen
+  ring token cannot re-key on restart (D-W1d/D5).
+* **v3-3**: TXAUDIO/TXIQ stay live-delegated on the S2
+  deque path (the 2026-05-18 S4a-revert lesson — touching
+  it in-process was empirically dangerous).  Pinned by
+  `test_txaudio_txiq_still_live_delegated`
+  (`p._tx_audio is inner._tx_audio`, `_tx_audio_lock` SAME
+  object, `inject_tx_iq` NOT in `_PROXY_OWN` so reads still
+  delegate through `__getattr__`).
+* **v3-2**: STEPATT (0x14/0x1C) + TX-NCO (0x02/0x08/0x0a)
+  unchanged — still W1.3 `_CC_EXCLUDED` synchronous
+  byte-identical-HEAD; pinned by
+  `test_stepatt_txnco_still_cc_excluded` +
+  `test_tx_path_methods_still_pure_delegation` (the
+  TX-internal methods stay the contained stream's own
+  bound methods — proxy does not shadow them).
+* **v3-4 RingPeerLost + wedged-drain discipline**: drain
+  RingPeerLost (same-process lock contention; nothing can
+  die in W1) = log-once + re-arm, NEVER D3 / NEVER
+  `force_release_all` (D3 is a W2 cross-process concern;
+  the real wire MOX bit is on `_dispatch_state` and is
+  unaffected by a rehearsal-drain stall — no-worse-than-
+  HEAD: HEAD has no rehearsal layer at all).  Producer
+  enqueue on a wedged ring returns within the bounded
+  `put(timeout=0.5)`, NEVER blocks/raises the FSM/Qt
+  thread.  Both behaviours pinned.
+* **Documented test-side fallout** (the established W1.3
+  precedent: `start()` now also spins the non-daemon
+  `lyra-w1-tx-drain` thread → 3 test-helper teardowns add
+  `_w1_teardown_tx`).  Correct test fallout, not a code
+  regression.
+* `tests/ipc/test_hl2_proxy_w14.py` (15 tests, all green):
+  rising-edge MOX_ON-then-INJECT_ON order, falling-edge
+  MOX_OFF-then-INJECT_OFF GRACEFUL (no discard), FIFO seq
+  strictly monotonic, idempotent-reset no-token (v3-4(c)
+  surrogate), pre-start no-ring just-delegates (P1
+  isolation), drain applies MOX + advances seq, back-compat
+  tx active RX-only, start-tx idempotent, wedged-drain
+  never-blocks-FSM, drain RingPeerLost logged+re-arm+no-D3,
+  stop() P2 HARD predisconnect-before-contained-stop +
+  bounded + drain joined, hard-predisconnect unit (D5 gen
+  bump + wire_mox=0 + stop latched), TXAUDIO/TXIQ
+  live-delegated (v3-3), STEPATT/TXNCO `_CC_EXCLUDED`
+  unchanged (v3-2), TX wire methods pure delegation.
+* **Full suite: 512 passed / 0 failed / 35 subtests passed
+  in 53 s** (was 497 at W1.3 → +15 W1.4 tests; zero
+  regressions across W0 + W1.0–W1.3 + the wider tree).
+* **HONESTY**: W1.4 in-process does NOT change the
+  operator audio symptom (only W2's actual cross-process
+  move does — the locked charter framing); the W1.4 gate
+  is **no-worse-than-S3** via the multi-capture A/B
+  bench, NOT a "did it get better" check.
+
+**STATUS: W1.4 SHIPPED.  W1.4 is the FIRST operator HL2
+A/B-vs-S3 bench gate** (per v3 item 5):
+1. `set LYRA_WIRE_DEBUG=1` then `python -u -m lyra.ui.app
+   > %USERPROFILE%\lyra_wire.log 2>&1`; HL2-jack out,
+   dummy load, DSP off, ~1 min steady RX + a few
+   Chrome-open / cross-monitor window-drags + 2-3
+   Stop/Start cycles.  NO RF, NO antenna.
+2. Send `lyra_wire.log`; I run `lyra._wirediag.
+   summarize_capture`.  PASS = no-worse-than-S3
+   baseline (no 21072-class deque burst; gap mass within
+   S3 bounds; `un` ≤ ~1851; ≤1-datagram DDC routing skew
+   per A-v3-1a; 20× clean stop/restart with no hang/no
+   dead-RX — proves W1.4 did not regress the working
+   in-process path that the eventual W2 move falls back
+   to).
+3. On PASS → W1.5 (gen/D3 polish) → W2 cross-process
+   move (own grounded design + 2-agent red-team + its
+   own HL2 bench gate; W1 retained as the fallback).
+   On FAIL → revert W1.4 (single commit, fully
+   revertable), diagnose with the captured numbers, no
+   guess-fix.
+
+---
+
+### 15.27 — Opt-in toggles that become DEFAULTS once process-isolation lands (operator-flagged 2026-05-19; NOTE NOW, REMOVE LATER)
+
+Operator directive 2026-05-19: the process-isolation
+architecture (the W0→W3 charter) makes multi-threaded /
+process-isolated operation **how Lyra works**, not an operator
+choice.  Settings toggles that gate the OLD single-path
+behaviour become meaningless (or actively confusing) once W2
+is in + bench-confirmed.  **Do NOT remove them yet** — they
+are the working fallback while W1/W2 are still being built and
+validated; ripping a fallback out before its replacement is
+proven is exactly the anti-pattern this project avoids.  This
+entry is the tracked reminder so the cleanup is not lost.
+
+Toggles to retire (after W2 is in + operator-bench-confirmed):
+
+* **"DSP Threading (advanced)" → Worker thread / Single-thread
+  (legacy)** — `lyra/ui/settings_dialog.py:1894-1941`
+  (`threading_combo`, `radio.dsp_threading_mode`, QSettings
+  `dsp/threading_mode`).  This is the "BETA opt-in
+  multi-threading" the operator means.  The S3 work already
+  removed the worker `processEvents` coupling; once the wire
+  path is its own process the "single-thread legacy" mode is
+  not a meaningful or safe choice.  Plan: drop the combo +
+  the `single` code path; `worker` (now process-isolated)
+  becomes the only path.  Audit `dsp_threading_mode` /
+  `_on_samples_main_thread` (the S4a-reverted single-thread
+  inline coalescer lives on this path) for dead-code removal
+  at the same time.
+* **Any other "experimental / opt-in / default-off" Settings
+  toggle the new architecture subsumes** — sweep
+  `settings_dialog.py` for `(opt-in, default off)` /
+  `legacy` / `BETA` / `experimental` at W2-cleanup time and
+  reclassify each: (a) silently-becomes-the-default-and-the-
+  toggle-is-removed, vs (b) still a genuine operator choice
+  that survives.  Known candidates surfaced so far: the
+  threading combo above (remove); the GPU-panadapter
+  "(BETA)" label `settings_dialog.py:3252` is a genuine
+  backend choice → KEEP (just drop the "BETA" word once
+  stable); `LYRA_USE_LEGACY_DSP` is already dead (the
+  v0.0.9.6 cleanup arc removed the legacy DSP path —
+  no-op env var, nothing to remove in UI).
+* **The W1 in-process rings + the W1-vs-W2 fallback seam**
+  themselves are NOT operator-facing toggles (no Settings
+  UI) — they are the internal staged-migration fallback and
+  are removed by code (collapse W1→W2) when W2 is
+  bench-locked, NOT a §15.27 UI item.
+
+Sequencing: this is a **post-W2, pre-feature-resume cleanup
+commit** — bundled with the W2 collapse, its own small
+red-team pass (a removed toggle must not strand an operator
+who had `single` persisted in QSettings → the loader must
+migrate a stale `dsp/threading_mode=single` to the new single
+path gracefully, not error).  Tracked; do not action before
+W2 is in + operator-bench-confirmed.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-18 EOD)

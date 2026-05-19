@@ -25,13 +25,23 @@ silent-W2-landmine finding) one path at a time, each
 independently A/B-gated and revertable, with W1 remaining the
 fallback for the W2 cross-process move.
 
-Note (W1.0 ONLY): the contained stream IS exposed as a live
-object via transparent delegation — that is correct and
-required here for wire-identity.  The "do NOT expose
-`_tx_audio`/`_cc_registers` as live objects; use guard objects"
-requirement (red-team amendment v3-3 / A1) lands at **W1.4**,
-when the tx_ring/cc_cmd routing is interposed.  W1.0 changes
-nothing.
+Note: W1.3 swapped `_cc_registers`/`_cc_cycle` for guard objects
+(the cc_cmd boundary).  **W1.4 is CONTROL-ONLY** (the converged
+v3 + P1/P2 — §15.26): the tx_ring carries ONLY rehearsal
+ordering tokens (MOX_ON / MOX_OFF / INJECT_IQ_ON / INJECT_IQ_OFF)
+that prove the W2 ordered-seam FIFO + exercise the D5 stale-gen
+discard + are the W2 fallback seam.  `_tx_audio`/`_tx_iq` STAY
+live-delegated on the S2 deque path UNCHANGED — v3-3 explicitly
+deleted all TXAUDIO/TXIQ-on-ring (the 2026-05-18 S4a revert
+empirically proved in-process touching the TX-audio deque is
+dangerous; the hard cross-process TX-audio transport is scoped
+to W2 with its own bench gate, NOT skimped).  STEPATT (0x14/
+0x1C) + TX-NCO (0x02/0x08/0x0a) stay W1.3 `_CC_EXCLUDED`
+synchronous byte-identical-HEAD.  **P1: the wire MOX bit STAYS
+100% on `_dispatch_state.mox` MAIN-direct in W1** — the tokens
+are pure rehearsal; nothing in W1.4 reads `_w1_wire_mox` into
+`_snapshot_mox_bit` (we make NO stream.py change, so this holds
+by construction).
 """
 from __future__ import annotations
 
@@ -197,6 +207,45 @@ class _GuardCcCycle:
         # value+`_register_cc_slot` apply; swallow here so the
         # routed c0 cannot enter the cycle ahead of its value.
 
+# ── W1.4 tx_ring framing (CONTROL-ONLY) ──────────────────────────
+# In-process rehearsal of the W2 ordered wire-egress seam.  The
+# tx_ring carries ONLY control ordering tokens — NEVER TX audio/IQ
+# (v3-3: TXAUDIO/TXIQ stay on the S2 `_tx_audio` deque, untouched;
+# the S4a revert proved touching it in-process is dangerous) and
+# NEVER the MOX-correlated/§15.25/TX-safety registers (v3-2:
+# 0x14/0x1C/0x02/0x08/0x0a stay W1.3 `_CC_EXCLUDED` synchronous
+# byte-identical-HEAD).  Tokens are generation-tagged FIFO records
+# enqueued at the proxy `__setattr__` `inject_tx_iq` edge — the
+# ONLY non-invasive seam (ptt.py writes `stream.inject_tx_iq` at
+# exactly two sites: True in `_open_tx_iq` = the DEFERRED keydown
+# step AFTER `_on_tx_state_changed(True)`→synchronous
+# `_apply_att_on_tx`→STEPATT and AFTER `set_mox(True)`→synchronous
+# `_set_tx_freq`→TXNCO, so the rising-edge token is correctly
+# ordered TXNCO(sync)→STEPATT(sync)→MOX_ON→INJECT_ON = v3-1; False
+# in `_finalize_keyup` = AFTER the MoxEdgeFade fade-poll gate so
+# the faded tail is already on the S2 deque ahead = v3-4(b)
+# GRACEFUL; re-key-collapse never flips it ⇒ no edge ⇒ no token =
+# v3-4(c) NEITHER — all BY CONSTRUCTION, no stream.py/ptt.py
+# change).  drop_oldest=False (a control token must NEVER be
+# silently lost — a full ring is a TX-safety event; unreachable
+# at the operator-keying cadence, the shipped W1.3 cc_cmd
+# argument).  P1: the drain applies tokens ONLY to the
+# rehearsal-only `_w1_wire_mox` (proves the W2 seam + the FIFO
+# seq monotonic); the REAL wire MOX bit stays 100% on
+# `_dispatch_state.mox` MAIN-direct (`_snapshot_mox_bit`,
+# stream.py — UNCHANGED; we make no stream.py edit so this holds
+# by construction).  Wiring the ring into `_snapshot_mox_bit`
+# would reintroduce an unordered wire-MOX path = BLOCKS-SHIP.
+# Slot must exceed the W0 24-byte slot header; the record itself
+# is only 5 B (kind+seq) — 64 B is plenty and matches cc_cmd.
+_TX_SLOT = 64
+_TX_SLOTS = 256
+_TXREC = struct.Struct("<BI")          # kind, producer_seq (5 B)
+_TX_MOX_ON = 1
+_TX_MOX_OFF = 2
+_TX_INJECT_ON = 3
+_TX_INJECT_OFF = 4
+
 #: Instance attributes owned by the proxy itself (everything
 #: else is delegated to the contained stream).
 _PROXY_OWN = frozenset({
@@ -211,6 +260,10 @@ _PROXY_OWN = frozenset({
     "_w1_cc", "_w1_cc_real_regs", "_w1_cc_real_cycle",
     "_w1_cc_drain_thread", "_w1_cc_stop", "_w1_cc_lost_logged",
     "_w1_cc_gen",
+    # W1.4 tx_ring (control-only) routing state:
+    "_w1_tx", "_w1_tx_drain_thread", "_w1_tx_stop",
+    "_w1_tx_lost_logged", "_w1_tx_gen", "_w1_tx_seq",
+    "_w1_wire_mox", "_w1_tx_last_seq",
 })
 
 
@@ -250,6 +303,15 @@ class HL2StreamProxy:
         object.__setattr__(self, "_w1_cc_stop", False)
         object.__setattr__(self, "_w1_cc_lost_logged", False)
         object.__setattr__(self, "_w1_cc_gen", 1)
+        # W1.4 tx_ring control-only routing state (inert until start()).
+        object.__setattr__(self, "_w1_tx", None)
+        object.__setattr__(self, "_w1_tx_drain_thread", None)
+        object.__setattr__(self, "_w1_tx_stop", False)
+        object.__setattr__(self, "_w1_tx_lost_logged", False)
+        object.__setattr__(self, "_w1_tx_gen", 1)
+        object.__setattr__(self, "_w1_tx_seq", 0)
+        object.__setattr__(self, "_w1_wire_mox", False)
+        object.__setattr__(self, "_w1_tx_last_seq", 0)
 
     # ── total delegation ─────────────────────────────────────
     def __getattr__(self, name: str):
@@ -262,10 +324,45 @@ class HL2StreamProxy:
     def __setattr__(self, name: str, value) -> None:
         if name in _PROXY_OWN:
             object.__setattr__(self, name, value)
-        else:
-            # e.g. `proxy.inject_audio_tx = True`,
-            # `proxy.inject_tx_iq = True` must hit the real stream.
-            setattr(self._w1_stream, name, value)
+            return
+        if name == "inject_tx_iq":
+            # ── W1.4 control-only seam ──────────────────────────
+            # ptt.py writes `stream.inject_tx_iq` at exactly two
+            # sites (verified): True in `_open_tx_iq` (the deferred
+            # keydown step), False in `_finalize_keyup` (after the
+            # fade-poll gate).  Edge-detect vs the REAL stream's
+            # current value, delegate the real write FIRST (P1: the
+            # actual flag drives the unchanged HEAD wire path —
+            # `_snapshot_mox_bit`/EP2 packer read the real
+            # `inject_tx_iq` + the real `_dispatch_state.mox`,
+            # never `_w1_wire_mox`), THEN enqueue the rehearsal
+            # ordering token on a true edge only (idempotent
+            # re-set ⇒ no edge ⇒ no churn; re-key-collapse never
+            # flips it ⇒ no token = v3-4(c) NEITHER).
+            try:
+                cur = bool(getattr(self._w1_stream,
+                                   "inject_tx_iq", False))
+            except Exception:
+                cur = False
+            nv = bool(value)
+            setattr(self._w1_stream, name, value)   # P1: real path
+            if nv and not cur:
+                # keydown _open_tx_iq — deferred, AFTER
+                # _on_tx_state_changed(True)→sync STEPATT and
+                # set_mox(True)→sync TXNCO.  v3-1 FIFO order.
+                self._w1_tx_enqueue(_TX_MOX_ON)
+                self._w1_tx_enqueue(_TX_INJECT_ON)
+            elif cur and not nv:
+                # keyup _finalize_keyup — AFTER the MoxEdgeFade
+                # fade-poll gate (faded tail already on the S2
+                # deque ahead).  v3-4(b) GRACEFUL: ordered
+                # MOX_OFF/INJECT_OFF, NO ring discard.
+                self._w1_tx_enqueue(_TX_MOX_OFF)
+                self._w1_tx_enqueue(_TX_INJECT_OFF)
+            return
+        # e.g. `proxy.inject_audio_tx = True` must hit the real
+        # stream (delegated verbatim — wire path unchanged).
+        setattr(self._w1_stream, name, value)
 
     def __delattr__(self, name: str) -> None:
         if name in _PROXY_OWN:
@@ -294,6 +391,12 @@ class HL2StreamProxy:
         # reads through the guard from its first tick).  Independent
         # of the rx-cb path.
         self._w1_start_cc_routing()
+        # W1.4: stand up the control-only tx_ring + drain.
+        # Unconditional (like cc) — rehearses the W2 ordered-seam +
+        # is the W2 fallback regardless of rx cbs.  Inert on the
+        # wire until the FSM flips inject_tx_iq (P1: tokens are
+        # rehearsal-only; the real wire path is unchanged HEAD).
+        self._w1_start_tx_routing()
         if on_samples is None and on_rx2_samples is None:
             # No rx cbs — cc routing still active; rx straight-delegate.
             return self._w1_stream.start(
@@ -676,6 +779,156 @@ class HL2StreamProxy:
             except Exception:
                 pass
 
+    # ── W1.4: tx_ring CONTROL-ONLY ordered-seam rehearsal ────
+    # The converged v3 + the P1/P2 implementation contract
+    # (§15.26).  tx_ring carries ONLY MOX_ON/MOX_OFF/INJECT_ON/
+    # INJECT_OFF ordering tokens enqueued at the proxy
+    # `inject_tx_iq` edge; the drain applies them to the
+    # rehearsal-only `_w1_wire_mox` + tracks FIFO seq monotonicity
+    # (proves the W2 ordered-seam + the D5 stale-gen discard +
+    # is the W2 fallback seam).  NO stream.py/ptt.py/radio.py
+    # change ⇒ independently revertible; the real wire path is
+    # byte-identical HEAD (P1).
+
+    def _w1_start_tx_routing(self) -> None:
+        if self._w1_tx is not None:
+            return                            # idempotent
+        self._w1_tx_stop = False
+        self._w1_tx_lost_logged = False
+        ring = Ring.create(_TX_SLOT, _TX_SLOTS, drop_oldest=False,
+                           lock=threading.Lock())
+        ring.set_generation(self._w1_tx_gen)
+        self._w1_tx = ring
+        t = threading.Thread(target=self._w1_tx_drain_loop,
+                             name="lyra-w1-tx-drain", daemon=False)
+        self._w1_tx_drain_thread = t
+        t.start()
+
+    def _w1_tx_enqueue(self, kind: int) -> None:
+        # Called from the proxy `__setattr__` inject_tx_iq edge
+        # (Qt-main / FSM thread).  Only enqueues (the tx_ring has
+        # its OWN lock; never takes `_cc_lock`; the drain takes
+        # nothing wire-affecting — pure rehearsal).  Defensive: if
+        # the ring isn't up (pre-start / torn down) just no-op —
+        # exact HEAD (the real flag was already delegated).
+        ring = self._w1_tx
+        if ring is None:
+            return
+        try:
+            self._w1_tx_seq = (self._w1_tx_seq + 1) & 0xFFFFFFFF
+            rec = _TXREC.pack(kind & 0xFF, self._w1_tx_seq)
+            if not ring.put(rec, type_id=kind & 0xFF, timeout=0.5):
+                # NON-drop control ring full — a control token must
+                # NEVER be silently lost (TX-safety event).
+                # Unreachable at the operator-keying cadence (the
+                # shipped W1.3 cc_cmd argument); log-once.
+                self._w1_log_tx_once(
+                    f"tx_ring full; control token {kind} dropped")
+        except RingPeerLost:
+            self._w1_log_tx_once(
+                f"tx_ring put: drain wedged; token {kind} dropped")
+        except Exception as exc:               # never break the FSM
+            self._w1_log_tx_once(f"tx_ring put error: {exc!r}")
+
+    def _w1_tx_drain_loop(self):
+        ring = self._w1_tx
+        while not self._w1_tx_stop:
+            try:
+                # Read self._w1_tx_gen fresh each iter so a HARD
+                # pre-disconnect gen-bump (D5) takes effect — a
+                # stale in-flight token is discarded, not applied.
+                rec = ring.get(timeout=0.1,
+                               expected_generation=self._w1_tx_gen)
+            except RingClosed:
+                break
+            except RingPeerLost:
+                # W1 is SAME-PROCESS: nothing can die — this is
+                # lock contention (a Qt/GIL stall holding the
+                # lock).  v3-4: in-process the safety mechanism is
+                # the HARD teardown via stop() (D3 is a W2
+                # cross-process concern); the REAL wire MOX bit is
+                # on `_dispatch_state` (P1), unaffected by a
+                # rehearsal-drain stall — NEVER D3/force_release_all
+                # here (no-worse-than-HEAD: HEAD has no rehearsal
+                # layer at all).  Log-once, re-arm, continue.
+                self._w1_log_tx_once(
+                    "tx_ring get: lock contention; re-armed")
+                continue
+            except Exception as exc:
+                self._w1_log_tx_once(f"tx_ring get error: {exc!r}")
+                continue
+            if rec is None:
+                continue                      # idle — normal
+            _seq, _g, _tid, payload = rec
+            try:
+                kind, pseq = _TXREC.unpack_from(payload, 0)
+            except Exception as exc:
+                self._w1_log_tx_once(f"tx_ring decode error: {exc!r}")
+                continue
+            # Rehearsal-only application (proves the W2 ordered
+            # seam).  NOT read by `_snapshot_mox_bit` (P1: the real
+            # wire MOX bit stays 100% on `_dispatch_state.mox`
+            # MAIN-direct — we make NO stream.py change so this
+            # holds by construction).  The seq monotonic check is
+            # the A/B-gate's FIFO proof.
+            if kind == _TX_MOX_ON:
+                self._w1_wire_mox = True
+            elif kind == _TX_MOX_OFF:
+                self._w1_wire_mox = False
+            # INJECT_ON/OFF: ordering tokens — the real
+            # inject_tx_iq flag was already delegated in
+            # __setattr__; here they only advance the FIFO seq.
+            self._w1_tx_last_seq = pseq
+
+    def _w1_log_tx_once(self, msg: str) -> None:
+        if not self._w1_tx_lost_logged:
+            self._w1_tx_lost_logged = True
+            import logging
+            logging.getLogger(__name__).warning("[W1.4 tx_ring] %s", msg)
+
+    def _w1_tx_hard_predisconnect(self) -> None:
+        # P2 HARD teardown — invoked from stop() BEFORE
+        # `self._w1_stream.stop()` (i.e. before the EP2-writer
+        # join).  Force the rehearsal wire-mox to 0, bump the
+        # generation (D5: stale-discard any in-flight token —
+        # cb58bcb come-up-not-keyed itself rests on the MAIN-direct
+        # `_dispatch_state.mox=False` path, UNCHANGED; this is the
+        # W2-seam rehearsal of "no stale token survives a stop"),
+        # and close the control ring so the drain's get raises
+        # RingClosed and it cannot apply a stale token while the
+        # EP2 writer drains its final frames.  Re-key-collapse and
+        # normal/force_release_all/§15.20 keyups are GRACEFUL
+        # (v3-4(b)/(c)) and do NOT call this — HARD is stop()/D3/
+        # fault ONLY (a HARD hook on a graceful keyup would
+        # reintroduce the D-W14f tail-chop).
+        self._w1_tx_stop = True
+        self._w1_wire_mox = False
+        self._w1_tx_gen = (self._w1_tx_gen + 1) & 0xFFFFFFFF
+        ring = self._w1_tx
+        if ring is not None:
+            try:
+                ring.set_generation(self._w1_tx_gen)
+            except Exception:
+                pass
+            try:
+                ring.close()
+            except Exception:
+                pass
+
+    def _w1_teardown_tx(self) -> None:
+        self._w1_tx_stop = True
+        t = self._w1_tx_drain_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=2.0)              # bounded (0.1 s get tick)
+        self._w1_tx_drain_thread = None
+        ring = self._w1_tx
+        self._w1_tx = None
+        if ring is not None:
+            try:
+                ring.close()
+            except Exception:
+                pass
+
     def stop(self):
         # Signal the drain threads, tear down the contained stream
         # (its §15.21-ordered teardown joins the EP2 writer + the
@@ -686,6 +939,15 @@ class HL2StreamProxy:
         # them after the join).
         self._w1_stop = True
         self._w1_cc_stop = True
+        self._w1_tx_stop = True
+        # P2 HARD tx pre-disconnect BEFORE contained.stop() — force
+        # the rehearsal wire-mox to 0, bump generation (D5
+        # stale-discard), and close the control ring so no stale
+        # token can be applied while the EP2 writer drains its
+        # final frames (i.e. before the EP2-writer join inside
+        # contained.stop()).  cb58bcb come-up-not-keyed stays on
+        # the MAIN-direct `_dispatch_state.mox=False` path.
+        self._w1_tx_hard_predisconnect()
         try:
             return self._w1_stream.stop()
         finally:
@@ -705,6 +967,12 @@ class HL2StreamProxy:
             # completed inside contained.stop() in the try) — v2-4
             # teardown order; bounded, then free the cc ring.
             self._w1_teardown_cc()
+            # tx-drain join AFTER the EP2-writer join too.  The
+            # control ring was already closed in the P2 HARD
+            # pre-disconnect (before contained.stop()), so the
+            # drain's get already raised RingClosed and it exits
+            # ~immediately; just join bounded + null the refs.
+            self._w1_teardown_tx()
             # tele is normally torn down by register_mic_consumer
             # (None) BEFORE stop() (Radio teardown order) — but
             # tear it down here too, defensively + bounded.

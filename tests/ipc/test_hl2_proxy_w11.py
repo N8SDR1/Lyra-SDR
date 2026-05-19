@@ -70,9 +70,11 @@ class W11RxIqRoutingTest(unittest.TestCase):
         if t is not None:
             t.join(timeout=2.0)
             self.assertFalse(t.is_alive())
-        # W1.3: start() also spins the cc-drain — tear it down
-        # (bounded) so the non-daemon thread doesn't leak.
+        # W1.3/W1.4: start() also spins the cc-drain AND the
+        # control-only tx-drain — tear both down (bounded) so the
+        # non-daemon threads don't leak.
         p._w1_teardown_cc()
+        p._w1_teardown_tx()
         if p._w1_rx_iq is not None:
             p._w1_rx_iq.close()
 
@@ -179,6 +181,7 @@ class W11RxIqRoutingTest(unittest.TestCase):
         p = _proxy(stub=True)
         p.start(rx_freq_hz=14000000)
         self.addCleanup(p._w1_teardown_cc)   # cc-drain spun by start()
+        self.addCleanup(p._w1_teardown_tx)   # tx-drain spun by start()
         self.assertIsNone(p._w1_rx_drain_thread)          # no rx routing
         self.assertIsNone(p._w1_rx_iq)
         self.assertEqual(p._w1_stream.start_kw["on_samples"], None)
