@@ -9338,6 +9338,149 @@ methodology.  Do NOT carry the reverted S4a coalescer into
 S4b uncritically — re-derive whether it's even wanted.
 `origin/main` stays v0.1.1.
 
+#### ✅ S4b GROUNDED DESIGN + 2-AGENT RED-TEAM 2026-05-19
+#### (same locked procedure as S2/S3/S4a — plan→2 independent
+#### senior red-team→reconcile).  Both CONVERGED FIRST PASS:
+#### **implement-with-required-additions** (NOT redesign, NOT
+#### as-designed).  Design CORRECTED + LOCKED.  Awaiting
+#### operator go-ahead; NO code until then.
+
+A Plan agent produced a grounded, file:line design; two
+independent senior red-team agents (concurrency/GIL lens
+`a6a74c7d9b5001e0c`; safety/silent-regression lens
+`a49505f9a5d8f81de`) reviewed.  Complementary, no conflicts.
+
+**THE DESIGN (core, LOCKED):** split `radio.py
+_process_spec_db` (≈12355-12719) into `_compute_spec_payload
+(spec_db)->immutable SpecPayload` (pure numeric: S-meter
+window/cal/EWMA/peak-hold-decay, noise-floor pct20+EWMA,
+auto-scale math, zoom crop, waterfall interp) running on the
+DSP worker thread right after the FFT (`worker.py
+_maybe_run_fft` ≈844-923), and `_apply_spec_payload(payload)`
+running MAIN via a new `spectrum_payload_ready=Signal(object)`
+queued connection (replacing `spectrum_raw_ready`) doing ALL
+`.emit`/`set_*_db_range`/`band_for_freq`/`_compute_dds_freq_hz`
++ the state assignments.  Ownership split, no locks (mirrors
+S3 between-blocks discipline).  Staged: **S4b-1** = pure
+refactor split, BOTH modes still 100 % main, golden
+equivalence test (the revertable safety net); **S4b-2** = the
+threading move + new signal; **S4b-3/S4c** = paint-side (see
+NBNS below).  S2 (lock-free EP2 ring + timer-paced writer)
+and S3 (`_ctl_q` between-blocks) untouched & favoured.
+
+**CONVERGED CORRECTIONS (5 MANDATORY — both agents; without
+these the Auto-LNA surface is `redesign` territory):**
+1. 🔴 **Accumulator-reset race (both rank #1).** The design's
+   "owned by whoever computes; mode is process-start-only"
+   mitigation is INSUFFICIENT.  `set_mode` (radio.py:3724/
+   3725), `set_smeter_mode` (8327/8329), `set_spectrum_auto_
+   scale` (8459) + the band-range counter (8436) write
+   worker-owned accumulators (`_smeter_avg_lin`/
+   `_smeter_peak_hold_lin`/`_auto_scale_tick_counter`/…)
+   from the Qt MAIN thread at operator-driven RUNTIME — a
+   real cross-thread reset-vs-accumulate race (semantically
+   wrong, not crash).  MANDATORY: route every such reset
+   through the S3 `_ctl_q` (post→applied on the worker
+   between blocks), NOT a direct main write.  Enumerate the
+   exact sites in S4b-2.  (CORRECTION: `clear_peak_holds`
+   :4989 is NOT an accumulator writer — only emits
+   `peak_holds_cleared` for the widget's per-bin markers;
+   out of scope, do not route.  `_noise_floor_history` has
+   no runtime reset = safe.)
+2. 🔴 **Auto-LNA trap NOT closed by "assignment stays main"
+   (co-rank-1).** The hazard is the DERIVATION moving one
+   FFT block earlier and reading main-mutated `_rate`/
+   `_fft_size`/window/cal on the worker (`half_bw_bins=int(
+   3000/(self._rate/self._fft_size))` :12376; `_lna_passband
+   _peak_dbfs` :12392; `_noise_floor_db` :12492 → read by
+   `_adjust_lna_auto` :7035 / `_evaluate_pullup` :7119 on
+   the 500 ms LNA timer).  MANDATORY: `_compute_spec_payload`
+   snapshots `_rate`/`_fft_size`/window/`_win_norm`/
+   `_spectrum_cal_db` ATOMICALLY on the worker at FFT time
+   (extend the discipline `worker.py:905-911` already uses
+   for the FFT body); the payload CARRIES the derived
+   `_lna_passband_peak_dbfs`/`_noise_floor_db`; `_apply`
+   NEVER re-reads main state for them.  Payload is the
+   SINGLE carrier of nf+passband+smeter for a frame so the
+   500 ms timer never sees a mixed-frame state (document the
+   ordering invariant).
+3. 🔴 **S4b-1 is NOT zero-behaviour-change.** Eager payload
+   build vs today's inline-conditional emit gating
+   (noise-floor `_nf_emit_counter>=5` :12495-12499;
+   auto-scale `AUTO_SCALE_INTERVAL_TICKS` :12521;
+   `_smeter_avg_lin<=0` / `_noise_floor_db is None` seeding
+   :12425/:12489) can shift WHICH emits fire on a given
+   frame.  MANDATORY: the S4b-1 golden test asserts the
+   exact SEQUENCE and FRAME-INDEX of every emit
+   (`smeter_level`/`noise_floor_changed`/`spectrum_ready`/
+   `waterfall_ready`/`set_spectrum_db_range`/
+   `set_waterfall_db_range`) over a multi-frame trace
+   INCLUDING a rate change, mode change, auto-scale toggle
+   (:8459 resets the tick counter) and `clear_peak_holds` —
+   not just values.  Do NOT proceed to S4b-2 until green.
+4. 🔴 **Stop/restart payload-in-flight (NOT covered by the
+   §15.21 bug-3 final-drain — that's in the worker run_loop
+   `finally:`, does NOT flush the Qt event queue).** A
+   `spectrum_payload_ready` can sit queued at `stop()` and
+   `_apply` then runs against torn-down state
+   (`band_for_freq(int(self._freq_hz))` :12601,
+   `_compute_dds_freq_hz` :12654, `set_*_db_range`, the LNA
+   assigns) = the cb58bcb/b7e61e6 class.  MANDATORY:
+   `_apply_spec_payload` early-returns on torn-down/stream-
+   dead state AND `Radio.stop()` bumps a generation counter
+   the payload carries → a stale in-flight payload is
+   dropped, not applied.
+5. 🔴 **HONEST SCOPE — S4b is NECESSARY-BUT-NOT-SUFFICIENT
+   (the make-or-break, concurrency agent).** The
+   QOpenGLWidget `paintGL` GIL hold on MAIN
+   (`spectrum_ready.emit`→`panels.py:5651/5844`→`update()`→
+   `paintGL`) is NOT addressed by S4b and is, per the
+   operator's OWN S4a-revert data, co-dominant with
+   `_process_spec_db`.  The design's "S4b-3 optional"
+   UNDERSTATES this: **S4c** (throttle/coalesce the
+   `spectrum_ready`→paint path) is the likely-MANDATORY
+   completion.  Pre-state the measured gate up front (do
+   NOT declare success on the refactor).  This is the exact
+   S3/S4a NBNS pattern; the S4b HL2 gate must be judged on
+   it, not assumed.
+
+**MANDATORY HL2-GATE ADDITIONS (objective — a wire-cadence
+`summarize_capture` CANNOT catch the silent-regression class;
+the S4a lesson):** (a) Auto-LNA `lna_auto_event` (radio.py
+:7079) timestamp/delta A/B pre-vs-post-S4b at identical
+band/settings — must match within one 500 ms tick (F1/F2
+made observable); (b) the F3 emit-sequence trace wired as a
+CI artifact, green on S4b-1 before S4b-2; (c) 20× Stop/Start
+under spectrum load with an instrumented "applied against
+torn-down state" counter = 0 (F4); (d) the wire metrics:
+continuous MAINSTALL collapses + `un` storm collapses +
+deque ≤ S3 ~3000 (a 21072-class burst = explicit FAIL) — BUT
+read honestly under #5 (if paint still dominates, MAINSTALL
+won't fully collapse and that mandates S4c, it is NOT an S4b
+failure — the R-B corner-painting discipline).
+
+**AGREE/DISAGREE vs the Plan's risk ranking:** both
+DISAGREE the Plan over-ranked worker-block-budget (#4) —
+it's LOW (numpy GIL-released, FFT-cadence-gated, ≈ the FFT
+cost already there; no IQ-queue starvation, no S2/S3
+perturbation — verified).  Both AGREE accumulator race is #1
+but the Plan's mitigation was insufficient (→ correction 1).
+Safety agent: Auto-LNA is CO-rank-1 not rank-2 (→ correction
+2).  Cosmetic: `_lna_peaks` init is radio.py:919-921 (design
+mis-cited 9756); `_lna_peaks`/`_lna_rms` B.6 path
+(`_on_worker_lna_peak`) is genuinely separate — untouched,
+do NOT fold in.  `_wf_prev_spec` waterfall interp MUST stay
+in `_apply` (cross-frame consumer-visible — moving it to
+`_compute` breaks the gradient silently).
+
+**STATUS: corrected S4b design LOCKED (5 mandatory
+corrections + objective gate).  Both agents converged first
+pass — NO loop needed.  Strategy GO, staged S4b-1→S4b-2→S4c.
+Awaiting operator go-ahead to implement S4b-1 (the pure
+refactor + the correction-3 emit-sequence golden test = the
+revertable safety net, lowest risk, no threading yet).  NO
+code until then.**  `origin/main` stays v0.1.1.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-18 EOD)
