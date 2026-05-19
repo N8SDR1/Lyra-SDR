@@ -10193,6 +10193,55 @@ W1.4 (the tx_ring hot path).  W1 stays the W2 fallback.
 NO code until operator go-ahead.**  `origin/main` stays
 v0.1.1.
 
+#### ✅ W1.0 SHIPPED 2026-05-19 (operator "go").  The
+#### transparent pass-through proxy skeleton — wire-identical
+#### BY CONSTRUCTION, in-process, lowest-risk, fully
+#### revertable, no HL2 bench.
+
+`lyra/ipc/hl2_proxy.py::HL2StreamProxy` — a pure delegating
+shim: contains one real `HL2Stream`, forwards EVERY attribute
+read / write / delete / method call to it via
+`__getattr__`/`__setattr__`/`__delattr__`.  NO rings, NO extra
+thread, NO behaviour, NO ordering change — the contained
+`HL2Stream` runs exactly as today on its own internal threads;
+the S2 timer-paced writer, S3 `_ctl_q`, §15.25 keydown/keyup
+ordering and §15.21 teardown are byte-identical.  Only
+production change: `radio.py:9120` constructs
+`HL2StreamProxy(self._ip, sample_rate=self._rate)` instead of
+`HL2Stream(...)` (+ the import).  The raw reach-ins
+(`audio_sink.py:294-295` `_stream._tx_audio`/`_tx_audio_lock`,
+`radio.py` `_set_tx_freq`/`_send_cc`, `inject_audio_tx`/
+`inject_tx_iq` writes) delegate to the SAME contained objects
+— verified identity-equal.  `unwrap()` exposes the contained
+stream for W1.1+ / tests.  Per the locked design, W1.0
+INTENTIONALLY exposes the contained stream as a live object
+(required for wire-identity here); the guard-object / "no
+live `_tx_audio`/`_cc_registers`" requirement (amendment
+v3-3/A1) lands at **W1.4** when ring routing is interposed —
+W1.0 changes nothing.
+
+Tests `tests/ipc/test_hl2_proxy.py` (9): used-surface
+forwarding, methods are the contained stream's bound methods
+(proxy shadows nothing — proves straight-through), raw
+reach-in returns the SAME object + mutation passes through,
+attribute-write forwarding (`inject_tx_iq`/`inject_audio_tx`),
+instance-dict identity parity, hasattr/AttributeError
+semantics, truthiness matches a real stream
+(`radio.py:if self._stream:`), `unwrap()` is the HL2Stream,
+Radio constructs the proxy.  Full suite **468 passed / 0**
+(459 W0 baseline + 9; zero regressions — the swap is
+wire-identical and the suite confirms no behaviour change).
+`origin/main` stays v0.1.1.
+
+**NEXT = W1.1** (route `rx_iq` — the read-back path, lowest
+risk: drop-oldest already W0-proven; the EP6
+`dispatch_ddc_samples` site → `rx_iq.put`, proxy consumer
+fans to `register_consumer` callbacks).  Still in-process,
+no HL2 bench (first HL2 A/B-vs-S3 bench-gate is W1.4 — the
+tx_ring hot path).  Per the locked v3 design + A1/A2/
+A-v3-1a/A-v3-2a; each W1.x independently revertable, W1
+stays the W2 fallback.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-18 EOD)
