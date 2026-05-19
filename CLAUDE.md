@@ -9473,13 +9473,100 @@ do NOT fold in.  `_wf_prev_spec` waterfall interp MUST stay
 in `_apply` (cross-frame consumer-visible — moving it to
 `_compute` breaks the gradient silently).
 
-**STATUS: corrected S4b design LOCKED (5 mandatory
+**STATUS (round-1): corrected S4b design LOCKED (5 mandatory
 corrections + objective gate).  Both agents converged first
-pass — NO loop needed.  Strategy GO, staged S4b-1→S4b-2→S4c.
-Awaiting operator go-ahead to implement S4b-1 (the pure
-refactor + the correction-3 emit-sequence golden test = the
-revertable safety net, lowest risk, no threading yet).  NO
-code until then.**  `origin/main` stays v0.1.1.
+pass.**
+
+#### ✅ S4b ROUND-2 CONFIRM (operator: "two more agents,
+#### confirm or loop until all agree") — 2026-05-19.  Two
+#### FRESH independent agents (verification lens
+#### `a5034577ccb981f5b`; strategy/sequencing lens
+#### `a4a2f3885ff248d01`).  BOTH **CONFIRM-WITH-AMENDMENTS**
+#### — NEITHER says LOOP.  All 4 agents now agree the design
+#### + 5 corrections are sound and S4b-1 is the right safe
+#### first step.  Round-2 added 3 refinements (folded; no
+#### redesign):
+
+* **A1 (verification) — fix correction-2's rationale.** The
+  round-1 citation of `worker.py:905-911` as an "established
+  atomic-snapshot discipline to extend" is FALSE on the
+  facts: `_rate` (`set_rate` radio.py:3529) and
+  `_spectrum_cal_db` (`set_spectrum_cal_db` :8290) ARE
+  runtime-mutated, so 905-911 is itself a PRE-EXISTING
+  latent torn-read shipping in S3 today (bounded for `_rate`
+  by the ring-clear at :3542; `_spectrum_cal_db` has NO
+  barrier — a cal change tears an in-flight FFT now).
+  Correction-2's prescription is still exactly right and
+  **closes that pre-existing bug as a bonus** — only the
+  rationale text changes (do NOT cite 905-911 as a safe
+  pattern; state S4b-2 introduces the atomic snapshot these
+  never had).
+* **A2 (verification) — hard-lock the freq-center
+  invariant.** Snapshotting the 5 numeric fields does NOT
+  fully close worker-side staleness: `_compute_spec_payload`
+  also reads `_smeter_mode`/`_smeter_cal_db`/`_gain_db`/
+  `_zoom`/`_noise_floor_enabled`/`_spectrum_auto_scale`
+  (scalar, GIL-atomic, ≤1 stale frame on a 6 Hz meter =
+  benign) — EXCEPT `_freq_hz`+`_panadapter_source_rx`+
+  CW-pitch consumed TOGETHER by `_compute_dds_freq_hz`
+  (:12654): a torn multi-field read = wrong spectrum
+  center_hz for one frame → click-to-tune/marker glitch on
+  RX2 swap / fast tune.  MANDATORY (already implied by the
+  design, now a HARD LOCKED INVARIANT): `_compute_dds_freq_hz`
+  / `band_for_freq` are computed in `_apply` on MAIN, NEVER
+  in `_compute`; only numeric-only fields cross in the
+  payload.  Also: stop()'s generation-counter bump
+  (correction 4) must land BEFORE the sink-swap barrier
+  (radio.py ~:9292) so a payload posted during the 1 s wait
+  is also rejected.
+* **A3 (strategy) — RE-SEQUENCE: S4b-1 → S4c (bench-gate) →
+  S4b-2 (was S4b-1→S4b-2→S4c).**  The load-bearing claim is
+  CODE-VERIFIED: `SpectrumGpuWidget` IS a `QOpenGLWidget`
+  (`spectrum_gpu.py:167`); `spectrum_ready.emit`
+  (radio.py:12667) → `_gpu_on_spectrum_ready`
+  (panels.py:5844) → `set_spectrum` (spectrum_gpu.py:580)
+  runs heavy GIL-bound numpy (EWMA 622-628, peak-hold/decay
+  634-687, vertex builds 695-709) + `update()`→`paintGL`
+  ENTIRELY on the Qt main thread at FFT cadence, INDEPENDENT
+  of `_process_spec_db` — S4b moves NONE of it.  Correction
+  #5 (NBNS) is therefore not a hedge, it is **empirically
+  pre-confirmed by the operator's own S4a-revert table**
+  (~9× fewer emits moved MAINSTALL/un/deque ≈ zero; the doc
+  itself concluded "_process_spec_db + QOpenGLWidget-paint
+  dominated").  The locked order would spend the project's
+  LARGEST-blast-radius rebuild (the 5 corrections + a real
+  accumulator race + a material expansion of S3's
+  deliberately-scoped `_ctl_q` config plane into a runtime-
+  reset plane) BEFORE the cheap lever the prior agents
+  THEMSELVES call mandatory and that might de-scope/de-risk
+  S4b-2.  That is information-per-risk INVERTED vs the proven
+  S0→S1→S2 project discipline (cheapest safe lever first,
+  empirical bench-gate before the big rebuild); S4a is the
+  precedent (an "obviously safe" change shipped ahead of
+  bench data, moved no metric, reverted).  RE-SEQUENCED
+  PLAN: **(1) S4b-1** pure refactor + correction-3 emit-
+  sequence golden test (lowest risk, prep, no threading, no
+  downside — ship it); **(2) S4c** small paint-coalesce/
+  throttle at the `spectrum_ready`→`set_spectrum`/paint
+  boundary (1 file, ~10 lines, no ownership change, no
+  `_ctl_q` growth, trivially revertable) → **operator HL2
+  bench-gate vs the S3 baseline table**; **(3) decide S4b-2
+  on real data** — if S4c alone meaningfully moves
+  MAINSTALL/un/chop, S4b-2's threading rebuild is deferred/
+  de-scoped; if it does NOT, that empirically justifies
+  S4b-2's blast radius with the same authority S2/S3 earned.
+  S4c gets its own grounded design + red-team before code
+  (it touches the paint path); S4b-1 stays 100 % main both
+  modes so it's safe to land first regardless.
+
+**STATUS: ALL 4 AGENTS CONVERGED — no further loop (operator
+"loop until all agree" satisfied).  S4b design + 5
+corrections + A1/A2 LOCKED.  PLAN RE-SEQUENCED per A3:
+S4b-1 → S4c(bench-gate) → S4b-2.  Awaiting operator decision:
+go-ahead for S4b-1 (pure refactor + emit-sequence golden
+test, no threading, revertable) and acceptance of the A3
+re-sequence (S4c benched before the S4b-2 rebuild).  NO code
+until then.**  `origin/main` stays v0.1.1.
 
 ---
 
