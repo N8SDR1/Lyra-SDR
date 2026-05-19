@@ -10956,11 +10956,133 @@ the SAME principled W1.3-pattern carve-down to a provably-
 safe minimal set — the hard tx-audio-cross-process problem
 is scoped to W2 *with a defined bench gate*, not skimped.
 
-**STATUS: W1.4 v3 written.  LOOPING once more per the
-charter — v3 → BOTH agents for confirm-or-loop.  NO code
-until convergence.**  W1.4 still the FIRST operator HL2
-A/B-vs-S3 bench-gate (post-convergence + implement).
-`origin/main` stays v0.1.1.
+#### ✅ W1.4 v3 ROUND-3 = CONVERGED 2026-05-19.  BOTH fresh
+#### independent agents — cadence/S2/drop-policy/deadlock
+#### `afb77885ee712f3a8` and safety/§15.25/charter
+#### `aecdb2bbe565efbfe` — returned **CONFIRM — NO LOOP**,
+#### independently, first pass.  "Loop until all agree"
+#### SATISFIED for W1.4 (round-1 LOOP → v2 → round-2
+#### still-LOOP → v3 → round-3 CONFIRM ×2; thesis held,
+#### narrowed to a provably-safe control-only set).  Both
+#### verified every v3 claim against real code (re-checked
+#### the doc's line refs); both explicitly state every v3
+#### numbered item + §6 is CONFIRMED-SOUND (no churn next
+#### iteration).  Each added the SAME class of mandatory
+#### IMPLEMENTATION-BINDING pin (NOT a design defect — v3-4
+#### already mandates "pin the concrete proxy seams"; the
+#### agents restated it with verified file:line so the coder
+#### cannot drift).  The two pins are consistent; reconciled
+#### below as the LOCKED implementation contract.
+
+* **Charter table:** every row PASS incl. no-worse-than-HEAD
+  (STEPATT/TXNCO/TXAUDIO byte-identical HEAD; normal keyup
+  GRACEFUL faded-tail intact ≥-reference; teardown HARD only
+  on stop/D3/fault).  §6(a) nothing worse than S3/HEAD,
+  PureSignal's shared `tx_step_attn` actuator NOT painted
+  into a corner (stays synchronous-excluded single-writer),
+  tx-audio cross-process transport honestly scoped to W2
+  with a defined bench gate (NOT skimped).  §6(b) the
+  control-only ordered ring + synchronous-excluded
+  MOX-correlated/§15.25/TX-safety registers + S2-deque audio
+  is ≥ the Thetis/pihpsdr/Quisk posture (they gate MOX after
+  TX-freq prime + clear MOX only after the TX down-ramp; v3
+  matches + adds explicit generation-tagged teardown the C
+  references don't formalise).
+
+* **CODE-VERIFIED by BOTH (CONFIRMED-SOUND — do not churn):**
+  v3-1 keydown FIFO TXNCO(sync)→STEPATT 0x1C/0x14(sync)→
+  MOX_ON(deferred) is real on every keydown variant —
+  `ptt.py:_enter_tx` 310-321 (`set_mox(True)` 316 →
+  `_on_tx_state_changed(True)` 318 → `_deferred(rf_delay,
+  _open_tx_iq)` 321); `radio.set_mox(True)` 2445-2490 does
+  `_set_tx_freq` (0x02/0x08/0x0a `_CC_EXCLUDED` sync) then
+  `_dispatch_state.mox=True` MAIN-direct; `_apply_att_on_tx`
+  3099-3110 is straight-line synchronous (NO QTimer / NO
+  auto-LNA async), gate at 3103; TUN/CW-first-key funnel the
+  identical `_enter_tx`; re-key-collapse `ptt.py:373-381`
+  returns early, enqueues nothing.  v3-2: `_CC_EXCLUDED`
+  `hl2_proxy.py:115` literally `{0x12,0x14,0x1C,0x02,0x08,
+  0x0A}`, guard `__setitem__` 160-166 transparent in-place
+  under the writer's held `_cc_lock` = byte-identical HEAD;
+  EP2 reader two-acquisition non-atomic pair is IDENTICAL to
+  HEAD's `set_tx_step_attn_db` (not regressed).  v3-3:
+  `audio_sink.py:294-295` `_tx_audio`/`_tx_audio_lock`
+  delegate verbatim via proxy `__getattr__`/`__setattr__`
+  255-268 — no ring/thread, S4a deque-burst cannot recur;
+  control-put unreachable-full at human-keying cadence
+  (256-slot non-drop, the shipped W1.3 cc_cmd argument).
+  v3-4: `force_release_all` (`ptt.py:460-470`) and §15.20
+  `_on_tx_timeout_fired`→`force_release_all` (`radio.py:
+  2704`) drive a NORMAL GRACEFUL gated keyup (NOT a hard
+  chop) — so HARD is reserved for `Radio.stop()`/D3/process-
+  exit ONLY; §15.25 faded-tail preserved by the EXISTING
+  MoxEdgeFade fade-poll gate (`ptt.py:347-363`, tail on the
+  untouched S2 `_tx_audio` deque via `_slew_fill_pairs`);
+  D-W14f tail-chop genuinely does NOT recur; lock-order
+  acyclic (W0 `Ring.get` releases `_lock` in its `finally`
+  `ring.py:185-186` before the `with _cc_lock:` apply —
+  the W1.3-proven `_w1_cc_drain_loop` form); proxy `stop()`
+  joins EP2 writer in the `try` before the `finally` joins
+  proxy drains.  v3-5 gate adequate (keyup-tail-integrity +
+  keydown-transient + 20×-rapid+sub-50ms-rekey +
+  deque-high-water-vs-S3 cover exactly the transients the
+  snapshot-diff is blind to).
+
+* **🔒 LOCKED IMPLEMENTATION CONTRACT (the two reconciled
+  pins — binding on the W1.4 coder; a violation is
+  BLOCKS-SHIP):**
+  - **P1 — the wire MOX bit STAYS 100% on the existing
+    `_dispatch_state.mox` MAIN-direct path in W1
+    (in-process).**  `_snapshot_mox_bit` (`stream.py:
+    1912-1917`) and the C4 ATT-on-TX gate (`stream.py:
+    1561-1581`) keep reading `_dispatch_state_provider().mox`
+    UNCHANGED from HEAD/cb58bcb.  The tx_ring MOX_ON/MOX_OFF
+    records are implemented PURELY as generation-tagged FIFO
+    ordering/barrier tokens that REHEARSE the W2 cross-
+    process seam (prove FIFO across the boundary, exercise
+    the D5 stale-gen discard, be the W2 fallback seam).
+    Do NOT wire the ring into `_snapshot_mox_bit` in W1 —
+    that reintroduces an unordered wire-MOX path =
+    BLOCKS-SHIP.  The `_wire_mox` stream-thread-local that
+    `_snapshot_mox_bit`+C4-gate eventually consume becomes
+    load-bearing ONLY at W2 (when the producer is cross-
+    process and `_dispatch_state` is no longer same-address-
+    space); in W1 it is the destination the barrier token
+    rehearses toward, NOT the live wire-bit source.
+  - **P2 — seam call sites pinned:** the HARD-teardown
+    `proxy.w1_tx_teardown()` (force the rehearsal MOX state
+    to 0 + discard the control ring) is invoked ONLY from
+    `Radio.stop()` immediately BEFORE `self._stream.stop()`
+    /the EP2-writer join (re-verify the exact line at code
+    time — agents cited radio.py:9371 vs :9427; pin it
+    mirroring the shipped W1.3 `_w1_teardown_cc` ordering)
+    AND the D3 dead-child path.  It is NOT wired to
+    `force_release_all` / NOT §15.20 (verified GRACEFUL
+    FSM keyups — a HARD hook there reintroduces D-W14f).
+    The GRACEFUL ordered MOX_OFF token enqueues from the
+    `_clear_mox_tail`→`set_mox(False)` path (`ptt.py:
+    389-391`) AFTER the fade-poll gate has already passed
+    (`fade.is_off()` true), guaranteeing the faded S2-deque
+    tail is ahead of the MOX_OFF token; since `set_mox` is
+    a Radio method (not proxy-intercepted) this uses the
+    same proxy-level hook mechanism v3-4 specifies.  cb58bcb
+    come-up-not-keyed stays on the MAIN-direct
+    `_dispatch_state.mox=False` path so a discarded/stale-gen
+    ring token can never re-key on restart (D-W1d/D5).
+
+**STATUS: W1.4 DESIGN CONVERGED & LOCKED (v3 + the P1/P2
+implementation contract; thesis + every fix confirmed by 8
+independent senior agents across W1.4 rounds 1-3 + the W1
+design rounds; no charter row FAIL/CONDITIONAL; no-worse-
+than-HEAD PASS).  Methodology complete through design.
+AWAITING OPERATOR GO-AHEAD to implement W1.4 per the locked
+v3 + P1/P2 (the control-only tx_ring + the rehearsal
+MOX_ON/MOX_OFF/INJECT ordering tokens + the GRACEFUL/HARD/
+NEITHER teardown split; TXAUDIO/TXIQ/STEPATT/TXNCO untouched
+on their HEAD paths).  W1.4 is the FIRST operator HL2
+A/B-vs-S3 bench-gate (post-implement) — the multi-capture
+gate of v3 item 5.  W1 stays the W2 fallback.  NO code until
+operator go-ahead.**  `origin/main` stays v0.1.1.
 
 ---
 
