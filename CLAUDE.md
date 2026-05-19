@@ -9922,6 +9922,129 @@ deque-depth A/B-vs-S3 capture, FAIL if cadence/underrun moves).
 Its own grounded design + red-team (charter §6 comparative
 questions) before code, per the locked methodology.
 
+#### ⚠ W1 GROUNDED DESIGN — ROUND-1 RED-TEAM = LOOP
+#### (2026-05-19; rigor working: caught a silent W2 landmine
+#### + an S4a-class worse-than-HEAD defect BEFORE any code).
+#### Agents `aee4fe7db21ef3c79` (cadence/ordering:
+#### "redesign-needed" on the MOX-routing, else
+#### implement-with-additions) + `a106aa23bd66feaeb`
+#### (safety/charter: implement-with-required-additions, 3
+#### blocks-ship + a per-charter "no-worse-than-HEAD" FAIL
+#### as-designed).  NOT converged → corrected design v2,
+#### re-verify (loop).  W1 thesis (in-process proxy seam,
+#### single ordered ring, staged W1.0-W1.5, revertable,
+#### W2-fallback) SURVIVES.
+
+The Plan's RISK-#1 premise was code-FALSE (both agents):
+`_set_tx_freq`/`_send_cc` do NOT emit immediately —
+`stream.py:3026-3036`/`1919-1948` defer into `_cc_registers`;
+the EP2 round-robin (`stream.py:2382-2388`, one `_cc_cycle`
+entry / 2.625 ms fire, ~8-15 entries TX-live) re-emits ~20-40
+ms later; freq-vs-MOX is ALREADY non-atomic (MOX = per-fire
+`_snapshot_mox_bit` `stream.py:2615` off `_dispatch_state`,
+NOT round-robin).  ⇒ the single ordered ring is a
+correctness IMPROVEMENT — but ONLY if it also carries MOX.
+
+Defects (file:line-grounded):
+* **D-W1a STRUCTURAL — MOX left off the ring.** Design
+  routes TXNCO(freq) onto `tx_ring` but leaves the wire MOX
+  bit on the existing `_dispatch_state` per-fire snapshot →
+  keydown freq sits behind a possible AUDIO backlog while
+  MOX goes live next fire = §15.25 trap #2 (stale-freq
+  first TX burst) REINTRODUCED.  D2/A2 "freq-before-MOX
+  FIFO by construction" only holds if MOX-on/MOX-off are
+  ALSO typed `tx_ring` records.
+* **D-W1b SILENT W2 LANDMINE — wrong interpose layer.**
+  Seam interposes at `Radio→stream` PUBLIC method names,
+  but `_set_tx_freq` + the 5 `_refresh_frame_*`
+  (`stream.py:1596/1685/1749/1839/1879`) and
+  `set_lna_gain_db`/`set_tx_step_attn_db`→`_refresh_frame_11`
+  /`_refresh_frame_4` mutate `_cc_registers` DIRECTLY.
+  Public-name interpose lets those bypass the rings —
+  wire-identical in the W1.0 A/B gate (invisible) but in W2
+  they run in the child, the seam never carried them, and
+  the §15.26 Thetis-byte-identical ATT-on-TX RX-ADC
+  protection silently stops reaching the wire.
+* **D-W1c S4a-CLASS, WORSE-THAN-HEAD — in-proc false
+  RingPeerLost.** `Ring.get(timeout)` timeout
+  UNCONDITIONALLY raises `RingPeerLost`→D3 (force FSM→RX +
+  `force_release_all` PA-disarm).  In W1 the "peer" is a
+  GIL-sharing thread — it can't die but CAN be starved by a
+  Qt paint stall → D3 force-releases a VALID transmission.
+  HEAD has no such trip.  The Plan missed this.
+* **D-W1d — A3 generation-bump eats the teardown MOX-off.**
+  A3 bumps gen MAIN-side at `stop()`-issue BEFORE drain;
+  the teardown `set_mox(False)` (`radio.py:9363`) posted as
+  a `tx_ring` record is then discarded stale-gen → the
+  proxy-thread HL2Stream never gets MOX-off before
+  `_stream.stop()`.  cb58bcb come-up-not-keyed then rests
+  solely on MAIN-direct `_dispatch_state.mox=False`
+  (`radio.py:2489`) — only safe if teardown `set_mox(False)`
+  is MAIN-direct, NOT tx_ring-routed.  Plus: the proxy
+  thread join must be added to the §15.21 bounded teardown
+  (`stream.py:3170-3224`, after EP2/RX join, ≤2 s) or
+  teardown gains a hang.
+
+**CORRECTED v2 (folds all; re-verify next):**
+1. **Interpose at the stream-INTERNAL `_cc_registers`/
+   `_cc_lock` + `_tx_audio`/`_tx_audio_lock` mutation
+   boundary, NOT public method names** (fixes D-W1b + the
+   `audio_sink.py:294-295` raw reach-in: proxy must NOT
+   expose `_tx_audio`/`_cc_registers` as live pass-through
+   objects; every path — public, internal `_refresh_frame_*`,
+   `_set_tx_freq`, sink raw-extend — captured by
+   construction).  W1.3 A/B gate ADDS a `_cc_registers`
+   full-snapshot diff vs S3 (a cadence gate can't see a
+   register that silently stops changing).
+2. **ALL ordered wire-affecting writes are typed `tx_ring`
+   records: TXNCO, MOX-on, MOX-off, INJECT_IQ, AUDIO, IQ.**
+   The drain applies the MOX record into an HL2Stream-thread-
+   local wire-MOX state that `_snapshot_mox_bit` reads
+   (instead of the cross-thread `_dispatch_state`) — so
+   freq-before-MOX + MOX-off-after-faded-tail are FIFO-by-
+   construction (fixes D-W1a; reference-consistent — Thetis/
+   pihpsdr frame-order C&C+IQ together, no separate control
+   FIFO).  `_dispatch_state.mox` stays the in-process source
+   of truth for all OTHER consumers; only the wire-bit
+   emission moves to the ring.  `cc_cmd` carries ONLY
+   genuine latest-value/idempotent regs (LNA/attn/drive/PA/
+   RX1+RX2-freq/rate-restart).
+3. **Teardown `set_mox(False)` BYPASSES `tx_ring` (MAIN-
+   direct mutation)** so A3's gen-bump cannot discard it;
+   cb58bcb invariant stays on the MAIN-direct path; the
+   proxy thread join is added to the §15.21 bounded
+   sequence (fixes D-W1d).
+4. **W1 RingPeerLost→D3 is GATED behind a liveness probe**
+   (proxy-thread `is_alive()` + heartbeat).  A bounded-get
+   timeout WITHOUT confirmed non-liveness re-arms +
+   continues (logs a diagnostic), NEVER trips
+   force_release_all/FSM→RX.  Live D3 requires CONFIRMED
+   non-liveness (never true in W1; genuinely true for a
+   dead child in W2) (fixes D-W1c — no worse-than-HEAD).
+5. **Per-ring OWN lock; in-process W1 passes a
+   `threading.Lock` (NOT `mp.Lock()`)** to `Ring.create(
+   lock=…)` — avoids needless kernel transitions + false
+   cross-ring contention coupling.
+6. **Keyup `_end_keyup` does NOT block on the tele-ACK**
+   (A2's no-await applies symmetrically); W1.2 asserts the
+   `ptt.py:389-406` keyup call ordering AND timing is
+   byte-for-byte unchanged vs HEAD (tele-ACK plumbing wired
+   but the `ptt_out_delay`→`_request_rx_channel(True)`
+   QTimer chain unchanged).
+7. **A/B gate hardened (W1.1 AND W1.4 gated, multi-capture
+   not single):** `read_max_wire_gap_ms`/`LYRA_WIRE_DEBUG`
+   MAINSTALL instrument over a multi-min window-drag-stressed
+   capture + `_cc_registers` snapshot-diff (RA-1) +
+   ring-bypass counter == 0 (RA-2) + zero spurious
+   `force_release_all` over a 30-min concurrent-load capture
+   (RA-3) + deque swing ≤ S3 ~3000 / p95 within 25-50 ms,42
+   / un ≤ ~1851 (the S4a-class thresholds).  Any → FAIL,
+   revert the seam.
+
+**STATUS: W1 v2 written.  LOOPING per the charter — v2 →
+BOTH round-1 agents for confirm-or-loop before any code.  NO
+code until convergence.**  `origin/main` stays v0.1.1.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-18 EOD)
