@@ -11265,6 +11265,161 @@ W2 is in + operator-bench-confirmed.
 
 ---
 
+### 15.28 — W0–W1.4 REVERTED (operator-empirical hardware failure, 2026-05-19 EOD)
+
+The locked methodology was overruled by operator hardware data,
+again.  W1.4 (`c4c6793`) shipped with full-suite 512/0 + eight
+senior-agent confirmations over 3 red-team rounds.  N8SDR ran
+the bench on his HL2+/AK4951 with `LYRA_WIRE_DEBUG=1`, antenna
+connected, DSP off, no key.  Result: **no audio, panadapter
+updating ~0.05 Hz ("slow scan TV"), `stream.inject_tx_iq=True`
+latched on within ~50 ms of stream start and held for the
+entire ~30-second capture, deque empty most of that time, `un`
+underrun storm climbing to 492.  Operator: "it never fully
+started — its not clean it never got a chance to even run."**
+
+Three independent senior agents (forensic-diff of W0→W1.4;
+FSM/MOX-latch root-cause; multi-week retrospective) converged
+on the same action: **REVERT.** Their reconciled findings:
+
+* The `inject_tx_iq=True` latch IS a real FSM keying event;
+  the W1.4 `__setattr__` interpose cannot fabricate writes
+  (it edge-detects and delegates).  Something in the W0–W1.4
+  stack is firing a `PttSource` at startup with NO operator
+  input, NO HW-PTT (gate confirmed intact + QSettings
+  NOT-SET at HEAD), NO MOX/TUN click.  The forensic agent's
+  prime candidates (TxPanel QSettings restore firing
+  `toggled→request_tun(True)`; signal storm via
+  `tx_active_changed`↔`mox_btn.setChecked`) need bench
+  bisection to confirm; the empirical fact is the symptom
+  did NOT occur on `7f35a10` (S3) and DOES occur on
+  `c4c6793` (W1.4).
+* The four W1 non-daemon drain threads (`_w1_rx_iq_drain`,
+  `_w1_tele_drain`, `_w1_cc_drain`, `_w1_tx_drain`) each
+  poll `ring.get(timeout=0.1)` at ~10 Hz — adding GIL
+  pressure to an already over-subscribed thread set (Qt
+  main + paint, EP2 writer, RX loop, DSP worker, audio
+  sink, TX DSP worker).  Independent of the FSM latch, the
+  W1.2 tele-drain path (rx-loop→ring→drain→`_on_hl2_mic`→
+  `_tx_dsp_worker.submit`) GIL-starves the TX producer
+  whenever the main thread paints — exactly matching the
+  `deque=0`-while-`inject=True` pattern in the log.
+* The W0–W1.4 sequence is by its OWN locked design
+  contract a *rehearsal* of the W2 cross-process seam —
+  it does NOT change the wire path's GIL exposure (the
+  empirically-proven root cause of the chop).  Six commits
+  + three red-team rounds + 60+ stub tests built
+  scaffolding that does not address the operator's
+  symptom by design.  Tests covered stubs; the **first
+  real-hardware integration was at the W1.4 bench**, and
+  it failed.
+
+**ACTION SHIPPED:** revert `Radio.start()` to construct
+`HL2Stream(...)` directly (radio.py:9120), drop the
+`HL2StreamProxy` import (radio.py:24).  Two-line code revert.
+`lyra/ipc/` (the W0 ring library + the W1.0–W1.4 proxy) +
+`tests/ipc/` are LEFT IN TREE as dead code — zero call sites
+in production after this commit, but preserved because (a)
+the W0 barrier-bearing SPSC ring is genuinely useful for
+the eventual cross-process W2 move, (b) the multi-round
+red-team archaeology is the project's working record of
+exactly how convergence-theatre fails, and (c) deleting
+1000+ lines + 63 tests in the same commit as the runtime
+revert mixes concerns.  Wire behaviour after this revert
+is byte-identical to `7f35a10` (S3 SHIPPED, last
+operator-bench-confirmed clean).
+
+**HONEST RETROSPECTIVE (per the third agent, abridged):**
+
+The single biggest pattern of failure across this multi-
+week arc is **convergence theatre** — multi-agent rounds
+producing increasingly elaborate, internally-consistent,
+file:line-grounded designs that pass agent-vs-agent review
+and fail at the bench.  N8SDR's empirical hardware data
+overruled the agent verdict in **11 instances over 3 days**
+(documented in §15.26: the Apollo I²C "side-channel",
+C3-bit-7 PA polarity, PA-current decode slot, dual-PA
+hypothesis, S4a "implement-with-corrections" → reverted,
+three keyup iterations → all reverted, the W1.4 8-agent
+"CONFIRM ×2" → unrunnable).  The convergence ritual
+converged the agents to *each other*, not to reality; the
+operator-HL2-gate is the only step that has ever produced
+ground truth.
+
+A second pattern: the project's no-attribution rule
+(study reference, implement Lyra-native, no reference name
+in shipped code) was being read as *don't read the
+reference first*.  Every time we read Thetis/RTL/wiki
+ground-truth BEFORE designing, we got the right answer in
+one pass (HL2+ ak4951v4 gateware reads, the C0=0x09 PA
+mechanism, the §15.25 keydown/keyup ordering, ATT-on-TX
+Round 4 convergence).  Every time we designed first and
+read second, we shipped a regression (Apollo "I²C side-
+channel", the three reverted keyup iterations, the
+self-introduced `tr_disable` bug, the `_TUNE_TONE_MAG=0.5`
+power deficit, this W1.4 stack).
+
+The audio chop the operator has been reporting for weeks
+has the same empirically-proven root cause it had three
+weeks ago: **the Qt main thread holds the GIL during
+`_process_spec_db` + `QOpenGLWidget.paintGL` at ~25-40 fps,
+starving the EP2 writer / DSP worker / audio sink that
+all live in the same Python process.**  S2 made the EP2
+writer timer-paced + added a lock-free ring (real win,
+shipped).  S3 removed the worker `processEvents` pump
+(real win, shipped).  Neither severs the in-process GIL
+coupling that IS the root cause.  W0–W1.4 explicitly does
+not change the wire path's GIL exposure (it is in-process
+rehearsal of a cross-process seam) — and we built it
+anyway, ahead of S4b/S4c (the targeted GIL-decoupling
+levers the empirical data was pointing at).
+
+**METHODOLOGY LOCKS GOING FORWARD (if the operator gives
+us another chance):**
+
+1. **Smallest revertable empirical step → operator HL2
+   bench → next step.**  If a step requires multiple
+   red-team rounds to lock the design, the step is too
+   big.  S2 was the right size.  W0–W1.4 was 6 steps too
+   far.  One commit, one bench, falsifiable.
+2. **Multi-agent convergence is a code-review tool, not
+   an empirical-truth tool.**  Use it to catch
+   concurrency/safety bugs in already-drafted code, not to
+   reach across reality boundaries.  One careful design +
+   one operator HL2 bench is faster and as good.
+3. **Read the reference FIRST, in shipped-code form,
+   before designing.**  The no-attribution rule applies
+   to shipped code/comments/commits, not to the working
+   investigation.  Dossier of "reference does X at
+   file:line" precedes the design doc.
+4. **Define the operator-visible metric BEFORE the
+   design, not after.**  A change without a falsifiable
+   operator-visible behaviour metric is furniture, not a
+   step.  W0–W1.4 had no operator-visible metric by its
+   own design contract — that should have been the stop.
+5. **Stop adding non-daemon polling threads on the audio
+   path.**  Four `daemon=False` drains polling at 10 Hz
+   on top of an already over-subscribed thread set was
+   moving the wrong direction.  The reference architecture
+   uses one dedicated wire thread, not five Python
+   producer/consumer pairs.
+
+**NEXT (one targeted commit on top of this revert, if the
+operator wants to continue):** the S4c paint-coalesce —
+throttle/coalesce `spectrum_ready` → `set_spectrum` /
+`paintGL` at the panel boundary in `panels.py` to ~30 Hz.
+One file, ~50 LOC, fully revertable, single LYRA_WIRE_DEBUG
+MAINSTALL-collapse bench gate.  This is the empirical
+lever S4a's revert was pointing at on 2026-05-18 before
+the charter pivot to process-isolation derailed it.
+
+`origin/main` stays v0.1.1.  The feature branch is back to
+S3 wire behaviour with the entire TX/first-RF arc intact
+(first RF, ~5 W into dummy, PA telemetry, ATT-on-TX, TUN,
+TX safety timeout — all hardware-validated, untouched).
+
+---
+
 ## ▶ NEXT SESSION STARTS HERE (2026-05-18 EOD)
 
 **AUTHORITATIVE RESUME DOC = §15.26.**  Read the LAST

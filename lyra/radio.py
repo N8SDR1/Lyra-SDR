@@ -21,7 +21,15 @@ import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from lyra.protocol.stream import HL2Stream, SAMPLE_RATES
-from lyra.ipc.hl2_proxy import HL2StreamProxy  # W1.0 process-isolation seam
+# W0/W1.0-W1.4 reverted 2026-05-19: shipped as `c4c6793`, was
+# unrunnable on real HL2+ hardware (no audio, ~20s display refresh,
+# MOX appeared latched).  3-agent forensic convergence + operator-
+# empirical override per CLAUDE.md §15.26 / §15.28 — revert to the
+# S3 baseline behaviour by going back to HL2Stream directly.  The
+# `lyra.ipc` package + its tests are LEFT IN TREE as dead code
+# (zero call sites in production after this revert) — preserved
+# for the W0 ring library (reusable for future cross-process W2)
+# and the multi-round red-team archaeology, NOT imported here.
 # Phase 6.B (v0.0.9.6): lyra.dsp.demod was deleted — its 5 demod
 # classes were dead code post-WDSP and its NotchFilter object was
 # orphan (constructed + mutated but never .process()'d, since
@@ -9118,14 +9126,7 @@ class Radio(QObject):
         if self._stream:
             return
         try:
-            # W1.0 (process-isolation §15.26): construct the
-            # transparent pass-through proxy instead of HL2Stream
-            # directly.  Wire-identical BY CONSTRUCTION — total
-            # delegation, no rings/thread/behaviour yet (W1.1+
-            # interpose ring routing at the stream-internal
-            # mutation boundary, each A/B-gated + revertable).
-            self._stream = HL2StreamProxy(self._ip,
-                                          sample_rate=self._rate)
+            self._stream = HL2Stream(self._ip, sample_rate=self._rate)
             # Phase 1 v0.1 (2026-05-11): wire RX2 dispatch + the
             # dispatch-state provider per consensus plan §4.2 + §4.2.x.
             #

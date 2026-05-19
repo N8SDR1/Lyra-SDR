@@ -121,13 +121,12 @@ class HL2StreamProxyW10Test(unittest.TestCase):
         _real, proxy = self._pair()
         self.assertIsInstance(proxy.unwrap(), HL2Stream)
 
+    @unittest.skip(
+        "W0-W1.4 reverted 2026-05-19 per §15.28: Radio.start() now "
+        "constructs HL2Stream directly; HL2StreamProxy is dead code "
+        "(library preserved for the future W2 cross-process move).")
     def test_radio_constructs_the_proxy(self):
-        import lyra.radio as radio_mod
-        self.assertIs(radio_mod.HL2StreamProxy, HL2StreamProxy)
-        import inspect
-        src = inspect.getsource(radio_mod.Radio.start)
-        self.assertIn("HL2StreamProxy(", src)
-        self.assertNotIn("self._stream = HL2Stream(", src)
+        pass
 
 
 if __name__ == "__main__":
