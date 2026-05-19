@@ -10279,13 +10279,77 @@ now legitimately intercepted).  Full suite **477 passed / 0**
 (468 W1.0 baseline + 9; zero regressions).  `origin/main`
 stays v0.1.1.
 
-**NEXT = W1.2** (route the `tele` ring — FrameStats /
-mic / `ptt_in`/`dot_in`/`dash_in` edges + the keyup MOX-off
-ACK plumbing; per v3-5 the `ptt.py:389-406` keyup ordering
-+ timing stays byte-identical, `_end_keyup` NEVER blocks on
-the ACK).  Still in-process, no HL2 bench (first HL2
-A/B-vs-S3 bench-gate is W1.4 — the tx_ring hot path).  Per
-the locked v3 design + A1/A2/A-v3-1a/A-v3-2a; each W1.x
+#### ✅ W1.2 SHIPPED 2026-05-19 (operator "yes").  tele
+#### (mic + ptt/dot/dash) read-back routing — in-process,
+#### no HL2 bench, fully revertable.
+
+The mic PUSH callback is decoupled from `Radio._on_hl2_mic`
+via a W0 drop-oldest ring, mirroring W1.1.  **Interpose at
+the registration boundary:** the proxy intercepts
+`register_mic_consumer` — stores the real cb, registers its
+OWN `_w1_mic_producer` shim on the contained stream; the
+rx-loop (producer) → `tele.put` (drop-oldest, bounded,
+NEVER blocks the rx-loop); the proxy's OWN tele drain thread
+→ the real mic cb.  **Mic lifecycle is INDEPENDENT of
+start()/stop()** (driven by `register_mic_consumer`, like
+the real HL2Stream API) with its OWN stop flag
+(`_w1_tele_stop`) so clearing the mic consumer never
+disturbs the rx_iq drain.  **THE correctness point:**
+`_on_hl2_mic` reads `stats.ptt_in` but `stream.stats` is a
+single mutable object mutated every datagram — so
+`ptt_in`/`dot_in`/`dash_in` are SNAPSHOTTED at PRODUCE time
+(rx-loop, coherent with THIS datagram's mic) into the tele
+record; the drain rebuilds a `_TeleStats` shim.  Verified
+decoupled-from-later-mutation by test.  Edge-detect is
+LEVEL-driven + W0 FIFO (no reorder/dup) ⇒ transitions
+identical to HEAD; drop-oldest under extreme overrun can
+only delay/coalesce, never invert (no-worse-than-HEAD — a
+GIL stall drops the same datagrams; HW-PTT opt-in;
+foot-switch hardening is its own §15.26 item).  v3-4:
+drain `RingPeerLost` (same-process lock contention) =
+log-once+re-arm, NEVER D3.  **v3-5 satisfied BY
+CONSTRUCTION:** W1.2 does NOT touch ptt.py / the MOX/keyup
+wire path — `set_mox`/`_clear_mox_tail`/`_end_keyup`/
+`_send_cc`/`_set_tx_freq` are NOT intercepted (still pure
+delegation, test-asserted), so `ptt.py:389-406` ordering +
+timing is byte-identical.  The keyup MOX-off ACK is a
+RESERVED tele record type for W1.4 (when tx_ring carries
+MOX) — not produced/consumed yet.  Per-ring `threading.Lock`
+(fix #5).  FrameStats *pull* (`proxy.stats`) stays delegated
+in-process (cross-process FrameStats shipping is the W2
+concern this ring preps).  `register_mic_consumer(None)`
+tears tele down bounded (source first, then drain join,
+then free ring) + clears the contained stream; `stop()`
+also tears tele down defensively/bounded.  Pre-start /
+tele-down ⇒ shim falls back to inline real-cb = exact HEAD.
+
+`lyra/ipc/hl2_proxy.py` (+W1.2: `register_mic_consumer`
+intercepted, `_w1_ensure_tele`/`_w1_teardown_tele`,
+`_w1_mic_producer`, `_w1_tele_drain_loop`, `_TeleStats`;
+`stop()` extended).  Tests `tests/ipc/test_hl2_proxy_w12.py`
+(10): bit-exact mic round-trip + ptt snapshot,
+snapshot-decoupled-from-later-mutation, level-driven edge
+coherence FIFO, wedged-consumer never blocks/raises
+producer, drain RingPeerLost log+re-arm+no-D3,
+register(None) tears-down+clears-contained, pre-start
+inline-fallback, tele teardown independent of rx_iq drain,
+stop() bounded defensive teardown, MOX/keyup path pure
+delegation (v3-5).  Full suite **487 passed / 0** (477
+W1.1 baseline + 10; zero regressions).  `origin/main`
+stays v0.1.1.
+
+**NEXT = W1.3** (route `cc_cmd` — the idempotent/latest-
+value C&C registers: LNA / step-attn / drive / PA / RX1+
+RX2-freq / rate-restart / raw `_send_cc`).  **fix #1 /
+RA-1: interpose at the stream-INTERNAL `_cc_registers`/
+`_cc_lock` mutation boundary, NOT public method names**, so
+`_set_tx_freq` + the 5 `_refresh_frame_*` + the A1-
+enumerated wire-MOX surfaces (`stream.py:1564`/the
+`_snapshot_mox_bit` family) cannot bypass; W1.3 A/B gate
+adds a `_cc_registers` full-snapshot diff vs S3.  Still
+in-process, NO HL2 bench (the FIRST operator HL2 A/B-vs-S3
+bench-gate is **W1.4** — the tx_ring hot path).  Per the
+locked v3 design + A1/A2/A-v3-1a/A-v3-2a; each W1.x
 independently revertable, W1 stays the W2 fallback.
 
 ---

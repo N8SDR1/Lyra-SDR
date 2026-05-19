@@ -55,6 +55,39 @@ _RXHDR = struct.Struct("<II")          # route_id, n_samples (8 B, aligned)
 _RX_ROUTE_CH0 = 0
 _RX_ROUTE_CH2 = 1
 
+# ── W1.2 tele ring framing ───────────────────────────────────────
+# Mic int16 (≈38/datagram @ 48 kHz codec ≈ 76 B) + the per-datagram
+# FrameStats fields the mic consumer needs.  Verified
+# `Radio._on_hl2_mic` reads ONLY `stats.ptt_in` (and only when the
+# opt-in `_hw_ptt_input_enabled` is set, default OFF); ptt_in /
+# dot_in / dash_in are snapshotted AT PRODUCE TIME (rx-loop,
+# coherent with THIS datagram's mic — the live shared
+# `stream.stats` would be a later datagram's value by delivery,
+# and is W2-incompatible).  Header 8 B (int16-aligned): n, ptt,
+# dot, dash.  Drop-oldest like rx_iq (the rx-loop must NEVER
+# block); ptt edge-detect is LEVEL-driven so a dropped record can
+# only delay/coalesce an edge, never invert it — under extreme
+# overrun a brief pulse loss is no-worse-than-HEAD (a GIL stall
+# drops the same datagrams; HW-PTT is opt-in; foot-switch
+# hardening is its own §15.26 item).  FrameStats *pull*
+# (`proxy.stats`) stays delegated in-process — cross-process
+# FrameStats shipping is a W2 concern this ring preps.
+_TELE_SLOT = 2048                      # mic ≈76 B/datagram + 8 hdr
+_TELE_SLOTS = 256                      # drop-oldest read-back cushion
+_TELEHDR = struct.Struct("<IBBBx")     # n_samples, ptt, dot, dash (8 B)
+
+
+class _TeleStats:
+    """Minimal per-datagram stats snapshot the mic consumer sees
+    (W1.2 routes mic + the ptt/dot/dash edges only — full
+    FrameStats is a W2 tele concern)."""
+    __slots__ = ("ptt_in", "dot_in", "dash_in")
+
+    def __init__(self, ptt_in: bool, dot_in: bool, dash_in: bool):
+        self.ptt_in = ptt_in
+        self.dot_in = dot_in
+        self.dash_in = dash_in
+
 #: Instance attributes owned by the proxy itself (everything
 #: else is delegated to the contained stream).
 _PROXY_OWN = frozenset({
@@ -62,6 +95,9 @@ _PROXY_OWN = frozenset({
     # W1.1 rx_iq routing state:
     "_w1_rx1_cb", "_w1_rx2_cb", "_w1_rx_iq",
     "_w1_rx_drain_thread", "_w1_stop", "_w1_rx_lost_logged",
+    # W1.2 tele routing state:
+    "_w1_mic_cb", "_w1_tele", "_w1_tele_drain_thread",
+    "_w1_tele_lost_logged", "_w1_tele_stop",
 })
 
 
@@ -87,6 +123,12 @@ class HL2StreamProxy:
         object.__setattr__(self, "_w1_rx_drain_thread", None)
         object.__setattr__(self, "_w1_stop", False)
         object.__setattr__(self, "_w1_rx_lost_logged", False)
+        # W1.2 tele routing state (inert until start()).
+        object.__setattr__(self, "_w1_mic_cb", None)
+        object.__setattr__(self, "_w1_tele", None)
+        object.__setattr__(self, "_w1_tele_drain_thread", None)
+        object.__setattr__(self, "_w1_tele_lost_logged", False)
+        object.__setattr__(self, "_w1_tele_stop", False)
 
     # ── total delegation ─────────────────────────────────────
     def __getattr__(self, name: str):
@@ -240,11 +282,155 @@ class HL2StreamProxy:
             import logging
             logging.getLogger(__name__).warning("[W1.1 rx_iq] %s", msg)
 
+    # ── W1.2: tele (mic + ptt/dot/dash) read-back routing ────
+    # The mic PUSH callback is decoupled from the operator's mic
+    # consumer (`Radio._on_hl2_mic`) via a W0 drop-oldest ring,
+    # exactly as W1.1 does for rx_iq.  Mic lifecycle is INDEPENDENT
+    # of start()/stop() (driven by register_mic_consumer, like the
+    # real HL2Stream API), with its OWN stop flag so clearing the
+    # mic consumer never disturbs the rx_iq drain.  ptt_in/dot_in/
+    # dash_in are snapshotted at PRODUCE time (rx-loop, coherent
+    # with THIS datagram's mic) and shipped in the tele record;
+    # the drain rebuilds a _TeleStats shim for the consumer.
+    # EP2 EGRESS / WIRE / MOX / §15.25 / §15.21 UNTOUCHED.  v3-5:
+    # the keyup MOX-off ACK is a RESERVED tele record type for
+    # W1.4 (when tx_ring carries MOX) — W1.2 does NOT touch
+    # ptt.py / the keyup path, so ptt.py:389-406 ordering+timing
+    # is byte-identical by construction (nothing modified there).
+
+    def register_mic_consumer(self, callback):
+        if callback is None:
+            self._w1_mic_cb = None
+            # Stop the producer at the source FIRST (≤1 in-flight
+            # datagram may still hit the shim — its put is bounded
+            # + try/excepted, never breaks the rx-loop), then tear
+            # down the tele drain + ring.
+            try:
+                self._w1_stream.register_mic_consumer(None)
+            finally:
+                self._w1_teardown_tele()
+            return
+        self._w1_mic_cb = callback
+        self._w1_ensure_tele()
+        # The contained stream calls the proxy's shim on its
+        # rx-loop thread; the proxy's drain thread invokes the
+        # operator's real callback.
+        self._w1_stream.register_mic_consumer(self._w1_mic_producer)
+
+    def _w1_ensure_tele(self) -> None:
+        if self._w1_tele is not None:
+            return                            # idempotent
+        self._w1_tele_stop = False
+        self._w1_tele_lost_logged = False
+        self._w1_tele = Ring.create(_TELE_SLOT, _TELE_SLOTS,
+                                    drop_oldest=True,
+                                    lock=threading.Lock())
+        t = threading.Thread(target=self._w1_tele_drain_loop,
+                             name="lyra-w1-tele-drain", daemon=False)
+        self._w1_tele_drain_thread = t
+        t.start()
+
+    def _w1_teardown_tele(self) -> None:
+        self._w1_tele_stop = True
+        t = self._w1_tele_drain_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=2.0)              # bounded (0.1 s get tick)
+        self._w1_tele_drain_thread = None
+        ring = self._w1_tele
+        self._w1_tele = None
+        if ring is not None:
+            try:
+                ring.close()
+            except Exception:
+                pass
+
+    def _w1_mic_producer(self, mic_int16, stats):
+        # rx-loop thread.  If tele isn't up (registered before
+        # start / already torn down) fall back to the real cb
+        # inline = exact HEAD behaviour (no rx-loop exists
+        # pre-start anyway; purely defensive).
+        ring = self._w1_tele
+        if ring is None:
+            cb = self._w1_mic_cb
+            if cb is not None:
+                try:
+                    cb(mic_int16, stats)
+                except Exception:
+                    pass
+            return
+        try:
+            arr = np.ascontiguousarray(mic_int16, dtype=np.int16)
+            hdr = _TELEHDR.pack(
+                arr.size,
+                1 if getattr(stats, "ptt_in", False) else 0,
+                1 if getattr(stats, "dot_in", False) else 0,
+                1 if getattr(stats, "dash_in", False) else 0)
+            payload = hdr + arr.tobytes()
+            if len(payload) > ring.payload_capacity:
+                self._w1_log_tele_once(
+                    f"tele payload {len(payload)} > cap; dropped")
+                return
+            ring.put(payload, type_id=0, timeout=0.5)
+        except RingPeerLost:
+            self._w1_log_tele_once(
+                "tele put: consumer wedged; mic datagram dropped")
+        except Exception as exc:               # never break rx-loop
+            self._w1_log_tele_once(f"tele put error: {exc!r}")
+
+    def _w1_tele_drain_loop(self):
+        ring = self._w1_tele
+        while not self._w1_tele_stop:
+            try:
+                rec = ring.get(timeout=0.1)
+            except RingClosed:
+                break
+            except RingPeerLost:
+                # Same-process lock contention — log-once, re-arm,
+                # NEVER D3/force_release_all (v3-4; tele/mic is not
+                # a TX-safety event; no-worse-than-HEAD).
+                self._w1_log_tele_once(
+                    "tele get: lock contention; re-armed")
+                continue
+            except Exception as exc:
+                self._w1_log_tele_once(f"tele get error: {exc!r}")
+                continue
+            if rec is None:
+                continue                      # idle — normal
+            _seq, _gen, _tid, payload = rec
+            try:
+                n, ptt, dot, dash = _TELEHDR.unpack_from(payload, 0)
+                mic = np.frombuffer(payload, dtype=np.int16,
+                                    count=n,
+                                    offset=_TELEHDR.size).copy()
+            except Exception as exc:
+                self._w1_log_tele_once(f"tele decode error: {exc!r}")
+                continue
+            cb = self._w1_mic_cb
+            if cb is None:
+                continue
+            try:
+                # The mic consumer reads stats.ptt_in (gated by the
+                # opt-in _hw_ptt_input_enabled); the per-datagram
+                # snapshot preserves edge coherence.  Edge-detect is
+                # LEVEL-driven so FIFO order (no reorder/dup — W0
+                # guaranteed) keeps transitions identical to HEAD.
+                cb(mic, _TeleStats(bool(ptt), bool(dot), bool(dash)))
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "W1.2 mic consumer raised; tele drain continues")
+
+    def _w1_log_tele_once(self, msg: str) -> None:
+        if not self._w1_tele_lost_logged:
+            self._w1_tele_lost_logged = True
+            import logging
+            logging.getLogger(__name__).warning("[W1.2 tele] %s", msg)
+
     def stop(self):
         # Signal the drain thread, tear down the contained stream
         # (its §15.21-ordered teardown joins the rx-loop = the
-        # rx_iq producer), THEN join the drain thread bounded,
-        # THEN free the ring (no one touches it after the join).
+        # rx_iq/tele producer), THEN join the drain threads bounded,
+        # THEN free the rings (no one touches them after the join).
         self._w1_stop = True
         try:
             return self._w1_stream.stop()
@@ -261,6 +447,10 @@ class HL2StreamProxy:
                     ring.close()
                 except Exception:
                     pass
+            # tele is normally torn down by register_mic_consumer
+            # (None) BEFORE stop() (Radio teardown order) — but
+            # tear it down here too, defensively + bounded.
+            self._w1_teardown_tele()
 
     # ── explicit, non-forwarded helpers (W1.1+ use these) ────
     def unwrap(self) -> HL2Stream:
