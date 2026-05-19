@@ -35,11 +35,34 @@ nothing.
 """
 from __future__ import annotations
 
+import struct
+import threading
+
+import numpy as np
+
 from lyra.protocol.stream import HL2Stream
+from lyra.ipc.ring import Ring, RingClosed, RingPeerLost
+
+# ── W1.1 rx_iq ring framing ──────────────────────────────────────
+# Per-DDC per-datagram RX batch (nddc=4/192k ≈ 38 complex64 ≈
+# 304 B).  Slot 4 KB ⇒ ≤511 complex64 headroom (real batches are
+# tens); 128 slots, drop-oldest (W0-proven, producer-side) ≈ a
+# generous read-back cushion that can never back-pressure the
+# rx-loop.  Header is 8 B (aligned for complex64): route, n.
+_RX_SLOT = 4096
+_RX_SLOTS = 128
+_RXHDR = struct.Struct("<II")          # route_id, n_samples (8 B, aligned)
+_RX_ROUTE_CH0 = 0
+_RX_ROUTE_CH2 = 1
 
 #: Instance attributes owned by the proxy itself (everything
 #: else is delegated to the contained stream).
-_PROXY_OWN = frozenset({"_w1_stream"})
+_PROXY_OWN = frozenset({
+    "_w1_stream",
+    # W1.1 rx_iq routing state:
+    "_w1_rx1_cb", "_w1_rx2_cb", "_w1_rx_iq",
+    "_w1_rx_drain_thread", "_w1_stop", "_w1_rx_lost_logged",
+})
 
 
 class HL2StreamProxy:
@@ -57,6 +80,13 @@ class HL2StreamProxy:
         # (and because the contained stream does not exist yet).
         object.__setattr__(self, "_w1_stream",
                             HL2Stream(*args, **kwargs))
+        # W1.1 rx_iq routing state (inert until start()).
+        object.__setattr__(self, "_w1_rx1_cb", None)
+        object.__setattr__(self, "_w1_rx2_cb", None)
+        object.__setattr__(self, "_w1_rx_iq", None)
+        object.__setattr__(self, "_w1_rx_drain_thread", None)
+        object.__setattr__(self, "_w1_stop", False)
+        object.__setattr__(self, "_w1_rx_lost_logged", False)
 
     # ── total delegation ─────────────────────────────────────
     def __getattr__(self, name: str):
@@ -79,6 +109,158 @@ class HL2StreamProxy:
             object.__delattr__(self, name)
         else:
             delattr(self._w1_stream, name)
+
+    # ── W1.1: rx_iq read-back routing ────────────────────────
+    # The inbound EP6 RX path (radio→host read-back) is decoupled
+    # from the operator's RX1/RX2 consumer callbacks via a W0
+    # drop-oldest ring.  Producer = the contained stream's
+    # rx-loop thread (it calls the proxy's producer shims, which
+    # it received as the RX_AUDIO_CH0/CH2 consumers).  Consumer =
+    # the proxy's OWN drain thread, which invokes the operator's
+    # real callbacks.  EP2 EGRESS / WIRE CADENCE / MOX / §15.25 /
+    # §15.21 are UNTOUCHED — rx_iq is inbound read-back only; this
+    # only changes which thread the RX callbacks run on + adds a
+    # W0-proven drop-oldest cushion that can never back-pressure
+    # the rx-loop.  Per the locked v3 design + v3-4 (no D3 on the
+    # rx path) + fix #5 (per-ring threading.Lock).
+
+    def start(self, on_samples=None, on_rx2_samples=None,
+              dispatch_state_provider=None, **kw):
+        if on_samples is None and on_rx2_samples is None:
+            # Nothing to route — straight delegate (back-compat).
+            return self._w1_stream.start(
+                on_samples=on_samples, on_rx2_samples=on_rx2_samples,
+                dispatch_state_provider=dispatch_state_provider, **kw)
+        shim0, shim2 = self._w1_start_rx_routing(on_samples,
+                                                 on_rx2_samples)
+        return self._w1_stream.start(
+            on_samples=shim0, on_rx2_samples=shim2,
+            dispatch_state_provider=dispatch_state_provider, **kw)
+
+    def _w1_start_rx_routing(self, on_samples, on_rx2_samples):
+        """Stand up the rx_iq ring + drain thread; return the
+        producer shims to register on the contained stream as the
+        RX_AUDIO_CH0 / CH2 consumers.  Separated from ``start`` so
+        it is unit-testable without binding a socket."""
+        self._w1_rx1_cb = on_samples
+        self._w1_rx2_cb = on_rx2_samples
+        self._w1_stop = False
+        self._w1_rx_lost_logged = False
+        self._w1_rx_iq = Ring.create(_RX_SLOT, _RX_SLOTS,
+                                     drop_oldest=True,
+                                     lock=threading.Lock())
+        t = threading.Thread(target=self._w1_rx_iq_drain_loop,
+                              name="lyra-w1-rxiq-drain", daemon=False)
+        self._w1_rx_drain_thread = t
+        t.start()
+        shim0 = self._w1_rx1_producer if on_samples is not None else None
+        shim2 = self._w1_rx2_producer if on_rx2_samples is not None else None
+        return shim0, shim2
+
+    # producer shims — called on the contained stream's rx-loop
+    # thread with (samples: complex64 ndarray, stats: FrameStats)
+    def _w1_rx1_producer(self, samples, _stats):
+        self._w1_rx_put(_RX_ROUTE_CH0, samples)
+
+    def _w1_rx2_producer(self, samples, _stats):
+        self._w1_rx_put(_RX_ROUTE_CH2, samples)
+
+    def _w1_rx_put(self, route, samples):
+        try:
+            arr = np.ascontiguousarray(samples, dtype=np.complex64)
+            payload = _RXHDR.pack(route, arr.size) + arr.tobytes()
+            ring = self._w1_rx_iq
+            if ring is None:
+                return
+            if len(payload) > ring.payload_capacity:
+                # real per-datagram batches are tens of samples;
+                # never expected. Drop, never block the rx-loop.
+                self._w1_log_rx_once(
+                    f"rx_iq payload {len(payload)} > cap; dropped")
+                return
+            # drop_oldest: put never blocks/fails on a full ring.
+            # bounded acquire so a wedged consumer can't stall the
+            # rx-loop; RingPeerLost ⇒ drop (degraded RX, NEVER a
+            # wire/TX-safety event — v3-4: no D3 on the rx path).
+            ring.put(payload, type_id=route, timeout=0.5)
+        except RingPeerLost:
+            self._w1_log_rx_once(
+                "rx_iq put: consumer wedged; sample dropped")
+        except Exception as exc:               # never break rx-loop
+            self._w1_log_rx_once(f"rx_iq put error: {exc!r}")
+
+    def _w1_rx_iq_drain_loop(self):
+        ring = self._w1_rx_iq
+        while not self._w1_stop:
+            try:
+                rec = ring.get(timeout=0.1)
+            except RingClosed:
+                break
+            except RingPeerLost:
+                # W1 is SAME-PROCESS: nothing can actually die —
+                # this is lock contention (a Qt/GIL stall holding
+                # the lock).  v3-4: D3 is gated on liveness and the
+                # rx_iq path is NEVER a TX-safety event — log-once,
+                # re-arm, continue.  force_release_all / FSM→RX is
+                # NOT triggered here (no-worse-than-HEAD: a wedge
+                # just delays RX, exactly as a GIL stall does today).
+                self._w1_log_rx_once(
+                    "rx_iq get: lock contention; re-armed")
+                continue
+            except Exception as exc:
+                self._w1_log_rx_once(f"rx_iq get error: {exc!r}")
+                continue
+            if rec is None:
+                continue                      # ring empty (RX idle)
+            _seq, _gen, _tid, payload = rec
+            try:
+                r, n = _RXHDR.unpack_from(payload, 0)
+                samples = np.frombuffer(
+                    payload, dtype=np.complex64, count=n,
+                    offset=_RXHDR.size).copy()
+            except Exception as exc:
+                self._w1_log_rx_once(f"rx_iq decode error: {exc!r}")
+                continue
+            cb = self._w1_rx1_cb if r == _RX_ROUTE_CH0 else self._w1_rx2_cb
+            if cb is None:
+                continue
+            try:
+                # stats unused by RX1/RX2 cbs (verified
+                # _stream_cb/_stream_cb_rx2 take `_stats`); the full
+                # FrameStats/ptt_in goes via the tele ring (W1.2).
+                cb(samples, None)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "W1.1 rx consumer raised; other RX continues")
+
+    def _w1_log_rx_once(self, msg: str) -> None:
+        if not self._w1_rx_lost_logged:
+            self._w1_rx_lost_logged = True
+            import logging
+            logging.getLogger(__name__).warning("[W1.1 rx_iq] %s", msg)
+
+    def stop(self):
+        # Signal the drain thread, tear down the contained stream
+        # (its §15.21-ordered teardown joins the rx-loop = the
+        # rx_iq producer), THEN join the drain thread bounded,
+        # THEN free the ring (no one touches it after the join).
+        self._w1_stop = True
+        try:
+            return self._w1_stream.stop()
+        finally:
+            t = self._w1_rx_drain_thread
+            if t is not None and t.is_alive():
+                t.join(timeout=2.0)           # bounded: 0.1 s get +
+                # _w1_stop check ⇒ exits within ~one tick, no hang.
+            self._w1_rx_drain_thread = None
+            ring = self._w1_rx_iq
+            self._w1_rx_iq = None
+            if ring is not None:
+                try:
+                    ring.close()
+                except Exception:
+                    pass
 
     # ── explicit, non-forwarded helpers (W1.1+ use these) ────
     def unwrap(self) -> HL2Stream:

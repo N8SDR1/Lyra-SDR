@@ -10233,14 +10233,60 @@ Radio constructs the proxy.  Full suite **468 passed / 0**
 wire-identical and the suite confirms no behaviour change).
 `origin/main` stays v0.1.1.
 
-**NEXT = W1.1** (route `rx_iq` — the read-back path, lowest
-risk: drop-oldest already W0-proven; the EP6
-`dispatch_ddc_samples` site → `rx_iq.put`, proxy consumer
-fans to `register_consumer` callbacks).  Still in-process,
-no HL2 bench (first HL2 A/B-vs-S3 bench-gate is W1.4 — the
-tx_ring hot path).  Per the locked v3 design + A1/A2/
-A-v3-1a/A-v3-2a; each W1.x independently revertable, W1
-stays the W2 fallback.
+#### ✅ W1.1 SHIPPED 2026-05-19 (operator "yes").  rx_iq
+#### read-back routing — in-process, lowest-risk, no HL2
+#### bench, fully revertable.
+
+The inbound EP6 RX path is decoupled from the operator's
+RX1/RX2 consumer callbacks via a W0 drop-oldest ring.
+**Interpose at the registration/dispatch boundary (NOT a
+public method — D-W1b discipline):** the proxy's `start()`
+registers its OWN producer shims as the contained stream's
+`RX_AUDIO_CH0`/`CH2` consumers; the stream's rx-loop thread
+(producer) calls them → `rx_iq.put` (drop-oldest, bounded
+acquire, NEVER blocks the rx-loop); the proxy's OWN drain
+thread pops `rx_iq` and invokes the operator's real
+callbacks.  **EP2 EGRESS / WIRE CADENCE / MOX / §15.25 /
+§15.21 are UNTOUCHED** — `rx_iq` is inbound read-back only;
+the sole change is which thread the RX callbacks run on +
+a W0-proven drop-oldest cushion.  Verified: `_stream_cb`/
+`_stream_cb_rx2` take `_stats` and IGNORE it → W1.1 routes
+RX IQ only and passes `stats=None`; the full FrameStats /
+`ptt_in` go via the `tele` ring in **W1.2** (exactly the
+locked W1.1/W1.2 design split).  v3-4 honoured: a
+`RingPeerLost` on the drain (lock contention, same-process
+— nothing can die) is log-once + re-arm + continue, NEVER
+D3/`force_release_all` (rx_iq is not a TX-safety event;
+no-worse-than-HEAD — a wedge just delays RX like a GIL
+stall does today).  Per-ring `threading.Lock` (fix #5).
+`stop()` order: set drain-stop → contained `stream.stop()`
+(its §15.21-ordered teardown joins the rx-loop = the
+producer) → join the drain thread BOUNDED (2 s) → free the
+ring (no one touches it after the join).  Back-compat: no
+cbs ⇒ straight delegate (no ring/thread).  All TX/cc paths
+remain pure delegation (W1.3/W1.4 territory, untouched).
+
+`lyra/ipc/hl2_proxy.py` (+W1.1: `start`/`stop` now
+intercepted, `_w1_start_rx_routing`, producer shims, drain
+loop).  Tests `tests/ipc/test_hl2_proxy_w11.py` (9):
+bit-exact round-trip + stats=None, two-route independence,
+monotonic/non-corrupt under overrun, wedged-consumer never
+blocks/raises the producer, drain RingPeerLost = log+re-arm
++no-D3, start() registers shims-not-raw-cbs + kw passthrough,
+back-compat straight-delegate, stop() bounded-join+frees-ring,
+TX path still pure delegation.  W1.0 test updated (start/stop
+now legitimately intercepted).  Full suite **477 passed / 0**
+(468 W1.0 baseline + 9; zero regressions).  `origin/main`
+stays v0.1.1.
+
+**NEXT = W1.2** (route the `tele` ring — FrameStats /
+mic / `ptt_in`/`dot_in`/`dash_in` edges + the keyup MOX-off
+ACK plumbing; per v3-5 the `ptt.py:389-406` keyup ordering
++ timing stays byte-identical, `_end_keyup` NEVER blocks on
+the ACK).  Still in-process, no HL2 bench (first HL2
+A/B-vs-S3 bench-gate is W1.4 — the tx_ring hot path).  Per
+the locked v3 design + A1/A2/A-v3-1a/A-v3-2a; each W1.x
+independently revertable, W1 stays the W2 fallback.
 
 ---
 

@@ -49,12 +49,14 @@ class HL2StreamProxyW10Test(unittest.TestCase):
                             f"proxy does not forward {name!r}")
 
     def test_methods_are_the_contained_streams_bound_methods(self):
-        # Proves "delegates straight through": the proxy defines no
-        # shadowing method; proxy.start IS the contained stream's
-        # bound method (same code path, wire-identical).
+        # Proves "delegates straight through" for the paths NOT yet
+        # interposed.  start/stop ARE intercepted as of W1.1 (the
+        # rx_iq seam) — excluded here, covered by the W1.1 tests.
+        # queue_tx_audio/_send_cc/_set_tx_freq/set_pa_on are still
+        # pure delegation (W1.3/W1.4 territory, not yet routed).
         _real, proxy = self._pair()
         inner = proxy.unwrap()
-        for name in ("start", "stop", "queue_tx_audio",
+        for name in ("queue_tx_audio",
                      "_send_cc", "_set_tx_freq", "set_pa_on"):
             m = getattr(proxy, name)
             self.assertTrue(callable(m))
