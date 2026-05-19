@@ -10689,6 +10689,142 @@ its own grounded-design → 2-agent red-team → reconcile
 BEFORE code (same as W1.3), then implement → operator HL2
 A/B bench.
 
+#### ⚠ W1.4 GROUNDED DESIGN — ROUND-1 RED-TEAM = LOOP
+#### (2026-05-19; the rigor caught a real S4a-class SILENT
+#### keydown regression the snapshot-diff gate would be
+#### BLIND to — exactly the operator-flagged "looks done
+#### but bites us" check working).  Agents
+#### `a94ffe269df677d4f` (cadence/S2/deadlock) +
+#### `ab89a5a93bad0592f` (safety/§15.25/charter), BOTH
+#### implement-with-required-additions but with BLOCKS-SHIP
+#### correctness defects → LOOP.  Thesis (single ordered
+#### ring; ATT-on-TX co-located with MOX; 0x12 synchronous;
+#### `_wire_mox` split) SURVIVES; operator integrity
+#### condition structurally achievable.
+
+* **D-W14a BLOCKS-SHIP (safety; the S4a-class one) —
+  keydown MOX-before-att.** Design ASSERTED ring order
+  `TXNCO→STEPATT_PAIR→MOX_ON`.  Actual code `ptt.py:316-318`:
+  `_enter_tx` → `set_mox(True)` (`ptt.py:316`; carries
+  TXNCO + the MOX intent `radio.py:2483-2490`) is called
+  BEFORE `_on_tx_state_changed(True)` (`ptt.py:318`; carries
+  `_apply_att_on_tx`→`set_tx_step_attn_db`→STEPATT).  If
+  `set_mox` enqueues `MOX_ON`, FIFO ⇒ MOX_ON reaches the
+  EP2 writer BEFORE STEPATT_PAIR ⇒ keyed frames with the RX
+  wide open until the att drains = D-W13b REINTRODUCED,
+  worse-than-HEAD (HEAD's round-robin re-emits the
+  protective att every ~2.6 ms; a one-shot ring MOX-before-
+  att does not).  The `_cc_registers` snapshot-diff is
+  STRUCTURALLY BLIND (steady-state/convergence instrument;
+  this is a keydown transient — the S4a class).
+* **D-W14b BLOCKS-SHIP (both) — STEPATT_PAIR has no
+  coalescing hook.** `set_tx_step_attn_db@stream.py:3113-3115`
+  calls `_refresh_frame_4()` then `_refresh_frame_11()` =
+  two independent `_cc_lock` acquisitions / two guard
+  `__setitem__` (0x1C then 0x14).  The guard cannot know
+  call N+1 pairs with N ⇒ two ring records ⇒ a MOX_ON can
+  interleave a half-updated att pair (the §15.26 "gateware
+  reads two redundant copies; updating only one acts on
+  stale" hazard).
+* **D-W14c BLOCKS-SHIP (cadence) — single uniform-
+  `drop_oldest` ring cannot carry both drop-tolerant
+  TXAUDIO and never-drop MOX/TXNCO/STEPATT.**  W0
+  `Ring.drop_oldest` is a per-Ring constructor bool
+  (`ring.py:139-142`), not per-record.  =True ⇒ a queued
+  MOX_OFF/teardown record can be silently dropped under
+  audio flood = PA-safety regression (the S4a/v2-fix-#3
+  class already reverted once).  =False ⇒ the guard must
+  drop on full; fine for TXAUDIO (the deque is already
+  `maxlen`-drop-tolerant) but a silent safety loss for
+  MOX/TXNCO/STEPATT.
+* **D-W14d/e BLOCKS-SHIP (safety) — teardown/fault-path
+  seams.** `set_mox(False)` (`radio.py:2490/9371`) is
+  MAIN-direct + NOT proxy-intercepted, so the v3-2/A-v3-2a
+  "force `_wire_mox=0` + flush BEFORE the EP2-writer join
+  `stream.py:3211`" has no seam; AND the force/flush must
+  ALSO fire on the keyup `_clear_mox_tail`→`set_mox(False)`
+  (`ptt.py:391`) + the re-key-collapse (`ptt.py:373-381`)
+  paths, not only `Radio.stop()` — else a sub-50 ms
+  re-key-then-release leaves an in-flight ring MOX_ON
+  re-raising the wire bit while PA may be mid-disarm.
+
+CONFIRMED-CLEAN by both (do NOT change): 0x12 stays
+synchronous `_CC_EXCLUDED` (D-W13d, verified); the
+`_wire_mox`-vs-`_dispatch_state` consumer split is EXHAUSTIVE
++ correctly classified (incl. the A1 `stream.py:1564` C4
+read → `_wire_mox`; Auto-LNA-freeze@`radio.py:7005` stays
+`_dispatch_state` intent, un-freeze timing == HEAD, RX-DSP
+stopped during the window = no regression); lock-order
+acyclic (W0 `Ring.get` frees the ring-lock in its `finally`
+— the W1.3-proven pattern); §6(b) single-ordered-ring ≥
+Thetis/pihpsdr/Quisk; the honest "W1.4-in-process does NOT
+fix the operator symptom, gate = no-worse-than-S3" framing
+is COMPLETE.
+
+**CORRECTED v2 (folds all; re-verify next):**
+1. **(D-W14a)** `set_mox(True)` does NOT enqueue `MOX_ON`;
+   `_dispatch_state.mox=True` stays MAIN-direct intent
+   (off the wire, consistent with v3-1).  `MOX_ON` is
+   enqueued by a NEW explicit step AFTER
+   `_on_tx_state_changed(True)` completes (i.e. after the
+   STEPATT_PAIR) — e.g. in `_open_tx_iq` alongside
+   `INJECT_IQ_ON`, preserving keydown FIFO
+   `TXNCO→STEPATT_PAIR→MOX_ON→INJECT_IQ_ON`.  (Option-b
+   reordering `_enter_tx` is REJECTED — it reopens the
+   §15.25-locked freq-before-edge ordering `radio.py:2475-
+   2480` and would need its own red-team.)
+2. **(D-W14b)** the proxy interposes at the SEMANTIC
+   boundary: a guarded `set_tx_step_attn_db` builds ONE
+   `STEPATT_PAIR` record from BOTH composed frames (0x1C +
+   0x14) and enqueues once; the drain applies both under
+   ONE `contained._cc_lock` in FIFO (the W1.3 D-W1b
+   "interpose at the semantic boundary not the dumb sink"
+   + the D-W13a atomic-combined-record discipline,
+   extended to the pair).  Guard still only `ring.put`s
+   under the writer's `_cc_lock`, never takes `_cc_lock`
+   (the W1.3 acyclic proof preserved).
+3. **(D-W14c)** ONE ring, `drop_oldest=False`, **per-record
+   drop policy in the guard producer keyed by type**:
+   TXAUDIO/TXIQ — on `put()→False` increment a drop
+   counter + return (drop-tolerant, NEVER blocks
+   `audio_sink.py:294` — S2 preserved); MOX/TXNCO/
+   STEPATT_PAIR/INJECT_IQ — must NOT be lost: **reserve
+   control headroom** (the guard drops TXAUDIO once ring
+   depth crosses a high-water below `n_slots` so a control
+   record can never be starved by audio backlog) so a
+   control `put` cannot fail under audio pressure;
+   control-record `put` failure is a TX-safety event (NOT
+   a silent log-once like the W1.3 idempotent path).
+4. **(D-W14d/e)** the `_wire_mox`-force-0 + tx_ring
+   short-circuit (discard ring, stop applying MOX_ON) is
+   pinned in proxy `stop()`'s `try` BEFORE
+   `self._w1_stream.stop()` (so it precedes the contained
+   EP2-writer join `stream.py:3211`; mirrors the shipped
+   W1.3 `_w1_teardown_cc` order), AND is ALSO driven by the
+   keyup `_clear_mox_tail`→`set_mox(False)` path + the
+   re-key-collapse path (a proxy-level hook, since
+   `set_mox` is not intercepted); cb58bcb stays on the
+   MAIN-direct `_dispatch_state.mox=False`.  tx-drain join
+   in the §15.21 `finally` AFTER the EP2 join, bounded 2 s.
+5. **(gate)** the A/B gate ADDS, beyond the snapshot-diff:
+   a keydown-transient HL2 capture (NO MOX=1 frame ever
+   emitted before frame-11 C4==0x40 / before the
+   STEPATT_PAIR applied — D-W14a/b proof, BY CONSTRUCTION
+   under #1+#2); a 20× rapid + sub-50 ms re-key capture
+   (no MOX=1 after final keyup, no PA-armed-while-MOX-
+   cleared — D-W14d/e); deque-high-water + `tx_audio_
+   underruns` vs S3 (the chronically-behind-drain S4a
+   empirical kill-criterion); plus the existing
+   ring-bypass==0 / zero-spurious-force_release_all /
+   deque≤~3000 / p95 25-50,42 / un≤~1851 / A-v3-1a
+   ≤1-datagram / 20× clean stop-restart.
+
+**STATUS: W1.4 v2 written.  LOOPING per the charter — v2 →
+BOTH round-1 agents for confirm-or-loop.  NO code until
+convergence.**  W1.4 is still the FIRST operator HL2
+A/B-vs-S3 bench-gate (post-convergence + implement).
+`origin/main` stays v0.1.1.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-18 EOD)
