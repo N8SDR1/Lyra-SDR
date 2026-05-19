@@ -10461,9 +10461,101 @@ on W1.4's ordered ring — the reference frames C&C+IQ
 together, no separate deferred control plane for
 MOX-correlated regs).
 
-**STATUS: W1.3 v2 written.  LOOPING per the charter — v2 →
-BOTH round-1 agents for confirm-or-loop.  NO code until
-convergence.**  `origin/main` stays v0.1.1.
+#### ⚠ W1.3 v2 RE-VERIFY = STILL LOOP (2026-05-19;
+#### converging-by-narrowing — the rigor correctly carving
+#### W1.3 down to a provably-safe minimal set).  Deadlock
+#### `a0bfe6bd9cb0b41a7` = CONFIRM-WITH-AMENDMENTS (A1 doc +
+#### A2 pass-through-spec); safety `a614d13d49e16a1f0` =
+#### LOOP (0x12 TX-safety misclassified + the same A2
+#### incoherence).  2 bounded code-grounded corrections →
+#### v3.  Thesis (in-proc cc_cmd rehearsal for the
+#### genuinely-deferrable idempotent set) SURVIVES.
+
+* **D-W13d (safety, LOOP) — 0x12 (frame-10) is TX-SAFETY,
+  NOT idempotent-deferrable.** `set_pa_on`/
+  `set_tx_drive_level` → `_send_cc(0x12, _compose_frame_10)`:
+  C2 bit3 = gateware PA-enable (the literal RF on/off gate,
+  §15.26 PART C / R1'); C1 = `drive_level` (level==0 =
+  zero-RF fail-safe).  v2 routed 0x12 through the cc_cmd
+  ring as "idempotent" → a safety-driven PA-disarm (on
+  `force_release_all` / §15.20 TX-timeout / keyup) is
+  DEFERRED a ring+drain+round-robin hop ⇒ the PA stays
+  enabled during the window instead of dropping
+  synchronously = STRICTLY worse than HEAD (late/stuck
+  PA-off, worst-consequence).
+* **D-W13e (BOTH) — the "synchronous write-through under
+  the caller's already-held `_cc_lock`" wording is
+  incoherent vs the real call graph.** The excluded-key
+  writers `_refresh_frame_4/11`@1748/1595, `_set_tx_freq`
+  @3033, `_send_cc`@1942 SELF-acquire `_cc_lock` (docstrings:
+  "Caller MUST NOT be holding `_cc_lock`").  The guard
+  `__setitem__` fires from INSIDE `_refresh_frame_*`'s own
+  `with self._cc_lock:`.  As literally written a future
+  implementer would re-acquire `_cc_lock` (non-reentrant
+  self-deadlock) OR enqueue (reintroducing D-W13b).
+
+**CORRECTED v3 (folds D-W13d/e + A1; thesis unchanged):**
+1. **v3-A (D-W13e):** for EXCLUDED c0 the guard
+   `__setitem__` / guard-list `append` is a TRANSPARENT
+   pass-through straight to the real backing object — NO
+   ring enqueue, NO `_cc_lock` (re-)acquisition — executing
+   within whatever `_cc_lock` scope the
+   `_refresh_frame_*`/`_send_cc`/`_set_tx_freq` writer
+   already holds (those methods self-acquire it; the guard
+   store is the line inside that block).  Byte-identical to
+   HEAD for those keys; the EP2 reader sees them
+   synchronously, no drain hop.  The ≥1e5-iter deadlock
+   stress test MUST include an excluded-key writer to
+   exercise the pass-through path.
+2. **v3-B (D-W13d):** ADD `0x12` (frame-10: PA-enable +
+   drive_level) to the synchronous-pass-through EXCLUSION
+   set (same treatment as 0x14/0x1C/TXNCO).  Raw `_send_cc`
+   must FILTER by c0: any c0 ∈ {0x12, 0x14, 0x1C, 0x02,
+   0x08, 0x0a} ⇒ pass-through (synchronous); only
+   genuinely-idempotent MOX-independent c0 ⇒ cc_cmd ring.
+   Net W1.3-ROUTED set shrinks to: RX1/RX2-freq (0x04/0x06),
+   `0x74` (reset_on_disconnect), and `0x00` (frame-0) —
+   the latter with an explicit **TRIPWIRE**: 0x00 is
+   deferrable ONLY because no current caller mutates it on
+   a MOX/TX-safety edge (its C2 OC pins drive the PA TX/RX
+   relay + BPF, C4 duplex bit); a future OC-relay-on-TX /
+   v0.4 antenna setter MUST reclassify 0x00 as
+   synchronous/W1.4.
+3. **A1 (doc accuracy, both agents):** 0x14 (frame-11 C4)
+   is MOX-*gated* @stream.py:1578-1581; 0x1C (frame-4 C3)
+   is MOX-*correlated* @1728 (NO mox branch — it is
+   coherence-paired with 0x14 because `set_tx_step_attn_db`
+   @3113-3115 writes BOTH).  Exclusion unchanged; only the
+   D-W13b reason text corrected.
+4. **UNCHANGED + CONFIRMED by both:** v2-1 (atomic combined
+   `cc_cmd{c0,tuple,register_slot}` record, drain applies
+   under one `_cc_lock` FIFO — closes D-W13a for the
+   remaining routed slot-registering writers); v2-3
+   (enforced two-statement drain; W0 `Ring.get`'s
+   `finally`-release makes it deadlock-free by construction
+   — verified `ring.py`); v2-4 (cc-drain join AFTER the
+   EP2-writer join, finite timeout, generation discard,
+   seed-preserve, fresh-per-`Radio.start` — code-verified
+   `radio.py:9127`; **STRENGTHENED**: with PA/att/TXNCO now
+   synchronous, NO safety register is ever ring-deferred so
+   stale-PA/att-on-restart is structurally impossible);
+   v2-5 augmented A/B gate + ADD: assert PA-disarm reaches
+   the wire synchronously on `force_release_all` (the
+   no-worse-than-HEAD proof for 0x12).
+
+§6: with v3, no-worse-than-HEAD restored — the MOX-
+correlated / §15.25-ordered / TX-safety registers (0x14/
+0x1C/TXNCO/0x12) are byte-identical to HEAD (synchronous
+pass-through within the writer's existing `_cc_lock`); only
+the genuinely-idempotent latest-value set is ring-deferred
+(≥ the Thetis/pihpsdr/Quisk cached-register-re-emit
+posture).  W1.3's routed surface is now thin but provably
+safe — the correct outcome (better a minimal correct W1.3
+than one deferring the RF-enable gate).
+
+**STATUS: W1.3 v3 written.  LOOPING once more per the
+charter — v3 → BOTH agents for confirm-or-loop.  NO code
+until convergence.**  `origin/main` stays v0.1.1.
 
 ---
 
