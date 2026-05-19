@@ -9559,14 +9559,90 @@ pass.**
   (it touches the paint path); S4b-1 stays 100 % main both
   modes so it's safe to land first regardless.
 
-**STATUS: ALL 4 AGENTS CONVERGED — no further loop (operator
-"loop until all agree" satisfied).  S4b design + 5
-corrections + A1/A2 LOCKED.  PLAN RE-SEQUENCED per A3:
-S4b-1 → S4c(bench-gate) → S4b-2.  Awaiting operator decision:
-go-ahead for S4b-1 (pure refactor + emit-sequence golden
-test, no threading, revertable) and acceptance of the A3
-re-sequence (S4c benched before the S4b-2 rebuild).  NO code
-until then.**  `origin/main` stays v0.1.1.
+**STATUS: ALL 4 AGENTS CONVERGED — no further loop.  S4b
+design + 5 corrections + A1/A2 LOCKED.**  SUPERSEDED as the
+*path* by the operator architecture directive below — S4b-2/
+S4c stall-patching is DROPPED; S4b-1 retained only as
+optional harmless GUI-side hygiene, NOT the critical path.
+The S4b analysis stays on record because it CODE-PROVED the
+GIL/paint coupling that justifies the process split.
+
+#### 🔒 ARCHITECTURE CHARTER — OPERATOR-LOCKED 2026-05-19
+#### (binding directive; governs ALL audio-path / wire /
+#### TX / PS / feature work from here — supersedes the
+#### "cheapest-lever-first" S4 sequencing for this problem).
+
+Operator decision, verbatim intent ("I want this DONE RIGHT
+— no more games; lock this into the plan"):
+
+1. **THE ARCHITECTURE = process-isolated wire/radio path.**
+   The HL2/ANAN/Brick wire path (EP2 writer + C&C round-
+   robin + lock-free TX-I/Q ring + OS-timer keepalive + EP6
+   RX-IQ/telemetry/PTT readback) runs in its **OWN PROCESS**
+   — its own CPython interpreter, its own GIL, its own core,
+   tight OS-timer loop, nothing else contending.  This is
+   THE design, LOCKED, not a fallback.  S2 (HIGH_RESOLUTION
+   timer-paced writer + lock-free ring) BECOMES the core of
+   that process — it is reused, not discarded.  Qt/GUI/DSP
+   load can never touch radio timing by construction.
+2. **Performance-driven, no apology.** Best graphics we can
+   achieve, genuine multicore/multithread use, lowest
+   latency achievable for the current AND planned feature
+   set.  Not "works if you tolerate X".
+3. **Concurrent-use requirement (hard):** the operator can
+   run a browser / a logger / another light app at the same
+   time as Lyra with ZERO stutter, lockup, RX pop/crack, or
+   TX break-up.  This is a pass/fail acceptance criterion,
+   not an aspiration.
+4. **TX bulletproof through the FULL feature set:** no
+   hangs / break-up / stutter on TX OR RX with the complete
+   §15.19 TX chain + **PureSignal (a MAJOR pillar)** + EQ +
+   Combinator + Tube-plating + formant + de-esser + RTA +
+   the rest, all running.  The architecture must be designed
+   so these LAND ON TOP of it without re-hitting this wall —
+   forward-compat is part of the design, not a later worry.
+5. **Hardware first-class:** HL2 / HL2+ / ANAN / Brick — all
+   first-class, none "partial".
+6. **STANDING RED-TEAM GATE (mandatory at EVERY design +
+   every change checkpoint, added to the locked
+   methodology):** agents MUST explicitly answer —
+   (a) "Will this cause TX hangs / break-up / stutter on TX
+   or RX, now or once the full TX/PS/EQ/Combinator/RTA load
+   is added?"  (b) "How do Thetis / HPSDR family / other
+   SDR apps that drive HL2/ANAN/Brick handle this exact
+   problem?"  Comparative grounding against known-good
+   reference implementations is now REQUIRED, not optional
+   (study them, implement Lyra-native, no code copy, no
+   reference name in shipped code/commits per the standing
+   no-attribution rule — provenance only here/docs).
+7. **DEFINITION OF DONE (the bar):** Lyra is an application
+   users run with pride and confidence that works exactly
+   as described — NOT an oddball that partially works if you
+   accept audio stutter, lockups, or missing common
+   features.  That bar, or it is not done.
+
+This charter is the acceptance contract for the process-
+isolation work and for every subsequent feature (TX, PS,
+v0.2/v0.3).  Methodology unchanged and reaffirmed: grounded
+design → 2 independent senior red-team agents (now also
+answering the §6 comparative questions) → reconcile/loop
+until all agree → operator decision → STAGED migration where
+the working radio is NEVER broken between steps → operator
+HL2 bench-gate each stage.  The process split is bigger than
+S2/S3 and has EARNED that full rigor (the IPC boundary —
+shared-memory rings for RX-IQ-in / TX-out / C&C / telemetry
+— is itself a real-time-correctness surface; it touches S2/
+S3/§15.21/§15.25/Phase-3 TX; done carelessly it relocates
+the jitter, so it gets designed, red-teamed, staged, benched
+— exactly the discipline that protected the working parts
+through S2/S3 and that S4a proved we skip at our peril).
+
+**STATUS: charter LOCKED.  STARTING NOW — grounded design
+for the process-isolated wire/radio architecture (Plan
+agent), then the 2-agent red-team with the §6 comparative
+questions, reconcile, operator decision, staged bench-gated
+migration.  S4b-2/S4c dropped; S4b-1 optional hygiene only.**
+`origin/main` stays v0.1.1.
 
 ---
 
