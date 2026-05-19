@@ -10352,6 +10352,119 @@ bench-gate is **W1.4** — the tx_ring hot path).  Per the
 locked v3 design + A1/A2/A-v3-1a/A-v3-2a; each W1.x
 independently revertable, W1 stays the W2 fallback.
 
+#### ⚠ W1.3 MECHANISM DESIGN — ROUND-1 RED-TEAM = LOOP
+#### (2026-05-19; rigor caught 2 CRITICAL worst-consequence
+#### defects BEFORE code, at the exact D-W1b zone).  Agents
+#### `a3897300d6096a809` (deadlock/cadence:
+#### implement-with-required-additions, RA-1 BLOCKING) +
+#### `a56e8995ed350df8a` (safety/A1:
+#### implement-with-required-additions, 2 CRITICAL +
+#### no-worse-than-HEAD FAIL as-designed).  Thesis (in-proc
+#### cc_cmd rehearsal via a guard-dict/list interpose at the
+#### internal `_cc_registers`/`_cc_lock` boundary) SURVIVES;
+#### corrections bounded.
+
+Code-verified ground truth (both agents): the ONLY mutation
+forms of `_cc_registers`/`_cc_cycle` in stream.py are
+`[k]=v` and `.append()` (NO update/pop/clear/extend/insert/
+comprehension) — the guard-dict `__setitem__` + guard-list
+`append` ARE an exhaustive chokepoint, no bypass path; the
+A1 wire-MOX surfaces (`stream.py:1564` C4 MOX-gate,
+`_snapshot_mox_bit` 1883-1917) read `_dispatch_state` and do
+NOT write `_cc_registers` for the MOX bit (W1.4 tx_ring
+concern, NOT W1.3).  But the as-designed mechanism has:
+
+* **D-W13a CRITICAL (both) — broken slot/value atomicity ⇒
+  EP2-writer death.** HEAD writes `_cc_registers[c0]=tuple`
+  AND `_register_cc_slot`→`_cc_cycle.append(c0)` under ONE
+  `_cc_lock` (verified atomic pair @1596-1598/2961-2963/
+  2993-2995/3033-3036/1942-1944).  Guard enqueuing
+  `__setitem__` and `append` as SEPARATE ring records lets
+  the drain apply the cycle-append before the value → the
+  sole EP2 reader @2386 `c1..c4=_cc_registers[c0]` →
+  **KeyError → EP2 writer thread dies → no keepalive →
+  stuck-state** (worst-consequence; snapshot-diff is blind
+  — transient race).
+* **D-W13b CRITICAL (safety) — ATT-on-TX keydown RX-ADC
+  transient ⇒ no-worse-than-HEAD FAIL.** `_cc_registers
+  [0x14]`(frame-11 C4)/`[0x1C]`(frame-4) carry the §15.26
+  Thetis-byte-identical ATT-on-TX RX-ADC protection and are
+  MOX-GATED (`stream.py:1578-1581`).  W1.3 drain-defers them
+  while the MOX bit stays on the un-deferred `_dispatch_state`
+  /`_snapshot_mox_bit` path (W1.4, not W1.3) → on keydown
+  MOX flips immediately but the att-raise lags ring+drain+
+  round-robin ⇒ keyed frames emitted with RX wide open = a
+  NEW RX-ADC-overload exposure absent in HEAD; snapshot-diff
+  (convergence-only) cannot see the keydown transient (S4a
+  class).
+* **D-W13c BLOCKING (cadence RA-1) — AB/BA deadlock if
+  mis-implemented.** Writer holds `_cc_lock`→guard→ring.put
+  (ring-lock); a drain that holds ring-lock while taking
+  `_cc_lock` = hard wedge within seconds.  W0 `Ring.get`
+  releases the ring-lock in its own `finally` BEFORE
+  returning, so the natural two-statement drain is provably
+  correct — but must be ENFORCED + deadlock-stress-tested.
+
+**CORRECTED v2 (folds all; re-verify next):**
+1. **Atomic combined record (D-W13a):** the guard enqueues
+   the value-store AND the `_register_cc_slot` append as ONE
+   typed `cc_cmd{c0, (c1,c2,c3,c4), register_slot:bool}`
+   record; the drain applies the pair under ONE
+   `contained._cc_lock` in strict ring FIFO order — mirrors
+   HEAD's slot/value atomicity exactly; no EP2-reader
+   KeyError possible.
+2. **Exclude the MOX-correlated registers from W1.3
+   (D-W13b):** `0x14` (frame-11) and `0x1C` (frame-4) — the
+   ATT-on-TX step-att pair — AND the §15.25-ordered TXNCO
+   `0x02/0x08/0x0a` (`_set_tx_freq`) are NOT routed through
+   W1.3's cc_cmd ring; the guard for those keys is a
+   SYNCHRONOUS write-through to the real backing under
+   `_cc_lock` (exact HEAD behaviour, un-deferred).  They
+   are co-located with the wire-MOX bit on W1.4's ordered
+   tx_ring (preserves the §15.26-locked "ATT-on-TX ↔ MOX
+   must not desynchronize" invariant; matches the A1
+   intent).  W1.3's cc_cmd ring carries ONLY genuinely
+   MOX-independent idempotent registers (frame-10 0x12
+   drive/PA, frame-0 0x00, frame-18 0x74, RX1/RX2-freq,
+   rate-restart, raw `_send_cc` for non-excluded c0).
+3. **Enforced drain discipline + deadlock test (D-W13c /
+   RA-1):** drain = `rec = cc_ring.get(timeout)` (W0 frees
+   the ring-lock in its finally) → `with contained._cc_lock:
+   apply(rec)`; NEVER nest the apply in a get-derived lock
+   scope, NEVER wrap the drain loop in a lock.  Add a ≥10⁵-
+   iteration stress-interleave test (all 5 `_refresh_frame_*`
+   + `_send_cc` + a simulated EP2 reader + the drain) =
+   no-deadlock proof.
+4. **§15.21 + generation + seed (RA-3/RA-4):** cc-drain
+   join added to the bounded teardown AFTER the EP2-writer
+   join, before socket close, finite timeout; cc_cmd records
+   generation-tagged (the v3-D5 counter), drain discards
+   mismatched-generation post-stop; the guard swap copies
+   the `__init__`-seeded entries (0x00, 0x2e) into the real
+   backing so they don't vanish (RX regression else); fresh
+   contained stream + guards + empty rings per `Radio.start`
+   (proxy reconstructed per start — verified).
+5. **Augmented A/B gate (mandatory, beyond snapshot-diff):**
+   the §15.26 `_cc_registers` full-snapshot diff vs S3 PLUS
+   (a) a keydown-transient capture asserting NO MOX=1 frame
+   is ever emitted with an un-protected step-att (proves
+   D-W13b closed by exclusion #2) AND (b) an EP2-reader
+   KeyError counter == 0 under a register-churn stress
+   (proves D-W13a closed by #1) — both transients the
+   snapshot-diff is structurally blind to.
+
+§6: with v2, no-worse-than-HEAD restored; the idempotent
+deferred set is ≥ the Thetis/pihpsdr/Quisk cached-register-
+re-emit posture, and the MOX-correlated set is kept at
+HEAD/reference parity by exclusion #2 (co-located with MOX
+on W1.4's ordered ring — the reference frames C&C+IQ
+together, no separate deferred control plane for
+MOX-correlated regs).
+
+**STATUS: W1.3 v2 written.  LOOPING per the charter — v2 →
+BOTH round-1 agents for confirm-or-loop.  NO code until
+convergence.**  `origin/main` stays v0.1.1.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-18 EOD)
