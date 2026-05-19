@@ -9637,12 +9637,142 @@ the jitter, so it gets designed, red-teamed, staged, benched
 — exactly the discipline that protected the working parts
 through S2/S3 and that S4a proved we skip at our peril).
 
-**STATUS: charter LOCKED.  STARTING NOW — grounded design
-for the process-isolated wire/radio architecture (Plan
-agent), then the 2-agent red-team with the §6 comparative
-questions, reconcile, operator decision, staged bench-gated
-migration.  S4b-2/S4c dropped; S4b-1 optional hygiene only.**
-`origin/main` stays v0.1.1.
+**STATUS: charter LOCKED.  Grounded design produced; 2-agent
+red-team done; result = LOOP (see below).**
+
+#### ⚠ PROCESS-ISOLATION DESIGN — ROUND-1 RED-TEAM = LOOP
+#### (2026-05-19; the rigor working: 2 STRUCTURAL + 3 safety
+#### defects caught BEFORE any code — an S4a-at-process-scale
+#### prevented).  Agents `a303304e0a75a9842`
+#### (IPC/real-time: "redesign-needed" on D1, else
+#### implement-with-additions) + `a9d92e206a65d5d74`
+#### (safety/charter: implement-with-required-additions; pt7
+#### FAIL→CONDITIONAL).  NOT converged → corrected design v2
+#### below, re-verify (loop).
+
+Architecture THESIS survives (process isolation correct,
+charter-compliant, S2 reusable verbatim contingent on D1).
+Defects (file:line-grounded by the agents):
+
+* **D1 STRUCTURAL — no CPython cross-process barrier.** The
+  "lock-free shared-mem ring, head/tail atomics,
+  release/acquire" proof is FALSE as written: CPython
+  exposes no cross-process atomic/barrier; the payload-
+  memcpy→publish-index store has no ordering guarantee.
+  "Usually works on x86-TSO" = the S4a confident-wrong
+  class.  Both agents flag the proof-sketch sentence "no
+  shared lock on the hot path" as the load-bearing
+  falsehood.
+* **D2 STRUCTURAL (§15.25-contract class) — in-band
+  MOX-off-marker incorrect vs the real `set_mox`
+  (radio.py:2482-2489).** Keydown `set_mox` ALSO writes 3
+  TX-NCO regs (0x02/0x08/0x0a) that MUST precede the MOX
+  bit (§15.25 trap #2).  Asymmetric routing (MOX-on cc_cmd,
+  MOX-off tx_ring) → the two rings have NO mutual order →
+  re-key-during-drain / stop-during-keyup interleave =
+  §15.25 traps #2/#5.  Independently found by both agents
+  from different angles.
+* **D3 safety — dead-child stuck-carrier OVERCLAIM.** Parent
+  `force_release_all`→`set_mox(False)` writes through the
+  DEAD child's stream/EP2 writer = a NO-OP; only the
+  HL2 gateware watchdog (TX-UNVERIFIED, §15.20/§15.24-C)
+  can clear it.  Design quietly upgrades an unverified
+  assumption to "covered" — below reference honesty
+  (Thetis/pihpsdr rely on the same watchdog but don't
+  overclaim).
+* **D4 safety — keydown RX-DSP-stop ↔ wire-MOX-set now two
+  unordered cross-process async paths.** RX-DSP-stop is
+  MAIN/WDSP via the worker `_ctl_q` between-blocks (≈ a
+  block latency); wire-MOX-set is child next-timer-fire.
+  No barrier → MOX live on the wire while WDSP RX still
+  grinding the keyed IQ = the `4ce07b9` "bristle-broom"
+  ring (3 reverted iterations) silently regressed.
+* **D5 safety — reused child retains stale register/MOX
+  state.** "Child kept alive & reused across stop/restart"
+  → stop-during-keyup leaves the child register MOX=1;
+  next start re-emits MOX → radio comes up TRANSMITTING
+  (the exact cb58bcb bug, relocated past the parent's
+  reach).  Plus: W1 NOT proven byte-identical-wire; W2
+  must revert onto W1; rx_iq drop-oldest must be
+  producer-side; STOP-ACK must mean "socket actually
+  closed + rings drained" (the §15.21 final_teardown
+  sync-Event barrier, cross-process).
+
+**CORRECTED DESIGN v2 (folds every defect with the agents'
+own prescribed mechanisms; this is what gets re-verified):**
+
+1. **D1 fix — barrier-bearing index.** Payload in
+   `shared_memory`; head/tail index published through a
+   primitive whose acquire/release IS a real cross-process
+   full barrier (a `multiprocessing.Lock`/`Value('Q')` per
+   ring — SPSC so uncontended ≈1 µs; rx_iq/tx_ring index
+   updates once per slot ≈≤5 kHz → negligible).  The proof-
+   sketch is rewritten: "a barrier-bearing sync per
+   publish, uncontended-SPSC sub-µs — NOT a stall," not
+   "no sync."  **W0 acceptance = a TWO-PROCESS tear/reorder
+   fuzz** (writer process hammering, reader asserts
+   monotonic non-torn no-reorder under load) — in-process
+   W0 validates nothing.
+2. **D2 fix — ONE ordered wire channel.** ALL ordered
+   wire-affecting records — keydown TX-NCO (0x02/0x08/0x0a),
+   MOX-on, MOX-off, inject_tx_iq on/off — travel as TYPED
+   records IN-BAND on the single tx_ring interleaved with
+   the audio/IQ samples.  FIFO on that one ring IS the
+   §15.25 contract by construction (freq-before-MOX;
+   MOX-off only after the faded down-ramp samples ahead of
+   it drain; a re-key appends MOX-on AFTER the in-flight
+   MOX-off with the faded tail between = the exact
+   in-process semantics).  cc_cmd carries ONLY genuinely-
+   unordered/idempotent state (LNA, PA-enable, rate-change-
+   with-restart).  Re-key-collapse stays a MAIN-side FSM
+   timing decision (ptt.py) and needs NO child-drain
+   observation — the ordered ring serialises it faithfully
+   (resolves the tele-round-trip concern: ordering
+   correctness needs no round-trip).
+3. **D4 fix — cross-process keydown/keyup ordering
+   barrier.** Keydown: FSM `_enter_tx` completes the
+   RX-DSP-stop (MAIN/WDSP, await the worker between-blocks
+   ack) BEFORE posting NCO+MOX-on to the ordered ring.
+   Keyup: child applies MOX-off (after the faded tail,
+   ordered) then emits a `tele` ACK with the sequence;
+   MAIN `_end_keyup` waits ACK + `ptt_out_delay` before
+   `_request_rx_channel(True)` (RX-DSP-restart).  Named at
+   radio.py `_on_tx_state_changed` (~2938/2973) +
+   ptt.py `_enter_tx`/`_end_keyup`.
+4. **D3 fix — stuck-carrier HONESTY + child-kill gate.**
+   DROP the "parent clears a dead-child carrier" claim;
+   doc states plainly the gateware watchdog is the SOLE
+   mechanism (TX-UNVERIFIED).  On child-death-while-keyed
+   MAIN: detect, force FSM→RX, alarm, STOP queuing tx_ring
+   (never write a dead consumer), respawn comes up RX
+   (never auto-key — cb58bcb).  MANDATORY Phase-3-EXIT
+   gate, distinct from the whole-process kill test:
+   `taskkill /F` the WIRE CHILD mid-TX into a dummy load,
+   scope PA-bias drop within N s — BLOCKS all real-antenna
+   keying.
+5. **D5 fix — child reuse-reset + generation counter.** On
+   STOP the child zeroes register MOX/PTT, clears the TX
+   rings, resets `_ep2_prefilled`, bumps a monotonic
+   generation; every ring record carries the generation;
+   the child discards mismatched-generation records (post-
+   STOP in-flight MAIN data dropped, not applied); START
+   issues a new generation.  STOP-ACK = "socket actually
+   closed in child AND rings drained" (the §15.21
+   final_teardown barrier semantics as a bounded IPC ACK;
+   kill+respawn force_release_all's in MAIN first).
+   rx_iq overrun = producer(EP6)-side drop-oldest, never
+   blocks/back-pressures the EP2 writer.  **W1** ships
+   with a gap-trace + deque-depth A/B-vs-S3 gate (NOT
+   assumed byte-identical).  **W2** ships as ONE revertible
+   commit with W1 retained as the working in-process
+   fallback (failed W2 → revert to W1-in-process, NOT
+   pre-W0).
+
+**STATUS: corrected design v2 written.  LOOPING per the
+charter ("loop until all agree") — v2 goes back to BOTH
+round-1 agents for confirm-or-loop before anything is
+presented as ready or any code (incl. W0) starts.  NO code
+until convergence.**  `origin/main` stays v0.1.1.
 
 ---
 
