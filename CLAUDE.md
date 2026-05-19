@@ -10127,12 +10127,71 @@ agents' directions reconcile):**
   "no-worse-than-HEAD" charter row FAIL→PASS under the
   corrected design.
 
-**STATUS: W1 v3 written (cadence defect + safety A–E folded;
-both agents' corrected directions mutually consistent;
-thesis + fixes #1/#4/#5/#6/#7 confirmed by both across 3
-rounds).  LOOPING once more per the charter — v3 → BOTH
-agents for confirm-or-loop.  NO code until convergence.**
-`origin/main` stays v0.1.1.
+#### ✅ W1 v3 ROUND-3 = CONVERGED 2026-05-19.  BOTH fresh
+#### agents (cadence `a4dcdd67ca1560646`; safety
+#### `a07d514e50e421d67`) returned **CONFIRM-WITH-AMENDMENTS
+#### — NO LOOP**.  "Loop until all agree" SATISFIED (W1:
+#### round-1 LOOP → v2 → round-2 still-LOOP → v3 → round-3
+#### CONFIRM ×2).  4 bounded spec-precision amendments (NOT
+#### redesign, NOT new defects) → final = v3 + the 4 below.
+#### Per-charter table PASS on every row incl.
+#### no-worse-than-HEAD; §6(a) nothing worse than HEAD;
+#### §6(b) posture ≥ Thetis/pihpsdr/Quisk.
+
+* **A-v3-1a (cadence):** W1.4 acceptance is spec'd as "DDC
+  routing flips within ≤1 datagram of the wire C0 bit (the
+  pre-existing once-per-datagram dispatch-snapshot
+  coalescing, `stream.py:3322-3325`), NOT bit-exact
+  same-frame"; the A/B gate asserts this bound is UNCHANGED
+  vs S3/HEAD (a plain CPython single-value attr read of the
+  drained wire-MOX is GIL-atomic — no torn read; demanding
+  zero skew would spuriously FAIL a correct impl).
+* **A-v3-2a (cadence):** pin the intra-`stop()` statement
+  order — "force wire-MOX local = 0 AND flush/short-circuit
+  the tx_ring drain" MUST be emitted BEFORE the EP2-writer
+  join (`stream.py:3211`), not merely "in teardown" (the
+  writer calls `_snapshot_mox_bit` fresh per datagram, so
+  local-already-0 ⇒ physically cannot emit a final MOX=1
+  frame).  The proxy-thread join stays after the EP2 join,
+  before socket close.
+* **A1 (safety):** v3-1's by-file:line enumeration MUST add
+  `stream.py:1564` (the C4 MOX-gated step-attenuator = the
+  §15.26 Thetis-byte-identical ATT-on-TX RX-ADC protection,
+  a wire-affecting C&C register — exactly the D-W1b silent-
+  W2-landmine surface) AND the `_snapshot_mox_bit` family
+  (`stream.py:1889-1915`) to the drained-wire-MOX list, and
+  W1.4's "no in-proc consumer reads a wire decision via
+  `_dispatch_state`" assertion must enumerate them by
+  file:line.  (Material: `ddc_map` DDC0/DDC1 are
+  byte-identical between RX-only and MOX-no-PS — the
+  route/discard skew is real ONLY on the `ps_armed` path,
+  which v3-1 correctly keeps on `_dispatch_state`;
+  Auto-LNA-freeze/cb58bcb confirmed NOT regressed.)
+* **A2 (safety):** the recorded W2 cross-process probe spec
+  is sound and must state the wedged-vs-backed-up
+  discriminator as an explicit TWO-CONJUNCT — "child process
+  alive AND SHM monotonic seq NOT advanced over a bounded
+  window" (so a future agent cannot collapse it to one
+  signal; OS process-liveness is out-of-band so it
+  distinguishes dead-child from backed-up-ring, and the
+  frozen-seq-while-alive conjunct catches the §15.26 D1/A1
+  wedged-holding-the-lock hazard).
+
+**STATUS: W1 DESIGN CONVERGED & LOCKED (v3 + A-v3-1a /
+A-v3-2a / A1 / A2; thesis + all fixes confirmed by 4
+independent senior agents across 3 rounds; no charter row
+FAIL/CONDITIONAL once the 4 folded; no-worse-than-HEAD PASS).
+Methodology complete through design.  AWAITING OPERATOR
+GO-AHEAD to start W1.0 — the pass-through `HL2StreamProxy`
+skeleton (delegates straight through to a contained
+`HL2Stream` on its own thread; wire-identical BY
+CONSTRUCTION; introspection test proving surface parity;
+full suite stays green).  W1.0 is IN-PROCESS, lowest-risk,
+fully revertable, NO HL2 bench needed.  W1.1→W1.5 each
+return; the FIRST operator HL2 A/B-vs-S3 bench-gate is
+W1.4 (the tx_ring hot path).  W1 stays the W2 fallback.
+NO code until operator go-ahead.**  `origin/main` stays
+v0.1.1.
 
 ---
 
