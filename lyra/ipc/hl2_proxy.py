@@ -88,6 +88,115 @@ class _TeleStats:
         self.dot_in = dot_in
         self.dash_in = dash_in
 
+
+# ── W1.3 cc_cmd ring framing + guard objects ─────────────────────
+# In-process rehearsal of the W2 cc_cmd boundary.  The contained
+# stream's `_cc_registers`/`_cc_cycle` are replaced by guard
+# objects that delegate ALL reads to a real private backing and
+# route MUTATIONS by C0:
+#   EXCLUDED  {0x12,0x14,0x1C,0x02,0x08,0x0a} — MOX-correlated /
+#     §15.25-ordered / TX-safety (PA-enable+drive, ATT-on-TX,
+#     TX-NCO).  Guard does a TRANSPARENT in-place pass-through to
+#     the real backing — NO ring, NO lock (the writer already
+#     holds `_cc_lock`; threading.Lock is non-reentrant).
+#     Byte-identical to HEAD (v3-A; closes D-W13b/d/e).
+#   ROUTED    {0x04,0x06,0x74,0x00} — genuinely-idempotent
+#     latest-value (RX1/RX2 NCO, reset_on_disconnect, frame-0
+#     general-settings; 0x00 is the G1 tripwire — safe TODAY
+#     because no caller mutates it on a MOX/TX-safety edge).
+#     Guard enqueues a cc_cmd record; the proxy cc-drain applies
+#     `real_registers[c0]=tuple` AND the idempotent
+#     `_register_cc_slot` append as ONE atomic pair under the
+#     contained `_cc_lock`, in ring FIFO — exactly mirroring
+#     HEAD's atomic store+append (v2-1; closes D-W13a, no
+#     EP2-reader KeyError).  cc_cmd is NON-drop (idempotent but a
+#     distinct-c0 loss would stick); generous, log-once on full
+#     (unreachable at the operator-event cc rate).
+_CC_EXCLUDED = frozenset({0x12, 0x14, 0x1C, 0x02, 0x08, 0x0A})
+_CC_SLOT = 64
+_CC_SLOTS = 256
+_CCREC = struct.Struct("<BBBBB")       # c0, c1, c2, c3, c4
+
+
+class _GuardCcRegisters:
+    """Drop-in for `HL2Stream._cc_registers` (a dict).  Reads
+    delegate to the real backing; `[c0]=v` routes by C0."""
+    __slots__ = ("_real", "_ring", "_route_cb")
+
+    def __init__(self, real: dict, ring, route_cb):
+        self._real = real
+        self._ring = ring
+        self._route_cb = route_cb       # (c0, (c1,c2,c3,c4)) -> None
+
+    # reads → real backing (EP2 round-robin reads `[c0]`; defensive
+    # full delegation so any uncovered op fails LOUD, never silently
+    # bypasses — the D-W1b discipline).
+    def __getitem__(self, k):
+        return self._real[k]
+
+    def __contains__(self, k):
+        return k in self._real
+
+    def __len__(self):
+        return len(self._real)
+
+    def __iter__(self):
+        return iter(self._real)
+
+    def get(self, k, default=None):
+        return self._real.get(k, default)
+
+    def keys(self):
+        return self._real.keys()
+
+    def items(self):
+        return self._real.items()
+
+    def values(self):
+        return self._real.values()
+
+    # the ONLY mutation form (verified exhaustive: no update/pop/
+    # clear/setdefault on _cc_registers anywhere in stream.py).
+    def __setitem__(self, c0, value):
+        if c0 in _CC_EXCLUDED:
+            # transparent pass-through — runs INSIDE the writer's
+            # already-held `_cc_lock`; byte-identical to HEAD.
+            self._real[c0] = value
+        else:
+            self._route_cb(c0, value)   # enqueue cc_cmd record
+
+
+class _GuardCcCycle:
+    """Drop-in for `HL2Stream._cc_cycle` (a list).  Reads delegate
+    to the real backing; `append(c0)` of a ROUTED c0 is swallowed
+    (the cc-drain registers the slot atomically with the value, so
+    a routed c0 is never in `_cc_cycle` before its
+    `_cc_registers` value = no EP2-reader KeyError).  An EXCLUDED
+    c0's append passes straight through (byte-identical HEAD)."""
+    __slots__ = ("_real",)
+
+    def __init__(self, real: list):
+        self._real = real
+
+    def __contains__(self, c0):
+        return c0 in self._real
+
+    def __getitem__(self, i):
+        return self._real[i]
+
+    def __len__(self):
+        return len(self._real)
+
+    def __iter__(self):
+        return iter(self._real)
+
+    def append(self, c0):
+        if c0 in _CC_EXCLUDED:
+            self._real.append(c0)
+        # else: routed — the cc-drain does the atomic
+        # value+`_register_cc_slot` apply; swallow here so the
+        # routed c0 cannot enter the cycle ahead of its value.
+
 #: Instance attributes owned by the proxy itself (everything
 #: else is delegated to the contained stream).
 _PROXY_OWN = frozenset({
@@ -98,6 +207,10 @@ _PROXY_OWN = frozenset({
     # W1.2 tele routing state:
     "_w1_mic_cb", "_w1_tele", "_w1_tele_drain_thread",
     "_w1_tele_lost_logged", "_w1_tele_stop",
+    # W1.3 cc_cmd routing state:
+    "_w1_cc", "_w1_cc_real_regs", "_w1_cc_real_cycle",
+    "_w1_cc_drain_thread", "_w1_cc_stop", "_w1_cc_lost_logged",
+    "_w1_cc_gen",
 })
 
 
@@ -129,6 +242,14 @@ class HL2StreamProxy:
         object.__setattr__(self, "_w1_tele_drain_thread", None)
         object.__setattr__(self, "_w1_tele_lost_logged", False)
         object.__setattr__(self, "_w1_tele_stop", False)
+        # W1.3 cc_cmd routing state (inert until start()).
+        object.__setattr__(self, "_w1_cc", None)
+        object.__setattr__(self, "_w1_cc_real_regs", None)
+        object.__setattr__(self, "_w1_cc_real_cycle", None)
+        object.__setattr__(self, "_w1_cc_drain_thread", None)
+        object.__setattr__(self, "_w1_cc_stop", False)
+        object.__setattr__(self, "_w1_cc_lost_logged", False)
+        object.__setattr__(self, "_w1_cc_gen", 1)
 
     # ── total delegation ─────────────────────────────────────
     def __getattr__(self, name: str):
@@ -168,8 +289,13 @@ class HL2StreamProxy:
 
     def start(self, on_samples=None, on_rx2_samples=None,
               dispatch_state_provider=None, **kw):
+        # W1.3: install the cc_cmd guard interpose BEFORE
+        # contained.start() spins the EP2 writer (so the writer
+        # reads through the guard from its first tick).  Independent
+        # of the rx-cb path.
+        self._w1_start_cc_routing()
         if on_samples is None and on_rx2_samples is None:
-            # Nothing to route — straight delegate (back-compat).
+            # No rx cbs — cc routing still active; rx straight-delegate.
             return self._w1_stream.start(
                 on_samples=on_samples, on_rx2_samples=on_rx2_samples,
                 dispatch_state_provider=dispatch_state_provider, **kw)
@@ -426,12 +552,140 @@ class HL2StreamProxy:
             import logging
             logging.getLogger(__name__).warning("[W1.2 tele] %s", msg)
 
+    # ── W1.3: cc_cmd C&C-register read-back/control routing ──
+    # In-process rehearsal of the W2 cc_cmd boundary at the
+    # stream-INTERNAL `_cc_registers`/`_cc_lock` mutation
+    # chokepoint (fix#1/RA-1 — NOT public method names).  Guard
+    # objects replace the contained stream's `_cc_registers`/
+    # `_cc_cycle`; EXCLUDED safety/MOX/§15.25 c0 are synchronous
+    # pass-through (byte-identical HEAD), ROUTED idempotent c0 go
+    # through the cc_cmd ring + the proxy cc-drain (atomic
+    # value+slot apply under the contained `_cc_lock`).  No
+    # stream.py modification (the W1.x revertable property).
+
+    def _w1_start_cc_routing(self) -> None:
+        if self._w1_cc is not None:
+            return                            # idempotent
+        s = self._w1_stream
+        # Snapshot the contained stream's __init__-seeded
+        # registers/cycle (0x00 general-settings, 0x2e TX-latency,
+        # …) into the REAL backing so they don't vanish (G1/seed
+        # preserve), then swap in the guards BEFORE contained
+        # .start() spins the EP2 writer.
+        self._w1_cc_real_regs = dict(s._cc_registers)
+        self._w1_cc_real_cycle = list(s._cc_cycle)
+        self._w1_cc_stop = False
+        self._w1_cc_lost_logged = False
+        ring = Ring.create(_CC_SLOT, _CC_SLOTS, drop_oldest=False,
+                           lock=threading.Lock())
+        ring.set_generation(self._w1_cc_gen)
+        self._w1_cc = ring
+        s._cc_registers = _GuardCcRegisters(
+            self._w1_cc_real_regs, ring, self._w1_cc_route)
+        s._cc_cycle = _GuardCcCycle(self._w1_cc_real_cycle)
+        t = threading.Thread(target=self._w1_cc_drain_loop,
+                             name="lyra-w1-cc-drain", daemon=False)
+        self._w1_cc_drain_thread = t
+        t.start()
+
+    def _w1_cc_route(self, c0, value) -> None:
+        # Called from the guard `__setitem__` for a ROUTED c0,
+        # WHILE the writer holds the contained `_cc_lock`.  Only
+        # enqueues (the cc_cmd ring has its OWN lock — NEVER takes
+        # `_cc_lock`; the drain takes `_cc_lock` later, after W0
+        # Ring.get has released the ring-lock in its finally:
+        # lock-order acyclic, no AB/BA, no re-entrancy).
+        ring = self._w1_cc
+        if ring is None:
+            return
+        try:
+            c1, c2, c3, c4 = value
+            rec = _CCREC.pack(c0 & 0xFF, c1 & 0xFF, c2 & 0xFF,
+                              c3 & 0xFF, c4 & 0xFF)
+            if not ring.put(rec, type_id=c0 & 0xFF, timeout=0.5):
+                # NON-drop ring full — unreachable at the
+                # operator-event cc rate; idempotent so a later
+                # write of the same c0 re-sends.  Log-once.
+                self._w1_log_cc_once(
+                    f"cc_cmd ring full; c0=0x{c0:02X} write dropped")
+        except RingPeerLost:
+            self._w1_log_cc_once(
+                f"cc_cmd put: drain wedged; c0=0x{c0:02X} dropped")
+        except Exception as exc:               # never break a writer
+            self._w1_log_cc_once(f"cc_cmd put error: {exc!r}")
+
+    def _w1_cc_drain_loop(self):
+        ring = self._w1_cc
+        regs = self._w1_cc_real_regs
+        cyc = self._w1_cc_real_cycle
+        cc_lock = self._w1_stream._cc_lock
+        gen = self._w1_cc_gen
+        while not self._w1_cc_stop:
+            try:
+                rec = ring.get(timeout=0.1, expected_generation=gen)
+            except RingClosed:
+                break
+            except RingPeerLost:
+                # Same-process lock contention — log-once, re-arm.
+                # cc_cmd is idempotent latest-value, NOT a
+                # TX-safety edge (those are EXCLUDED/synchronous)
+                # → NEVER D3/force_release_all (v3-4 class).
+                self._w1_log_cc_once(
+                    "cc_cmd get: lock contention; re-armed")
+                continue
+            except Exception as exc:
+                self._w1_log_cc_once(f"cc_cmd get error: {exc!r}")
+                continue
+            if rec is None:
+                continue                      # idle — normal
+            _seq, _g, _tid, payload = rec
+            try:
+                c0, c1, c2, c3, c4 = _CCREC.unpack_from(payload, 0)
+            except Exception as exc:
+                self._w1_log_cc_once(f"cc_cmd decode error: {exc!r}")
+                continue
+            # W0 Ring.get released the ring-lock in its finally
+            # BEFORE returning → taking `_cc_lock` here is NOT
+            # nested in any ring-lock scope (acyclic).  Apply the
+            # value-store AND the idempotent slot-append as ONE
+            # atomic pair under the contained `_cc_lock` — exactly
+            # mirroring HEAD's `with _cc_lock: regs[c0]=t;
+            # _register_cc_slot(c0)` (v2-1; no EP2-reader KeyError).
+            with cc_lock:
+                regs[c0] = (c1, c2, c3, c4)
+                if c0 not in cyc:
+                    cyc.append(c0)
+
+    def _w1_log_cc_once(self, msg: str) -> None:
+        if not self._w1_cc_lost_logged:
+            self._w1_cc_lost_logged = True
+            import logging
+            logging.getLogger(__name__).warning("[W1.3 cc_cmd] %s", msg)
+
+    def _w1_teardown_cc(self) -> None:
+        self._w1_cc_stop = True
+        t = self._w1_cc_drain_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=2.0)              # bounded (0.1 s get tick)
+        self._w1_cc_drain_thread = None
+        ring = self._w1_cc
+        self._w1_cc = None
+        if ring is not None:
+            try:
+                ring.close()
+            except Exception:
+                pass
+
     def stop(self):
-        # Signal the drain thread, tear down the contained stream
-        # (its §15.21-ordered teardown joins the rx-loop = the
-        # rx_iq/tele producer), THEN join the drain threads bounded,
-        # THEN free the rings (no one touches them after the join).
+        # Signal the drain threads, tear down the contained stream
+        # (its §15.21-ordered teardown joins the EP2 writer + the
+        # rx-loop = the rx_iq/tele/cc producers), THEN join the
+        # proxy drain threads bounded (cc-drain join is AFTER the
+        # EP2-writer join — contained.stop() completes in the try
+        # before this finally), THEN free the rings (no one touches
+        # them after the join).
         self._w1_stop = True
+        self._w1_cc_stop = True
         try:
             return self._w1_stream.stop()
         finally:
@@ -447,6 +701,10 @@ class HL2StreamProxy:
                     ring.close()
                 except Exception:
                     pass
+            # cc-drain join AFTER the EP2-writer join (which
+            # completed inside contained.stop() in the try) — v2-4
+            # teardown order; bounded, then free the cc ring.
+            self._w1_teardown_cc()
             # tele is normally torn down by register_mic_consumer
             # (None) BEFORE stop() (Radio teardown order) — but
             # tear it down here too, defensively + bounded.

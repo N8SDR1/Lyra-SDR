@@ -10609,6 +10609,86 @@ stay synchronous pass-through (byte-identical HEAD).
 In-process, NO HL2 bench (first HL2 A/B-vs-S3 bench-gate is
 W1.4 — the tx_ring hot path).  `origin/main` stays v0.1.1.
 
+#### ✅ W1.3 SHIPPED 2026-05-19 (3 red-team rounds / 6
+#### agents, converged).  cc_cmd C&C-register routing —
+#### in-process, no HL2 bench, fully revertable.
+
+`lyra/ipc/hl2_proxy.py`: `_GuardCcRegisters`/`_GuardCcCycle`
+replace the contained stream's `_cc_registers`/`_cc_cycle`
+(installed in `start()` BEFORE `contained.start()` spins the
+EP2 writer; per-`Radio.start` fresh).  Reads delegate to a
+real private backing (defensive full delegation — any
+uncovered op fails LOUD, never silent-bypasses = the D-W1b
+discipline; verified the ONLY mutation forms are `[k]=v` /
+`.append()`).  **EXCLUDED {0x12,0x14,0x1C,0x02,0x08,0x0a}**
+(PA-enable+drive / ATT-on-TX / TX-NCO — all MOX-correlated /
+§15.25-ordered / TX-safety) → guard does a TRANSPARENT
+in-place pass-through to the real backing (NO ring, NO lock
+— runs inside the writer's already-held `_cc_lock`;
+byte-identical to HEAD; D-W13b/d/e closed).  **ROUTED
+{0x04,0x06,0x74,0x00}** (RX1/RX2-NCO / reset_on_disconnect /
+frame-0 — genuinely-idempotent latest-value; 0x00 = the G1
+tripwire, safe today) → guard enqueues a `_CCREC` cc_cmd
+record (NON-drop ring, log-once-on-full); a proxy cc-drain
+thread pops FIFO and applies `regs[c0]=tuple` AND the
+idempotent `_register_cc_slot` append as ONE atomic pair
+under the contained `_cc_lock` — exactly mirroring HEAD's
+atomic store+append, so a routed c0 is NEVER in `_cc_cycle`
+before its value ⇒ the sole EP2 reader can't KeyError
+(D-W13a closed via v2-1).  Lock-order acyclic + D-W13c
+closed: the guard only `ring.put`s (ring-lock, never
+`_cc_lock`); the drain is the locked two-statement form
+`rec=ring.get(timeout)` (W0 `Ring.get` releases the
+ring-lock in its `finally` BEFORE returning) → `with
+contained._cc_lock: apply` — verified, no AB/BA, no
+re-entrancy.  cc-drain `RingPeerLost` (same-process lock
+contention) = log-once+re-arm, NEVER D3 (idempotent cc, not
+a TX-safety edge — v3-4 class).  Generation-tagged
+(`set_generation`/`expected_generation`); seed entries
+(0x00/0x2e …) copied into the real backing on swap (G1).
+`stop()`: set cc-stop + `contained.stop()` (its §15.21
+teardown joins the EP2 writer) THEN bounded cc-drain join
+(AFTER the EP2-writer join, in the `finally`) THEN free the
+ring (v2-4).  cc routing is independent of the rx-cb path
+(active even RX-only).  EP2 EGRESS / WIRE CADENCE / the
+MOX/§15.25/TX-safety registers byte-identical to HEAD; only
+the genuinely-idempotent latest-value set is deferred a
+sub-ms hop ≪ the existing ~20-40 ms round-robin control
+latency.
+
+Tests `tests/ipc/test_hl2_proxy_w13.py` (10): excluded =
+synchronous pass-through, PA-disarm/ATT never deferred
+(D-W13d/b), routed real-writer end-to-end + atomic
+value+slot, **no EP2-reader-KeyError window** (D-W13a),
+**≥1e5-iter mixed-interleave deadlock stress** incl. an
+excluded-key writer + EP2-reader (D-W13c/RA-1 — no
+deadlock, no KeyError, drain survives, converges), seed
+preservation, guard read-delegation, back-compat (cc active
+RX-only), bounded stop() teardown, idempotent start.  3
+stale W1.1 test-stubs updated (W1.3 made `start()` install
+cc routing unconditionally — the minimal stub needed the
+`_cc_*` attrs a real stream has; not a code regression).
+Full suite **497 passed / 0** (487 W1.2 baseline + 10;
+zero regressions).  `origin/main` stays v0.1.1.
+
+**NEXT = W1.4** — the tx_ring HOT path: ALL ordered
+wire-affecting writes (TXNCO, MOX-on, MOX-off, INJECT_IQ)
++ the TX audio/IQ samples as typed records on the SINGLE
+ordered ring (D2/A2); drain applies the wire-MOX into an
+HL2Stream-thread-local that `_snapshot_mox_bit` AND the
+RX-loop `ddc_map` axis read (v3-1/A1); teardown
+`set_mox(False)` MAIN-direct + force wire-MOX local 0 +
+flush drain BEFORE the EP2-writer join (v3-2/A-v3-2a);
+RingPeerLost→D3 gated on proxy-thread `is_alive()` ONLY
+(v3-4); the hardened multi-capture A/B gate.  **W1.4 is
+the FIRST operator HL2 A/B-vs-S3 bench-gate** (it touches
+the EP2 egress).  Per the locked v3 + A1/A2/A-v3-1a/
+A-v3-2a; W1 stays the W2 fallback.  Given W1.4 is the
+inflection that finally touches the wire egress, it gets
+its own grounded-design → 2-agent red-team → reconcile
+BEFORE code (same as W1.3), then implement → operator HL2
+A/B bench.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-18 EOD)

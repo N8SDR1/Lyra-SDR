@@ -29,6 +29,12 @@ class _StubStream:
     def __init__(self):
         self.start_kw = None
         self.stop_called = 0
+        # W1.3 made start() install cc routing unconditionally
+        # (cc is independent of rx cbs) — a real stream exposes
+        # these; the stub must too or _w1_start_cc_routing fails.
+        self._cc_registers = {0x00: (1, 2, 3, 4)}
+        self._cc_cycle = [0x00]
+        self._cc_lock = threading.Lock()
 
     def start(self, on_samples=None, on_rx2_samples=None,
               dispatch_state_provider=None, **kw):
@@ -64,6 +70,9 @@ class W11RxIqRoutingTest(unittest.TestCase):
         if t is not None:
             t.join(timeout=2.0)
             self.assertFalse(t.is_alive())
+        # W1.3: start() also spins the cc-drain — tear it down
+        # (bounded) so the non-daemon thread doesn't leak.
+        p._w1_teardown_cc()
         if p._w1_rx_iq is not None:
             p._w1_rx_iq.close()
 
@@ -169,7 +178,8 @@ class W11RxIqRoutingTest(unittest.TestCase):
     def test_backcompat_no_cbs_straight_delegate(self):
         p = _proxy(stub=True)
         p.start(rx_freq_hz=14000000)
-        self.assertIsNone(p._w1_rx_drain_thread)          # no routing
+        self.addCleanup(p._w1_teardown_cc)   # cc-drain spun by start()
+        self.assertIsNone(p._w1_rx_drain_thread)          # no rx routing
         self.assertIsNone(p._w1_rx_iq)
         self.assertEqual(p._w1_stream.start_kw["on_samples"], None)
         self.assertEqual(p._w1_stream.start_kw["rx_freq_hz"], 14000000)
