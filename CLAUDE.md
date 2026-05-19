@@ -10819,9 +10819,146 @@ is COMPLETE.
    deque≤~3000 / p95 25-50,42 / un≤~1851 / A-v3-1a
    ≤1-datagram / 20× clean stop-restart.
 
-**STATUS: W1.4 v2 written.  LOOPING per the charter — v2 →
-BOTH round-1 agents for confirm-or-loop.  NO code until
-convergence.**  W1.4 is still the FIRST operator HL2
+#### ⚠ W1.4 v2 RE-VERIFY = STILL LOOP (2026-05-19; rigor
+#### caught v2 ITSELF introducing a new S4a-class regression
+#### + an over-reach re-detonating the reverted S4a deque-
+#### burst — the operator-flagged "looks done until
+#### red-teamed" check working).  Cadence
+#### `a29469c169b95d6a2` = LOOP; safety
+#### `a5a5963ccbe0c442e` = LOOP.  Both converge.  Thesis
+#### (in-proc rehearsal of the MOX/control boundary via
+#### `_wire_mox` + a control ring) SURVIVES; v3 NARROWS
+#### W1.4 to control-only (the same principled W1.3-style
+#### carve-down — NOT skimping; the hard tx-audio cross-
+#### process transport is correctly scoped to W2 + its own
+#### bench, because doing it in-process is exactly what the
+#### 2026-05-18 S4a revert empirically proved dangerous).
+
+* **D-W14f BOTH (the loop reason) — v2-4 keyup hard-flush
+  self-contradiction.** v2-4 drove the teardown HARD
+  `_wire_mox`-force-0 + ring-discard from the NORMAL keyup
+  `_clear_mox_tail`→`set_mox(False)` (`ptt.py:389-391`) +
+  re-key-collapse (`ptt.py:373-381`).  But MOX-off-after-
+  the-faded-tail is the §15.25 keyup invariant; discarding
+  the ring on every release HARD-CHOPS the faded MoxEdgeFade
+  carrier tail (CW/SSB tail truncation, T/R click) — a
+  self-introduced S4a-class regression HEAD lacks, invisible
+  to the snapshot/cadence gate (keyup transient).
+* **D-W14g (cadence, BLOCKS-SHIP) — v2-3 re-detonates the
+  reverted S4a deque-burst.** TXAUDIO does NOT flow through
+  any ring: `audio_sink.py:294-295` reaches directly into
+  `_stream._tx_audio` (a `maxlen` deque) drained by the S2
+  writer + `_slew_fill_pairs`.  v2-3's TXAUDIO-on-ring +
+  reserved-headroom solves a non-problem AND re-introduces
+  the exact chronically-behind-drain failure empirically
+  reverted 2026-05-18 (`lyra_wire.log` deque burst 21072).
+* **D-W14h (cadence) — v2-2 STEPATT-on-ring collides with
+  the W1.3 CONFIRMED-CLEAN.** 0x14/0x1C are already
+  `_CC_EXCLUDED` synchronous byte-identical-HEAD
+  (`hl2_proxy.py:115`) and on the W1.3 "do NOT change"
+  list; routing them through a new tx_ring removes them
+  from the synchronous-excluded contract (re-opens D-W13b/d)
+  AND needs a NEW uninstrumented proxy-method seam (the
+  W1.3 guard interposes at the `_cc_registers` attribute
+  chokepoint, NOT at `set_tx_step_attn_db` granularity).
+
+CONFIRMED SOUND by both (KEEP): **v2-1 (the D-W14a fix) —
+`set_mox(True)` enqueues NO MOX_ON; `_dispatch_state.mox=True`
+MAIN-direct intent; MOX_ON enqueued AFTER
+`_on_tx_state_changed(True)`.  The operator integrity
+condition is MET BY CONSTRUCTION — explicit YES (safety
+agent): `_apply_att_on_tx` is fully synchronous (no Qt-timer
+/ no auto-LNA async path; `radio.py:3099-3110`), runs inside
+`_on_tx_state_changed(True)` (`ptt.py:318`) BEFORE the
+deferred MOX_ON enqueue (`_open_tx_iq`, later event-loop
+turn) on every keydown variant.**  §15.25 freq-before-edge
+(`radio.py:2475-2480`) preserved (Option-b reorder still
+REJECTED).  0x12 synchronous, `_wire_mox`/`_dispatch_state`
+split exhaustive+correct, lock-order acyclic, §6(b)
+≥-reference — all re-confirmed.
+
+**CORRECTED v3 (folds D-W14f/g/h; thesis intact, scope
+narrowed to control-only):**
+1. **(KEEP v2-1)** `set_mox(True)` no MOX_ON;
+   `_dispatch_state.mox=True` MAIN-direct; MOX_ON enqueued
+   by the explicit `_open_tx_iq` step AFTER
+   `_on_tx_state_changed(True)`.  Enumerate the THREE
+   enqueue-bearing keydown entries (normal `_enter_tx`,
+   TUN, CW-first-key); re-key-collapse (`ptt.py:373-381`)
+   enqueues NOTHING (never clears/sets MOX).
+2. **(D-W14h) DROP the STEPATT_PAIR ring record entirely.**
+   0x14/0x1C STAY W1.3 `_CC_EXCLUDED` synchronous,
+   byte-identical HEAD (CONFIRMED-CLEAN, do-not-change).
+   D-W14a is closed PURELY by #1's MOX_ON-timing: the
+   synchronous `_refresh_frame_4/_11` complete under
+   `_cc_lock` (`stream.py:3114-3115`) BEFORE the deferred
+   MOX_ON enqueue, and are already atomic w.r.t. the EP2
+   reader (it takes `_cc_lock` @`stream.py:2382`).  D-W14b
+   DISSOLVES (no STEPATT ring record to coalesce).  TXNCO
+   (0x02/0x08/0x0a) ALSO stays W1.3-synchronous-excluded;
+   §15.25 freq-before-MOX preserved by synchronous-cc-write
+   -before-deferred-MOX_ON.
+3. **(D-W14g) DELETE all TXAUDIO/TXIQ-on-ring + reserved-
+   headroom design.** TXAUDIO/TXIQ stay on the S2
+   `_tx_audio`/`_tx_iq` deque path UNCHANGED (the S2-
+   contract owner; the S4a revert proved in-process
+   touching is dangerous).  The TX-audio CROSS-PROCESS
+   transport is an EXPLICIT W2 design item (own grounded-
+   design + 2-agent red-team + operator HL2 bench) — NOT
+   rehearsed in W1.4 (honest scope, NOT skimped).  tx_ring
+   is **CONTROL-ONLY**: MOX_ON / MOX_OFF / INJECT_IQ_ON /
+   INJECT_IQ_OFF.  `drop_oldest=False`; control-put-failure
+   = a TX-safety event (NOT a silent log-once); unreachable
+   at the operator-edge rate (the shipped W1.3 cc_cmd-ring
+   argument).
+4. **(D-W14f) SPLIT v2-4 into three mechanisms:**
+   (a) **teardown/fault** (`Radio.stop`, `force_release_all`,
+   §15.20 timeout, D3) = **HARD**: force `contained._wire_mox
+   =0` + discard the control ring, pinned in proxy `stop()`'s
+   `try` BEFORE `self._w1_stream.stop()` (precedes the EP2
+   join `stream.py:3211`; mirrors shipped W1.3
+   `_w1_teardown_cc`) — needs a proxy-level seam (the FSM/
+   Radio teardown points call an explicit
+   `proxy.w1_tx_teardown()`; `set_mox`/`force_release_all`
+   are Radio methods, NOT proxy-intercepted — pin the exact
+   call sites);
+   (b) **normal keyup** `_clear_mox_tail`→`set_mox(False)`
+   (`ptt.py:389-391`) = **GRACEFUL**: MAIN-direct
+   `_dispatch_state.mox=False` (cb58bcb) AND enqueue an
+   ORDERED MOX_OFF control-ring record — NO discard.  The
+   §15.25 "MOX-off after the faded tail" invariant is
+   preserved by the EXISTING MoxEdgeFade fade-poll gate
+   (`ptt.py:360-391` — the FSM only reaches `_clear_mox_tail`
+   after `fade.is_off()`; the faded tail is on the S2 deque
+   drained by `_slew_fill_pairs`; the fade-poll SEQUENCING,
+   not ring-co-location, is the invariant — this is why
+   audio does NOT need to be on the ring with MOX);
+   (c) **re-key-collapse** (`ptt.py:373-381`) = **NEITHER**
+   (never clears MOX — must not flush or it tears MOX out
+   of a continuing TX).  Pin the concrete proxy seams +
+   exact `ptt.py`/`radio.py` call sites for (a) and (b).
+5. **(gate)** the A/B gate ADDS a keyup-tail-integrity
+   capture (the faded cos² carrier tail reaches the wire
+   INTACT on a normal keyup — NO hard chop — proving v3-4(b)
+   GRACEFUL; this is the exact S4a-class regression v2-4
+   would have introduced) + the existing keydown-transient
+   / 20× rapid+sub-50ms re-key / deque-high-water-vs-S3 /
+   ring-bypass==0 / zero-spurious-FRA / deque≤~3000 / p95
+   25-50,42 / un≤~1851 / A-v3-1a / 20× clean stop-restart.
+
+§6: with v3, no-worse-than-HEAD restored (STEPATT/TXNCO/
+TXAUDIO byte-identical HEAD; normal keyup GRACEFUL = faded
+tail intact = ≥-reference; teardown HARD only on
+stop/fault); the control-only ordered ring ≥ Thetis/pihpsdr/
+Quisk.  W1.4 honestly does NOT change the operator symptom
+(only W2 does); gate = no-worse-than-S3.  The narrowing is
+the SAME principled W1.3-pattern carve-down to a provably-
+safe minimal set — the hard tx-audio-cross-process problem
+is scoped to W2 *with a defined bench gate*, not skimped.
+
+**STATUS: W1.4 v3 written.  LOOPING once more per the
+charter — v3 → BOTH agents for confirm-or-loop.  NO code
+until convergence.**  W1.4 still the FIRST operator HL2
 A/B-vs-S3 bench-gate (post-convergence + implement).
 `origin/main` stays v0.1.1.
 
