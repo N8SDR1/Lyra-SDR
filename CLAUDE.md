@@ -10041,9 +10041,98 @@ Defects (file:line-grounded):
    / un ≤ ~1851 (the S4a-class thresholds).  Any → FAIL,
    revert the seam.
 
-**STATUS: W1 v2 written.  LOOPING per the charter — v2 →
-BOTH round-1 agents for confirm-or-loop before any code.  NO
-code until convergence.**  `origin/main` stays v0.1.1.
+#### ⚠ W1 v2 RE-VERIFY = STILL LOOP (2026-05-19; converging,
+#### bounded, NO redesign — thesis held 3 rounds).  Cadence
+#### `ae73f2aac8a9684b0` = LOOP (one real code-grounded defect
+#### v2 introduced); safety `a1d5eae7d7ac71ade` =
+#### CONFIRM-WITH-AMENDMENTS (A–E, explicitly deferred to the
+#### cadence agent for convergence).  Corrected directions are
+#### MUTUALLY CONSISTENT → v3 below.
+
+The defect (cadence agent, code-verified): v2 fix #2 moved the
+wire-MOX onto the ring but left `_dispatch_state.mox` for
+"all OTHER consumers" — too broad.  The RX-loop dispatcher
+(`stream.py:3322-3325`) feeds `provider().mox` into
+`ddc_map` (`protocol/__init__.py:144-149`) — a HARD
+route/discard switch for RX1/RX2 audio with NO conservatism.
+v2 → on keydown RX audio cuts out N records BEFORE the wire
+MOX actually goes on; on keyup, TX-coupled garbage routed
+into RX1/RX2 + the Auto-LNA peak buffer while MOX-off is
+still draining.  AND v2 fix #3 teardown `set_mox(False)`
+updated `_dispatch_state` but not the drained wire-MOX local
+→ teardown emits a final KEYED frame (PA-safety regression
+vs HEAD).  (Auto-LNA-freeze/cb58bcb/FSM/UI are NOT broken —
+they read `_dispatch_state.mox` and are intent-level/
+conservative; the break is specifically the RX dispatcher's
+hard switch, which the safety agent did not trace and the
+cadence agent did.)
+
+**CORRECTED v3 (folds the cadence defect + safety A–E; both
+agents' directions reconcile):**
+- **v3-1 (was fix #2, scope tightened):** the drained
+  wire-MOX thread-local is the source of truth for ALL
+  WIRE-CORRELATED consumers — the EP2 C0 bit
+  (`stream.py:2545`), the S2 TX-I/Q guard
+  (`_pack_audio_bytes_pairs:2615`), AND **the RX-loop
+  dispatcher's `mox` axis fed to `ddc_map`
+  (`stream.py:3322-3325`)** (the RX loop reads a stream
+  method returning the drained wire-MOX, NOT
+  `provider().mox`, for the route/discard decision — so DDC
+  routing flips FIFO-coherent with the wire bit).
+  `_dispatch_state.mox` stays authoritative ONLY for
+  genuinely OFF-wire/intent consumers (Auto-LNA freeze
+  `radio.py:7004`, §15.20 timeout arm, UI `tx_active`,
+  `ps_armed`, `ddc_map`'s `ps_armed` axis).  W1.4 asserts NO
+  in-proc consumer reads a *wire* decision via
+  `_dispatch_state` (safety amendment D).
+- **v3-2 (was fix #3, completed):** teardown `set_mox(False)`
+  is MAIN-direct AND synchronously forces the wire-MOX
+  thread-local to 0 AND flushes/short-circuits the ring
+  drain so no stale MOX-on record can re-raise it — teardown
+  deterministically wins the wire (no final keyed frame),
+  cb58bcb stays on the MAIN-direct `_dispatch_state.mox=False`
+  path, proxy-thread join carries an explicit finite timeout
+  and is ordered AFTER the EP2-writer join and BEFORE socket
+  close in the §15.21 bounded sequence (safety amendment B).
+- **v3-3 (safety A):** the W1.4 ring-bypass counter must be
+  incremented at the ATTRIBUTE IDENTITY — the proxy exposes
+  `_tx_audio`/`_tx_audio_lock`/`_cc_registers` as guard
+  objects whose access/extend/`__enter__` increments-and-
+  redirects-to-ring (so `audio_sink.py:294-295`'s raw
+  reach-in and any internal `_refresh_frame_*` cannot evade
+  it), NOT an opt-in `queue_*` method the bypasser never
+  calls (else theatre).
+- **v3-4 (safety C):** in W1, D3 (RingPeerLost→
+  force_release_all/FSM→RX) is gated on proxy-thread
+  `is_alive()` ALONE (a same-process thread's liveness is
+  GIL-independent + authoritative; it provably never
+  confirms non-liveness in W1 ⇒ D3 never spuriously trips ⇒
+  no-worse-than-HEAD).  The heartbeat is logged-diagnostic
+  ONLY, NEVER a D3 precondition.  RECORD NOW for W2: the
+  cross-process probe = a shared-memory monotonic sequence +
+  OS process-liveness (`child.is_alive()`/waitpid-class),
+  NOT an in-band ring heartbeat (in-band shares the ring's
+  failure mode and cannot distinguish "child wedged" from
+  "ring backed up" — the §15.26 D3 dead-child finding).
+- **v3-5 (safety E / keep):** W1.2 keeps the mandatory
+  byte-identical assertion of the `ptt.py:389-406` keyup
+  ordering AND timing vs HEAD (tele-ACK plumbing wired but
+  `_end_keyup` never blocks on it — A2 symmetric).
+- Unchanged + CONFIRMED by both: v2 fix #1 (the
+  `_cc_lock`/`_cc_registers` boundary is a provably
+  exhaustive single chokepoint — RA-1 closed), fix #5
+  (per-ring `threading.Lock` — `Ring._acquire`
+  `ring.py:215-219` is `threading.Lock`-API-compatible), the
+  staged W1.0-W1.5, the hardened multi-capture A/B gate, the
+  "no-worse-than-HEAD" charter row FAIL→PASS under the
+  corrected design.
+
+**STATUS: W1 v3 written (cadence defect + safety A–E folded;
+both agents' corrected directions mutually consistent;
+thesis + fixes #1/#4/#5/#6/#7 confirmed by both across 3
+rounds).  LOOPING once more per the charter — v3 → BOTH
+agents for confirm-or-loop.  NO code until convergence.**
+`origin/main` stays v0.1.1.
 
 ---
 
