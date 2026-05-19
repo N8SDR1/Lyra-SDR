@@ -9870,6 +9870,58 @@ commit with W1 retained as the working in-process fallback.
 NO code until operator go-ahead.**  `origin/main` stays
 v0.1.1.
 
+#### ✅ W0 SHIPPED 2026-05-19 (operator "start-").  The
+#### smallest safe stage of the converged v3 process-isolation
+#### plan — standalone, IN-PROCESS-only, ZERO wire risk, fully
+#### revertable; no HL2 bench needed.
+
+`lyra/ipc/` (new package) — `Ring`: a barrier-bearing
+single-producer/single-consumer shared-memory ring
+implementing every v3 design pin:
+* **The lock IS the cross-process barrier (D1 fix).** Indices
+  are NOT bare shared-memory stores (CPython has no
+  cross-process atomic/fence — the round-1 defect that killed
+  the original "lock-free" proof).  The entire put/get runs
+  under one `multiprocessing.Lock`; producer-release pairs
+  with consumer-acquire for happens-before over header +
+  payload.  Whole-record-under-lock chosen deliberately:
+  removes the full-ring slot-overlap race by construction;
+  cost was budgeted in v3.
+* **Bounded waits only (A1).** `multiprocessing.Lock` is an
+  ownerless semaphore — a peer that dies holding it never
+  releases it, so a bounded `acquire(timeout)` returning
+  False IS the authoritative peer-death signal →
+  `RingPeerLost` (no spin-retry).  `get()` REQUIRES a finite
+  timeout.
+* **Generation tagging (D5):** per-record uint64 gen;
+  `get(expected_generation=…)` discards stale-gen records;
+  `set_generation` bump.
+* **Producer-side drop-oldest** (rx_iq overrun policy) +
+  `mark_closed`→`RingClosed` (clean shutdown, distinct from
+  `RingPeerLost`) + `depth()` (the W1 A/B-gate instrument).
+
+Tests: `tests/ipc/test_ring.py` (10 in-process — FIFO, wrap,
+full-no-drop, drop-oldest+monotonic, gen-discard, clean-close,
+**bounded-acquire-timeout→RingPeerLost**, finite-timeout
+guard, payload-cap, depth) + `tests/ipc/test_ring_twoproc.py`
+(the 2 RED-TEAM-MANDATED ACCEPTANCE GATES, real `spawn`
+processes: **tear/reorder fuzz** — 4000 records cross-process,
+asserts crc-intact + strictly-monotonic-seq = no torn/reordered
+/duplicated records under load; **kill-the-writer-while-it-
+holds-the-lock** — child terminated holding the ring lock,
+consumer's bounded get surfaces `RingPeerLost` in <3 s, proving
+A1 cannot hang on a dead peer).  W0 acceptance gate GREEN.
+Full suite **459 passed / 0** (447 S3 baseline + 12 W0; zero
+regressions — nothing wired into radio/wire).  `origin/main`
+stays v0.1.1.
+
+**NEXT = W1** (in-process ring-backed `HL2Stream` proxy seam,
+still single-process — flushes every `Radio↔stream` boundary
+API the cross-process move will need; gated by a gap-trace +
+deque-depth A/B-vs-S3 capture, FAIL if cadence/underrun moves).
+Its own grounded design + red-team (charter §6 comparative
+questions) before code, per the locked methodology.
+
 ---
 
 ## ▶ NEXT SESSION STARTS HERE (2026-05-18 EOD)
