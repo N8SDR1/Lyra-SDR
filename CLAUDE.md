@@ -9768,11 +9768,107 @@ own prescribed mechanisms; this is what gets re-verified):**
    fallback (failed W2 → revert to W1-in-process, NOT
    pre-W0).
 
-**STATUS: corrected design v2 written.  LOOPING per the
-charter ("loop until all agree") — v2 goes back to BOTH
-round-1 agents for confirm-or-loop before anything is
-presented as ready or any code (incl. W0) starts.  NO code
-until convergence.**  `origin/main` stays v0.1.1.
+#### ✅ v2 RE-VERIFY = CONVERGED 2026-05-19.  Both round-1
+#### agents re-reviewed v2: IPC/real-time
+#### `a455b2f92f8b08af2` and safety/charter
+#### `a5e4a1b189c5e3073` BOTH returned **CONFIRM-WITH-
+#### AMENDMENTS — no LOOP**.  ALL 4 AGENTS AGREE the thesis
+#### + D1/D2/D3/D5 mechanisms + the keyup half of D4 are
+#### correct against the code.  3 bounded amendments (gate/
+#### wording, NOT redesign) → final design v3 below.  Both
+#### independently converged on the SAME D4 resolution.
+
+**v3 = v2 + 3 folded amendments:**
+
+* **A1 — bounded ring acquire (the one NEW hazard the D1
+  fix introduces).** Windows `multiprocessing.Lock` is a
+  kernel mutex and is NOT robust: if the wire child dies
+  WHILE holding the ring publish-lock (incl. the D4
+  `taskkill /F` gate), MAIN's consumer `acquire()` wedges.
+  v3: EVERY MAIN-side ring `acquire()` is
+  `acquire(timeout=…)`-bounded; a timeout IS a child-death
+  signal feeding the D3 detect→FSM→RX→alarm path (NO
+  spin-retry).  D5's STOP-ACK "rings drained" wait uses the
+  SAME bounded acquire (timeout → kill+respawn).  W0
+  acceptance gains a **kill-the-writer-while-it-holds-the-
+  lock** fuzz case (assert MAIN escapes within the timeout
+  and routes to the D3 path) — alongside the two-process
+  tear/reorder fuzz.
+* **A2 — D4 keydown REWORD (both agents; the IPC agent's
+  stronger form adopted, which also moots the safety
+  agent's dead-PTT-hang LOOP-trigger).** v2's "keydown
+  awaits the RX-DSP-stop ack before MOX-on" is WRONG: it
+  contradicts the shipped, operator-empirically-validated
+  NON-blocking worker contract (`worker.py:340-347/587-608`
+  `request_rx_channel` is fire-and-forget; a blocking flush
+  at the keydown instant was the §15.21/§15.26 T/R-relay-
+  chatter cause, removed by `47ae18d`) and would reintroduce
+  the exact main-thread blocking-wait/GIL-stall class this
+  project fights (and risk a stalled-worker ⇒ dead-PTT
+  hang).  v3: **keydown does NOT await anything** — it posts
+  NCO+MOX-on to the ordered ring non-blocking, exactly as
+  today.  The original v1-D4 "MOX-live-while-WDSP-grinds"
+  defect is resolved NOT by a keydown barrier but by the
+  already-shipped mechanism: `_on_tx_state_changed(True)`
+  STOPS the WDSP RX channel + `_tx_rx_muted` gates RX audio
+  (`radio.py:2973-2998`) — the receiver ceases to exist, so
+  there is no fold window to barrier against.  The **keyup**
+  half of D4 STANDS (child emits a `tele` MOX-off ACK after
+  the faded tail; MAIN `_end_keyup` waits ACK +
+  `ptt_out_delay` before `_request_rx_channel(True)` —
+  bounded, on the non-latency-critical RESTART path, matches
+  `ptt.py:389-406` + the locked `4ce07b9` order).
+* **A3 — generation bump is authoritative MAIN-side at
+  STOP-issue (child mirrors), BEFORE the STOP-ACK wait.**
+  So an in-flight keydown MOX-on record from a racing FSM is
+  already stale-generation and child-discarded regardless
+  of which bounded timer fires first — the D1-lock × D5-gen
+  × D3-child-death paths cannot compose into a come-up-keyed
+  window; kill+respawn provably comes up RX (the cb58bcb
+  invariant `radio.py:9354-9386` holds across the boundary).
+* **Gate refinement (safety agent):** the mandatory kill-
+  the-WIRE-CHILD-mid-TX dummy-load Phase-3-EXIT gate must
+  ALSO assert MAIN's `force_release_all` PA-disarm
+  (`radio.py:2554-2555`, §15.26 PART C) fires on *detected
+  child-death* (part of the same PA-bias scope trace), not
+  only on the §15.20 timeout — else the gateware watchdog
+  clears RF but PA bias can sit hot until the next watchdog
+  cycle.
+
+**Re-graded charter table under v3:** pt1/pt2/pt5 PASS;
+**pt3 (concurrent browser/logger, zero stutter) → PASS**
+(process isolation + barrier-bearing index + producer-side
+rx_iq drop-oldest removes all back-pressure onto the EP2
+writer); **pt4 (TX bulletproof full §15.19+PS+EQ+Combinator
++RTA) → CONDITIONAL** (the wall is structurally removed by
+the single ordered ring; stays CONDITIONAL only because PS
+is not yet on the ring — design-correct/unbuilt — and the
+W1 A/B-vs-S3 gate is unproven until benched); **pt6 PASS**;
+**pt7 (definition of done) → CONDITIONAL** (binds on A1/A2/
+A3 + the mandatory HL2 kill-child bench gate; cannot be PASS
+pre-bench by the charter's own HL2-gate requirement).  NO
+charter point is FAIL.  §6: (a) with A2's no-await, NO
+TX/RX hang/stutter now or under full future load (ordered
+single ring + barrier index + producer-side drop = no
+jitter relocation, no blocking keydown); (b) safety posture
+**≥ Thetis/pihpsdr/HPSDR-family** (same gateware watchdog,
+now stated TX-UNVERIFIED without overclaim, PLUS a MAIN-side
+PA-disarm-on-fault + mandatory kill-child gate the reference
+family does not have) — no longer below reference.
+
+**STATUS: CONVERGED — all 4 agents agree; "loop until all
+agree" SATISFIED.  Final design = v3 (v2 + A1/A2/A3 +
+gate refinement), charter-graded (no FAIL).  Methodology
+complete through design.  AWAITING OPERATOR GO-AHEAD to
+start the STAGED migration at W0 — the smallest safe stage:
+build the barrier-bearing IPC ring library + the two-process
+tear/reorder AND kill-writer-holding-lock fuzz gate.  W0 is
+IN-PROCESS ONLY, zero wire risk, fully revertable, no HL2
+bench needed.  W1→W2→W3 each return for their own bench-
+gate; W2 (the cross-process move) ships as ONE revertible
+commit with W1 retained as the working in-process fallback.
+NO code until operator go-ahead.**  `origin/main` stays
+v0.1.1.
 
 ---
 
