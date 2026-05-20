@@ -21,6 +21,7 @@
 #include <QMetaObject>
 #include <Qt>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace lyra::ipc {
@@ -176,6 +177,7 @@ void HL2Stream::open(const QString &ip) {
     framingErrors_.store(0);  windowDg_.store(0);
     txTotalDg_.store(0);  txWindowDg_.store(0);
     txSendErrors_.store(0);  txSeq_.store(0);
+    rx1DbFs_.store(-200.0, std::memory_order_relaxed);
     dgPerSec_   = 0.0;
     txDgPerSec_ = 0.0;
     running_.store(true, std::memory_order_release);
@@ -284,6 +286,32 @@ void HL2Stream::rxWorkerLoop(std::stop_token stop, SocketHandle sh) {
     QByteArray buf;
     buf.resize(2048);  // generous; Metis EP6 datagrams are 1032 bytes
 
+    // ---- Step 2c: RX1 dBFS accumulator -----------------------
+    // Local-to-this-thread state — re-initialized per-open since
+    // each open() spawns a fresh worker.  The accumulator sums
+    // magnitude² (I²+Q²) across kRmsWindowSamples DDC0 samples,
+    // then computes dBFS = 10·log₁₀(meanSq) and atomically
+    // publishes to rx1DbFs_ for the QML banner.  At 192 kHz IQ
+    // rate, 9600 samples = 50 ms — updates 20× per second so the
+    // 5 Hz QML stats tick always sees the most recent ~50 ms RMS.
+    //
+    // Wire format for each 26-byte slot (nddc=4, gateware default
+    // verified ak4951v4 RTL + Thetis networkproto1.c:527-541):
+    //   bytes [0..2]   DDC0 I — 24-bit signed BE
+    //   bytes [3..5]   DDC0 Q — 24-bit signed BE
+    //   bytes [6..23]  DDC1/2/3 I/Q  — Step 5 RX2 work, ignored here
+    //   bytes [24..25] mic sample    — Step 3+ TX work, ignored here
+    //
+    // 24-bit normalization: pack the 3 bytes into the TOP 24 bits
+    // of an int32 with the low byte zero, then divide by 2³¹.
+    // bytes[0]'s high bit naturally lands at bit 31 = the sign
+    // bit of int32, so the sign extends correctly without any
+    // explicit cast.  Range: [-1.0, +1.0).
+    double rmsAcc       = 0.0;
+    int    rmsAccCount  = 0;
+    constexpr int kRmsWindowSamples = 9600;        // 50 ms @ 192 kHz
+    constexpr double kInv2Pow31      = 1.0 / 2147483648.0;
+
     while (!stop.stop_requested()) {
         sockaddr_in from{};
         int fromLen = sizeof(from);
@@ -364,6 +392,39 @@ void HL2Stream::rxWorkerLoop(std::stop_token stop, SocketHandle sh) {
         }
         totalDg_.fetch_add(1, std::memory_order_relaxed);
         windowDg_.fetch_add(1, std::memory_order_relaxed);
+
+        // ---- Step 2c: parse DDC0 IQ + accumulate RMS ---------
+        // Two USB frames per datagram at offsets 8 and 520; each
+        // carries 19 sample slots starting at frame-offset 8.
+        for (int usbFrame = 0; usbFrame < 2; ++usbFrame) {
+            const std::uint8_t *frame = u + (usbFrame == 0 ? 8 : 520);
+            for (int slot = 0; slot < 19; ++slot) {
+                const std::uint8_t *sb = frame + 8 + slot * 26;
+                // DDC0 I — bytes 0..2, packed into top 24 bits of int32
+                const std::int32_t iRaw = static_cast<std::int32_t>(
+                    (static_cast<std::uint32_t>(sb[0]) << 24) |
+                    (static_cast<std::uint32_t>(sb[1]) << 16) |
+                    (static_cast<std::uint32_t>(sb[2]) <<  8));
+                // DDC0 Q — bytes 3..5
+                const std::int32_t qRaw = static_cast<std::int32_t>(
+                    (static_cast<std::uint32_t>(sb[3]) << 24) |
+                    (static_cast<std::uint32_t>(sb[4]) << 16) |
+                    (static_cast<std::uint32_t>(sb[5]) <<  8));
+                const double iVal = static_cast<double>(iRaw) * kInv2Pow31;
+                const double qVal = static_cast<double>(qRaw) * kInv2Pow31;
+                rmsAcc += iVal * iVal + qVal * qVal;
+                if (++rmsAccCount >= kRmsWindowSamples) {
+                    const double meanSq =
+                        rmsAcc / static_cast<double>(kRmsWindowSamples);
+                    const double db = (meanSq > 0.0)
+                        ? 10.0 * std::log10(meanSq)
+                        : -200.0;
+                    rx1DbFs_.store(db, std::memory_order_relaxed);
+                    rmsAcc      = 0.0;
+                    rmsAccCount = 0;
+                }
+            }
+        }
     }
 }
 

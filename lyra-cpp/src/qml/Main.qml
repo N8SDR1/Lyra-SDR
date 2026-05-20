@@ -19,7 +19,7 @@ ApplicationWindow {
     width: 1000
     height: 680
     visible: true
-    title: qsTr("Lyra — Hermes Lite 2 / 2+ — v0.0.3 (C++23 / Qt 6)")
+    title: qsTr("Lyra — Hermes Lite 2 / 2+ — v0.0.4 (C++23 / Qt 6)")
 
     // ---- top bar ----------------------------------------------
     header: ToolBar {
@@ -108,6 +108,35 @@ ApplicationWindow {
                         color: Stream.framingErrors > 0
                                ? "#ff7f7f" : "#888"
                         font.family: "Consolas"
+                    }
+                    // RX1 dBFS — first real radio reception lifted
+                    // into the C++ build (Step 2c).  Sentinel
+                    // -200.0 means "no samples yet"; show "—.— dBFS"
+                    // until the first ~50 ms RMS window completes.
+                    Label {
+                        text: {
+                            if (Stream.rx1DbFs <= -190.0) {
+                                return qsTr("RX1 —.— dBFS")
+                            }
+                            return qsTr("RX1 ") +
+                                   Stream.rx1DbFs.toFixed(1) +
+                                   qsTr(" dBFS")
+                        }
+                        // Color-code by signal strength: dim grey
+                        // for noise-floor territory, white for
+                        // moderate, cyan for strong, amber when
+                        // pushing the ADC, red for overload risk.
+                        color: {
+                            var v = Stream.rx1DbFs
+                            if (v <= -190.0) return "#888"
+                            if (v < -80.0) return "#999"
+                            if (v < -50.0) return "#dddddd"
+                            if (v < -20.0) return "#7fdfff"
+                            if (v <  -5.0) return "#ffd07f"
+                            return "#ff7f7f"
+                        }
+                        font.family: "Consolas"
+                        font.bold: true
                     }
                     Item { Layout.fillWidth: true }
                     Label {

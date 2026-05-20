@@ -97,6 +97,8 @@ class HL2Stream : public QObject {
     Q_PROPERTY(double  txDatagramsPerSec    READ txDatagramsPerSec    NOTIFY statsChanged)
     Q_PROPERTY(qint64  txTotalDatagrams     READ txTotalDatagrams     NOTIFY statsChanged)
     Q_PROPERTY(qint64  txSendErrors         READ txSendErrors         NOTIFY statsChanged)
+    // RX1 signal level (Step 2c — first real radio reception in C++)
+    Q_PROPERTY(double  rx1DbFs              READ rx1DbFs              NOTIFY statsChanged)
 
 public:
     explicit HL2Stream(QObject *parent = nullptr);
@@ -118,6 +120,12 @@ public:
     double  txDatagramsPerSec() const { return txDgPerSec_; }
     qint64  txTotalDatagrams()  const { return txTotalDg_.load(std::memory_order_relaxed); }
     qint64  txSendErrors()      const { return txSendErrors_.load(std::memory_order_relaxed); }
+    // rx1DbFs — RMS magnitude of the RX1 baseband IQ stream in
+    // dBFS (full scale = 1.0 magnitude after normalizing the
+    // gateware's 24-bit signed samples).  Updated by the RX
+    // worker thread every 50 ms (9600 samples at 192 kHz);
+    // initial sentinel -200.0 means "no samples yet."
+    double  rx1DbFs()           const { return rx1DbFs_.load(std::memory_order_relaxed); }
 
 public slots:
     // Open the stream to the radio at `ip`.  Creates one native UDP
@@ -157,6 +165,11 @@ private:
     std::atomic<qint64>  txWindowDg_{0};
     std::atomic<qint64>  txSendErrors_{0};
     std::atomic<quint32> txSeq_{0};
+    // Step 2c: RX1 dBFS, written by the RX worker thread.  Sentinel
+    // -200.0 = "no samples yet" / pre-first-window.  std::atomic<double>
+    // is lock-free on x86_64 so the main-thread read in the Q_PROPERTY
+    // getter doesn't take a lock.
+    std::atomic<double>  rx1DbFs_{-200.0};
     double               dgPerSec_   = 0.0;
     double               txDgPerSec_ = 0.0;
     QString              targetIp_;
