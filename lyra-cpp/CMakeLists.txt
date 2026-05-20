@@ -57,6 +57,15 @@ target_link_libraries(lyra PRIVATE
     Qt6::Network
 )
 
+# Step 2b: HL2Stream uses raw WinSock2 (sendto/recvfrom from
+# dedicated OS threads -- one shared native socket) and Win32
+# CreateWaitableTimerExW (HIGH_RESOLUTION 380 Hz EP2 keepalive
+# cadence).  Link ws2_32 for WinSock2.  CreateWaitableTimerExW is
+# in kernel32 which the MSVC toolchain links by default.
+if(WIN32)
+    target_link_libraries(lyra PRIVATE ws2_32)
+endif()
+
 # MSVC: enable /utf-8 (sane source encoding) and the standards-
 # conformant preprocessor (/Zc:preprocessor) — both required for
 # clean C++23 + Qt headers on MSVC v143/v144.

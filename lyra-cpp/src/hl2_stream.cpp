@@ -1,21 +1,35 @@
-// Lyra — HPSDR Protocol 1 stream implementation (EP6 receive path).
-// See hl2_stream.h for the protocol reference + Step 2a scope.
+// Lyra — HPSDR Protocol 1 stream implementation (EP6 receive + EP2
+// keepalive).  See hl2_stream.h for the locked architecture +
+// protocol reference.
 
 #include "hl2_stream.h"
 
-#include <QUdpSocket>
-#include <QHostAddress>
+// WinSock2 MUST be included before windows.h to avoid winsock 1.x
+// being pulled in via windows.h transitively.  NOMINMAX keeps the
+// windows.h macros from clobbering std::min/std::max.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+
 #include <QByteArray>
 #include <QMetaObject>
 #include <Qt>
+#include <algorithm>
+#include <cstring>
 
 namespace lyra::ipc {
 
 namespace {
 
-// Build the 64-byte host→radio control packet.  start=true sends
+// 64-byte HPSDR P1 host→radio control packet.  start=true sends
 // 0xEFFE 0x04 0x01 (start IQ); start=false sends 0xEFFE 0x04 0x00
-// (stop everything).  Remainder is zero padding per HPSDR P1.
+// (stop everything).
 QByteArray buildControlPacket(bool start) {
     QByteArray pkt(64, char{0});
     pkt[0] = static_cast<char>(0xEF);
@@ -23,6 +37,103 @@ QByteArray buildControlPacket(bool start) {
     pkt[2] = static_cast<char>(0x04);
     pkt[3] = static_cast<char>(start ? 0x01 : 0x00);
     return pkt;
+}
+
+// 1032-byte EP2 host→radio keepalive datagram.  Frame-0 C&C carries
+// the minimum-viable HL2 config (192 kHz IQ, nddc=4, MOX off,
+// duplex bit set) consistent with the post-START gateware default
+// — sending this every 2.6 ms satisfies the gateware watchdog
+// without re-configuring anything.  Audio out + TX I/Q bytes are
+// all zero (RX-only state).
+//
+// The sequence-number bytes [4..7] are placeholder zeros here;
+// the writer thread updates them in-place per send to avoid
+// allocating a new QByteArray 380 times per second.
+QByteArray buildEp2KeepaliveTemplate() {
+    QByteArray pkt(1032, char{0});
+    auto *u = reinterpret_cast<std::uint8_t*>(pkt.data());
+    // Metis header: magic + data + endpoint=0x02 (host→radio EP2)
+    u[0] = 0xEF; u[1] = 0xFE; u[2] = 0x01; u[3] = 0x02;
+    // bytes [4..7] = sequence (filled per send)
+
+    // USB frame 1 (offset 8): sync + frame-0 C&C + 504 zero data
+    u[ 8] = 0x7F; u[ 9] = 0x7F; u[10] = 0x7F;
+    u[11] = 0x00;   // C0 = frame address 0, MOX off
+    u[12] = 0x02;   // C1 = sample rate bits [1:0] = 10 = 192 kHz
+    u[13] = 0x00;   // C2 = no OC pins, no 10MHz ref override
+    u[14] = 0x00;   // C3 = no random, no dither, no preamp adjust
+    u[15] = 0x1C;   // C4 = nddc=4 (0x18) | duplex bit (0x04)
+    // bytes [16..519] = 504 bytes audio/IQ payload = zero
+
+    // USB frame 2 (offset 520): same minimal frame-0 C&C
+    u[520] = 0x7F; u[521] = 0x7F; u[522] = 0x7F;
+    u[523] = 0x00;
+    u[524] = 0x02;
+    u[525] = 0x00;
+    u[526] = 0x00;
+    u[527] = 0x1C;
+    // bytes [528..1031] = 504 bytes audio/IQ payload = zero
+
+    return pkt;
+}
+
+// Stringify a Windows error code (FormatMessage) for log lines.
+QString winsockError(int code) {
+    wchar_t *buf = nullptr;
+    const DWORD len = ::FormatMessageW(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER |
+        FORMAT_MESSAGE_FROM_SYSTEM     |
+        FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr, static_cast<DWORD>(code),
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        reinterpret_cast<wchar_t*>(&buf), 0, nullptr);
+    QString descr;
+    if (len && buf) {
+        descr = QString::fromWCharArray(buf, len).trimmed();
+        ::LocalFree(buf);
+    }
+    return descr.isEmpty()
+        ? QStringLiteral("WSA=%1").arg(code)
+        : QStringLiteral("WSA=%1: %2").arg(code).arg(descr);
+}
+
+// Open a native UDP socket bound to ANY:ephemeral.  Sets a 4 MiB
+// receive buffer (5 MB/sec EP6 wire rate × ~0.8 sec headroom for
+// brief GUI / scheduler stalls — much larger than the kernel
+// default 64 KiB which can drop packets under contention).
+SocketHandle openNativeUdpSocket(QString *errOut) {
+    const SOCKET s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) {
+        if (errOut) *errOut = QStringLiteral("socket: %1")
+                              .arg(winsockError(::WSAGetLastError()));
+        return kInvalidSocket;
+    }
+    int rcvbuf = 4 * 1024 * 1024;
+    ::setsockopt(s, SOL_SOCKET, SO_RCVBUF,
+                 reinterpret_cast<const char*>(&rcvbuf),
+                 sizeof(rcvbuf));
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_ANY);
+    local.sin_port = 0;
+    if (::bind(s, reinterpret_cast<sockaddr*>(&local),
+               sizeof(local)) != 0) {
+        if (errOut) *errOut = QStringLiteral("bind: %1")
+                              .arg(winsockError(::WSAGetLastError()));
+        ::closesocket(s);
+        return kInvalidSocket;
+    }
+    return static_cast<SocketHandle>(s);
+}
+
+quint16 localPortOf(SocketHandle sh) {
+    sockaddr_in local{};
+    int len = sizeof(local);
+    if (::getsockname(static_cast<SOCKET>(sh),
+                      reinterpret_cast<sockaddr*>(&local), &len) == 0) {
+        return ntohs(local.sin_port);
+    }
+    return 0;
 }
 
 } // namespace
@@ -34,8 +145,6 @@ HL2Stream::HL2Stream(QObject *parent) : QObject(parent) {
 }
 
 HL2Stream::~HL2Stream() {
-    // RAII: ensure the worker thread is stopped + joined before
-    // the QObject + atomics destruct.  close() is idempotent.
     close();
 }
 
@@ -45,199 +154,314 @@ void HL2Stream::open(const QString &ip) {
         return;
     }
     // Defensive: if a previous worker exited on its own (e.g. fatal
-    // error) and we never close()d, the jthread may still be joinable.
-    // Join it before reassigning (std::jthread move-assign would
-    // terminate() otherwise).
-    if (worker_.joinable()) {
-        worker_.request_stop();
-        worker_.join();
+    // error path) the jthread may still be joinable.  Join before
+    // reassigning so std::jthread move-assign doesn't terminate().
+    if (rxWorker_.joinable()) { rxWorker_.request_stop(); rxWorker_.join(); }
+    if (txWorker_.joinable()) { txWorker_.request_stop(); txWorker_.join(); }
+    if (socket_ != kInvalidSocket) {
+        ::closesocket(static_cast<SOCKET>(socket_));
+        socket_ = kInvalidSocket;
     }
 
+    QString err;
+    socket_ = openNativeUdpSocket(&err);
+    if (socket_ == kInvalidSocket) {
+        emit logLine(QStringLiteral("open: %1").arg(err));
+        return;
+    }
+    const quint16 lport = localPortOf(socket_);
+
     targetIp_ = ip;
-    totalDg_.store(0, std::memory_order_relaxed);
-    dropouts_.store(0, std::memory_order_relaxed);
-    framingErrors_.store(0, std::memory_order_relaxed);
-    windowDg_.store(0, std::memory_order_relaxed);
-    dgPerSec_ = 0.0;
+    totalDg_.store(0);  dropouts_.store(0);
+    framingErrors_.store(0);  windowDg_.store(0);
+    txTotalDg_.store(0);  txWindowDg_.store(0);
+    txSendErrors_.store(0);  txSeq_.store(0);
+    dgPerSec_   = 0.0;
+    txDgPerSec_ = 0.0;
     running_.store(true, std::memory_order_release);
     emit runningChanged();
     emit statsChanged();
-    emit logLine(QStringLiteral("opening EP6 stream to %1:%2 ...")
-                 .arg(ip).arg(kRadioPort));
+    emit logLine(QStringLiteral(
+        "opening EP6 stream to %1:%2 (local port %3) ...")
+        .arg(ip).arg(kRadioPort).arg(lport));
+
     statsTimer_.start();
 
-    worker_ = std::jthread([this, ip](std::stop_token stop) {
-        workerThread(std::move(stop), ip);
+    // Spawn RX first so it's already listening when TX sends START.
+    // Native UDP sendto + recvfrom on one socket from different
+    // threads is documented thread-safe at the OS level.
+    const SocketHandle sh = socket_;
+    rxWorker_ = std::jthread([this, sh](std::stop_token stop) {
+        rxWorkerLoop(std::move(stop), sh);
+    });
+    txWorker_ = std::jthread([this, sh, ip](std::stop_token stop) {
+        txWorkerLoop(std::move(stop), sh, ip);
     });
 }
 
 void HL2Stream::close() {
-    if (!running_.load(std::memory_order_acquire) && !worker_.joinable()) {
+    if (!running_.load(std::memory_order_acquire) &&
+        !rxWorker_.joinable() &&
+        !txWorker_.joinable() &&
+        socket_ == kInvalidSocket) {
         return;
     }
     emit logLine(QStringLiteral("closing EP6 stream ..."));
-    if (worker_.joinable()) {
-        worker_.request_stop();
-        worker_.join();
+
+    // Request stop on both workers BEFORE joining either so they
+    // wind down in parallel (RX: bounded by recv timeout 100 ms,
+    // TX: bounded by waitable-timer wait cap 100 ms).
+    if (rxWorker_.joinable()) rxWorker_.request_stop();
+    if (txWorker_.joinable()) txWorker_.request_stop();
+    if (rxWorker_.joinable()) rxWorker_.join();
+    if (txWorker_.joinable()) txWorker_.join();
+
+    // Both workers stopped — main thread sends STOP, then closes
+    // the socket.  Best-effort; if STOP doesn't reach the gateware
+    // its own watchdog will idle the stream within ~13 sec anyway.
+    if (socket_ != kInvalidSocket) {
+        sockaddr_in dest{};
+        dest.sin_family = AF_INET;
+        dest.sin_port   = htons(kRadioPort);
+        ::inet_pton(AF_INET,
+                    targetIp_.toLatin1().constData(),
+                    &dest.sin_addr);
+        const QByteArray stopPkt = buildControlPacket(false);
+        ::sendto(static_cast<SOCKET>(socket_),
+                 stopPkt.constData(), stopPkt.size(), 0,
+                 reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
+        ::closesocket(static_cast<SOCKET>(socket_));
+        socket_ = kInvalidSocket;
     }
+
     statsTimer_.stop();
-    // Final stats tick — flush the current window into the UI so the
-    // operator sees the final count, not a stale 0.
-    onStatsTick();
+    onStatsTick();  // flush the final window so the UI shows true totals
     running_.store(false, std::memory_order_release);
     emit runningChanged();
     emit logLine(QStringLiteral(
-        "stream closed: %1 datagrams, %2 dropouts, %3 framing errors")
+        "stream closed: RX %1 dg (%2 drop, %3 framing), "
+        "TX %4 keepalives (%5 send errors)")
         .arg(totalDg_.load())
         .arg(dropouts_.load())
-        .arg(framingErrors_.load()));
+        .arg(framingErrors_.load())
+        .arg(txTotalDg_.load())
+        .arg(txSendErrors_.load()));
 }
 
 void HL2Stream::onStatsTick() {
-    // Main-thread polling of the atomics the worker thread updates.
-    // 5 Hz is plenty for the operator UI; per-packet signal emits
-    // would be 5000+/sec which is bad practice (the GIL is gone but
-    // signal/slot machinery still has overhead).
-    const qint64 windowCount =
-        windowDg_.exchange(0, std::memory_order_acq_rel);
-    // Window is kStatPeriodMs (=200) ms long.
-    dgPerSec_ = static_cast<double>(windowCount) *
-                (1000.0 / static_cast<double>(kStatPeriodMs));
+    const qint64 rxWin = windowDg_.exchange(0,   std::memory_order_acq_rel);
+    const qint64 txWin = txWindowDg_.exchange(0, std::memory_order_acq_rel);
+    const double scale = 1000.0 / static_cast<double>(kStatPeriodMs);
+    dgPerSec_   = static_cast<double>(rxWin) * scale;
+    txDgPerSec_ = static_cast<double>(txWin) * scale;
     emit statsChanged();
 }
 
 void HL2Stream::onFatalError(QString reason) {
-    // Worker thread asked us (via QueuedConnection) to tear down due
-    // to an unrecoverable error.  Run the normal close() path so the
-    // UI returns to a clean idle state.
     emit logLine(QStringLiteral("FATAL: %1").arg(reason));
     close();
 }
 
-void HL2Stream::workerThread(std::stop_token stop, QString ip) {
-    // Dedicated OS thread for the EP6 RX path.  No Qt event loop on
-    // this thread — we use QUdpSocket synchronously with
-    // waitForReadyRead() as a blocking-with-timeout primitive, then
-    // drain all queued datagrams in a tight inner loop.  Diagnostic
-    // signals back to the main thread go via QueuedConnection so
-    // they cross the thread boundary safely.
+// ----------------------------------------------------------------
+// RX worker — dedicated OS thread, drains EP6 datagrams at line
+// rate (~5040 dg/sec at 192 kHz nddc=4), verifies Metis header +
+// USB sync, counts dropouts via sequence-number gaps.
 
-    QUdpSocket sock;
-    // Bind to all IPv4 interfaces, ephemeral port.  The OS routing
-    // table picks the correct NIC to reach the radio's IP — for a
-    // multi-NIC host (operator's typical setup) this is what gets
-    // the EP6 reply landing on the same NIC the START went out on.
-    if (!sock.bind(QHostAddress::AnyIPv4, 0,
-                   QAbstractSocket::DefaultForPlatform)) {
-        const QString err = sock.errorString();
-        QMetaObject::invokeMethod(this, [this, err]() {
-            onFatalError(QStringLiteral("bind: %1").arg(err));
-        }, Qt::QueuedConnection);
-        return;
-    }
-    const quint16 localPort = sock.localPort();
-    QMetaObject::invokeMethod(this, [this, localPort]() {
-        emit logLine(QStringLiteral("  bound local UDP port %1")
-                     .arg(localPort));
-    }, Qt::QueuedConnection);
+void HL2Stream::rxWorkerLoop(std::stop_token stop, SocketHandle sh) {
+    const SOCKET s = static_cast<SOCKET>(sh);
 
-    const QHostAddress radioAddr(ip);
-    const QByteArray startPkt = buildControlPacket(true);
-    const QByteArray stopPkt  = buildControlPacket(false);
+    // 100 ms recv timeout — bounds stop-token check latency.  The
+    // healthy wire rate is ~5040 dg/sec so recvfrom returns
+    // immediately almost every call; the timeout only fires during
+    // the brief window between Open and the first EP6 datagram.
+    DWORD timeout = 100;
+    ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                 reinterpret_cast<const char*>(&timeout),
+                 sizeof(timeout));
 
-    // Send START.  HPSDR P1 requires no handshake — the radio starts
-    // streaming EP6 datagrams within ~10 ms of receiving this.
-    const qint64 sent = sock.writeDatagram(startPkt, radioAddr, kRadioPort);
-    if (sent != startPkt.size()) {
-        const QString err = sock.errorString();
-        QMetaObject::invokeMethod(this, [this, err]() {
-            onFatalError(QStringLiteral("START send: %1").arg(err));
-        }, Qt::QueuedConnection);
-        sock.close();
-        return;
-    }
-    QMetaObject::invokeMethod(this, [this]() {
-        emit logLine(QStringLiteral(
-            "  START sent (0xEFFE 0x04 0x01 + 60 zeros), "
-            "awaiting EP6 datagrams ..."));
-    }, Qt::QueuedConnection);
-
-    // Tight recvfrom loop.
     quint32 expectedSeq = 0;
     bool    firstPacket = true;
     QByteArray buf;
     buf.resize(2048);  // generous; Metis EP6 datagrams are 1032 bytes
 
     while (!stop.stop_requested()) {
-        // 200 ms wait: long enough that we're not spinning when the
-        // stream is healthy (waitForReadyRead returns immediately
-        // when a datagram is queued), short enough that stop-token
-        // checks have sub-second latency for clean shutdown.
-        if (!sock.waitForReadyRead(200)) {
+        sockaddr_in from{};
+        int fromLen = sizeof(from);
+        const int n = ::recvfrom(s, buf.data(), buf.size(), 0,
+                                 reinterpret_cast<sockaddr*>(&from),
+                                 &fromLen);
+        if (n == SOCKET_ERROR) {
+            const int err = ::WSAGetLastError();
+            if (err == WSAETIMEDOUT) continue;          // expected
+            if (err == WSAEINTR     ||
+                err == WSAESHUTDOWN ||
+                err == WSAENOTSOCK)   break;            // teardown
+            framingErrors_.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
-        // Drain ALL queued datagrams before sleeping again — keeps
-        // the kernel UDP receive buffer from backing up at the
-        // ~5052 dg/sec wire rate.
-        while (sock.hasPendingDatagrams() && !stop.stop_requested()) {
-            const qint64 n =
-                sock.readDatagram(buf.data(), buf.size());
-            if (n < 0) continue;
-            if (n != kMetisDgSize) {
-                framingErrors_.fetch_add(1, std::memory_order_relaxed);
-                continue;
-            }
-            const auto *u =
-                reinterpret_cast<const std::uint8_t*>(buf.constData());
+        if (n != kMetisDgSize) {
+            framingErrors_.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        const auto *u =
+            reinterpret_cast<const std::uint8_t*>(buf.constData());
 
-            // Metis header: 0xEFFE 0x01 0x06 + 4-byte BE seq
-            if (u[0] != 0xEF || u[1] != 0xFE ||
-                u[2] != 0x01 || u[3] != 0x06) {
-                framingErrors_.fetch_add(1, std::memory_order_relaxed);
-                continue;
+        // Metis header: magic + data + endpoint=0x06 (radio→host)
+        if (u[0] != 0xEF || u[1] != 0xFE ||
+            u[2] != 0x01 || u[3] != 0x06) {
+            framingErrors_.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        const quint32 seq =
+            (static_cast<quint32>(u[4]) << 24) |
+            (static_cast<quint32>(u[5]) << 16) |
+            (static_cast<quint32>(u[6]) <<  8) |
+             static_cast<quint32>(u[7]);
+        if (firstPacket) {
+            expectedSeq = seq + 1;
+            firstPacket = false;
+        } else {
+            if (seq != expectedSeq) {
+                // Unsigned subtraction wraps cleanly across 2^32.
+                dropouts_.fetch_add(seq - expectedSeq,
+                                    std::memory_order_relaxed);
             }
-            const quint32 seq =
-                (static_cast<quint32>(u[4]) << 24) |
-                (static_cast<quint32>(u[5]) << 16) |
-                (static_cast<quint32>(u[6]) <<  8) |
-                 static_cast<quint32>(u[7]);
-            if (firstPacket) {
-                expectedSeq = seq + 1;
-                firstPacket = false;
-            } else {
-                if (seq != expectedSeq) {
-                    // Gap.  Unsigned subtraction wraps cleanly, so
-                    // this counts forward jumps correctly even
-                    // across the 2^32 boundary (which we won't hit
-                    // in any realistic session — 2^32 / 5052 ≈ 10
-                    // days continuous streaming — but be correct).
-                    const quint32 gap = seq - expectedSeq;
-                    dropouts_.fetch_add(gap, std::memory_order_relaxed);
-                }
-                expectedSeq = seq + 1;
-            }
+            expectedSeq = seq + 1;
+        }
+        // Both USB frames must begin 0x7F 0x7F 0x7F.
+        if (u[ 8] != 0x7F || u[ 9] != 0x7F || u[ 10] != 0x7F ||
+            u[520] != 0x7F || u[521] != 0x7F || u[522] != 0x7F) {
+            framingErrors_.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        totalDg_.fetch_add(1, std::memory_order_relaxed);
+        windowDg_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
 
-            // Both USB frames must begin with the 0x7F 0x7F 0x7F
-            // sync triplet.  This is a structural integrity check —
-            // if it ever fails on a real radio we have either bit
-            // corruption on the wire (rare) or a parser bug.
-            if (u[ 8] != 0x7F || u[ 9] != 0x7F || u[ 10] != 0x7F ||
-                u[520] != 0x7F || u[521] != 0x7F || u[522] != 0x7F) {
-                framingErrors_.fetch_add(1, std::memory_order_relaxed);
-                continue;
-            }
+// ----------------------------------------------------------------
+// TX worker — dedicated OS thread, sends one START packet on
+// entry then a 1032-byte EP2 keepalive every 2.6 ms (380 Hz)
+// using a Win32 HIGH_RESOLUTION waitable timer with drift-
+// corrected absolute scheduling.
 
-            totalDg_.fetch_add(1, std::memory_order_relaxed);
-            windowDg_.fetch_add(1, std::memory_order_relaxed);
+void HL2Stream::txWorkerLoop(std::stop_token stop, SocketHandle sh,
+                              QString ip) {
+    const SOCKET s = static_cast<SOCKET>(sh);
+
+    sockaddr_in dest{};
+    dest.sin_family = AF_INET;
+    dest.sin_port   = htons(kRadioPort);
+    ::inet_pton(AF_INET, ip.toLatin1().constData(), &dest.sin_addr);
+
+    // Send START.  Done from the TX thread (not from main or RX)
+    // so every host→radio packet originates from one operation
+    // context.  The radio responds with EP6 to whatever socket the
+    // start came from — that's the shared socket the RX thread is
+    // listening on, so EP6 routing is preserved.
+    const QByteArray startPkt = buildControlPacket(true);
+    if (::sendto(s, startPkt.constData(), startPkt.size(), 0,
+                 reinterpret_cast<sockaddr*>(&dest),
+                 sizeof(dest)) != startPkt.size()) {
+        const int err = ::WSAGetLastError();
+        QMetaObject::invokeMethod(this, [this, err]() {
+            onFatalError(QStringLiteral("START: %1")
+                         .arg(winsockError(err)));
+        }, Qt::QueuedConnection);
+        return;
+    }
+    QMetaObject::invokeMethod(this, [this]() {
+        emit logLine(QStringLiteral(
+            "  START sent (0xEFFE 0x04 0x01 + 60 zeros), "
+            "EP2 keepalive engaging @380 Hz"));
+    }, Qt::QueuedConnection);
+
+    // High-resolution waitable timer (Win10 1803+ — operator is on
+    // Windows 11 so supported).  Falls back to the legacy timer if
+    // somehow unavailable; legacy granularity is ~1 ms which is
+    // still plenty for the 13-sec gateware watchdog window.
+    HANDLE timer = ::CreateWaitableTimerExW(
+        nullptr, nullptr,
+        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+        TIMER_ALL_ACCESS);
+    if (!timer) {
+        timer = ::CreateWaitableTimerW(nullptr, FALSE, nullptr);
+    }
+    if (!timer) {
+        QMetaObject::invokeMethod(this, [this]() {
+            onFatalError(QStringLiteral(
+                "EP2 timer create failed"));
+        }, Qt::QueuedConnection);
+        return;
+    }
+
+    LARGE_INTEGER qpcFreq;
+    ::QueryPerformanceFrequency(&qpcFreq);
+    const LONGLONG periodTicks = qpcFreq.QuadPart / kEp2RateHz;
+    LARGE_INTEGER nextFire;
+    ::QueryPerformanceCounter(&nextFire);
+    nextFire.QuadPart += periodTicks;  // first fire 2.6 ms from now
+
+    // Pre-allocated template — only seq bytes [4..7] change per send.
+    QByteArray pkt = buildEp2KeepaliveTemplate();
+    auto *pktBytes = reinterpret_cast<std::uint8_t*>(pkt.data());
+
+    while (!stop.stop_requested()) {
+        LARGE_INTEGER now;
+        ::QueryPerformanceCounter(&now);
+        const LONGLONG remainTicks = nextFire.QuadPart - now.QuadPart;
+
+        if (remainTicks > 0) {
+            // Convert QPC ticks → 100ns timer ticks.
+            const LONGLONG remain100ns =
+                remainTicks * 10000000LL / qpcFreq.QuadPart;
+            // Cap the wait at 100 ms so stop_token has bounded
+            // latency even if remainTicks somehow blows up.
+            const LONGLONG wait100ns =
+                std::min<LONGLONG>(remain100ns, 1000000LL);
+            LARGE_INTEGER due;
+            due.QuadPart = -wait100ns;
+            ::SetWaitableTimer(timer, &due, 0,
+                               nullptr, nullptr, FALSE);
+            ::WaitForSingleObject(timer, INFINITE);
+            // Re-check time — if we capped the wait, loop back
+            // and wait the remaining slice.
+            ::QueryPerformanceCounter(&now);
+            if (now.QuadPart < nextFire.QuadPart) continue;
+        }
+        if (stop.stop_requested()) break;
+
+        // Update the sequence number bytes in-place (BE u32).
+        const quint32 seq =
+            txSeq_.fetch_add(1, std::memory_order_relaxed);
+        pktBytes[4] = static_cast<std::uint8_t>((seq >> 24) & 0xFF);
+        pktBytes[5] = static_cast<std::uint8_t>((seq >> 16) & 0xFF);
+        pktBytes[6] = static_cast<std::uint8_t>((seq >>  8) & 0xFF);
+        pktBytes[7] = static_cast<std::uint8_t>( seq        & 0xFF);
+
+        const int n = ::sendto(s, pkt.constData(), pkt.size(), 0,
+                               reinterpret_cast<sockaddr*>(&dest),
+                               sizeof(dest));
+        if (n != pkt.size()) {
+            txSendErrors_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            txTotalDg_.fetch_add(1, std::memory_order_relaxed);
+            txWindowDg_.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        // Schedule next fire — drift-corrected, NOT now+period.
+        nextFire.QuadPart += periodTicks;
+
+        // Resync if we've fallen way behind (e.g. system suspend,
+        // ≥10 periods late).  Avoids a catch-up burst that would
+        // saturate the gateware on resume from a long stall.
+        ::QueryPerformanceCounter(&now);
+        if (now.QuadPart - nextFire.QuadPart > periodTicks * 10) {
+            nextFire.QuadPart = now.QuadPart + periodTicks;
         }
     }
 
-    // Send STOP — best-effort.  The radio's gateware watchdog will
-    // also stop streaming if it doesn't see traffic for a few
-    // seconds, but a clean STOP returns it to idle immediately so
-    // the next open() doesn't see lingering EP6 traffic.
-    sock.writeDatagram(stopPkt, radioAddr, kRadioPort);
-    sock.close();
+    ::CloseHandle(timer);
 }
 
 } // namespace lyra::ipc

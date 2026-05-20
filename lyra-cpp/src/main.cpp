@@ -15,8 +15,25 @@
 #include <QQmlContext>
 #include <QtQml>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#endif
+
 int main(int argc, char *argv[])
 {
+#ifdef _WIN32
+    // Explicit WSAStartup before any native socket use (HL2Stream
+    // uses raw WinSock2 — see src/hl2_stream.cpp).  Qt would do it
+    // lazily for QUdpSocket, but we don't want to depend on Qt's
+    // init ordering for our wire path.  WSAStartup is refcounted —
+    // safe to call alongside Qt's.
+    WSADATA wsa;
+    ::WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+
     QGuiApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("Lyra"));
     app.setOrganizationName(QStringLiteral("N8SDR"));
@@ -56,5 +73,10 @@ int main(int argc, char *argv[])
     engine.loadFromModule(QStringLiteral("Lyra"),
                           QStringLiteral("Main"));
 
-    return app.exec();
+    const int rc = app.exec();
+
+#ifdef _WIN32
+    ::WSACleanup();
+#endif
+    return rc;
 }

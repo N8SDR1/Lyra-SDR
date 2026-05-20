@@ -1,11 +1,13 @@
-// Lyra — Step 2a QML shell.
+// Lyra — Step 2b QML shell.
 //
-// Discovery (Step 1) + Stream open/close + live EP6 stats (Step 2a).
-// Click "Discover HL2" to scan the LAN; click "Open" on a found radio
-// to start its EP6 stream on a dedicated OS thread; the banner shows
-// live datagrams/sec + total + dropouts + framing errors.  Click
-// "Close" to stop.  No DSP, no audio, no panadapter yet — Step 2a is
-// the wire-path-only proof.
+// Discovery (Step 1) + Stream open/close + live EP6 RX stats (Step 2a)
+// + EP2 keepalive TX stats (Step 2b).  Click "Discover HL2" to scan
+// the LAN; click "Open" on a found radio to start the bidirectional
+// stream (each direction on its own dedicated OS thread); the banner
+// shows live RX dg/s + total + dropouts + framing on the left and
+// TX dg/s + total + send-errors on the right.  Click "Close" to stop.
+// No DSP, no audio, no panadapter yet — Step 2b proves the gateware
+// watchdog stays satisfied, the stream runs indefinitely.
 
 import QtQuick
 import QtQuick.Controls
@@ -17,7 +19,7 @@ ApplicationWindow {
     width: 1000
     height: 680
     visible: true
-    title: qsTr("Lyra — Hermes Lite 2 / 2+ — v0.0.2 (C++23 / Qt 6)")
+    title: qsTr("Lyra — Hermes Lite 2 / 2+ — v0.0.3 (C++23 / Qt 6)")
 
     // ---- top bar ----------------------------------------------
     header: ToolBar {
@@ -52,76 +54,152 @@ ApplicationWindow {
         spacing: 0
 
         // Live stream-stats banner.  Only visible while a stream is
-        // open.  Updates at 5 Hz from the worker-thread atomics.
+        // open.  Two-row layout: RX (radio→host EP6) on top, TX
+        // (host→radio EP2 keepalive) on bottom.  Updates at 5 Hz
+        // from the worker-thread atomics; the wire path itself
+        // runs on its own dedicated OS threads at full line rate.
         Rectangle {
             id: streamBanner
             Layout.fillWidth: true
-            implicitHeight: visible ? 40 : 0
+            implicitHeight: visible ? 64 : 0
             visible: Stream.running
             color: "#0a2a0a"
             border.color: "#2a6a2a"
             border.width: 1
-            RowLayout {
+            ColumnLayout {
                 anchors.fill: parent
                 anchors.leftMargin: 12
                 anchors.rightMargin: 12
-                spacing: 18
+                anchors.topMargin: 4
+                anchors.bottomMargin: 4
+                spacing: 2
 
-                Label {
-                    text: qsTr("● STREAMING  ") + Stream.targetIp
-                    color: "#7fff7f"
-                    font.bold: true
-                    font.family: "Consolas"
-                }
-                Label {
-                    text: Stream.datagramsPerSec.toFixed(0) +
-                          qsTr(" dg/s")
-                    color: "#cccccc"
-                    font.family: "Consolas"
-                }
-                Label {
-                    text: Stream.totalDatagrams + qsTr(" total")
-                    color: "#cccccc"
-                    font.family: "Consolas"
-                }
-                Label {
-                    text: Stream.dropouts + qsTr(" drop")
-                    color: Stream.dropouts > 0 ? "#ff7f7f" : "#888"
-                    font.family: "Consolas"
-                }
-                Label {
-                    text: Stream.framingErrors + qsTr(" framing")
-                    color: Stream.framingErrors > 0
-                           ? "#ff7f7f" : "#888"
-                    font.family: "Consolas"
-                }
-                Item { Layout.fillWidth: true }
-                Label {
-                    // ~5052 dg/s is the expected healthy rate at
-                    // 48 kHz × 19 slots × 2 USB frames per UDP
-                    // datagram.  Show "OK" once we're inside ±5 %.
-                    text: {
-                        if (Stream.datagramsPerSec >= 4800 &&
-                            Stream.datagramsPerSec <= 5300) {
-                            return qsTr("WIRE OK")
-                        }
-                        if (Stream.datagramsPerSec === 0) {
-                            return qsTr("starting...")
-                        }
-                        return qsTr("rate off")
+                // RX row -- radio -> host EP6 data
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 18
+                    Label {
+                        text: qsTr("● RX  ") + Stream.targetIp
+                        color: "#7fff7f"
+                        font.bold: true
+                        font.family: "Consolas"
                     }
-                    color: {
-                        if (Stream.datagramsPerSec >= 4800 &&
-                            Stream.datagramsPerSec <= 5300) {
-                            return "#7fff7f"
-                        }
-                        if (Stream.datagramsPerSec === 0) {
-                            return "#ffd07f"
-                        }
-                        return "#ff7f7f"
+                    Label {
+                        text: Stream.datagramsPerSec.toFixed(0) +
+                              qsTr(" dg/s")
+                        color: "#cccccc"
+                        font.family: "Consolas"
                     }
-                    font.family: "Consolas"
-                    font.bold: true
+                    Label {
+                        text: Stream.totalDatagrams + qsTr(" total")
+                        color: "#cccccc"
+                        font.family: "Consolas"
+                    }
+                    Label {
+                        text: Stream.dropouts + qsTr(" drop")
+                        color: Stream.dropouts > 0 ? "#ff7f7f" : "#888"
+                        font.family: "Consolas"
+                    }
+                    Label {
+                        text: Stream.framingErrors + qsTr(" framing")
+                        color: Stream.framingErrors > 0
+                               ? "#ff7f7f" : "#888"
+                        font.family: "Consolas"
+                    }
+                    Item { Layout.fillWidth: true }
+                    Label {
+                        // ~5052 dg/s expected at 192 kHz nddc=4.
+                        // Distinguish the three failure modes
+                        // (starting up / RX stalled while TX is
+                        // healthy / rate mismatch) so the operator
+                        // sees what's actually going on.
+                        text: {
+                            if (Stream.datagramsPerSec >= 4800 &&
+                                Stream.datagramsPerSec <= 5300) {
+                                return qsTr("WIRE OK")
+                            }
+                            if (Stream.datagramsPerSec === 0 &&
+                                Stream.txDatagramsPerSec >= 300) {
+                                return qsTr("RX stalled")
+                            }
+                            if (Stream.datagramsPerSec === 0) {
+                                return qsTr("starting...")
+                            }
+                            return qsTr("rate off")
+                        }
+                        color: {
+                            if (Stream.datagramsPerSec >= 4800 &&
+                                Stream.datagramsPerSec <= 5300) {
+                                return "#7fff7f"
+                            }
+                            if (Stream.datagramsPerSec === 0 &&
+                                Stream.txDatagramsPerSec >= 300) {
+                                return "#ff7f7f"
+                            }
+                            if (Stream.datagramsPerSec === 0) {
+                                return "#ffd07f"
+                            }
+                            return "#ff7f7f"
+                        }
+                        font.family: "Consolas"
+                        font.bold: true
+                    }
+                }
+
+                // TX row -- host -> radio EP2 keepalive
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 18
+                    Label {
+                        text: qsTr("● TX  keepalive")
+                        color: "#7fff7f"
+                        font.bold: true
+                        font.family: "Consolas"
+                    }
+                    Label {
+                        text: Stream.txDatagramsPerSec.toFixed(0) +
+                              qsTr(" dg/s")
+                        color: "#cccccc"
+                        font.family: "Consolas"
+                    }
+                    Label {
+                        text: Stream.txTotalDatagrams + qsTr(" total")
+                        color: "#cccccc"
+                        font.family: "Consolas"
+                    }
+                    Label {
+                        text: Stream.txSendErrors + qsTr(" errors")
+                        color: Stream.txSendErrors > 0
+                               ? "#ff7f7f" : "#888"
+                        font.family: "Consolas"
+                    }
+                    Item { Layout.fillWidth: true }
+                    Label {
+                        // 380 Hz expected (= 48 kHz audio / 126
+                        // samples per datagram).  Tight ±10 % band.
+                        text: {
+                            if (Stream.txDatagramsPerSec >= 340 &&
+                                Stream.txDatagramsPerSec <= 420) {
+                                return qsTr("KEEPALIVE OK")
+                            }
+                            if (Stream.txDatagramsPerSec === 0) {
+                                return qsTr("starting...")
+                            }
+                            return qsTr("cadence off")
+                        }
+                        color: {
+                            if (Stream.txDatagramsPerSec >= 340 &&
+                                Stream.txDatagramsPerSec <= 420) {
+                                return "#7fff7f"
+                            }
+                            if (Stream.txDatagramsPerSec === 0) {
+                                return "#ffd07f"
+                            }
+                            return "#ff7f7f"
+                        }
+                        font.family: "Consolas"
+                        font.bold: true
+                    }
                 }
             }
         }
