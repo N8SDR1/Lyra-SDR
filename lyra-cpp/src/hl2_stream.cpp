@@ -317,28 +317,44 @@ void HL2Stream::rxWorkerLoop(std::stop_token stop, SocketHandle sh) {
             (static_cast<quint32>(u[5]) << 16) |
             (static_cast<quint32>(u[6]) <<  8) |
              static_cast<quint32>(u[7]);
+        // The HL2 gateware (ak4951v4 variant + every other HL2
+        // gateware that shares this Verilog) implements the EP6
+        // sequence counter as a 20-bit register, NOT 32-bit:
+        //
+        //   logic [19:0] ep6_seq_no = 20'h0;
+        //   ...
+        //   3'h3: udp_data_next = 8'h00;                       // hi byte
+        //   3'h2: udp_data_next = {4'h00, ep6_seq_no[19:16]};  // hi 4b=0
+        //   3'h1: udp_data_next = ep6_seq_no[15:8];
+        //   3'h0: udp_data_next = ep6_seq_no[7:0];
+        //         ep6_seq_no_next = ep6_seq_no + 'h1;          // wraps 2^20
+        //
+        // (gateware source verified 2026-05-20 — RTL of the HL2+
+        // ak4951v4 variant running on the operator's bench.)
+        //
+        // At ~5053 dg/sec the counter wraps every 207.5 sec
+        // (= 3 min 27 sec).  Treating the sequence as a 32-bit
+        // monotonic field (per the generic HPSDR P1 spec) would
+        // therefore flag every legitimate wrap as a "seq error",
+        // burying real diagnostic value in deterministic noise —
+        // operator HL2+ bench caught this on the first long run
+        // (10 false alarms over 35 min = exactly 10 wraps).  We
+        // mask to 20 bits when computing the next-expected so a
+        // wrap from 0xFFFFF -> 0x00000 produces no false alarm
+        // and every counted seqError is a REAL packet-loss event.
+        // The mask is also forward-safe for the v0.4 ANAN family:
+        // a hypothetical 32-bit-counter radio's wrap is one event
+        // per 2^32 packets ≈ 5 days at typical rates, negligible.
+        constexpr quint32 kSeqMask20 = 0x000FFFFF;
+
         if (firstPacket) {
-            expectedSeq = seq + 1;
+            expectedSeq = (seq + 1) & kSeqMask20;
             firstPacket = false;
         } else {
-            // Count ANY sequence anomaly as ONE event — not as the
-            // arithmetic gap.  Reason: the gateware can reset its
-            // sequence counter transiently (operator HL2+ bench
-            // 2026-05-20 caught one such reset during a 4-minute
-            // continuous run).  Summing `seq - expectedSeq` then
-            // wraps unsigned u32 and reports nonsense like
-            // 4 293 918 720 "drops" for one ~1 M-packet backward
-            // jump.  Event-count is the honest diagnostic — the
-            // operator sees "1 seq err" and knows ONE anomaly
-            // happened (whether forward gap, backward jump, or
-            // genuine 32-bit wrap that happened to miss a packet).
-            // Natural 2^32 wrap with no packet loss produces
-            // seq == expectedSeq via expectedSeq's own wrap and
-            // does not trip this branch.
             if (seq != expectedSeq) {
                 seqErrors_.fetch_add(1, std::memory_order_relaxed);
             }
-            expectedSeq = seq + 1;
+            expectedSeq = (seq + 1) & kSeqMask20;
         }
         // Both USB frames must begin 0x7F 0x7F 0x7F.
         if (u[ 8] != 0x7F || u[ 9] != 0x7F || u[ 10] != 0x7F ||
