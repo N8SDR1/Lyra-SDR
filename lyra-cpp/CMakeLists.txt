@@ -37,6 +37,8 @@ qt_add_executable(lyra
     src/main.cpp
     src/hl2_discovery.h
     src/hl2_discovery.cpp
+    src/hl2_stream.h
+    src/hl2_stream.cpp
 )
 
 # QML module — keeps Main.qml inside the binary as a Qt resource so

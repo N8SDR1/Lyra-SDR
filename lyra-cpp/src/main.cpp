@@ -8,6 +8,7 @@
 // wire path.
 
 #include "hl2_discovery.h"
+#include "hl2_stream.h"
 
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
@@ -32,11 +33,19 @@ int main(int argc, char *argv[])
     // (QQmlEngine refuses cross-thread connect from QML).
     auto *discovery = new lyra::ipc::HL2Discovery(&app);
 
-    // Expose the worker to QML as a context property so Main.qml
-    // can bind to its signals + invoke scan() from a Button click.
+    // Step 2a: the stream object opens the EP6 RX path to a
+    // selected radio on its OWN dedicated OS thread (std::jthread
+    // inside HL2Stream — see hl2_stream.h for the locked
+    // architecture rationale).  Exposed to QML as `Stream`.
+    auto *stream = new lyra::ipc::HL2Stream(&app);
+
+    // Expose the workers to QML as context properties so Main.qml
+    // can bind to their signals + invoke their slots from buttons.
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(
         QStringLiteral("Discovery"), discovery);
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("Stream"), stream);
 
     // Load the QML module's Main.qml entry.  URI 'Lyra' matches
     // qt_add_qml_module() in CMakeLists.txt.
