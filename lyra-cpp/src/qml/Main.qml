@@ -96,8 +96,11 @@ ApplicationWindow {
                         font.family: "Consolas"
                     }
                     Label {
-                        text: Stream.dropouts + qsTr(" drop")
-                        color: Stream.dropouts > 0 ? "#ff7f7f" : "#888"
+                        // Count of sequence-number anomaly EVENTS
+                        // (one per occurrence, not summed by gap
+                        // magnitude — see hl2_stream.cpp comment).
+                        text: Stream.seqErrors + qsTr(" seq err")
+                        color: Stream.seqErrors > 0 ? "#ffd07f" : "#888"
                         font.family: "Consolas"
                     }
                     Label {

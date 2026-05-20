@@ -91,7 +91,7 @@ class HL2Stream : public QObject {
     Q_PROPERTY(QString targetIp             READ targetIp             NOTIFY runningChanged)
     Q_PROPERTY(double  datagramsPerSec      READ datagramsPerSec      NOTIFY statsChanged)
     Q_PROPERTY(qint64  totalDatagrams       READ totalDatagrams       NOTIFY statsChanged)
-    Q_PROPERTY(qint64  dropouts             READ dropouts             NOTIFY statsChanged)
+    Q_PROPERTY(qint64  seqErrors            READ seqErrors            NOTIFY statsChanged)
     Q_PROPERTY(qint64  framingErrors        READ framingErrors        NOTIFY statsChanged)
     // TX direction (Step 2b — EP2 keepalive)
     Q_PROPERTY(double  txDatagramsPerSec    READ txDatagramsPerSec    NOTIFY statsChanged)
@@ -106,7 +106,14 @@ public:
     QString targetIp()          const { return targetIp_; }
     double  datagramsPerSec()   const { return dgPerSec_; }
     qint64  totalDatagrams()    const { return totalDg_.load(std::memory_order_relaxed); }
-    qint64  dropouts()          const { return dropouts_.load(std::memory_order_relaxed); }
+    // seqErrors: count of EP6 datagrams whose sequence number was
+    // anything other than (previous+1).  Incremented by 1 per event
+    // — NOT summed by the gap magnitude — so a one-shot sequence
+    // counter reset (which the HL2 gateware can do transiently)
+    // shows up as "1 seq err" instead of nonsense.  Matches the
+    // reference-implementation diagnostic posture; see CLAUDE.md
+    // §15.x / FEATURES.md for the rationale.
+    qint64  seqErrors()         const { return seqErrors_.load(std::memory_order_relaxed); }
     qint64  framingErrors()     const { return framingErrors_.load(std::memory_order_relaxed); }
     double  txDatagramsPerSec() const { return txDgPerSec_; }
     qint64  txTotalDatagrams()  const { return txTotalDg_.load(std::memory_order_relaxed); }
@@ -143,7 +150,7 @@ private:
     std::jthread         txWorker_;
     std::atomic<bool>    running_{false};
     std::atomic<qint64>  totalDg_{0};
-    std::atomic<qint64>  dropouts_{0};
+    std::atomic<qint64>  seqErrors_{0};
     std::atomic<qint64>  framingErrors_{0};
     std::atomic<qint64>  windowDg_{0};
     std::atomic<qint64>  txTotalDg_{0};

@@ -172,7 +172,7 @@ void HL2Stream::open(const QString &ip) {
     const quint16 lport = localPortOf(socket_);
 
     targetIp_ = ip;
-    totalDg_.store(0);  dropouts_.store(0);
+    totalDg_.store(0);  seqErrors_.store(0);
     framingErrors_.store(0);  windowDg_.store(0);
     txTotalDg_.store(0);  txWindowDg_.store(0);
     txSendErrors_.store(0);  txSeq_.store(0);
@@ -239,10 +239,10 @@ void HL2Stream::close() {
     running_.store(false, std::memory_order_release);
     emit runningChanged();
     emit logLine(QStringLiteral(
-        "stream closed: RX %1 dg (%2 drop, %3 framing), "
+        "stream closed: RX %1 dg (%2 seq errs, %3 framing), "
         "TX %4 keepalives (%5 send errors)")
         .arg(totalDg_.load())
-        .arg(dropouts_.load())
+        .arg(seqErrors_.load())
         .arg(framingErrors_.load())
         .arg(txTotalDg_.load())
         .arg(txSendErrors_.load()));
@@ -321,10 +321,22 @@ void HL2Stream::rxWorkerLoop(std::stop_token stop, SocketHandle sh) {
             expectedSeq = seq + 1;
             firstPacket = false;
         } else {
+            // Count ANY sequence anomaly as ONE event — not as the
+            // arithmetic gap.  Reason: the gateware can reset its
+            // sequence counter transiently (operator HL2+ bench
+            // 2026-05-20 caught one such reset during a 4-minute
+            // continuous run).  Summing `seq - expectedSeq` then
+            // wraps unsigned u32 and reports nonsense like
+            // 4 293 918 720 "drops" for one ~1 M-packet backward
+            // jump.  Event-count is the honest diagnostic — the
+            // operator sees "1 seq err" and knows ONE anomaly
+            // happened (whether forward gap, backward jump, or
+            // genuine 32-bit wrap that happened to miss a packet).
+            // Natural 2^32 wrap with no packet loss produces
+            // seq == expectedSeq via expectedSeq's own wrap and
+            // does not trip this branch.
             if (seq != expectedSeq) {
-                // Unsigned subtraction wraps cleanly across 2^32.
-                dropouts_.fetch_add(seq - expectedSeq,
-                                    std::memory_order_relaxed);
+                seqErrors_.fetch_add(1, std::memory_order_relaxed);
             }
             expectedSeq = seq + 1;
         }
