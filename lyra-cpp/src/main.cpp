@@ -9,6 +9,7 @@
 
 #include "hl2_discovery.h"
 #include "hl2_stream.h"
+#include "wdsp_native.h"
 
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
@@ -73,6 +74,16 @@ int main(int argc, char *argv[])
     // architecture rationale).  Exposed to QML as `Stream`.
     auto *stream = new lyra::ipc::HL2Stream(&app);
 
+    // Step 3a: bundle the WDSP DSP engine.  Created here so the
+    // QML context-property is available when Main.qml loads, but
+    // load() itself is DEFERRED until AFTER engine.loadFromModule
+    // — otherwise the logLine signal we emit on success/failure
+    // arrives before the QML Connections are wired and the
+    // operator never sees the result.  Step 3a's scope is
+    // load-or-fail only — no symbols resolved yet (Step 3b), no
+    // DSP yet (Step 3c+).
+    auto *wdsp = new lyra::dsp::WdspNative(&app);
+
     // Expose the workers to QML as context properties so Main.qml
     // can bind to their signals + invoke their slots from buttons.
     QQmlApplicationEngine engine;
@@ -80,6 +91,8 @@ int main(int argc, char *argv[])
         QStringLiteral("Discovery"), discovery);
     engine.rootContext()->setContextProperty(
         QStringLiteral("Stream"), stream);
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("Wdsp"), wdsp);
 
     // Load the QML module's Main.qml entry.  URI 'Lyra' matches
     // qt_add_qml_module() in CMakeLists.txt.
@@ -89,6 +102,12 @@ int main(int argc, char *argv[])
         Qt::QueuedConnection);
     engine.loadFromModule(QStringLiteral("Lyra"),
                           QStringLiteral("Main"));
+
+    // QML is now loaded — Wdsp's logLine signal is wired to the
+    // log panel.  Safe to attempt the DLL load; the result line
+    // will appear in the UI immediately (DirectConnection,
+    // same-thread).
+    wdsp->load();
 
     const int rc = app.exec();
 

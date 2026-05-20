@@ -50,6 +50,8 @@ qt_add_executable(lyra
     src/hl2_discovery.cpp
     src/hl2_stream.h
     src/hl2_stream.cpp
+    src/wdsp_native.h
+    src/wdsp_native.cpp
 )
 
 # QML module — keeps Main.qml inside the binary as a Qt resource so
@@ -76,6 +78,31 @@ target_link_libraries(lyra PRIVATE
 if(WIN32)
     target_link_libraries(lyra PRIVATE ws2_32)
 endif()
+
+# Step 3a: bundle the WDSP DSP engine DLLs (`wdsp.dll` +
+# `libfftw3-3.dll` + `libfftw3f-3.dll` + `rnnoise.dll` +
+# `specbleach.dll`) into a `_native/` subdirectory next to
+# `lyra.exe` at build time.  WdspNative::load() resolves them
+# from that path via AddDllDirectory + LoadLibraryExW.
+#
+# Provenance: DLLs originate from the upstream WDSP source
+# (Warren Pratt NR0V, GPL v3+ -- link-compatible with Lyra's
+# GPL v3+ license).  Bundled as binaries because the Python
+# tree's _native/ already has the matching set (MSVC-built,
+# x64) and re-building from source is an orthogonal task --
+# CLAUDE.md §14 documents the toolchain.
+# `copy_directory` auto-creates the destination directory + copies
+# all files in one step.  Doing per-file `copy_if_different` calls
+# fails on first build because the `_native/` dest dir doesn't
+# exist yet (CMake's per-file copy doesn't create parent dirs).
+add_custom_command(TARGET lyra POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "$<TARGET_FILE_DIR:lyra>/_native"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/_native"
+        "$<TARGET_FILE_DIR:lyra>/_native"
+    COMMENT "Bundling WDSP DLLs into _native/"
+    VERBATIM)
 
 # MSVC: enable /utf-8 (sane source encoding) and the standards-
 # conformant preprocessor (/Zc:preprocessor) — both required for

@@ -26,6 +26,16 @@ CMakeFiles/
 *.exe
 *.dll
 
+# Tracked WDSP / FFTW / RNNoise / SpecBleach binaries -- these are
+# load-bearing GPL v3+ dependencies that ship WITH the source so
+# the repo is build-from-scratch reproducible.  Per FEATURES.md §0
+# the locked architecture row links WDSP directly into Lyra; these
+# are NOT build output (they originate in lyra/dsp/_native/ in the
+# Python tree, bundled identically).  Negate the *.dll rule above
+# for this single directory only.
+!_native/
+!_native/*.dll
+
 # OS noise
 Thumbs.db
 .DS_Store

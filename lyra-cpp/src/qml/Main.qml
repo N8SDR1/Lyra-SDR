@@ -381,4 +381,12 @@ ApplicationWindow {
             logArea.text += "[strm] " + line + "\n"
         }
     }
+
+    // WDSP DLL loader reports here (Step 3a).
+    Connections {
+        target: Wdsp
+        function onLogLine(line) {
+            logArea.text += line + "\n"
+        }
+    }
 }
