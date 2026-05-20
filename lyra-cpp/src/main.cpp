@@ -12,7 +12,6 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
-#include <QThread>
 #include <QtQml>
 
 int main(int argc, char *argv[])
@@ -22,15 +21,16 @@ int main(int argc, char *argv[])
     app.setOrganizationName(QStringLiteral("N8SDR"));
     app.setOrganizationDomain(QStringLiteral("github.com/N8SDR1/Lyra-SDR"));
 
-    // Discovery lives in its OWN worker thread — Qt main thread
-    // (paint, QML scene graph, event loop) never blocks on UDP.
-    QThread discoveryThread;
-    discoveryThread.setObjectName(QStringLiteral("lyra-discovery"));
-    auto *discovery = new lyra::ipc::HL2Discovery();
-    discovery->moveToThread(&discoveryThread);
-    QObject::connect(&discoveryThread, &QThread::finished,
-                     discovery, &QObject::deleteLater);
-    discoveryThread.start();
+    // Discovery lives on the Qt main thread.  This is FINE: QUdpSocket
+    // is fully async / event-loop-driven on Qt (no blocking recvfrom,
+    // no GIL, no Python).  The "wire path on its OWN OS thread"
+    // requirement applies to the real-time EP2 writer (380 Hz
+    // cadence) and the RX loop (~5000 datagrams/s) — those land in
+    // dedicated threads in later commits.  Discovery is one-shot
+    // bursty UDP — it does not need its own thread, and putting it
+    // on one breaks QML's main-thread Connections requirement
+    // (QQmlEngine refuses cross-thread connect from QML).
+    auto *discovery = new lyra::ipc::HL2Discovery(&app);
 
     // Expose the worker to QML as a context property so Main.qml
     // can bind to its signals + invoke scan() from a Button click.
@@ -47,10 +47,5 @@ int main(int argc, char *argv[])
     engine.loadFromModule(QStringLiteral("Lyra"),
                           QStringLiteral("Main"));
 
-    const int rc = app.exec();
-
-    // Clean shutdown — stop the worker thread before destruction.
-    discoveryThread.quit();
-    discoveryThread.wait(2000);
-    return rc;
+    return app.exec();
 }
