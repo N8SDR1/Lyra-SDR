@@ -31,6 +31,51 @@
 
 namespace lyra::dsp {
 
+// WDSP C ABI function pointer types.  All extern "C" -- no name
+// mangling, matching the wdsp.dll exports directly.  Signatures
+// verified against the upstream WDSP source (Warren Pratt NR0V,
+// GPL v3+).  Parameter types are LOAD-BEARING -- a single
+// `int` vs `double` mismatch on Windows x86_64 causes a
+// register-class calling-convention bug (cf. the v0.0.9.8.1
+// SetRXAAGCSlope regression in the Python tree, CLAUDE.md
+// §15.26).  Do NOT modify these without re-verifying.
+extern "C" {
+using fn_OpenChannel_t = void (*)(
+    int channel, int in_size, int dsp_size,
+    int input_samplerate, int dsp_rate, int output_samplerate,
+    int type, int state,
+    double tdelayup, double tslewup,
+    double tdelaydown, double tslewdown,
+    int block);
+using fn_CloseChannel_t        = void (*)(int channel);
+using fn_SetChannelState_t     = int  (*)(int channel, int state, int dmode);
+using fn_fexchange0_t          = void (*)(int channel,
+                                          double *in_buff,
+                                          double *out_buff,
+                                          int *error);
+using fn_SetRXAMode_t          = void (*)(int channel, int mode);
+using fn_RXASetPassband_t      = void (*)(int channel,
+                                          double f_low, double f_high);
+using fn_SetRXAAGCMode_t       = void (*)(int channel, int mode);
+using fn_SetRXAPanelBinaural_t = void (*)(int channel, int bin);
+using fn_WDSPwisdom_t          = int  (*)(char *directory);
+} // extern "C"
+
+// Resolved function pointers.  Step 3b populates these via
+// GetProcAddress at load() time; nullptr until then.  Step 3c+
+// reads them via WdspNative::api().
+struct WdspApi {
+    fn_OpenChannel_t         OpenChannel         = nullptr;
+    fn_CloseChannel_t        CloseChannel        = nullptr;
+    fn_SetChannelState_t     SetChannelState     = nullptr;
+    fn_fexchange0_t          fexchange0          = nullptr;
+    fn_SetRXAMode_t          SetRXAMode          = nullptr;
+    fn_RXASetPassband_t      RXASetPassband      = nullptr;
+    fn_SetRXAAGCMode_t       SetRXAAGCMode       = nullptr;
+    fn_SetRXAPanelBinaural_t SetRXAPanelBinaural = nullptr;
+    fn_WDSPwisdom_t          WDSPwisdom          = nullptr;
+};
+
 class WdspNative : public QObject {
     Q_OBJECT
     // Exposed to QML as a context property so the operator can
@@ -59,17 +104,26 @@ public:
     // do it at process exit.
     void unload();
 
+    // Access the resolved function-pointer table.  Step 3c+ uses
+    // this via `wdsp.api().OpenChannel(...)` etc.  All pointers
+    // are nullptr until load() succeeds.
+    const WdspApi &api() const { return api_; }
+
 signals:
     void loadedChanged();
     void logLine(QString line);
 
 private:
+    bool resolveSymbols();
+    void emitLog(const QString &line);   // mirror logLine -> qInfo console
+
     // We deliberately keep this as a `void*` so the header doesn't
     // drag windows.h through every translation unit that includes
     // it.  Cast to HMODULE in the cpp.
     void   *handle_ = nullptr;
     QString loadedFrom_;
     QString loadError_;
+    WdspApi api_;
 };
 
 } // namespace lyra::dsp

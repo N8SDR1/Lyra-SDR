@@ -12,9 +12,11 @@
 #include <windows.h>
 
 #include <QCoreApplication>
+#include <QDebug>
 #include <QDir>
 #include <QFileInfo>
 #include <QString>
+#include <QStringList>
 
 namespace lyra::dsp {
 
@@ -66,8 +68,8 @@ bool WdspNative::load() {
     if (!QFileInfo::exists(dllPath)) {
         loadError_ = QStringLiteral("wdsp.dll not found at %1")
                      .arg(dllPath);
-        emit logLine(QStringLiteral("[wdsp] LOAD FAILED: %1")
-                     .arg(loadError_));
+        emitLog(QStringLiteral("[wdsp] LOAD FAILED: %1")
+                .arg(loadError_));
         emit loadedChanged();
         return false;
     }
@@ -111,7 +113,7 @@ bool WdspNative::load() {
     if (!h) {
         const DWORD err = ::GetLastError();
         loadError_ = winError(err);
-        emit logLine(QStringLiteral(
+        emitLog(QStringLiteral(
             "[wdsp] LOAD FAILED: LoadLibraryExW(%1): %2")
             .arg(dllPath, loadError_));
         emit loadedChanged();
@@ -121,8 +123,81 @@ bool WdspNative::load() {
     handle_     = static_cast<void*>(h);
     loadedFrom_ = dllPath;
     loadError_.clear();
-    emit logLine(QStringLiteral("[wdsp] LOADED: %1").arg(dllPath));
+    emitLog(QStringLiteral("[wdsp] LOADED: %1").arg(dllPath));
+
+    // Step 3b: resolve the minimum WDSP entry points via
+    // GetProcAddress.  On any miss we unload + return false so the
+    // operator sees an explicit symbol-resolution failure rather
+    // than a deferred crash at first use in Step 3c.
+    if (!resolveSymbols()) {
+        ::FreeLibrary(h);
+        handle_ = nullptr;
+        loadedFrom_.clear();
+        emit loadedChanged();
+        return false;
+    }
+
     emit loadedChanged();
+    return true;
+}
+
+void WdspNative::emitLog(const QString &line) {
+    // Mirror every log line to both the QML log panel (via the
+    // logLine signal) AND the host's stdout via qInfo() -- the
+    // operator runs lyra.exe from a console specifically to
+    // capture diagnostics, so a one-stop place to read every
+    // status line is operator-friendly.  Cheap (one printf-like
+    // call); no production concern.
+    qInfo("%s", qPrintable(line));
+    emit logLine(line);
+}
+
+bool WdspNative::resolveSymbols() {
+    HMODULE mod = static_cast<HMODULE>(handle_);
+    if (!mod) return false;
+
+    QStringList missing;
+    int found = 0;
+    int total = 0;
+
+    // Wrapper resolves one symbol into the strongly-typed function
+    // pointer, increments the running tallies, and records the
+    // name on miss.  reinterpret_cast through FARPROC is the
+    // standard Win32 idiom (the MS docs explicitly bless this for
+    // GetProcAddress assignment to function-pointer types).
+    auto resolve = [&](auto &fnPtr, const char *name) {
+        ++total;
+        using FnT = std::remove_reference_t<decltype(fnPtr)>;
+        FARPROC p = ::GetProcAddress(mod, name);
+        if (p) {
+            fnPtr = reinterpret_cast<FnT>(p);
+            ++found;
+        } else {
+            fnPtr = nullptr;
+            missing << QString::fromLatin1(name);
+        }
+    };
+
+    resolve(api_.OpenChannel,         "OpenChannel");
+    resolve(api_.CloseChannel,        "CloseChannel");
+    resolve(api_.SetChannelState,     "SetChannelState");
+    resolve(api_.fexchange0,          "fexchange0");
+    resolve(api_.SetRXAMode,          "SetRXAMode");
+    resolve(api_.RXASetPassband,      "RXASetPassband");
+    resolve(api_.SetRXAAGCMode,       "SetRXAAGCMode");
+    resolve(api_.SetRXAPanelBinaural, "SetRXAPanelBinaural");
+    resolve(api_.WDSPwisdom,          "WDSPwisdom");
+
+    if (!missing.isEmpty()) {
+        loadError_ = QStringLiteral(
+            "symbols resolved %1/%2 -- MISSING: %3")
+            .arg(found).arg(total).arg(missing.join(QStringLiteral(", ")));
+        emitLog(QStringLiteral("[wdsp] %1").arg(loadError_));
+        return false;
+    }
+
+    emitLog(QStringLiteral("[wdsp] symbols: %1/%2 resolved")
+            .arg(found).arg(total));
     return true;
 }
 
