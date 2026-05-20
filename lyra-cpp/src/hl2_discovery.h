@@ -43,6 +43,7 @@
 #include <QSet>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace lyra::ipc {
 
@@ -97,7 +98,10 @@ private:
                     RadioInfo &out) const;
     void sendBroadcastFromAllSockets();
 
-    QList<std::unique_ptr<QUdpSocket>> sockets_;
+    // std::vector (not QList) because QList is value-semantic
+    // (implicitly shared / copy-on-write) and unique_ptr is
+    // move-only — QList tries to copy elements internally.
+    std::vector<std::unique_ptr<QUdpSocket>> sockets_;
     QSet<QString>                       foundMacs_;
     QTimer                              deadline_;
     QTimer                              attemptTimer_;

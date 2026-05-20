@@ -125,8 +125,9 @@ void HL2Discovery::scan(double timeoutSeconds, int attempts) {
 
     for (const QHostAddress &addr : ifaces) {
         auto sock = std::make_unique<QUdpSocket>(this);
-        sock->setSocketOption(QAbstractSocket::MulticastLoopbackOption, 1);
-        // SO_REUSEADDR so multiple interface-bound sockets coexist.
+        // SO_REUSEADDR so multiple interface-bound sockets coexist
+        // on the same port (the HL2 reply lands on whichever socket
+        // its routing table associated with the broadcast).
         if (!sock->bind(addr, 0,
                         QAbstractSocket::ShareAddress |
                         QAbstractSocket::ReuseAddressHint)) {

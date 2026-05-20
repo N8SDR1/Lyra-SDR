@@ -60,8 +60,11 @@ target_link_libraries(lyra PRIVATE
 # clean C++23 + Qt headers on MSVC v143/v144.
 if(MSVC)
     target_compile_options(lyra PRIVATE /utf-8 /Zc:preprocessor /W4 /permissive-)
-    # On Windows, GUI apps want WIN32 subsystem (no console window).
-    set_target_properties(lyra PROPERTIES WIN32_EXECUTABLE TRUE)
+    # Step 1 diagnostic build: leave WIN32_EXECUTABLE OFF so Qt
+    # diagnostic output (QML errors, qWarning, qFatal) prints to
+    # the parent console.  Flip to TRUE once the bench-validated
+    # binary is stable.
+    # set_target_properties(lyra PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 
 # Install / deploy hint (used later by windeployqt to bundle Qt DLLs
