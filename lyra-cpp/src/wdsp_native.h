@@ -109,6 +109,48 @@ public:
     // are nullptr until load() succeeds.
     const WdspApi &api() const { return api_; }
 
+    // Step 3c-i: FFTW WISDOM plumbing.  WDSP plans every internal
+    // FFT at FFTW_PATIENT (the most expensive planner tier).  With
+    // no cached wisdom file, FFTW_PATIENT re-runs in-process on
+    // every OpenChannel — multi-minute stall, with the UI frozen.
+    // ensureWisdom() resolves that by:
+    //
+    //   (a) computing Lyra-C++-PRIVATE wisdom dir
+    //       %APPDATA%\N8SDR\Lyra-cpp\fftw\  — note the `-cpp` suffix
+    //       so we never share with Python Lyra (which uses .../Lyra/
+    //       fftw/, leave it untouched per CLAUDE.md §15.26
+    //       isolation-by-directory rule);
+    //
+    //   (b) if `wdspWisdom00` exists in that dir, calling
+    //       api().WDSPwisdom(<dir>) IN-PROCESS — fast import,
+    //       <100 ms typical;
+    //
+    //   (c) if it does not, spawning `lyra.exe --build-wisdom <dir>`
+    //       as a SUBPROCESS — the subprocess does the multi-minute
+    //       FFTW_PATIENT search and writes the file, then exits;
+    //       the main process waits + then loads the cached result.
+    //       Subprocess isolation is mandatory because WDSPwisdom()
+    //       internally calls AllocConsole() + FreeConsole() which
+    //       hijacks stdout when run in a `--windowed` Qt app
+    //       (operator-bench-verified bite in the Python tree,
+    //       CLAUDE.md §15.26 commit f936b2e).
+    //
+    // Returns true on success.  Status messages stream through
+    // emitLog() (console + QML log panel).
+    bool ensureWisdom();
+
+    // Invoked by main.cpp when argv[1] == "--build-wisdom".  Runs
+    // ONLY the wisdom build in this process, then exits with code
+    // 0 (built ok) / 1 (no DLL) / 2 (no dir).  The parent process
+    // launched us with stdio piped to DEVNULL; AllocConsole's
+    // hijack is harmless because we never produce any output that
+    // anyone reads.
+    int runWisdomBuilderEntryPoint(const QString &targetDir);
+
+    // Returns the path Lyra C++ uses for the wisdom cache.  Public
+    // so test code / future Settings UI can read it.
+    static QString wisdomDir();
+
 signals:
     void loadedChanged();
     void logLine(QString line);

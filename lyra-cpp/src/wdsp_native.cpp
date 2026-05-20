@@ -14,7 +14,10 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileInfo>
+#include <QProcess>
+#include <QStandardPaths>
 #include <QString>
 #include <QStringList>
 
@@ -208,6 +211,179 @@ void WdspNative::unload() {
     loadedFrom_.clear();
     loadError_.clear();
     emit loadedChanged();
+}
+
+// ---------------------------------------------------------------
+// Step 3c-i: FFTW WISDOM plumbing.
+// ---------------------------------------------------------------
+
+QString WdspNative::wisdomDir() {
+    // Lyra-C++-PRIVATE directory.  Qt's GenericDataLocation
+    // resolves to %APPDATA%\ on Windows; we then carve out our
+    // own "N8SDR/Lyra-cpp/fftw/" subdir so we share with NEITHER
+    // Python Lyra (which uses .../N8SDR/Lyra/fftw/) NOR any other
+    // HPSDR app.  Isolation-by-directory per CLAUDE.md §15.26
+    // (the wisdom-file format isn't versioned; different WDSP
+    // builds can produce mutually-incompatible cached plans, so
+    // cross-app sharing is a hidden footgun we explicitly avoid).
+    const QString base = QStandardPaths::writableLocation(
+        QStandardPaths::GenericDataLocation);
+    return QDir::cleanPath(base +
+        QStringLiteral("/N8SDR/Lyra-cpp/fftw"));
+}
+
+namespace {
+
+// Hard-coded filename per WDSP source (wisdom.c) — same name
+// every HPSDR app produces; isolation is purely by directory.
+constexpr const char *kWisdomFilename = "wdspWisdom00";
+
+bool wisdomFileExists(const QString &dir) {
+    return QFileInfo::exists(QDir(dir).filePath(
+        QString::fromLatin1(kWisdomFilename)));
+}
+
+}  // namespace
+
+int WdspNative::runWisdomBuilderEntryPoint(const QString &targetDir) {
+    // Subprocess entry point.  Parent process spawned us with:
+    //
+    //   lyra.exe --build-wisdom <targetDir>
+    //
+    // We need wdsp.dll loaded + the WDSPwisdom symbol resolved
+    // before we can call it.  Reuse our normal load() path — it
+    // walks the same _native/ folder + resolves all 9 symbols.
+    // On success we call WDSPwisdom(<targetDir>) which does the
+    // multi-minute FFTW_PATIENT search inside WDSP, writes
+    // wdspWisdom00 in the target dir, then returns.
+    //
+    // AllocConsole + FreeConsole inside WDSPwisdom won't bite us
+    // here — we redirect stdio to nullDevice() in the parent's
+    // QProcess setup, and we don't read any output from this
+    // process.  Stdout corruption is irrelevant.
+    if (!load()) {
+        return 1;   // DLL couldn't be loaded
+    }
+    if (!api_.WDSPwisdom) {
+        return 1;   // unexpected — load() already validated this
+    }
+    QDir().mkpath(targetDir);
+    // WDSP appends "wdspWisdom00" to the dir string with strcat,
+    // so the dir argument MUST end in a path separator.  Use
+    // native separators + ANSI codepage for filesystem APIs.
+    QString dirArg = targetDir;
+    if (!dirArg.endsWith(QLatin1Char('/')) &&
+        !dirArg.endsWith(QLatin1Char('\\'))) {
+        dirArg += QLatin1Char('/');
+    }
+    QByteArray dirBytes =
+        QDir::toNativeSeparators(dirArg).toLocal8Bit();
+    api_.WDSPwisdom(dirBytes.data());
+    return 0;
+}
+
+bool WdspNative::ensureWisdom() {
+    if (!isLoaded()) {
+        emitLog(QStringLiteral(
+            "[wdsp] wisdom: cannot ensure — DLL not loaded"));
+        return false;
+    }
+    if (!api_.WDSPwisdom) {
+        emitLog(QStringLiteral(
+            "[wdsp] wisdom: cannot ensure — WDSPwisdom symbol "
+            "not resolved"));
+        return false;
+    }
+
+    const QString dir = wisdomDir();
+    QDir().mkpath(dir);
+
+    // ---- Fast path: cache exists, import in-process. ----
+    // We're a console build right now (CMakeLists.txt keeps
+    // WIN32_EXECUTABLE OFF for the diagnostic build), and an
+    // import-only WDSPwisdom call is sub-100ms anyway, so any
+    // AllocConsole stdout hijack is brief + harmless.  When we
+    // flip to a --windowed binary, we'll route this through the
+    // subprocess too.  For now keep it in-process for simplicity
+    // + bench-visibility.
+    if (wisdomFileExists(dir)) {
+        emitLog(QStringLiteral(
+            "[wdsp] wisdom: loading cached plans from %1").arg(dir));
+        QElapsedTimer t; t.start();
+        QString dirArg = dir;
+        if (!dirArg.endsWith(QLatin1Char('/'))) {
+            dirArg += QLatin1Char('/');
+        }
+        QByteArray dirBytes = QDir::toNativeSeparators(dirArg)
+                              .toLocal8Bit();
+        api_.WDSPwisdom(dirBytes.data());
+        emitLog(QStringLiteral(
+            "[wdsp] wisdom: loaded in %1 ms").arg(t.elapsed()));
+        return true;
+    }
+
+    // ---- Slow path: no cache, spawn the subprocess builder. ----
+    emitLog(QStringLiteral(
+        "[wdsp] wisdom: building (one-time, may take several "
+        "minutes — UI stays responsive)…"));
+    emitLog(QStringLiteral(
+        "[wdsp] wisdom: target dir = %1").arg(dir));
+
+    const QString exe = QCoreApplication::applicationFilePath();
+    QProcess builder;
+    builder.setStandardOutputFile(QProcess::nullDevice());
+    builder.setStandardErrorFile(QProcess::nullDevice());
+    QStringList args;
+    args << QStringLiteral("--build-wisdom") << dir;
+
+    QElapsedTimer t; t.start();
+    builder.start(exe, args);
+    if (!builder.waitForStarted(5000)) {
+        emitLog(QStringLiteral(
+            "[wdsp] wisdom: BUILD FAILED — could not spawn "
+            "subprocess: %1").arg(builder.errorString()));
+        return false;
+    }
+    // 20 minute hard cap.  WDSP_PATIENT on a midrange machine
+    // typically completes in 2-5 minutes; generous headroom for
+    // slow CPUs but capped so a hung subprocess doesn't deadlock
+    // launch.
+    constexpr int kBuildTimeoutMs = 20 * 60 * 1000;
+    if (!builder.waitForFinished(kBuildTimeoutMs)) {
+        builder.kill();
+        builder.waitForFinished(2000);
+        emitLog(QStringLiteral(
+            "[wdsp] wisdom: BUILD TIMEOUT after %1 min")
+            .arg(kBuildTimeoutMs / 60000));
+        return false;
+    }
+    if (builder.exitStatus() != QProcess::NormalExit ||
+        builder.exitCode() != 0) {
+        emitLog(QStringLiteral(
+            "[wdsp] wisdom: BUILD FAILED — subprocess exit %1")
+            .arg(builder.exitCode()));
+        return false;
+    }
+    if (!wisdomFileExists(dir)) {
+        emitLog(QStringLiteral(
+            "[wdsp] wisdom: BUILD FAILED — subprocess succeeded "
+            "but no wisdom file appeared at %1").arg(dir));
+        return false;
+    }
+    emitLog(QStringLiteral(
+        "[wdsp] wisdom: built in %1 s").arg(t.elapsed() / 1000));
+
+    // Now do the in-process import of the freshly-built cache so
+    // the rest of this process sees the plans.
+    QString dirArg = dir;
+    if (!dirArg.endsWith(QLatin1Char('/'))) {
+        dirArg += QLatin1Char('/');
+    }
+    QByteArray dirBytes =
+        QDir::toNativeSeparators(dirArg).toLocal8Bit();
+    api_.WDSPwisdom(dirBytes.data());
+    emitLog(QStringLiteral("[wdsp] wisdom: loaded from %1").arg(dir));
+    return true;
 }
 
 } // namespace lyra::dsp

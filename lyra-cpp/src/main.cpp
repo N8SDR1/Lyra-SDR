@@ -11,12 +11,15 @@
 #include "hl2_stream.h"
 #include "wdsp_native.h"
 
+#include <QCoreApplication>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
 #include <QtQml>
+
+#include <string_view>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -27,6 +30,28 @@
 
 int main(int argc, char *argv[])
 {
+    // ---- Subprocess entry point (Step 3c-i) ----
+    // When invoked as `lyra.exe --build-wisdom <dir>` we are a
+    // SHORT-LIVED CHILD spawned by the main Lyra process to build
+    // the FFTW wisdom file out-of-process.  AllocConsole inside
+    // WDSPwisdom would corrupt the parent's stdout if we ran in
+    // the parent process; this subprocess isolates the damage.
+    //
+    // Must be FIRST in main() — before QGuiApplication, before
+    // any Qt RHI or networking init.  We're a console-only mode
+    // here: no window, no QML, no event loop.  Just LoadLibrary,
+    // call WDSPwisdom, exit.
+    if (argc == 3 && std::string_view(argv[1]) == "--build-wisdom") {
+        // QCoreApplication needed for QStandardPaths + QString
+        // I/O.  No event loop, no GUI.
+        QCoreApplication app(argc, argv);
+        app.setApplicationName(QStringLiteral("Lyra-cpp"));
+        app.setOrganizationName(QStringLiteral("N8SDR"));
+        lyra::dsp::WdspNative builder;
+        return builder.runWisdomBuilderEntryPoint(
+            QString::fromLocal8Bit(argv[2]));
+    }
+
 #ifdef _WIN32
     // Explicit WSAStartup before any native socket use (HL2Stream
     // uses raw WinSock2 — see src/hl2_stream.cpp).  Qt would do it
@@ -53,7 +78,11 @@ int main(int argc, char *argv[])
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
 
     QGuiApplication app(argc, argv);
-    app.setApplicationName(QStringLiteral("Lyra"));
+    // applicationName is the LEAF segment in QStandardPaths paths
+    // (%APPDATA%\<organizationName>\<applicationName>\…).  We use
+    // "Lyra-cpp" so we share NO directories with Python Lyra
+    // (which uses "Lyra") — wisdom isolation per CLAUDE.md §15.26.
+    app.setApplicationName(QStringLiteral("Lyra-cpp"));
     app.setOrganizationName(QStringLiteral("N8SDR"));
     app.setOrganizationDomain(QStringLiteral("github.com/N8SDR1/Lyra-SDR"));
 
@@ -107,7 +136,16 @@ int main(int argc, char *argv[])
     // log panel.  Safe to attempt the DLL load; the result line
     // will appear in the UI immediately (DirectConnection,
     // same-thread).
-    wdsp->load();
+    if (wdsp->load()) {
+        // Step 3c-i: ensure FFTW wisdom is loaded BEFORE the first
+        // OpenChannel anywhere.  Without it, WDSP's PATIENT planning
+        // runs in-process on first channel-open and freezes the UI
+        // for several minutes.  ensureWisdom() either imports a
+        // cached file (fast) or spawns a subprocess to build one
+        // (slow but UI stays responsive because the work is in the
+        // child process).
+        wdsp->ensureWisdom();
+    }
 
     const int rc = app.exec();
 
