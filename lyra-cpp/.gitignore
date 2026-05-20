@@ -1,0 +1,31 @@
+# Build output
+build/
+build-*/
+out/
+cmake-build-*/
+
+# IDE state
+.vs/
+.vscode/
+*.user
+*.user.*
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+
+# Qt Creator
+*.pro.user*
+*.qmlproject.user*
+
+# MSVC + linker
+*.obj
+*.exp
+*.lib
+*.pdb
+*.ilk
+*.exe
+*.dll
+
+# OS noise
+Thumbs.db
+.DS_Store
