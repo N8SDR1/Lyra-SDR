@@ -522,11 +522,38 @@ All operator-adjustable in Settings → TX.
 
 ---
 
-## 12. Weather panel
-🟢 Live local weather conditions (operator's QTH).
+## 12. Weather + WX alerts (operator-confirmed 2026-05-20 — PORT)
+
+### 12.1 Toolbar WX indicator (`lyra/ui/wx_indicator.py` in old Lyra)
+🟢 Compact 3-badge header widget. Each badge auto-hides when its
+   tier is "none" — zero pixels on quiet days.
+
+   * **⚡ Lightning** — closest strike distance + bearing.
+     Tiers: Far (yellow, >25 mi) / Mid (orange, <25 mi) /
+     Close (red, <10 mi). Operator-tunable thresholds.
+   * **💨 Wind** — sustained / gust speed.
+     Tiers: Elevated (yellow) / High (orange) / Extreme (red).
+     Operator-tunable thresholds.
+   * **⚠ Severe** — NWS active alert (single glyph + headline
+     tooltip).
+
+   Distance unit (mi/km) + wind unit (mph/kph/kt) operator-selectable.
+
+### 12.2 Weather panel — full conditions
+🟢 Live local conditions widget (temperature, pressure, humidity,
+   wind, precipitation, etc.).
 🟢 Auto-refresh.
-❓ **OPEN — port or skip?** Was in old Lyra but it's a non-radio
-   convenience; want it in the C++ rebuild?
+
+### 12.3 Data source — ❓ OPEN
+   Old Lyra's WX data came from your **Ambient WS-2000** station
+   via the separate `wx-dashboard` project + an aggregator module
+   (`lyra/wx/aggregator.py`).
+   ❓ **OPEN: same source for C++ rebuild?** Options:
+
+   1. Same — read from Ambient WS-2000 (local network / API).
+   2. Standard public source (NWS API, OpenWeatherMap, Weather
+      Underground, etc.).
+   3. Both — Ambient for local-accurate, NWS for severe alerts.
 
 ---
 
@@ -551,35 +578,40 @@ All operator-adjustable in Settings → TX.
 
 ---
 
-## 15. Things old Lyra had but that I'm flagging for fresh decision
+## 15. Items confirmed by operator 2026-05-20 (moved from OPEN → PORT)
 
-❓ **TIME button** — HF time-station cycler (WWV / CHU / BPM / RWM).
-   Useful for clock setting; takes UI real-estate. Keep?
+🟢 **TIME button** — HF time-station cycler (WWV / CHU / BPM / RWM).
+   ✅ KEEP.
+🟢 **EiBi shortwave broadcaster overlay** — visual labels for SW
+   broadcaster freqs on panadapter. ✅ KEEP.
+🟢 **GEN 1/2/3** — customizable favorite-freq quick buttons.
+   ✅ KEEP.
+🟢 **NCDXF beacon rotation / auto-follow** — auto-tune to next
+   beacon on its schedule. ✅ KEEP.
+🟢 **Weather panel + WX toolbar indicator (Lightning / Wind / Severe)**
+   — see §12 above. ✅ KEEP. (Data source = ❓ OPEN per §12.3.)
 
-❓ **EiBi shortwave broadcaster overlay** — visual labels for SW
-   broadcaster freqs on panadapter. Keep?
-
-❓ **GEN 1/2/3** — customizable favorite-freq quick buttons. Keep?
-
-❓ **Weather panel** — non-radio convenience. Keep?
+### Still a fresh-decision item:
 
 ❓ **§15.22 panadapter Y-axis drag tuning bug** — fix in rebuild
    (only X-axis drag tunes). Confirm?
 
 ---
 
-## 16. Open Questions Summary
+## 16. Open Questions Summary (updated 2026-05-20)
 
 1. **Brick SDR — which exact radio?** (HiQSDR? HPSDR P2? ANAN-class?)
 2. **Combinator — 4-band or 5-band crossovers?**
 3. **CAT — Kenwood TS-2000 or Yaesu FT-991A style emulation?**
 4. **Quick-record RX audio (Thetis feature) — yes or skip?**
 5. **Settings JSON export/import — yes or skip?**
-6. **TIME button — yes or skip?**
-7. **EiBi overlay — yes or skip?**
-8. **GEN 1/2/3 favorites — yes or skip?**
-9. **Weather panel — yes or skip?**
-10. **§15.22 panadapter Y-axis drag bug — fix in rebuild (confirm)?**
+6. **WX data source** (Ambient WS-2000 / NWS API / OpenWeatherMap /
+   both)?
+7. **§15.22 panadapter Y-axis drag bug** — fix in rebuild
+   (only X-axis drag tunes). Confirm?
+
+(Q6-Q9 in the previous draft about TIME / EiBi / GEN / Weather are
+all confirmed PORT — moved to §15 above.)
 
 ---
 
