@@ -31,6 +31,17 @@ set(CMAKE_AUTOMOC ON)
 # (Multimedia for audio output, Quick3D for the panadapter, etc.).
 find_package(Qt6 6.11 REQUIRED COMPONENTS Core Gui Quick Network)
 
+# Vulkan SDK -- optional at compile time (Qt RHI dynamically loads
+# the Vulkan runtime via the loader at app launch), but having the
+# headers installed silences the Qt-side WrapVulkanHeaders warning
+# every configure pass.  Operator-side install steps:
+#   1. https://vulkan.lunarg.com/sdk/home#windows -> SDK Installer
+#   2. Default install location; restart shell so VULKAN_SDK env
+#      var is set.
+# If the SDK is absent we silently skip -- Lyra still runs (Qt RHI
+# falls back to D3D12 -> OpenGL transparently per FEATURES.md §0).
+find_package(Vulkan QUIET)
+
 qt_standard_project_setup(REQUIRES 6.5)
 
 qt_add_executable(lyra

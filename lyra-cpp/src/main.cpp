@@ -13,6 +13,8 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQuickWindow>
+#include <QSGRendererInterface>
 #include <QtQml>
 
 #ifdef _WIN32
@@ -33,6 +35,21 @@ int main(int argc, char *argv[])
     WSADATA wsa;
     ::WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
+
+    // Qt RHI backend selection.  Lyra targets Vulkan as the
+    // primary graphics path per FEATURES.md §0 (cross-vendor /
+    // cross-platform; Thetis is D3D12-only).  setGraphicsApi()
+    // MUST be called BEFORE QGuiApplication construction.  If
+    // Vulkan is unavailable at runtime (no driver loader / no
+    // SDK / unsupported GPU) Qt RHI transparently falls back to
+    // D3D12 → OpenGL — no operator-visible breakage.
+    //
+    // Setting QSG_INFO=1 makes Qt log the chosen backend on
+    // startup so the operator can VERIFY which RHI is live
+    // (look for "Using QRhi with backend Vulkan" in stdout).
+    // qputenv is portable; std::setenv would be POSIX-only.
+    qputenv("QSG_INFO", "1");
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
 
     QGuiApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("Lyra"));
