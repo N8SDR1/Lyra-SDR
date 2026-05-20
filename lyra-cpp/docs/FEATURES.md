@@ -1,6 +1,8 @@
 # Lyra (C++23 / Qt 6 rebuild) — Feature Catalog
 
-**Status:** WORKING DRAFT for operator review, 2026-05-20.
+**Status:** LOCKED 2026-05-20. All 7 open questions resolved.
+Ready for Step 2 sequencing (HL2/HL2+ wire path: open the
+radio, receive IQ on a dedicated RX thread, parse samples).
 
 This is the consolidated feature list for the C++23 rebuild — drawn
 from three sources:
@@ -65,18 +67,13 @@ Status legend used below:
 | Hermes Lite 2 Plus (HL2+) | HPSDR Protocol 1 | 🟢 PORT — operator's daily-driver |
 | Apache Labs ANAN-G2 / G2-1K / 7000DLE / 8000 | HPSDR Protocol 2 | 🟡 LOCKED — v0.4 in old Lyra; structurally additive |
 | Apache Labs ANAN-100 / 200 / 8000 (older) | HPSDR Protocol 1 (nddc=5) | 🟡 LOCKED — sibling to HL2 P1 path |
-| **Brick SDR** | ❓ **OPEN: which Brick?** | ❓ **OPEN** |
+| **Brick SDR** | HPSDR Protocol 2 (ANAN-class, pending Timmy confirm) | 🟡 LOCKED |
 
-**OPEN — Brick SDR:** old Lyra flagged that "Brick SDR" needs
-clarification. Three possibilities:
-
-1. **HiQSDR Brick SDR** → would use HiQSDR's vendor protocol (NOT
-   HPSDR). Bigger scope — separate protocol module.
-2. **Some HPSDR-compatible "Brick"** → drops into the HPSDR P1 or P2
-   module depending on which protocol it speaks.
-3. **An ANAN-class radio nicknamed "Brick"** → already covered by ANAN.
-
-What Brick exactly do you mean? I'll size scope once we know.
+**Operator answer 2026-05-20:** Brick is **ANAN-class** — Timmy
+ran ANAN in Thetis, will confirm exact model. Drops into the
+HPSDR P2 / ANAN-G2 code path (option 3 from the original three
+choices — covered by the existing ANAN scope, no separate
+vendor protocol module needed).
 
 ---
 
@@ -191,13 +188,12 @@ because you locked it.
 ### 3.3 Speech processing — Lyra-native (operator-curated)
 **Replaces Thetis CFC with Combinator + extras per your ask.**
 
-🟡 **Combinator** (X-Air-style multiband compressor). 4-band split
-   (Linkwitz-Riley crossovers, operator-adjustable defaults
-   ~250/1500/4000 Hz), per-band threshold / ratio / attack / release /
-   makeup. Optional top-band harmonic exciter ("polish").
-   **CHANGE from old Lyra spec? OPEN: prefer 4-band or 5-band
-   crossovers?** (You said "Combinator instead of CFC" — old spec
-   said 4-band; happy to do 5 if you want.)
+🟡 **Combinator** — **5-band** multiband compressor (X-Air style,
+   operator-confirmed 2026-05-20). Linkwitz-Riley crossovers,
+   operator-adjustable defaults (will dial in from operator's
+   X-Air bench screenshots when we get to that stage). Per-band
+   threshold / ratio / attack / release / makeup. Optional
+   top-band harmonic exciter ("polish").
 🟡 **Tube Plating effect** — soft tube-saturation (tanh waveshaper
    with even-order harmonic emphasis) + top-end exciter. Slider for
    amount, default OFF.
@@ -343,13 +339,14 @@ All operator-adjustable in Settings → TX.
 ### 4.4 Tuning quantization
 🟢 Exact / 100 Hz quantization toggle.
 
-### 4.5 BUG carry-forward
-❓ **OPEN: §15.22 panadapter drag tuning ignores Y-axis** —
-   horizontal drag tunes correctly; vertical drag movement during
-   drag also moves frequency (it shouldn't, since vertical is
-   reserved for zoom). Old Lyra bug, never fixed. Lock in C++
-   rebuild that only X-axis drag delta tunes? Default behavior in
-   rebuild.
+### 4.5 BUG carry-forward — operator-confirmed 2026-05-20
+🟢 **§15.22 fix locked: panadapter drag tunes on X-axis ONLY.**
+   Only horizontal drag delta produces frequency change. Vertical
+   mouse movement during a drag is a no-op (vertical is reserved
+   for zoom via wheel). Default behaviour in the C++ rebuild — not
+   an operator option, not a setting. Eliminates the "twitchy"
+   feel + overshoot the old Lyra had where any vertical drift
+   during a horizontal drag added unwanted frequency change.
 
 ---
 
@@ -446,8 +443,16 @@ All operator-adjustable in Settings → TX.
 🟢 spot_activated outbound.
 
 ### 7.2 CAT
-🟡 Virtual COM port CAT interface (Kenwood TS-2000 or Yaesu FT-991A
-   style? — OPEN). For non-TCI loggers / WSJT-X / FLDigi.
+🟡 **Virtual COM port CAT — Kenwood TS-2000 emulation** (operator-
+   confirmed 2026-05-20: Kenwood is the more reliable / widely-
+   supported choice). For non-TCI loggers / WSJT-X / FLDigi /
+   N1MM / DXLab.
+🟡 **BCD FTDI cable option (Yaesu-style band-data output)** —
+   port from old Lyra. Same hardware path the Yaesu rigs use for
+   external linear amplifier band-switching (FT-991A / FT-DX
+   family); operator-confirmed needed. Optional dep on Windows
+   FTDI driver (the `ftd2xx` package from the old Lyra install
+   guide).
 🟡 Foot-switch via PTT line on a CAT serial port (alternative to
    EP6 HW-PTT-in).
 
@@ -463,11 +468,19 @@ All operator-adjustable in Settings → TX.
    complex networks).
 🟢 Operator-override bind IP for specific NIC.
 
-### 7.5 Quick recording (Thetis feature)
-🔵 **NEW from Thetis list:** Quick-record RX audio / mic input to
-   WAV file. One-click record button + save dialog. Audio-domain
-   capture (not IQ). Useful for logging or signal sharing.
-   ❓ **OPEN: include or no?**
+### 7.5 Quick recording + Voice message playback (operator-confirmed 2026-05-20)
+🔵 **Quick-record RX audio / mic input to WAV file.** One-click
+   record button + save dialog. Audio-domain capture (not IQ).
+   Useful for logging or signal sharing.
+🔵 **Record-and-play-over-air ("voice keyer plus")** — operator
+   ask: pre-record a clip (contest CQ-CQ-CQ, club net intro,
+   "this is N8SDR testing", etc.) and key the radio with it
+   on a button press. Distinct from §3.12 voice keyer in that
+   the operator can record the clip live in Lyra (vs loading
+   a pre-existing WAV) and trigger arbitrary clips, not just
+   one. Implementation = numpy WAV recorder + a clip library
+   + a TX-chain injector that feeds the recorded buffer into
+   TxChannel instead of (or mixed with) live mic.
 
 ---
 
@@ -508,8 +521,34 @@ All operator-adjustable in Settings → TX.
 🟢 Settings dialog with tabs: Radio / Network/TCI / Hardware /
    DSP / Noise / Audio / TX / Visuals / Keyer / Bands / Propagation /
    Weather.
-🔵 **NEW:** export / import all settings as a single JSON file (for
-   moving between machines or sharing setups). ❓ **OPEN: want this?**
+🔵 **Settings export / import as a single file** (operator-confirmed
+   2026-05-20). Operator asked "what is best now for exporting
+   and saving / transfer? is JSON still the best choice?"
+
+   **Recommendation (locked unless you say otherwise): JSON.**
+   Reasons:
+   * Human-readable + diff-able (operator can open in Notepad to
+     spot-check before importing on another machine).
+   * Native in Qt (`QJsonDocument`) — zero extra dependency, no
+     parser bugs.
+   * What every other modern SDR (Thetis, ExpertSDR3, SparkSDR)
+     and modern Windows app standardised on. Operators moving
+     between Lyra + other apps see a familiar format.
+   * Future-proof: JSON Schema versioning lets us add fields
+     without breaking older exports.
+
+   Considered + rejected: INI (no nesting — bad fit for
+   per-band/per-RX/per-profile dict-of-dicts); XML (verbose,
+   no human wins over JSON, 2026-era anachronism); SQLite (binary,
+   can't email a config to a tester); YAML (extra dep, parser
+   ambiguity — JSON wins for config files).
+
+   Format: single `lyra-settings.json` file with sections for
+   Radio / TCI / Hardware / DSP / Noise / Audio / TX / Visuals /
+   Keyer / Bands / Propagation / Weather / Profiles (TX +
+   noise-capture). Version field at top for schema migration.
+   Settings dialog: **Export...** + **Import...** buttons at the
+   bottom.
 
 ---
 
@@ -544,16 +583,28 @@ All operator-adjustable in Settings → TX.
    wind, precipitation, etc.).
 🟢 Auto-refresh.
 
-### 12.3 Data source — ❓ OPEN
-   Old Lyra's WX data came from your **Ambient WS-2000** station
-   via the separate `wx-dashboard` project + an aggregator module
-   (`lyra/wx/aggregator.py`).
-   ❓ **OPEN: same source for C++ rebuild?** Options:
+### 12.3 Data source — operator-confirmed 2026-05-20: ALL FOUR
 
-   1. Same — read from Ambient WS-2000 (local network / API).
-   2. Standard public source (NWS API, OpenWeatherMap, Weather
-      Underground, etc.).
-   3. Both — Ambient for local-accurate, NWS for severe alerts.
+🟢 **Ambient WS-2000** (operator's local station) — same source
+   the old Lyra `wx-dashboard` aggregator used. Local-accurate
+   readings (temp, pressure, humidity, wind, rain, lightning).
+🟢 **NWS API** (api.weather.gov) — official severe-weather
+   alerts + government forecast. Free, no API key.
+🟢 **OpenWeatherMap** — secondary public source for coverage
+   redundancy + global stations (when traveling / portable).
+   Free tier sufficient.
+🟢 **Ecowitt** — operator has Ecowitt code to provide. Same
+   station class as Ambient (often the same hardware rebranded);
+   gives operators on Ecowitt-branded gear the local-accurate
+   path too.
+
+Aggregator pattern (port from old Lyra `wx/aggregator.py`): all
+four sources feed a single WxState struct; operator picks per-
+field priority in Settings → Weather (e.g. "Ambient for local
+temp/wind/lightning, NWS for severe alerts, OpenWeatherMap for
+forecast, Ecowitt for redundancy"). Stale-source detection +
+fallback. One unified panel + toolbar indicator regardless of
+which source is live for which field.
 
 ---
 
@@ -589,29 +640,62 @@ All operator-adjustable in Settings → TX.
 🟢 **NCDXF beacon rotation / auto-follow** — auto-tune to next
    beacon on its schedule. ✅ KEEP.
 🟢 **Weather panel + WX toolbar indicator (Lightning / Wind / Severe)**
-   — see §12 above. ✅ KEEP. (Data source = ❓ OPEN per §12.3.)
+   — see §12 above. ✅ KEEP. Data source: Ambient + NWS +
+   OpenWeatherMap + Ecowitt (operator has Ecowitt code) per
+   §12.3.
 
-### Still a fresh-decision item:
+### Carry-over reminders from old Lyra (operator-confirmed
+2026-05-20 — already in §4 above; calling out so they're not lost):
 
-❓ **§15.22 panadapter Y-axis drag tuning bug** — fix in rebuild
-   (only X-axis drag tunes). Confirm?
+🟢 **100 Hz / Exact tuning quantization toggle** — already in §4.4.
+   Operator-tunable between literal-Hz and 100 Hz snap.
+🟢 **Peak Hold options** (Off / Live / timed / Hold) + Decay
+   (Fast/Med/Slow) + Clear button — already in §4. Port the
+   exact v0.0.9.7 UX.
+🟢 **Panadapter / waterfall rate options** — already in §4
+   ("Waterfall — rolling history with operator-adjustable speed"
+   + "Variable FFT sizes" + "FFT smoothing"). Port the live-
+   preview-during-drag zoom slider behaviour (v0.0.9.7 polish).
+
+**Operator standing directive:** "should look and act like Lyra
+only without the issues we had." All v0.0.9.x polish that
+shipped clean carries over — no behaviour regressions vs the
+Python build. New behaviour only where it directly addresses a
+known Python-era issue (the §15.22 Y-axis drag bug, the audio
+chop, the relay chatter, etc.).
 
 ---
 
-## 16. Open Questions Summary (updated 2026-05-20)
+## 16. Open Questions Summary — ALL RESOLVED 2026-05-20
 
-1. **Brick SDR — which exact radio?** (HiQSDR? HPSDR P2? ANAN-class?)
-2. **Combinator — 4-band or 5-band crossovers?**
-3. **CAT — Kenwood TS-2000 or Yaesu FT-991A style emulation?**
-4. **Quick-record RX audio (Thetis feature) — yes or skip?**
-5. **Settings JSON export/import — yes or skip?**
-6. **WX data source** (Ambient WS-2000 / NWS API / OpenWeatherMap /
-   both)?
-7. **§15.22 panadapter Y-axis drag bug** — fix in rebuild
-   (only X-axis drag tunes). Confirm?
+All seven open questions from the previous draft are answered.
+Full text in the referenced section.
 
-(Q6-Q9 in the previous draft about TIME / EiBi / GEN / Weather are
-all confirmed PORT — moved to §15 above.)
+1. **Brick SDR — ANAN-class** (HPSDR P2; exact model pending
+   Timmy confirm). See §1.
+2. **Combinator — 5-band** (X-Air screenshot when we get there).
+   See §3.3.
+3. **CAT — Kenwood TS-2000 emulation** + **BCD FTDI cable
+   (Yaesu-style band-data output)** for external linear
+   amplifier band-switching. See §7.2.
+4. **Quick-record RX audio — YES**, plus **record-and-play-over-
+   air clip library** (contest CQ-CQ, club net intro, etc.).
+   See §7.5.
+5. **Settings export/import — JSON locked** (human-readable,
+   Qt-native, future-proofed with schema versioning, what
+   modern apps standardised on). See §10.
+6. **WX data — ALL FOUR sources** (Ambient WS-2000 + NWS +
+   OpenWeatherMap + Ecowitt). Operator-prioritised per field
+   in Settings; aggregator pattern from old Lyra. See §12.3.
+7. **§15.22 panadapter Y-axis drag — fixed in rebuild**,
+   only X-axis drag tunes (no setting, default behaviour).
+   See §4.5.
+
+**Catalog LOCKED 2026-05-20.** Ready for Step 2 sequencing.
+Next: operator picks the implementation order (Step 2
+HL2/HL2+ wire path — START packet + EP6 receive thread + IQ
+parsing — is the natural next step; everything else stacks
+on top of a working radio).
 
 ---
 
