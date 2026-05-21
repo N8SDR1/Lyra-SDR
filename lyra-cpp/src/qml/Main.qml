@@ -268,6 +268,75 @@ ApplicationWindow {
             }
         }
 
+        // ---- tuning (Step 4): RX1 (DDC0) receive frequency ----
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: visible ? 48 : 0
+            visible: Stream.running
+            color: "#101820"
+            border.color: "#2a4a5a"
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                spacing: 8
+                Label { text: qsTr("RX1"); color: "#cccccc"; font.bold: true }
+                Button {
+                    text: qsTr("−10k")
+                    onClicked: Stream.setRx1FreqHz(Stream.rx1FreqHz - 10000)
+                }
+                Button {
+                    text: qsTr("−1k")
+                    onClicked: Stream.setRx1FreqHz(Stream.rx1FreqHz - 1000)
+                }
+                TextField {
+                    id: freqField
+                    Layout.preferredWidth: 150
+                    horizontalAlignment: TextInput.AlignHCenter
+                    font.family: "Consolas"
+                    font.pixelSize: 16
+                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                    Component.onCompleted:
+                        text = (Stream.rx1FreqHz / 1.0e6).toFixed(6)
+                    onEditingFinished: {
+                        var mhz = parseFloat(text)
+                        if (!isNaN(mhz)) {
+                            Stream.setRx1FreqHz(Math.round(mhz * 1.0e6))
+                        }
+                    }
+                }
+                Label { text: qsTr("MHz"); color: "#999" }
+                Button {
+                    text: qsTr("+1k")
+                    onClicked: Stream.setRx1FreqHz(Stream.rx1FreqHz + 1000)
+                }
+                Button {
+                    text: qsTr("+10k")
+                    onClicked: Stream.setRx1FreqHz(Stream.rx1FreqHz + 10000)
+                }
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: qsTr("40m FT8")
+                    onClicked: Stream.setRx1FreqHz(7074000)
+                }
+                Button {
+                    text: qsTr("20m FT8")
+                    onClicked: Stream.setRx1FreqHz(14074000)
+                }
+            }
+            // Keep the field in sync when freq changes via buttons /
+            // presets, but never stomp the operator mid-edit.
+            Connections {
+                target: Stream
+                function onRx1FreqChanged() {
+                    if (!freqField.activeFocus) {
+                        freqField.text =
+                            (Stream.rx1FreqHz / 1.0e6).toFixed(6)
+                    }
+                }
+            }
+        }
+
         // ---- audio controls (Step 3e): mute / volume / output device.
         // Always visible so the operator can confirm MUTED + set a safe
         // volume + pick the output device BEFORE opening a stream.

@@ -100,6 +100,8 @@ class HL2Stream : public QObject {
     Q_PROPERTY(qint64  txSendErrors         READ txSendErrors         NOTIFY statsChanged)
     // RX1 signal level (Step 2c — first real radio reception in C++)
     Q_PROPERTY(double  rx1DbFs              READ rx1DbFs              NOTIFY statsChanged)
+    // RX1 (DDC0) receive frequency, Hz — tuning from C++ (Step 4)
+    Q_PROPERTY(quint32 rx1FreqHz            READ rx1FreqHz            NOTIFY rx1FreqChanged)
 
 public:
     explicit HL2Stream(QObject *parent = nullptr);
@@ -127,6 +129,7 @@ public:
     // worker thread every 50 ms (9600 samples at 192 kHz);
     // initial sentinel -200.0 means "no samples yet."
     double  rx1DbFs()           const { return rx1DbFs_.load(std::memory_order_relaxed); }
+    quint32 rx1FreqHz()         const { return rx1FreqHz_.load(std::memory_order_relaxed); }
 
     // Step 3d: register a sink for DDC0 baseband IQ.  Called ONCE per
     // EP6 datagram from the RX worker thread with interleaved
@@ -152,9 +155,17 @@ public slots:
     // to call when already stopped (no-op).
     void close();
 
+    // Set the DDC0 (RX1) receive frequency in Hz.  Stored in an atomic
+    // the EP2 writer reads each send; takes effect on the next
+    // keepalive (~2.6 ms) via the addr-2 C&C frame.  The duplex bit
+    // (frame-0 C4=0x1C, sent every datagram) is what lets the gateware
+    // apply post-priming RX-freq updates (CLAUDE.md §3.2).  Thread-safe.
+    void setRx1FreqHz(quint32 hz);
+
 signals:
     void runningChanged();
     void statsChanged();
+    void rx1FreqChanged();
     void logLine(QString line);
 
 private slots:
@@ -183,6 +194,10 @@ private:
     // is lock-free on x86_64 so the main-thread read in the Q_PROPERTY
     // getter doesn't take a lock.
     std::atomic<double>  rx1DbFs_{-200.0};
+    // Step 4: DDC0 (RX1) receive frequency, Hz.  Read by the EP2 writer
+    // each send.  Default 7.074 MHz (40m FT8) so first launch lands on
+    // a known-active spot.  std::atomic<quint32> is lock-free on x86_64.
+    std::atomic<quint32> rx1FreqHz_{7074000};
     // Step 3d: DDC0 IQ sink (DSP engine).  Set once before open();
     // read on the RX worker thread.  Default-empty = no DSP wired.
     std::function<void(const double *, int)> iqSink_;

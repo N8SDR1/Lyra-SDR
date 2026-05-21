@@ -66,13 +66,20 @@ QByteArray buildEp2KeepaliveTemplate() {
     u[15] = 0x1C;   // C4 = nddc=4 (0x18) | duplex bit (0x04)
     // bytes [16..519] = 504 bytes audio/IQ payload = zero
 
-    // USB frame 2 (offset 520): same minimal frame-0 C&C
+    // USB frame 2 (offset 520): frame-2 C&C = RX1 (DDC0) frequency
+    // (Step 4 tuning).  C0 = addr 2 << 1 = 0x04 (MOX off); C1..C4 =
+    // 32-bit freq in Hz, big-endian (reference: networkproto1.c
+    // case 2).  The writer overwrites C1..C4 from rx1FreqHz_ every
+    // send; the 7.074 MHz default here just makes the template sane
+    // pre-first-send.  Frame-0 (USB frame 1 above) still carries the
+    // duplex bit every datagram, which is what lets these RX-freq
+    // updates take effect.
     u[520] = 0x7F; u[521] = 0x7F; u[522] = 0x7F;
-    u[523] = 0x00;
-    u[524] = 0x02;
-    u[525] = 0x00;
-    u[526] = 0x00;
-    u[527] = 0x1C;
+    u[523] = 0x04;                 // C0 = address 2 (RX1 VFO), MOX off
+    u[524] = (7074000u >> 24) & 0xFF;   // C1 = freq byte 0 (MSB)
+    u[525] = (7074000u >> 16) & 0xFF;   // C2
+    u[526] = (7074000u >>  8) & 0xFF;   // C3
+    u[527] = (7074000u      ) & 0xFF;   // C4 = freq byte 3 (LSB)
     // bytes [528..1031] = 504 bytes audio/IQ payload = zero
 
     return pkt;
@@ -443,6 +450,15 @@ void HL2Stream::rxWorkerLoop(std::stop_token stop, SocketHandle sh) {
     }
 }
 
+void HL2Stream::setRx1FreqHz(quint32 hz) {
+    const quint32 prev = rx1FreqHz_.exchange(hz, std::memory_order_relaxed);
+    if (prev != hz) {
+        emit rx1FreqChanged();
+        emit logLine(QStringLiteral("RX1 -> %1 Hz (%2 MHz)")
+                     .arg(hz).arg(hz / 1.0e6, 0, 'f', 6));
+    }
+}
+
 // ----------------------------------------------------------------
 // TX worker — dedicated OS thread, sends one START packet on
 // entry then a 1032-byte EP2 keepalive every 2.6 ms (380 Hz)
@@ -542,6 +558,15 @@ void HL2Stream::txWorkerLoop(std::stop_token stop, SocketHandle sh,
         pktBytes[5] = static_cast<std::uint8_t>((seq >> 16) & 0xFF);
         pktBytes[6] = static_cast<std::uint8_t>((seq >>  8) & 0xFF);
         pktBytes[7] = static_cast<std::uint8_t>( seq        & 0xFF);
+
+        // Step 4: refresh the addr-2 (RX1 VFO) C&C freq bytes in USB
+        // frame 2 [524..527] from the live atomic, big-endian.  Sent
+        // every datagram so a tune takes effect within one period.
+        const quint32 f = rx1FreqHz_.load(std::memory_order_relaxed);
+        pktBytes[524] = static_cast<std::uint8_t>((f >> 24) & 0xFF);
+        pktBytes[525] = static_cast<std::uint8_t>((f >> 16) & 0xFF);
+        pktBytes[526] = static_cast<std::uint8_t>((f >>  8) & 0xFF);
+        pktBytes[527] = static_cast<std::uint8_t>( f        & 0xFF);
 
         const int n = ::sendto(s, pkt.constData(), pkt.size(), 0,
                                reinterpret_cast<sockaddr*>(&dest),
