@@ -70,6 +70,44 @@ using fn_SetRXAAGCThresh_t     = void (*)(int channel, double thresh,
                                           double size, double rate);
 using fn_SetRXAAGCSlope_t      = void (*)(int channel, int slope);
 using fn_SetRXAPanelGain1_t    = void (*)(int channel, double gain);
+
+// Step 5: WDSP spectral analyzer (panadapter source).  Same pipeline
+// Thetis uses — XCreateAnalyzer + SetAnalyzer to configure, Spectrum0
+// to feed IQ (interleaved doubles, like fexchange0), GetPixels to
+// retrieve a display-width dB array.  Signatures verified against
+// wdsp/analyzer.h.  GetPixels writes FLOAT pixels (dOUTREAL=float);
+// Spectrum0 takes DOUBLE IQ.  Do NOT swap those.
+using fn_XCreateAnalyzer_t        = void (*)(int disp, int *success,
+                                             int m_size, int m_LO,
+                                             int m_stitch,
+                                             char *app_data_path);
+using fn_DestroyAnalyzer_t        = void (*)(int disp);
+// SIGNATURE VERIFIED against wdsp/analyzer.c:1189 (the C# param NAMES
+// in PanDisplay.cs are misleading): param 5 `flp` is an int* vector
+// (one high-side-LO flag per FFT), NOT an int — passing an int there
+// is a null-pointer deref crash.  fsc_lin/fsc_hin are DOUBLE, not int.
+using fn_SetAnalyzer_t            = void (*)(int disp, int n_pixout,
+                                             int n_fft, int typ,
+                                             int *flp, int sz, int bf_sz,
+                                             int win_type, double pi,
+                                             int ovrlp, int clp,
+                                             double fsc_lin, double fsc_hin,
+                                             int n_pix, int n_stch,
+                                             int calset, double fmin,
+                                             double fmax, int max_w);
+using fn_Spectrum0_t              = void (*)(int run, int disp, int ss,
+                                             int LO, double *pbuff);
+using fn_GetPixels_t              = void (*)(int disp, int pixout,
+                                             float *pix, int *flag,
+                                             double *pixel_ref);
+using fn_SetDisplayDetectorMode_t = void (*)(int disp, int pixout, int mode);
+using fn_SetDisplayAverageMode_t  = void (*)(int disp, int pixout, int mode);
+using fn_SetDisplayNumAverage_t   = void (*)(int disp, int pixout, int num);
+// Exponential back-multiplier for recursive display averaging.  Paired
+// with SetDisplayNumAverage; both derived from a time constant tau:
+//   mult = exp(-1 / (frame_rate * tau)),  num = frame_rate * tau.
+using fn_SetDisplayAvBackmult_t   = void (*)(int disp, int pixout,
+                                             double mult);
 } // extern "C"
 
 // Resolved function pointers.  Step 3b populates these via
@@ -88,6 +126,16 @@ struct WdspApi {
     fn_SetRXAAGCThresh_t     SetRXAAGCThresh     = nullptr;
     fn_SetRXAAGCSlope_t      SetRXAAGCSlope      = nullptr;
     fn_SetRXAPanelGain1_t    SetRXAPanelGain1    = nullptr;
+    // Step 5: spectral analyzer (panadapter).
+    fn_XCreateAnalyzer_t        XCreateAnalyzer        = nullptr;
+    fn_DestroyAnalyzer_t        DestroyAnalyzer        = nullptr;
+    fn_SetAnalyzer_t            SetAnalyzer            = nullptr;
+    fn_Spectrum0_t              Spectrum0              = nullptr;
+    fn_GetPixels_t              GetPixels              = nullptr;
+    fn_SetDisplayDetectorMode_t SetDisplayDetectorMode = nullptr;
+    fn_SetDisplayAverageMode_t  SetDisplayAverageMode  = nullptr;
+    fn_SetDisplayNumAverage_t   SetDisplayNumAverage   = nullptr;
+    fn_SetDisplayAvBackmult_t   SetDisplayAvBackmult   = nullptr;
 };
 
 class WdspNative : public QObject {

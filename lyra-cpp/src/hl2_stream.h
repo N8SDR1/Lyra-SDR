@@ -67,6 +67,7 @@
 
 #pragma once
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QString>
 #include <QTimer>
@@ -205,6 +206,11 @@ private:
     double               txDgPerSec_ = 0.0;
     QString              targetIp_;
     QTimer               statsTimer_;
+    // Measures the ACTUAL interval between stats ticks so dg/s is
+    // correct even when the 5 Hz timer fires late (e.g. main-thread
+    // paint load) — dividing by a fixed period inflated the reading
+    // and made the WIRE-OK band flap.
+    QElapsedTimer        statsClock_;
 
     static constexpr quint16 kRadioPort    = 1024;
     static constexpr int     kMetisDgSize  = 1032;   // 8 hdr + 2*512 USB

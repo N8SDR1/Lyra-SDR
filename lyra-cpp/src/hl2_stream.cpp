@@ -202,6 +202,7 @@ void HL2Stream::open(const QString &ip) {
         .arg(ip).arg(kRadioPort).arg(lport));
 
     statsTimer_.start();
+    statsClock_.start();   // baseline for actual-elapsed dg/s
 
     // Radio memory: remember this radio so the next launch can
     // auto-connect without a Discover (read in main()).
@@ -271,7 +272,13 @@ void HL2Stream::close() {
 void HL2Stream::onStatsTick() {
     const qint64 rxWin = windowDg_.exchange(0,   std::memory_order_acq_rel);
     const qint64 txWin = txWindowDg_.exchange(0, std::memory_order_acq_rel);
-    const double scale = 1000.0 / static_cast<double>(kStatPeriodMs);
+    // Divide by the ACTUAL elapsed interval (not the assumed period),
+    // so timer jitter from main-thread load doesn't inflate the rate.
+    qint64 elapsedMs = statsClock_.restart();
+    if (elapsedMs <= 0) {
+        elapsedMs = kStatPeriodMs;
+    }
+    const double scale = 1000.0 / static_cast<double>(elapsedMs);
     dgPerSec_   = static_cast<double>(rxWin) * scale;
     txDgPerSec_ = static_cast<double>(txWin) * scale;
     emit statsChanged();

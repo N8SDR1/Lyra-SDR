@@ -9,6 +9,7 @@
 
 #include "hl2_discovery.h"
 #include "hl2_stream.h"
+#include "panadapter.h"
 #include "wdsp_engine.h"
 #include "wdsp_native.h"
 
@@ -140,6 +141,11 @@ int main(int argc, char *argv[])
     // freed audio ring (see WdspEngine::stopAudio).
     QObject::connect(&app, &QGuiApplication::aboutToQuit,
                      stream, &lyra::ipc::HL2Stream::close);
+
+    // Step 5: register the panadapter widget as a QML type under its
+    // own URI (keeps it separate from the qt_add_qml_module "Lyra"
+    // module's auto-registration).  Main.qml: `import LyraUI`.
+    qmlRegisterType<lyra::ui::Panadapter>("LyraUI", 1, 0, "Panadapter");
 
     // Expose the workers to QML as context properties so Main.qml
     // can bind to their signals + invoke their slots from buttons.

@@ -39,13 +39,45 @@ constexpr int    kAgcSlope         = 35;
 constexpr double kAgcThreshDbFs    = -100.0;
 constexpr double kAgcThreshFftSize = 4096.0;
 
+// Step 5: WDSP spectral analyzer (panadapter) config.  Values mirror
+// Thetis's HL2 RX analyzer (fft 4096, window 4, kaiser 14).  pixels is
+// fixed (the panadapter scales it to its on-screen width).  overlap =
+// fft - feed-block so one FFT advances per IQ feed (smooth).  Detector
+// peak + recursive time-average for a stable display.  All tunable on
+// the bench.
+constexpr int    kAnDisp        = 0;       // analyzer id (RX1)
+constexpr int    kAnMaxFft      = 32768;   // max fft (must be >= max_w)
+constexpr int    kAnFftSize     = 4096;
+constexpr int    kAnPixels      = 2048;    // dB output points
+constexpr int    kAnWindow      = 4;       // soft-knee window (ref default)
+constexpr double kAnKaiserPi    = 14.0;
+constexpr int    kAnFrameRate   = 60;      // display fps — drives overlap,
+                                           // max_w + averaging frame count.
+                                           // Higher = more responsive trace
+                                           // (tau holds the smoothing TIME
+                                           // constant).  Operator-adjustable
+                                           // control to come (Thetis-style).
+constexpr int    kAnDetector    = 0;       // 0 = peak
+// Time-averaging OFF by default (reference ships AverageOn=false) — a
+// LIVE trace, no smoothing lag, so it stays in sync with the audio.
+// The smooth "fluid" look comes from the curve RENDERING (no lag), not
+// from time-averaging.  Flip kAnAvgMode != 0 + tune kAnTau for an
+// operator AVG toggle later.
+constexpr int    kAnAvgMode     = 0;       // 0 = off (live)
+constexpr double kAnTau         = 0.12;    // avg time constant (s) when on
+
 // Step 3e audio-ring sizing.  The reference Python SoundDeviceSink
 // pre-fills 100 ms (= 4800 frames @ 48 kHz) because Python/GIL
 // delivered audio in bursty ~43 ms lumps that drained the ring.  The
 // C++ RX worker pushes audio every ~5.3 ms with no GIL, so we run a
 // SMALLER pre-fill.  Both tunable here.
-constexpr int    kRingMs     = 200;   // ring capacity (ms)
-constexpr int    kPrefillMs  = 50;    // startup silence pre-fill (ms)
+constexpr int    kRingMs       = 200;  // ring capacity (ms)
+constexpr int    kPrefillMs    = 30;   // startup silence pre-fill (ms)
+// Explicit QAudioSink device-buffer depth.  Qt's default is large
+// (~100-200 ms on WASAPI) and was the dominant audio latency that made
+// the audio lag the panadapter.  ~40 ms keeps it tight without
+// underrunning (operator-tunable on the bench).
+constexpr int    kSinkBufferMs = 40;
 
 // Step 3e: perceptual volume taper.  Slider position (0..1) -> dB gain
 // so comfortable listening sits mid-slider instead of bunched at the
@@ -296,6 +328,76 @@ bool WdspEngine::openRx1()
         api.SetRXAPanelGain1(channel_, 1.0);
     }
 
+    // Step 5: create + configure the spectral analyzer (panadapter
+    // source).  Independent of the DSP channel; fed the same IQ.
+    if (api.XCreateAnalyzer && api.SetAnalyzer) {
+        int success = 0;
+        char appDataPath[] = "";   // empty app-data path (no temp files)
+        api.XCreateAnalyzer(kAnDisp, &success, kAnMaxFft, 1, 1, appDataPath);
+        if (success == 0) {
+            // overlap + max_w per the frame-rate formula.  max_w sizes
+            // an internal display-history buffer — passing 0 makes WDSP
+            // crash on a zero-size allocation.  overlap clamps to 0 at
+            // 192 kHz / 4096 (samples-per-frame >> fft).
+            const int overlap =
+                std::max(0, kAnFftSize - cfg_.inRate / kAnFrameRate);
+            const int maxW = kAnFftSize +
+                std::min(cfg_.inRate / 10, kAnFftSize * kAnFrameRate / 10);
+            // flp = per-FFT high-side-LO flags (int* vector).  One FFT,
+            // not high-side -> {0}.  MUST be a real pointer (passing an
+            // int crashes WDSP — it dereferences flp[i]).
+            int flp[1] = {0};
+            api.SetAnalyzer(
+                kAnDisp,                    // disp
+                1,                          // n_pixout
+                1,                          // n_fft (spur-elim ffts)
+                1,                          // typ = complex IQ
+                flp,                        // flp (int* high-side LO flags)
+                kAnFftSize,                 // sz (fft size)
+                cfg_.inSize,                // bf_sz (our feed block)
+                kAnWindow,                  // win_type
+                kAnKaiserPi,                // pi (kaiser)
+                overlap,                    // ovrlp
+                0,                          // clp (clip bins/side)
+                0.0, 0.0,                   // fsc_lin, fsc_hin (DOUBLE)
+                kAnPixels,                  // n_pix (display points)
+                1,                          // n_stch (stitches)
+                0,                          // calset
+                0.0, 0.0,                   // fmin, fmax
+                maxW);                      // max_w (history buffer size)
+            if (api.SetDisplayDetectorMode) {
+                api.SetDisplayDetectorMode(kAnDisp, 0, kAnDetector);
+            }
+            // Average mode (0 = off = live trace by default).  When
+            // enabled, the back-multiplier + frame count derive from
+            // tau + frame_rate exactly as the reference does.
+            if (api.SetDisplayAverageMode) {
+                api.SetDisplayAverageMode(kAnDisp, 0, kAnAvgMode);
+            }
+            if (kAnAvgMode != 0) {
+                const double avb =
+                    std::exp(-1.0 / (kAnFrameRate * kAnTau));
+                const int numAvg = std::max(2,
+                    std::min(60, static_cast<int>(kAnFrameRate * kAnTau)));
+                if (api.SetDisplayAvBackmult) {
+                    api.SetDisplayAvBackmult(kAnDisp, 0, avb);
+                }
+                if (api.SetDisplayNumAverage) {
+                    api.SetDisplayNumAverage(kAnDisp, 0, numAvg);
+                }
+            }
+            analyzerOpen_ = true;
+            emitLog(QStringLiteral(
+                "[wdsp] analyzer: %1 pixels, fft %2, window %3 "
+                "(panadapter source)")
+                .arg(kAnPixels).arg(kAnFftSize).arg(kAnWindow));
+        } else {
+            emitLog(QStringLiteral(
+                "[wdsp] analyzer: XCreateAnalyzer failed (%1) — no "
+                "panadapter").arg(success));
+        }
+    }
+
     // Step 3e: bring up PC sound-card playback BEFORE running_ goes
     // true, so feedIq sees a live ring the moment IQ starts flowing.
     // Non-fatal: if the audio device is missing/unsupported we log and
@@ -336,9 +438,36 @@ void WdspEngine::closeRx1()
     }
     levelsTimer_.stop();
     stopAudio();
+    if (analyzerOpen_ && api.DestroyAnalyzer) {
+        api.DestroyAnalyzer(kAnDisp);
+        analyzerOpen_ = false;
+    }
     audioDbFs_.store(-200.0, std::memory_order_relaxed);
     accum_.clear();
     emitLog(QStringLiteral("[wdsp] channel 0 closed"));
+}
+
+int WdspEngine::spectrumPixelCount() const
+{
+    return kAnPixels;
+}
+
+int WdspEngine::copySpectrum(float *dst, int maxN)
+{
+    if (!analyzerOpen_ || dst == nullptr) {
+        return 0;
+    }
+    const WdspApi &api = wdsp_->api();
+    if (!api.GetPixels) {
+        return 0;
+    }
+    const int n = std::min(maxN, kAnPixels);
+    int    flag = 0;
+    double ref  = 0.0;
+    // GetPixels writes kAnPixels floats (dB) into dst.  WDSP serialises
+    // this against the RX-worker Spectrum0 feed internally.
+    api.GetPixels(kAnDisp, 0, dst, &flag, &ref);
+    return n;
 }
 
 bool WdspEngine::startAudio()
@@ -376,6 +505,12 @@ bool WdspEngine::startAudio()
         audioRing_->open(QIODevice::ReadOnly);
 
         audioSink_ = new QAudioSink(dev, fmt, this);
+        // Cap the device buffer so audio latency stays low (else Qt's
+        // large default makes audio lag the panadapter).  Must be set
+        // before start().
+        audioSink_->setBufferSize(
+            cfg_.outRate * kSinkBufferMs / 1000 * 2 *
+            static_cast<int>(sizeof(qint16)));
         audioSink_->start(audioRing_);   // pull mode
     }
 
@@ -476,6 +611,11 @@ void WdspEngine::feedIq(const double *iq, int nframes)
     const size_t blockDoubles = static_cast<size_t>(2 * cfg_.inSize);
     while (accum_.size() >= blockDoubles) {
         api.fexchange0(channel_, accum_.data(), outBuf_.data(), &fexErr_);
+
+        // Step 5: feed the same IQ block to the panadapter analyzer.
+        if (analyzerOpen_ && api.Spectrum0) {
+            api.Spectrum0(1, kAnDisp, 0, 0, accum_.data());
+        }
 
         // Peak |sample| across L+R as the audio-level proxy (Step 3d
         // is a measurement step — no playback).  20*log10(peak) dBFS.

@@ -13,6 +13,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
+import LyraUI
 
 ApplicationWindow {
     id: root
@@ -414,6 +415,17 @@ ApplicationWindow {
                     onActivated: WdspEngine.setAudioOutputDevice(currentIndex)
                 }
             }
+        }
+
+        // ---- panadapter (Step 5): WDSP spectral analyzer display ----
+        // Plain trace for now (proving the analyzer feed); glass + smooth
+        // fluid curve land next.  Pulls dB pixels straight from the C++
+        // WdspEngine.
+        Panadapter {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 240
+            visible: Stream.running
+            engine: WdspEngine
         }
 
         // ---- main split: found radios (left) + log (right) ----

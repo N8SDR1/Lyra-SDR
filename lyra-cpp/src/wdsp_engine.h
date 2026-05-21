@@ -100,6 +100,15 @@ public:
     // out_rate / in_rate).  Step 3d sizes its output buffer to this.
     int outSize() const { return outSize_; }
 
+    // Step 5: WDSP spectral analyzer (panadapter source).  The IQ fed
+    // to the audio chain is also fed to the analyzer; copySpectrum
+    // pulls the latest display-width dB array (called from the
+    // panadapter's render thread — WDSP serialises feed-vs-read
+    // internally, as Thetis relies on).  Plain C++ (not Q_INVOKABLE):
+    // the panadapter is a C++ QQuickPaintedItem, not QML JS.
+    int  spectrumPixelCount() const;
+    int  copySpectrum(float *dst, int maxN);
+
     // Step 3e operator audio controls (call from the UI / main thread).
     // setVolume: linear gain 0.0..1.0 applied before int16 conversion.
     // setMuted:  hard mute (gain 0) without losing the volume setting.
@@ -147,6 +156,7 @@ private:
     int         outSize_ = 0;
     bool        opened_  = false;
     bool        running_ = false;
+    bool        analyzerOpen_ = false;   // Step 5 panadapter analyzer
 
     // Step 3d DSP buffers (all sized in the constructor).
     // accum_ : interleaved IQ doubles awaiting a full in_size block.

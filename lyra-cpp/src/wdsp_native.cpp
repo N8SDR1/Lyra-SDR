@@ -193,6 +193,15 @@ bool WdspNative::resolveSymbols() {
     resolve(api_.SetRXAAGCThresh,     "SetRXAAGCThresh");
     resolve(api_.SetRXAAGCSlope,      "SetRXAAGCSlope");
     resolve(api_.SetRXAPanelGain1,    "SetRXAPanelGain1");
+    resolve(api_.XCreateAnalyzer,        "XCreateAnalyzer");
+    resolve(api_.DestroyAnalyzer,        "DestroyAnalyzer");
+    resolve(api_.SetAnalyzer,            "SetAnalyzer");
+    resolve(api_.Spectrum0,              "Spectrum0");
+    resolve(api_.GetPixels,              "GetPixels");
+    resolve(api_.SetDisplayDetectorMode, "SetDisplayDetectorMode");
+    resolve(api_.SetDisplayAverageMode,  "SetDisplayAverageMode");
+    resolve(api_.SetDisplayNumAverage,   "SetDisplayNumAverage");
+    resolve(api_.SetDisplayAvBackmult,   "SetDisplayAvBackmult");
 
     if (!missing.isEmpty()) {
         loadError_ = QStringLiteral(
