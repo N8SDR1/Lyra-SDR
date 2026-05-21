@@ -268,6 +268,61 @@ ApplicationWindow {
             }
         }
 
+        // ---- audio controls (Step 3e): mute / volume / output device.
+        // Always visible so the operator can confirm MUTED + set a safe
+        // volume + pick the output device BEFORE opening a stream.
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: 46
+            color: "#161616"
+            border.color: "#333"
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                spacing: 12
+                Label {
+                    text: qsTr("Audio")
+                    color: "#cccccc"
+                    font.bold: true
+                }
+                Button {
+                    text: WdspEngine.muted ? qsTr("Unmute") : qsTr("Mute")
+                    onClicked: WdspEngine.setMuted(!WdspEngine.muted)
+                }
+                // Clear muted/live indicator (text, not native-style
+                // palette tricks which this style rejects).
+                Label {
+                    text: WdspEngine.muted ? qsTr("MUTED") : qsTr("LIVE")
+                    color: WdspEngine.muted ? "#ffd07f" : "#7fff7f"
+                    font.bold: true
+                    font.family: "Consolas"
+                }
+                Label { text: qsTr("Vol"); color: "#999" }
+                Slider {
+                    Layout.preferredWidth: 200
+                    from: 0.0
+                    to: 1.0
+                    value: WdspEngine.volume
+                    onMoved: WdspEngine.setVolume(value)
+                }
+                Label {
+                    text: Math.round(WdspEngine.volume * 100) + "%"
+                    color: "#cccccc"
+                    font.family: "Consolas"
+                    Layout.preferredWidth: 44
+                }
+                Item { Layout.fillWidth: true }
+                Label { text: qsTr("Out"); color: "#999" }
+                ComboBox {
+                    Layout.preferredWidth: 300
+                    model: WdspEngine.audioOutputDevices()
+                    currentIndex: WdspEngine.audioDeviceIndex
+                    onActivated: WdspEngine.setAudioOutputDevice(currentIndex)
+                }
+            }
+        }
+
         // ---- main split: found radios (left) + log (right) ----
         SplitView {
             Layout.fillWidth: true

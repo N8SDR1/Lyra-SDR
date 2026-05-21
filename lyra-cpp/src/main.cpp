@@ -131,6 +131,15 @@ int main(int argc, char *argv[])
         wdspEngine->feedIq(iq, n);
     });
 
+    // Stop the RX worker on quit BEFORE the QObject children are
+    // destroyed.  The IQ sink (above) calls into wdspEngine from the
+    // worker thread; aboutToQuit fires while every object is still
+    // alive, so closing the stream here joins the worker and
+    // guarantees no feedIq() runs into a half-torn-down engine /
+    // freed audio ring (see WdspEngine::stopAudio).
+    QObject::connect(&app, &QGuiApplication::aboutToQuit,
+                     stream, &lyra::ipc::HL2Stream::close);
+
     // Expose the workers to QML as context properties so Main.qml
     // can bind to their signals + invoke their slots from buttons.
     QQmlApplicationEngine engine;

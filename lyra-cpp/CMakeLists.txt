@@ -29,7 +29,7 @@ set(CMAKE_AUTOMOC ON)
 
 # Qt 6 — bring in only the modules Step 1 needs.  More land later
 # (Multimedia for audio output, Quick3D for the panadapter, etc.).
-find_package(Qt6 6.11 REQUIRED COMPONENTS Core Gui Quick Network)
+find_package(Qt6 6.11 REQUIRED COMPONENTS Core Gui Quick Network Multimedia)
 
 # Vulkan SDK -- optional at compile time (Qt RHI dynamically loads
 # the Vulkan runtime via the loader at app launch), but having the
@@ -70,6 +70,7 @@ target_link_libraries(lyra PRIVATE
     Qt6::Gui
     Qt6::Quick
     Qt6::Network
+    Qt6::Multimedia
 )
 
 # Step 2b: HL2Stream uses raw WinSock2 (sendto/recvfrom from

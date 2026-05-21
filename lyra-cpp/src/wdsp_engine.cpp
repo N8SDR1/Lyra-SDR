@@ -3,9 +3,16 @@
 
 #include "wdsp_engine.h"
 
+#include <QAudioDevice>
+#include <QAudioFormat>
+#include <QAudioSink>
 #include <QDebug>
+#include <QIODevice>
+#include <QMediaDevices>
 
+#include <algorithm>
 #include <cmath>
+#include <mutex>
 
 namespace lyra::dsp {
 
@@ -20,7 +27,109 @@ constexpr int    kAgcModeMed = 3;   // AgcMode.MED
 constexpr double kUsbLowHz   = 200.0;
 constexpr double kUsbHighHz  = 3000.0;
 
+// Step 3e audio-ring sizing.  The reference Python SoundDeviceSink
+// pre-fills 100 ms (= 4800 frames @ 48 kHz) because Python/GIL
+// delivered audio in bursty ~43 ms lumps that drained the ring.  The
+// C++ RX worker pushes audio every ~5.3 ms with no GIL, so we run a
+// SMALLER pre-fill.  Both tunable here.
+constexpr int    kRingMs     = 200;   // ring capacity (ms)
+constexpr int    kPrefillMs  = 50;    // startup silence pre-fill (ms)
+
 } // namespace
+
+// ---------------------------------------------------------------
+// AudioRing — the QIODevice the QAudioSink pulls from (pull mode,
+// the Qt-native equivalent of the reference's CallbackASIO /
+// PortAudio callback).  Producer = the RX worker thread via push();
+// consumer = Qt's audio backend thread via readData().  A std::mutex
+// guards the ring indices (hold time = a memcpy of a few hundred
+// int16, sub-ms).  On underrun readData pads silence and always
+// returns the full requested length so the sink never stops.
+// ---------------------------------------------------------------
+class AudioRing : public QIODevice {
+public:
+    explicit AudioRing(int capacityFrames)
+        : capFrames_(capacityFrames),
+          buf_(static_cast<size_t>(capacityFrames) * 2, 0) {}
+
+    // Producer (RX worker thread): push interleaved stereo int16.
+    void push(const qint16 *lr, int nframes) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        for (int f = 0; f < nframes; ++f) {
+            if (countFrames_ >= capFrames_) {
+                rd_ = (rd_ + 1) % capFrames_;   // overrun: drop oldest
+                --countFrames_;
+                ++overruns_;
+            }
+            buf_[static_cast<size_t>(wr_) * 2 + 0] = lr[f * 2 + 0];
+            buf_[static_cast<size_t>(wr_) * 2 + 1] = lr[f * 2 + 1];
+            wr_ = (wr_ + 1) % capFrames_;
+            ++countFrames_;
+        }
+    }
+
+    // Seed the ring with `frames` of silence so the sink has headroom
+    // before the worker produces its first block.
+    void prefillSilence(int frames) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        rd_ = wr_ = countFrames_ = 0;
+        const int n = std::min(frames, capFrames_);
+        for (int i = 0; i < n; ++i) {
+            buf_[static_cast<size_t>(wr_) * 2 + 0] = 0;
+            buf_[static_cast<size_t>(wr_) * 2 + 1] = 0;
+            wr_ = (wr_ + 1) % capFrames_;
+            ++countFrames_;
+        }
+    }
+
+    qint64 overruns()  const { std::lock_guard<std::mutex> lk(mtx_); return overruns_;  }
+    qint64 underruns() const { std::lock_guard<std::mutex> lk(mtx_); return underruns_; }
+
+    // --- QIODevice overrides (no Q_OBJECT needed: only virtuals) ---
+    bool   isSequential() const override { return true; }
+    qint64 writeData(const char *, qint64) override { return -1; }
+
+    // Report a large, always-positive availability so the sink keeps
+    // pulling on its own cadence (we pad silence inside readData).
+    qint64 bytesAvailable() const override {
+        return static_cast<qint64>(capFrames_) * kBytesPerFrame
+               + QIODevice::bytesAvailable();
+    }
+
+    qint64 readData(char *data, qint64 maxlen) override {
+        const qint64 maxFrames = maxlen / kBytesPerFrame;
+        if (maxFrames <= 0) {
+            return 0;
+        }
+        qint16 *out = reinterpret_cast<qint16 *>(data);
+        bool padded = false;
+        std::lock_guard<std::mutex> lk(mtx_);
+        for (qint64 f = 0; f < maxFrames; ++f) {
+            if (countFrames_ > 0) {
+                out[f * 2 + 0] = buf_[static_cast<size_t>(rd_) * 2 + 0];
+                out[f * 2 + 1] = buf_[static_cast<size_t>(rd_) * 2 + 1];
+                rd_ = (rd_ + 1) % capFrames_;
+                --countFrames_;
+            } else {
+                out[f * 2 + 0] = 0;   // underrun -> silence
+                out[f * 2 + 1] = 0;
+                padded = true;
+            }
+        }
+        if (padded) {
+            ++underruns_;
+        }
+        return maxFrames * kBytesPerFrame;   // always full -> sink stays active
+    }
+
+private:
+    static constexpr qint64 kBytesPerFrame = 2 * sizeof(qint16);  // stereo
+    mutable std::mutex  mtx_;
+    std::vector<qint16> buf_;        // interleaved L,R; capFrames_*2
+    int                 capFrames_;
+    int                 rd_ = 0, wr_ = 0, countFrames_ = 0;
+    qint64              overruns_ = 0, underruns_ = 0;
+};
 
 WdspEngine::WdspEngine(WdspNative *wdsp, QObject *parent)
     : QObject(parent), wdsp_(wdsp)
@@ -35,6 +144,8 @@ WdspEngine::WdspEngine(WdspNative *wdsp, QObject *parent)
 
     // fexchange0 output buffer: 2 * outSize_ doubles (interleaved L/R).
     outBuf_.assign(static_cast<size_t>(2 * outSize_), 0.0);
+    // int16 stereo scratch for the audio-ring push (Step 3e).
+    pcm16_.assign(static_cast<size_t>(2 * outSize_), 0);
     // Headroom for one in_size block + a couple of EP6 datagrams so
     // feedIq's append never reallocates in steady state.
     accum_.reserve(static_cast<size_t>(2 * (cfg_.inSize + 128)));
@@ -44,6 +155,16 @@ WdspEngine::WdspEngine(WdspNative *wdsp, QObject *parent)
     levelsTimer_.setInterval(200);
     connect(&levelsTimer_, &QTimer::timeout,
             this, &WdspEngine::levelsChanged);
+
+    // Step 3e: enumerate the operator's PC output devices + default.
+    devices_ = QMediaDevices::audioOutputs();
+    const QAudioDevice def = QMediaDevices::defaultAudioOutput();
+    for (int i = 0; i < devices_.size(); ++i) {
+        if (devices_[i].id() == def.id()) {
+            deviceIndex_ = i;
+            break;
+        }
+    }
 }
 
 WdspEngine::~WdspEngine()
@@ -108,6 +229,12 @@ bool WdspEngine::openRx1()
     // AGC medium.
     api.SetRXAAGCMode(channel_, kAgcModeMed);
 
+    // Step 3e: bring up PC sound-card playback BEFORE running_ goes
+    // true, so feedIq sees a live ring the moment IQ starts flowing.
+    // Non-fatal: if the audio device is missing/unsupported we log and
+    // continue (the dBFS meter still works, just no sound).
+    startAudio();
+
     // Start the channel (state=running, dmode=0).
     api.SetChannelState(channel_, 1, 0);
     running_ = true;
@@ -141,9 +268,115 @@ void WdspEngine::closeRx1()
         emit runningChanged();
     }
     levelsTimer_.stop();
+    stopAudio();
     audioDbFs_.store(-200.0, std::memory_order_relaxed);
     accum_.clear();
     emitLog(QStringLiteral("[wdsp] channel 0 closed"));
+}
+
+bool WdspEngine::startAudio()
+{
+    QAudioFormat fmt;
+    fmt.setSampleRate(cfg_.outRate);
+    fmt.setChannelCount(2);
+    fmt.setSampleFormat(QAudioFormat::Int16);
+
+    if (devices_.isEmpty() ||
+        deviceIndex_ < 0 || deviceIndex_ >= devices_.size()) {
+        emitLog(QStringLiteral(
+            "[wdsp] audio: no output device — playback disabled "
+            "(dBFS meter still live)"));
+        return false;
+    }
+    const QAudioDevice dev = devices_[deviceIndex_];
+    if (!dev.isFormatSupported(fmt)) {
+        emitLog(QStringLiteral(
+            "[wdsp] audio: '%1' does not support 48 kHz/stereo/int16 — "
+            "playback disabled (dBFS meter still live)")
+            .arg(dev.description()));
+        return false;
+    }
+
+    const int capFrames     = cfg_.outRate * kRingMs    / 1000;
+    const int prefillFrames = cfg_.outRate * kPrefillMs / 1000;
+    {
+        std::lock_guard<std::mutex> lk(audioMtx_);
+        if (audioSink_) {
+            return true;  // already up
+        }
+        audioRing_ = new AudioRing(capFrames);
+        audioRing_->prefillSilence(prefillFrames);
+        audioRing_->open(QIODevice::ReadOnly);
+
+        audioSink_ = new QAudioSink(dev, fmt, this);
+        audioSink_->start(audioRing_);   // pull mode
+    }
+
+    emitLog(QStringLiteral(
+        "[wdsp] audio: '%1' @ 48 kHz stereo int16 (ring %2 ms, "
+        "prefill %3 ms) — MUTED, volume %4%%")
+        .arg(dev.description()).arg(kRingMs).arg(kPrefillMs)
+        .arg(static_cast<int>(volume_.load() * 100.0)));
+    return true;
+}
+
+void WdspEngine::stopAudio()
+{
+    // sink->stop() quiesces Qt's audio thread (no more readData) before
+    // we delete the ring; audioMtx_ blocks the RX worker's push().
+    std::lock_guard<std::mutex> lk(audioMtx_);
+    if (audioSink_) {
+        audioSink_->stop();
+        delete audioSink_;
+        audioSink_ = nullptr;
+    }
+    if (audioRing_) {
+        audioRing_->close();
+        delete audioRing_;
+        audioRing_ = nullptr;
+    }
+}
+
+void WdspEngine::setVolume(double v)
+{
+    v = std::clamp(v, 0.0, 1.0);
+    volume_.store(v, std::memory_order_relaxed);
+    emit volumeChanged();
+}
+
+void WdspEngine::setMuted(bool m)
+{
+    muted_.store(m, std::memory_order_relaxed);
+    emit mutedChanged();
+    emitLog(m ? QStringLiteral("[wdsp] audio: muted")
+              : QStringLiteral("[wdsp] audio: unmuted (volume %1%)")
+                    .arg(static_cast<int>(volume_.load() * 100.0)));
+}
+
+QStringList WdspEngine::audioOutputDevices() const
+{
+    QStringList names;
+    for (const QAudioDevice &d : devices_) {
+        names << d.description();
+    }
+    return names;
+}
+
+void WdspEngine::setAudioOutputDevice(int index)
+{
+    if (index < 0 || index >= devices_.size() || index == deviceIndex_) {
+        return;
+    }
+    deviceIndex_ = index;
+    emit audioDeviceChanged();
+    emitLog(QStringLiteral("[wdsp] audio: output device -> %1")
+                .arg(devices_[index].description()));
+    // Live switch: tear the sink down and rebuild on the new device.
+    // (stopAudio/startAudio each take audioMtx_; no nesting here.)
+    if (running_) {
+        stopAudio();
+        startAudio();
+    }
 }
 
 void WdspEngine::feedIq(const double *iq, int nframes)
@@ -181,6 +414,33 @@ void WdspEngine::feedIq(const double *iq, int nframes)
         }
         const double db = (peak > 0.0) ? 20.0 * std::log10(peak) : -200.0;
         audioDbFs_.store(db, std::memory_order_relaxed);
+
+        // Step 3e: apply the operator volume/mute gain, convert to
+        // int16 stereo, and push to the sound-card ring.  audioMtx_
+        // guards audioRing_ against a main-thread device switch /
+        // teardown.  gain = 0 when muted (SAFETY default at startup).
+        {
+            std::lock_guard<std::mutex> lk(audioMtx_);
+            if (audioRing_) {
+                const double gain =
+                    muted_.load(std::memory_order_relaxed)
+                        ? 0.0
+                        : volume_.load(std::memory_order_relaxed);
+                for (int f = 0; f < outSize_; ++f) {
+                    double l = std::clamp(
+                        outBuf_[static_cast<size_t>(2 * f + 0)] * gain,
+                        -1.0, 1.0);
+                    double r = std::clamp(
+                        outBuf_[static_cast<size_t>(2 * f + 1)] * gain,
+                        -1.0, 1.0);
+                    pcm16_[static_cast<size_t>(2 * f + 0)] =
+                        static_cast<qint16>(l * 32767.0);
+                    pcm16_[static_cast<size_t>(2 * f + 1)] =
+                        static_cast<qint16>(r * 32767.0);
+                }
+                audioRing_->push(pcm16_.data(), outSize_);
+            }
+        }
 
         // Drop the consumed block; shift the small remainder down.
         accum_.erase(accum_.begin(),
