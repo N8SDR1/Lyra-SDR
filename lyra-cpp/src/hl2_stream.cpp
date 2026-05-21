@@ -19,6 +19,7 @@
 
 #include <QByteArray>
 #include <QMetaObject>
+#include <QSettings>
 #include <Qt>
 #include <algorithm>
 #include <cmath>
@@ -150,6 +151,12 @@ HL2Stream::HL2Stream(QObject *parent) : QObject(parent) {
     statsTimer_.setInterval(kStatPeriodMs);
     connect(&statsTimer_, &QTimer::timeout,
             this, &HL2Stream::onStatsTick);
+    // Radio memory: restore the last tuned RX1 frequency.  QSettings
+    // resolves to %APPDATA%\N8SDR\Lyra-cpp\ (org/app set in main()
+    // before this object is constructed).
+    rx1FreqHz_.store(
+        QSettings().value(QStringLiteral("rx/freqHz"), 7074000u).toUInt(),
+        std::memory_order_relaxed);
 }
 
 HL2Stream::~HL2Stream() {
@@ -195,6 +202,10 @@ void HL2Stream::open(const QString &ip) {
         .arg(ip).arg(kRadioPort).arg(lport));
 
     statsTimer_.start();
+
+    // Radio memory: remember this radio so the next launch can
+    // auto-connect without a Discover (read in main()).
+    QSettings().setValue(QStringLiteral("radio/lastIp"), ip);
 
     // Spawn RX first so it's already listening when TX sends START.
     // Native UDP sendto + recvfrom on one socket from different
@@ -453,6 +464,7 @@ void HL2Stream::rxWorkerLoop(std::stop_token stop, SocketHandle sh) {
 void HL2Stream::setRx1FreqHz(quint32 hz) {
     const quint32 prev = rx1FreqHz_.exchange(hz, std::memory_order_relaxed);
     if (prev != hz) {
+        QSettings().setValue(QStringLiteral("rx/freqHz"), hz);
         emit rx1FreqChanged();
         emit logLine(QStringLiteral("RX1 -> %1 Hz (%2 MHz)")
                      .arg(hz).arg(hz / 1.0e6, 0, 'f', 6));

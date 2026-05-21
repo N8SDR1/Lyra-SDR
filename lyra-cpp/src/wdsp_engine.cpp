@@ -9,6 +9,7 @@
 #include <QDebug>
 #include <QIODevice>
 #include <QMediaDevices>
+#include <QSettings>
 
 #include <algorithm>
 #include <cmath>
@@ -49,9 +50,10 @@ constexpr int    kPrefillMs  = 50;    // startup silence pre-fill (ms)
 // Step 3e: perceptual volume taper.  Slider position (0..1) -> dB gain
 // so comfortable listening sits mid-slider instead of bunched at the
 // bottom (a linear gain made 8% already loud).  pos=1 -> 0 dB (unity),
-// pos=0.5 -> -30 dB, pos->0 -> silence.  Mirrors the Python dB-volume
-// idiom (CLAUDE.md §15.17).
-constexpr double kMinVolDb = -60.0;
+// pos=0.5 -> -20 dB, pos->0 -> silence.  Floor -40 dB (was -60) so the
+// whole curve is louder per position (operator: "10 should sound like
+// 20").  Mirrors the Python dB-volume idiom (CLAUDE.md §15.17).
+constexpr double kMinVolDb = -40.0;
 
 double posToDb(double pos) {
     return (pos <= 0.0) ? kMinVolDb : kMinVolDb * (1.0 - pos);
@@ -191,6 +193,26 @@ WdspEngine::WdspEngine(WdspNative *wdsp, QObject *parent)
         if (devices_[i].id() == def.id()) {
             deviceIndex_ = i;
             break;
+        }
+    }
+
+    // Radio memory: restore the operator's volume + output device.
+    // muted_ is DELIBERATELY NOT restored — we always start muted so
+    // auto-connect can never auto-blast (operator speaker-damage
+    // history).  Device matched by description; falls back to the
+    // system default (set above) if it's no longer present.
+    QSettings s;
+    volume_.store(std::clamp(
+        s.value(QStringLiteral("audio/volume"), 0.65).toDouble(), 0.0, 1.0),
+        std::memory_order_relaxed);
+    const QString savedDev =
+        s.value(QStringLiteral("audio/deviceName")).toString();
+    if (!savedDev.isEmpty()) {
+        for (int i = 0; i < devices_.size(); ++i) {
+            if (devices_[i].description() == savedDev) {
+                deviceIndex_ = i;
+                break;
+            }
         }
     }
 }
@@ -391,6 +413,7 @@ void WdspEngine::setVolume(double v)
 {
     v = std::clamp(v, 0.0, 1.0);
     volume_.store(v, std::memory_order_relaxed);
+    QSettings().setValue(QStringLiteral("audio/volume"), v);
     emit volumeChanged();
 }
 
@@ -418,6 +441,8 @@ void WdspEngine::setAudioOutputDevice(int index)
         return;
     }
     deviceIndex_ = index;
+    QSettings().setValue(QStringLiteral("audio/deviceName"),
+                         devices_[index].description());
     emit audioDeviceChanged();
     emitLog(QStringLiteral("[wdsp] audio: output device -> %1")
                 .arg(devices_[index].description()));

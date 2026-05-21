@@ -18,6 +18,7 @@
 #include <QQmlContext>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
+#include <QSettings>
 #include <QTimer>
 #include <QtQml>
 
@@ -169,7 +170,7 @@ int main(int argc, char *argv[])
     // observed — only [disc]/[strm], which fire after exec, showed).
     // Posting to the event loop means every [wdsp] line lands in the
     // Log panel exactly like [disc]/[strm].
-    QTimer::singleShot(0, &app, [wdsp, wdspEngine]() {
+    QTimer::singleShot(0, &app, [wdsp, wdspEngine, stream]() {
         if (wdsp->load()) {
             // Step 3c-i: ensure FFTW wisdom is loaded BEFORE the first
             // OpenChannel anywhere.  Without it, WDSP's PATIENT
@@ -187,6 +188,16 @@ int main(int argc, char *argv[])
             // worker -> fexchange0).  The engine's destructor closes
             // the channel at app exit.
             wdspEngine->openRx1();
+        }
+
+        // Radio memory: auto-connect to the last radio so the operator
+        // doesn't have to Discover every launch.  Independent of the
+        // WDSP load above — the RX/wire path works regardless.  If the
+        // radio is off/unreachable the UI just shows "RX stalled".
+        const QString lastIp =
+            QSettings().value(QStringLiteral("radio/lastIp")).toString();
+        if (!lastIp.isEmpty()) {
+            stream->open(lastIp);
         }
     });
 

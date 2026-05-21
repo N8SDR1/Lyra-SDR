@@ -41,6 +41,7 @@
 #include <QTimer>
 #include <QList>
 #include <QSet>
+#include <QVariantMap>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -69,6 +70,19 @@ class HL2Discovery : public QObject {
 public:
     explicit HL2Discovery(QObject *parent = nullptr);
     ~HL2Discovery() override;
+
+    // Radio memory: persist / restore the last opened radio's full
+    // record so launch can show it in the Found-radios list.  Done in
+    // C++ QSettings (not QML's QtCore Settings, whose plugin isn't in
+    // the local deploy) — same store the auto-connect radio/lastIp
+    // uses.  savedRadio() returns a QVariantMap with the same keys the
+    // radioModel uses (ip/mac/boardName/codeVersion/betaVersion/busy/
+    // numRxs); the "ip" key is empty when nothing is remembered.
+    Q_INVOKABLE void rememberRadio(const QString &ip, const QString &mac,
+                                   const QString &boardName,
+                                   int codeVersion, int betaVersion,
+                                   bool busy, int numRxs);
+    Q_INVOKABLE QVariantMap savedRadio() const;
 
 public slots:
     // Fire one discovery sweep.  Safe to call repeatedly; each

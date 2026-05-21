@@ -169,9 +169,9 @@ private:
     AudioRing          *audioRing_ = nullptr;
     QAudioSink         *audioSink_ = nullptr;
     std::vector<qint16> pcm16_;
-    // SAFETY defaults: muted, slider at 0.50 (= -30 dB taper) — first
-    // unmute is clearly audible but well below a blast.
-    std::atomic<double> volume_{0.50};
+    // SAFETY defaults: muted, slider at 0.65 (≈ -21 dB taper) —
+    // comfortable on first unmute, still well below a blast.
+    std::atomic<double> volume_{0.65};
     std::atomic<bool>   muted_{true};
     QList<QAudioDevice> devices_;       // operator's PC output devices
     int                 deviceIndex_ = 0;

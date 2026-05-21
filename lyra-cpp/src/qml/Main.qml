@@ -18,6 +18,18 @@ ApplicationWindow {
     id: root
     width: 1000
     height: 680
+
+    // Radio memory: on launch, if C++ remembers a radio (persisted in
+    // QSettings via Discovery.rememberRadio at Open time), show it in
+    // the Found-radios list so the operator sees what auto-connect
+    // attached to.  Done via the C++ Discovery object — NOT a QML
+    // QtCore Settings element (that plugin isn't in the local deploy).
+    Component.onCompleted: {
+        var r = Discovery.savedRadio()
+        if (r.ip && r.ip.length > 0) {
+            radioModel.append(r)
+        }
+    }
     visible: true
     title: qsTr("Lyra — Hermes Lite 2 / 2+ — v0.0.4 (C++23 / Qt 6)")
 
@@ -44,6 +56,14 @@ ApplicationWindow {
                     statusLabel.text = qsTr("Scanning...")
                     Discovery.scan(1.5, 2)
                 }
+            }
+            // Top-level Stop — disconnect the current radio without a
+            // Found-radios list entry (e.g. after auto-connect on
+            // launch).  Visible only while streaming.
+            Button {
+                text: qsTr("Stop")
+                visible: Stream.running
+                onClicked: Stream.close()
             }
             Label {
                 id: statusLabel
@@ -478,6 +498,14 @@ ApplicationWindow {
                                         Stream.targetIp === ip) {
                                         Stream.close()
                                     } else {
+                                        // Remember this radio's full
+                                        // record (C++ QSettings) for
+                                        // next-launch list restore +
+                                        // auto-connect.
+                                        Discovery.rememberRadio(
+                                            ip, mac, boardName,
+                                            codeVersion, betaVersion,
+                                            busy, numRxs)
                                         Stream.open(ip)
                                     }
                                 }

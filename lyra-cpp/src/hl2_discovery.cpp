@@ -5,6 +5,7 @@
 #include "hl2_discovery.h"
 
 #include <QNetworkInterface>
+#include <QSettings>
 #include <QtEndian>
 #include <QtDebug>
 #include <algorithm>
@@ -25,6 +26,42 @@ QString boardName(int boardId) {
     }
 }
 } // namespace
+
+void HL2Discovery::rememberRadio(const QString &ip, const QString &mac,
+                                 const QString &boardName_,
+                                 int codeVersion, int betaVersion,
+                                 bool busy, int numRxs) {
+    QSettings s;
+    s.beginGroup(QStringLiteral("lastRadio"));
+    s.setValue(QStringLiteral("ip"), ip);
+    s.setValue(QStringLiteral("mac"), mac);
+    s.setValue(QStringLiteral("boardName"), boardName_);
+    s.setValue(QStringLiteral("codeVersion"), codeVersion);
+    s.setValue(QStringLiteral("betaVersion"), betaVersion);
+    s.setValue(QStringLiteral("busy"), busy);
+    s.setValue(QStringLiteral("numRxs"), numRxs);
+    s.endGroup();
+}
+
+QVariantMap HL2Discovery::savedRadio() const {
+    QSettings s;
+    s.beginGroup(QStringLiteral("lastRadio"));
+    QVariantMap m;
+    // Keys match the QML radioModel fields so QML can append directly.
+    m[QStringLiteral("ip")]          = s.value(QStringLiteral("ip"));
+    m[QStringLiteral("mac")]         = s.value(QStringLiteral("mac"));
+    m[QStringLiteral("boardName")]   = s.value(QStringLiteral("boardName"));
+    m[QStringLiteral("codeVersion")] = s.value(QStringLiteral("codeVersion"), 0);
+    m[QStringLiteral("betaVersion")] = s.value(QStringLiteral("betaVersion"), 0);
+    // busy is a LIVE discovery state (another client holds the radio).
+    // The remembered entry can't know it without a fresh sweep, so
+    // never show stale BUSY — Lyra's own connection is conveyed by the
+    // green "connected" border + Close button instead.
+    m[QStringLiteral("busy")]        = false;
+    m[QStringLiteral("numRxs")]      = s.value(QStringLiteral("numRxs"), 0);
+    s.endGroup();
+    return m;
+}
 
 HL2Discovery::HL2Discovery(QObject *parent) : QObject(parent) {
     deadline_.setSingleShot(true);
