@@ -59,6 +59,17 @@ using fn_RXASetPassband_t      = void (*)(int channel,
 using fn_SetRXAAGCMode_t       = void (*)(int channel, int mode);
 using fn_SetRXAPanelBinaural_t = void (*)(int channel, int bin);
 using fn_WDSPwisdom_t          = int  (*)(char *directory);
+// Step 3e level-cal: AGC threshold/slope + panel gain.  SetRXAAGCThresh
+// computes the AGC max_gain from (thresh, size, rate) + the slope-
+// derived var_gain — replacing WDSP's hot create-time default
+// (max_gain = 10000 / 80 dB) that makes the audio overshoot 0 dBFS.
+// SLOPE IS `int` — a `double` binding produces a register-class
+// calling-convention bug on Windows x86_64 (CLAUDE.md §15.26 / the
+// Python v0.0.9.8.1 SetRXAAGCSlope regression).  Do NOT change to double.
+using fn_SetRXAAGCThresh_t     = void (*)(int channel, double thresh,
+                                          double size, double rate);
+using fn_SetRXAAGCSlope_t      = void (*)(int channel, int slope);
+using fn_SetRXAPanelGain1_t    = void (*)(int channel, double gain);
 } // extern "C"
 
 // Resolved function pointers.  Step 3b populates these via
@@ -74,6 +85,9 @@ struct WdspApi {
     fn_SetRXAAGCMode_t       SetRXAAGCMode       = nullptr;
     fn_SetRXAPanelBinaural_t SetRXAPanelBinaural = nullptr;
     fn_WDSPwisdom_t          WDSPwisdom          = nullptr;
+    fn_SetRXAAGCThresh_t     SetRXAAGCThresh     = nullptr;
+    fn_SetRXAAGCSlope_t      SetRXAAGCSlope      = nullptr;
+    fn_SetRXAPanelGain1_t    SetRXAPanelGain1    = nullptr;
 };
 
 class WdspNative : public QObject {

@@ -190,6 +190,9 @@ bool WdspNative::resolveSymbols() {
     resolve(api_.SetRXAAGCMode,       "SetRXAAGCMode");
     resolve(api_.SetRXAPanelBinaural, "SetRXAPanelBinaural");
     resolve(api_.WDSPwisdom,          "WDSPwisdom");
+    resolve(api_.SetRXAAGCThresh,     "SetRXAAGCThresh");
+    resolve(api_.SetRXAAGCSlope,      "SetRXAAGCSlope");
+    resolve(api_.SetRXAPanelGain1,    "SetRXAPanelGain1");
 
     if (!missing.isEmpty()) {
         loadError_ = QStringLiteral(

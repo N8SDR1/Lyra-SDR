@@ -27,6 +27,17 @@ constexpr int    kAgcModeMed = 3;   // AgcMode.MED
 constexpr double kUsbLowHz   = 200.0;
 constexpr double kUsbHighHz  = 3000.0;
 
+// Step 3e level-cal (mirrors the bench-proven Python _open_wdsp_rx).
+// slope 35 -> var_gain = 10^(35/200) ~ 1.5 (WDSP/industry soft-knee);
+// threshold -100 dBFS gives the AGC ~70 dB of headroom to boost weak
+// signals without over-driving the output past 0 dBFS.  size 4096 +
+// the IQ input rate are SetRXAAGCThresh's noise-bandwidth conversion
+// args.  Do NOT also call SetRXAAGCTop — it writes the same max_gain
+// field SetRXAAGCThresh computes and would clobber it.
+constexpr int    kAgcSlope         = 35;
+constexpr double kAgcThreshDbFs    = -100.0;
+constexpr double kAgcThreshFftSize = 4096.0;
+
 // Step 3e audio-ring sizing.  The reference Python SoundDeviceSink
 // pre-fills 100 ms (= 4800 frames @ 48 kHz) because Python/GIL
 // delivered audio in bursty ~43 ms lumps that drained the ring.  The
@@ -229,6 +240,23 @@ bool WdspEngine::openRx1()
     // AGC medium.
     api.SetRXAAGCMode(channel_, kAgcModeMed);
 
+    // Level calibration: replace WDSP's hot create-time AGC default
+    // (max_gain = 10000 / 80 dB, which overshoots 0 dBFS) with a
+    // threshold-computed ceiling.  SetRXAAGCThresh derives max_gain
+    // from (thresh, size, rate) + the slope-derived var_gain; we must
+    // NOT also call SetRXAAGCTop (same field, would clobber).
+    if (api.SetRXAAGCSlope) {
+        api.SetRXAAGCSlope(channel_, kAgcSlope);
+    }
+    if (api.SetRXAAGCThresh) {
+        api.SetRXAAGCThresh(channel_, kAgcThreshDbFs, kAgcThreshFftSize,
+                            static_cast<double>(cfg_.inRate));
+    }
+    // Panel (post-DSP makeup) gain at unity — Thetis default.
+    if (api.SetRXAPanelGain1) {
+        api.SetRXAPanelGain1(channel_, 1.0);
+    }
+
     // Step 3e: bring up PC sound-card playback BEFORE running_ goes
     // true, so feedIq sees a live ring the moment IQ starts flowing.
     // Non-fatal: if the audio device is missing/unsupported we log and
@@ -243,8 +271,8 @@ bool WdspEngine::openRx1()
 
     emitLog(QStringLiteral(
         "[wdsp] channel 0 opened (192k IQ -> 48k audio, USB "
-        "200-3000 Hz, AGC MED, binaural mono); out_size=%1 frames")
-        .arg(outSize_));
+        "200-3000 Hz, AGC MED thr -100 dBFS, binaural mono); "
+        "out_size=%1 frames").arg(outSize_));
     return true;
 }
 
