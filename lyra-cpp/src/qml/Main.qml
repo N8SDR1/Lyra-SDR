@@ -307,10 +307,14 @@ ApplicationWindow {
                     onMoved: WdspEngine.setVolume(value)
                 }
                 Label {
-                    text: Math.round(WdspEngine.volume * 100) + "%"
+                    // dB readout of the perceptual taper (0 dB = unity
+                    // at full slider; floors near -60 dB).
+                    text: WdspEngine.volume <= 0.0
+                          ? qsTr("-∞ dB")
+                          : Math.round(WdspEngine.volumeDb) + qsTr(" dB")
                     color: "#cccccc"
                     font.family: "Consolas"
-                    Layout.preferredWidth: 44
+                    Layout.preferredWidth: 56
                 }
                 Item { Layout.fillWidth: true }
                 Label { text: qsTr("Out"); color: "#999" }

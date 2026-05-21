@@ -73,7 +73,11 @@ class WdspEngine : public QObject {
     // Step 3e: operator audio controls.  SAFETY: starts MUTED at a low
     // default volume so the first listen can never be a full-scale
     // blast (operator-reported speaker damage in the Python tree).
+    // volume is the SLIDER POSITION (0..1); the actual gain is a
+    // perceptual dB taper of it (see wdsp_engine.cpp).  volumeDb is
+    // that position expressed in dB, for the UI readout.
     Q_PROPERTY(double volume      READ volume      NOTIFY volumeChanged)
+    Q_PROPERTY(double volumeDb    READ volumeDb    NOTIFY volumeChanged)
     Q_PROPERTY(bool   muted       READ muted       NOTIFY mutedChanged)
     Q_PROPERTY(int    audioDeviceIndex READ audioDeviceIndex NOTIFY audioDeviceChanged)
 
@@ -88,6 +92,7 @@ public:
     }
 
     double volume() const { return volume_.load(std::memory_order_relaxed); }
+    double volumeDb() const;   // slider position -> dB (for UI readout)
     bool   muted()  const { return muted_.load(std::memory_order_relaxed); }
     int    audioDeviceIndex() const { return deviceIndex_; }
 
@@ -164,8 +169,9 @@ private:
     AudioRing          *audioRing_ = nullptr;
     QAudioSink         *audioSink_ = nullptr;
     std::vector<qint16> pcm16_;
-    // SAFETY defaults: muted at 20% — first listen cannot blast.
-    std::atomic<double> volume_{0.20};
+    // SAFETY defaults: muted, slider at 0.50 (= -30 dB taper) — first
+    // unmute is clearly audible but well below a blast.
+    std::atomic<double> volume_{0.50};
     std::atomic<bool>   muted_{true};
     QList<QAudioDevice> devices_;       // operator's PC output devices
     int                 deviceIndex_ = 0;

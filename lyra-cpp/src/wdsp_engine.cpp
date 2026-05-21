@@ -46,6 +46,23 @@ constexpr double kAgcThreshFftSize = 4096.0;
 constexpr int    kRingMs     = 200;   // ring capacity (ms)
 constexpr int    kPrefillMs  = 50;    // startup silence pre-fill (ms)
 
+// Step 3e: perceptual volume taper.  Slider position (0..1) -> dB gain
+// so comfortable listening sits mid-slider instead of bunched at the
+// bottom (a linear gain made 8% already loud).  pos=1 -> 0 dB (unity),
+// pos=0.5 -> -30 dB, pos->0 -> silence.  Mirrors the Python dB-volume
+// idiom (CLAUDE.md §15.17).
+constexpr double kMinVolDb = -60.0;
+
+double posToDb(double pos) {
+    return (pos <= 0.0) ? kMinVolDb : kMinVolDb * (1.0 - pos);
+}
+
+double posToGain(double pos) {
+    if (pos <= 0.0) return 0.0;
+    if (pos >= 1.0) return 1.0;
+    return std::pow(10.0, posToDb(pos) / 20.0);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------
@@ -342,9 +359,9 @@ bool WdspEngine::startAudio()
 
     emitLog(QStringLiteral(
         "[wdsp] audio: '%1' @ 48 kHz stereo int16 (ring %2 ms, "
-        "prefill %3 ms) — MUTED, volume %4%%")
+        "prefill %3 ms) — MUTED, volume %4 dB")
         .arg(dev.description()).arg(kRingMs).arg(kPrefillMs)
-        .arg(static_cast<int>(volume_.load() * 100.0)));
+        .arg(static_cast<int>(posToDb(volume_.load()))));
     return true;
 }
 
@@ -365,6 +382,11 @@ void WdspEngine::stopAudio()
     }
 }
 
+double WdspEngine::volumeDb() const
+{
+    return posToDb(volume_.load(std::memory_order_relaxed));
+}
+
 void WdspEngine::setVolume(double v)
 {
     v = std::clamp(v, 0.0, 1.0);
@@ -377,8 +399,8 @@ void WdspEngine::setMuted(bool m)
     muted_.store(m, std::memory_order_relaxed);
     emit mutedChanged();
     emitLog(m ? QStringLiteral("[wdsp] audio: muted")
-              : QStringLiteral("[wdsp] audio: unmuted (volume %1%)")
-                    .arg(static_cast<int>(volume_.load() * 100.0)));
+              : QStringLiteral("[wdsp] audio: unmuted (volume %1 dB)")
+                    .arg(static_cast<int>(posToDb(volume_.load()))));
 }
 
 QStringList WdspEngine::audioOutputDevices() const
@@ -453,7 +475,7 @@ void WdspEngine::feedIq(const double *iq, int nframes)
                 const double gain =
                     muted_.load(std::memory_order_relaxed)
                         ? 0.0
-                        : volume_.load(std::memory_order_relaxed);
+                        : posToGain(volume_.load(std::memory_order_relaxed));
                 for (int f = 0; f < outSize_; ++f) {
                     double l = std::clamp(
                         outBuf_[static_cast<size_t>(2 * f + 0)] * gain,
