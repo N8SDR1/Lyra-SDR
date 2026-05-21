@@ -393,9 +393,17 @@ void HL2Stream::rxWorkerLoop(std::stop_token stop, SocketHandle sh) {
         totalDg_.fetch_add(1, std::memory_order_relaxed);
         windowDg_.fetch_add(1, std::memory_order_relaxed);
 
-        // ---- Step 2c: parse DDC0 IQ + accumulate RMS ---------
+        // ---- Step 2c/3d: parse DDC0 IQ -----------------------
         // Two USB frames per datagram at offsets 8 and 520; each
-        // carries 19 sample slots starting at frame-offset 8.
+        // carries 19 sample slots starting at frame-offset 8 = 38
+        // DDC0 IQ frames per datagram.  We (a) accumulate RMS for the
+        // RX1 dBFS readout (Step 2c) and (b) pack interleaved
+        // (I,Q,…) doubles in [-1,1) to hand the DSP engine once per
+        // datagram (Step 3d).  Scaling (b0<<24|b1<<16|b2<<8) * 1/2^31
+        // is byte-identical to the reference HL2 receive parse.
+        constexpr int kFramesPerDatagram = 2 * 19;   // 38
+        double iqScratch[2 * kFramesPerDatagram];
+        int    iqIdx = 0;
         for (int usbFrame = 0; usbFrame < 2; ++usbFrame) {
             const std::uint8_t *frame = u + (usbFrame == 0 ? 8 : 520);
             for (int slot = 0; slot < 19; ++slot) {
@@ -412,6 +420,8 @@ void HL2Stream::rxWorkerLoop(std::stop_token stop, SocketHandle sh) {
                     (static_cast<std::uint32_t>(sb[5]) <<  8));
                 const double iVal = static_cast<double>(iRaw) * kInv2Pow31;
                 const double qVal = static_cast<double>(qRaw) * kInv2Pow31;
+                iqScratch[iqIdx++] = iVal;
+                iqScratch[iqIdx++] = qVal;
                 rmsAcc += iVal * iVal + qVal * qVal;
                 if (++rmsAccCount >= kRmsWindowSamples) {
                     const double meanSq =
@@ -424,6 +434,11 @@ void HL2Stream::rxWorkerLoop(std::stop_token stop, SocketHandle sh) {
                     rmsAccCount = 0;
                 }
             }
+        }
+        // Step 3d: hand this datagram's IQ to the DSP engine inline on
+        // this RX worker thread (no Qt signal / no cross-thread queue).
+        if (iqSink_) {
+            iqSink_(iqScratch, kFramesPerDatagram);
         }
     }
 }

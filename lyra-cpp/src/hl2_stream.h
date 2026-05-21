@@ -72,6 +72,7 @@
 #include <QTimer>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <thread>
 #include <stop_token>
 
@@ -127,6 +128,18 @@ public:
     // initial sentinel -200.0 means "no samples yet."
     double  rx1DbFs()           const { return rx1DbFs_.load(std::memory_order_relaxed); }
 
+    // Step 3d: register a sink for DDC0 baseband IQ.  Called ONCE per
+    // EP6 datagram from the RX worker thread with interleaved
+    // (I,Q,…) doubles in [-1,1) (38 frames/datagram at 192 kHz nddc=4).
+    // The sink runs SYNCHRONOUSLY on the RX worker thread — it is a
+    // plain std::function, NOT a Qt signal, so there is no cross-thread
+    // queueing on the hot path (the DSP engine consumes it inline,
+    // mirroring how Thetis's cmaster pump calls fexchange0).  Must be
+    // set before open() spawns the worker; not changed while running.
+    void setIqSink(std::function<void(const double *, int)> sink) {
+        iqSink_ = std::move(sink);
+    }
+
 public slots:
     // Open the stream to the radio at `ip`.  Creates one native UDP
     // socket, spawns the EP6 RX std::jthread + the EP2 TX std::jthread
@@ -170,6 +183,9 @@ private:
     // is lock-free on x86_64 so the main-thread read in the Q_PROPERTY
     // getter doesn't take a lock.
     std::atomic<double>  rx1DbFs_{-200.0};
+    // Step 3d: DDC0 IQ sink (DSP engine).  Set once before open();
+    // read on the RX worker thread.  Default-empty = no DSP wired.
+    std::function<void(const double *, int)> iqSink_;
     double               dgPerSec_   = 0.0;
     double               txDgPerSec_ = 0.0;
     QString              targetIp_;

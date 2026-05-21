@@ -26,6 +26,11 @@
 
 #include <QObject>
 #include <QString>
+#include <QTimer>
+
+#include <atomic>
+#include <functional>
+#include <vector>
 
 namespace lyra::dsp {
 
@@ -50,7 +55,11 @@ struct RxConfig {
 
 class WdspEngine : public QObject {
     Q_OBJECT
-    Q_PROPERTY(bool running READ isRunning NOTIFY runningChanged)
+    Q_PROPERTY(bool   running   READ isRunning  NOTIFY runningChanged)
+    // Step 3d: peak audio level out of the DSP chain, dBFS.  Sentinel
+    // -200.0 = "no audio produced yet".  Written by the RX worker
+    // thread in feedIq(); sampled by the UI at ~5 Hz via levelsChanged.
+    Q_PROPERTY(double audioDbFs READ audioDbFs  NOTIFY levelsChanged)
 
 public:
     explicit WdspEngine(WdspNative *wdsp, QObject *parent = nullptr);
@@ -58,9 +67,23 @@ public:
 
     bool isRunning() const { return running_; }
 
+    double audioDbFs() const {
+        return audioDbFs_.load(std::memory_order_relaxed);
+    }
+
     // Frames fexchange0 writes per process() call (= in_size *
     // out_rate / in_rate).  Step 3d sizes its output buffer to this.
     int outSize() const { return outSize_; }
+
+    // Step 3d: feed interleaved baseband IQ — (I,Q,I,Q,…) doubles
+    // already normalized to [-1,1) — from the RX worker thread.
+    // Accumulates into in_size blocks; each full block runs
+    // fexchange0 IN-LINE on the caller's thread (block=1 returns as
+    // soon as the DSP thread has the output ready, ~187 calls/sec)
+    // and updates audioDbFs.  MUST be called from a SINGLE thread
+    // (the HL2Stream RX worker) — not thread-safe within the channel.
+    // No audio is played yet (Step 3e); this only measures.
+    void feedIq(const double *iq, int nframes);
 
     // Open RX1 (channel 0), apply the locked first-light config and
     // start the channel.  Idempotent; returns true on success.
@@ -72,6 +95,7 @@ public:
 
 signals:
     void runningChanged();
+    void levelsChanged();
     void logLine(QString line);
 
 private:
@@ -83,6 +107,18 @@ private:
     int         outSize_ = 0;
     bool        opened_  = false;
     bool        running_ = false;
+
+    // Step 3d DSP buffers (all sized in the constructor).
+    // accum_ : interleaved IQ doubles awaiting a full in_size block.
+    // outBuf_: fexchange0 output (2 * outSize_ doubles, L/R).
+    std::vector<double> accum_;
+    std::vector<double> outBuf_;
+    int                 fexErr_ = 0;
+    std::atomic<double> audioDbFs_{-200.0};
+    // 5 Hz UI poll — emits levelsChanged so the QML audioDbFs binding
+    // re-reads the atomic.  Lives on the main thread (WdspEngine is a
+    // main-thread object); started in openRx1, stopped in closeRx1.
+    QTimer              levelsTimer_;
 };
 
 } // namespace lyra::dsp

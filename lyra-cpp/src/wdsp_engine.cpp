@@ -5,6 +5,8 @@
 
 #include <QDebug>
 
+#include <cmath>
+
 namespace lyra::dsp {
 
 namespace {
@@ -30,6 +32,18 @@ WdspEngine::WdspEngine(WdspNative *wdsp, QObject *parent)
     } else {
         outSize_ = cfg_.inSize * (cfg_.outRate / cfg_.inRate);
     }
+
+    // fexchange0 output buffer: 2 * outSize_ doubles (interleaved L/R).
+    outBuf_.assign(static_cast<size_t>(2 * outSize_), 0.0);
+    // Headroom for one in_size block + a couple of EP6 datagrams so
+    // feedIq's append never reallocates in steady state.
+    accum_.reserve(static_cast<size_t>(2 * (cfg_.inSize + 128)));
+
+    // 5 Hz UI poll: emit levelsChanged so the QML audioDbFs binding
+    // re-reads the atomic (mirrors HL2Stream's statsTimer cadence).
+    levelsTimer_.setInterval(200);
+    connect(&levelsTimer_, &QTimer::timeout,
+            this, &WdspEngine::levelsChanged);
 }
 
 WdspEngine::~WdspEngine()
@@ -98,6 +112,7 @@ bool WdspEngine::openRx1()
     api.SetChannelState(channel_, 1, 0);
     running_ = true;
     emit runningChanged();
+    levelsTimer_.start();   // begin the 5 Hz audioDbFs UI poll
 
     emitLog(QStringLiteral(
         "[wdsp] channel 0 opened (192k IQ -> 48k audio, USB "
@@ -125,7 +140,52 @@ void WdspEngine::closeRx1()
         running_ = false;
         emit runningChanged();
     }
+    levelsTimer_.stop();
+    audioDbFs_.store(-200.0, std::memory_order_relaxed);
+    accum_.clear();
     emitLog(QStringLiteral("[wdsp] channel 0 closed"));
+}
+
+void WdspEngine::feedIq(const double *iq, int nframes)
+{
+    // Drop IQ until the channel is live (e.g. samples arriving in the
+    // window between stream-open and the deferred openRx1, or after a
+    // close).  fexchange0 on a closed channel is undefined.
+    if (!running_ || nframes <= 0) {
+        return;
+    }
+    const WdspApi &api = wdsp_->api();
+    if (!api.fexchange0) {
+        return;
+    }
+
+    // Append this datagram's interleaved IQ to the accumulator.
+    accum_.insert(accum_.end(), iq,
+                  iq + static_cast<size_t>(2 * nframes));
+
+    // Drain whole in_size blocks through WDSP.  in_size frames =
+    // 2*in_size interleaved doubles in, 2*outSize_ doubles out.
+    const size_t blockDoubles = static_cast<size_t>(2 * cfg_.inSize);
+    while (accum_.size() >= blockDoubles) {
+        api.fexchange0(channel_, accum_.data(), outBuf_.data(), &fexErr_);
+
+        // Peak |sample| across L+R as the audio-level proxy (Step 3d
+        // is a measurement step — no playback).  20*log10(peak) dBFS.
+        double peak = 0.0;
+        const int outDoubles = 2 * outSize_;
+        for (int i = 0; i < outDoubles; ++i) {
+            const double a = std::fabs(outBuf_[static_cast<size_t>(i)]);
+            if (a > peak) {
+                peak = a;
+            }
+        }
+        const double db = (peak > 0.0) ? 20.0 * std::log10(peak) : -200.0;
+        audioDbFs_.store(db, std::memory_order_relaxed);
+
+        // Drop the consumed block; shift the small remainder down.
+        accum_.erase(accum_.begin(),
+                     accum_.begin() + static_cast<std::ptrdiff_t>(blockDoubles));
+    }
 }
 
 } // namespace lyra::dsp

@@ -144,6 +144,32 @@ ApplicationWindow {
                         font.family: "Consolas"
                         font.bold: true
                     }
+                    // AUDIO dBFS — peak level OUT of the WDSP DSP
+                    // chain (Step 3d).  Proves IQ -> fexchange0 ->
+                    // audio is flowing; rises when tuned onto a
+                    // signal.  No playback yet (that's Step 3e).
+                    // Sentinel -200.0 = "no audio produced yet".
+                    Label {
+                        text: {
+                            if (WdspEngine.audioDbFs <= -190.0) {
+                                return qsTr("AUDIO —.— dBFS")
+                            }
+                            return qsTr("AUDIO ") +
+                                   WdspEngine.audioDbFs.toFixed(1) +
+                                   qsTr(" dBFS")
+                        }
+                        color: {
+                            var v = WdspEngine.audioDbFs
+                            if (v <= -190.0) return "#888"
+                            if (v < -60.0) return "#999"
+                            if (v < -30.0) return "#dddddd"
+                            if (v < -12.0) return "#7fdfff"
+                            if (v <  -3.0) return "#ffd07f"
+                            return "#ff7f7f"
+                        }
+                        font.family: "Consolas"
+                        font.bold: true
+                    }
                     Item { Layout.fillWidth: true }
                     Label {
                         // ~5052 dg/s expected at 192 kHz nddc=4.

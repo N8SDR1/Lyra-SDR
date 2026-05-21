@@ -122,6 +122,15 @@ int main(int argc, char *argv[])
     // loads + wisdom is ensured (below) so the channel-open is fast.
     auto *wdspEngine = new lyra::dsp::WdspEngine(wdsp, &app);
 
+    // Step 3d: route DDC0 baseband IQ from the stream's RX worker
+    // thread into the DSP engine.  Set BEFORE any open() so the worker
+    // sees the sink the moment it starts.  feedIq() runs synchronously
+    // on the RX worker thread (no Qt cross-thread queueing) and guards
+    // internally on the channel being open.
+    stream->setIqSink([wdspEngine](const double *iq, int n) {
+        wdspEngine->feedIq(iq, n);
+    });
+
     // Expose the workers to QML as context properties so Main.qml
     // can bind to their signals + invoke their slots from buttons.
     QQmlApplicationEngine engine;
