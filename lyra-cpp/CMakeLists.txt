@@ -52,6 +52,8 @@ qt_add_executable(lyra
     src/hl2_stream.cpp
     src/wdsp_native.h
     src/wdsp_native.cpp
+    src/wdsp_engine.h
+    src/wdsp_engine.cpp
 )
 
 # QML module — keeps Main.qml inside the binary as a Qt resource so

@@ -33,8 +33,14 @@ ApplicationWindow {
                 text: qsTr("Discover HL2")
                 enabled: !Stream.running
                 onClicked: {
+                    // Refresh the radio LIST, but keep the Log as an
+                    // append-only running history.  Clearing it here
+                    // wiped persistent context (e.g. the [wdsp] channel
+                    // status logged once at startup).  A separator
+                    // keeps repeated scans readable.
                     radioModel.clear()
-                    logArea.text = ""
+                    if (logArea.text.length > 0)
+                        logArea.text += "──── rescan ────\n"
                     statusLabel.text = qsTr("Scanning...")
                     Discovery.scan(1.5, 2)
                 }
@@ -385,6 +391,14 @@ ApplicationWindow {
     // WDSP DLL loader reports here (Step 3a).
     Connections {
         target: Wdsp
+        function onLogLine(line) {
+            logArea.text += line + "\n"
+        }
+    }
+
+    // WDSP RX channel engine reports here (Step 3c-ii).
+    Connections {
+        target: WdspEngine
         function onLogLine(line) {
             logArea.text += line + "\n"
         }

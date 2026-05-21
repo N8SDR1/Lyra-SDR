@@ -9,6 +9,7 @@
 
 #include "hl2_discovery.h"
 #include "hl2_stream.h"
+#include "wdsp_engine.h"
 #include "wdsp_native.h"
 
 #include <QCoreApplication>
@@ -17,6 +18,7 @@
 #include <QQmlContext>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
+#include <QTimer>
 #include <QtQml>
 
 #include <string_view>
@@ -113,6 +115,13 @@ int main(int argc, char *argv[])
     // DSP yet (Step 3c+).
     auto *wdsp = new lyra::dsp::WdspNative(&app);
 
+    // Step 3c-ii: the WDSP RX channel engine.  Owns the lifecycle of
+    // a single WDSP receiver channel (OpenChannel + config + start /
+    // stop + close).  Created here so the QML context-property exists
+    // when Main.qml loads; openRx1() is DEFERRED until after the DLL
+    // loads + wisdom is ensured (below) so the channel-open is fast.
+    auto *wdspEngine = new lyra::dsp::WdspEngine(wdsp, &app);
+
     // Expose the workers to QML as context properties so Main.qml
     // can bind to their signals + invoke their slots from buttons.
     QQmlApplicationEngine engine;
@@ -122,6 +131,8 @@ int main(int argc, char *argv[])
         QStringLiteral("Stream"), stream);
     engine.rootContext()->setContextProperty(
         QStringLiteral("Wdsp"), wdsp);
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("WdspEngine"), wdspEngine);
 
     // Load the QML module's Main.qml entry.  URI 'Lyra' matches
     // qt_add_qml_module() in CMakeLists.txt.
@@ -132,20 +143,34 @@ int main(int argc, char *argv[])
     engine.loadFromModule(QStringLiteral("Lyra"),
                           QStringLiteral("Main"));
 
-    // QML is now loaded — Wdsp's logLine signal is wired to the
-    // log panel.  Safe to attempt the DLL load; the result line
-    // will appear in the UI immediately (DirectConnection,
-    // same-thread).
-    if (wdsp->load()) {
-        // Step 3c-i: ensure FFTW wisdom is loaded BEFORE the first
-        // OpenChannel anywhere.  Without it, WDSP's PATIENT planning
-        // runs in-process on first channel-open and freezes the UI
-        // for several minutes.  ensureWisdom() either imports a
-        // cached file (fast) or spawns a subprocess to build one
-        // (slow but UI stays responsive because the work is in the
-        // child process).
-        wdsp->ensureWisdom();
-    }
+    // Defer the WDSP load / wisdom / channel-open to the FIRST
+    // event-loop iteration via a zero-delay single-shot.  These steps
+    // emit status via logLine signals; if we run them here (before
+    // app.exec()) the QML scene isn't live yet, so the lines reach the
+    // console via qInfo() but NOT the in-UI Log panel (operator-
+    // observed — only [disc]/[strm], which fire after exec, showed).
+    // Posting to the event loop means every [wdsp] line lands in the
+    // Log panel exactly like [disc]/[strm].
+    QTimer::singleShot(0, &app, [wdsp, wdspEngine]() {
+        if (wdsp->load()) {
+            // Step 3c-i: ensure FFTW wisdom is loaded BEFORE the first
+            // OpenChannel anywhere.  Without it, WDSP's PATIENT
+            // planning runs in-process on first channel-open and
+            // freezes the UI for several minutes.  ensureWisdom()
+            // either imports a cached file (fast) or spawns a
+            // subprocess to build one (slow but the work is in the
+            // child process, so the parent doesn't run FFTW_PATIENT
+            // in-process).
+            wdsp->ensureWisdom();
+
+            // Step 3c-ii: with the DLL loaded + wisdom in place, open
+            // RX1 as a live WDSP channel.  Channel-lifecycle proof
+            // only — no IQ flows through it yet (Step 3d wires the RX
+            // worker -> fexchange0).  The engine's destructor closes
+            // the channel at app exit.
+            wdspEngine->openRx1();
+        }
+    });
 
     const int rc = app.exec();
 

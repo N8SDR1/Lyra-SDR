@@ -325,7 +325,8 @@ bool WdspNative::ensureWisdom() {
     // ---- Slow path: no cache, spawn the subprocess builder. ----
     emitLog(QStringLiteral(
         "[wdsp] wisdom: building (one-time, may take several "
-        "minutes — UI stays responsive)…"));
+        "minutes — the window stays unresponsive while planning "
+        "runs; this is normal)…"));
     emitLog(QStringLiteral(
         "[wdsp] wisdom: target dir = %1").arg(dir));
 
