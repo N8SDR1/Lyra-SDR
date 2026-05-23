@@ -89,3 +89,6 @@ scratch/
 # Keep them on-disk but out of the repo: bundles balloon git
 # history because each one is a full repo snapshot.
 _backups/
+
+# Native C++23/Qt6 rebuild now lives in its own repo (Lyra-SDR-cpp)
+lyra-cpp/
