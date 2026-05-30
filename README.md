@@ -1,4 +1,9 @@
 # Lyra — Qt6 SDR Transceiver for Hermes Lite 2 / 2+
+# 🚨 PROJECT MOVED 🚨
+
+This version of the project is no longer maintained. We have restarted and improved the project under a new name!
+
+👉 **Find the new version here: [Lyra-SDR-cpp](https://github.com/N8SDR1/Lyra-SDR-cpp)**
 
 **Current version: 0.1.0-pre2 — "RX2 Dual Receiver"**
 
