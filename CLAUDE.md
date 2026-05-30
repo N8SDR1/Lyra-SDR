@@ -4419,9 +4419,22 @@ front of the radio.
 
 **ESSB architecture flags (baked into v0.2 throughout):**
 
-* TX BW operator-adjustable up to 8 kHz (HL2 wire path supports
-  it; UI surface must allow without warnings unless cutoff goes
-  below 50 Hz where AC-mains harmonics start to bite)
+* TX BW operator-adjustable up to **10 kHz** (bumped from 8 kHz
+  2026-05-30 per operator ask for ultra-wide ESSB headroom; HL2
+  wire path supports it via 48 k EP2 audio Nyquist 24 kHz and
+  WDSP 96 k DSP Nyquist 48 kHz, both well above 10 kHz so 10K is
+  an operator-policy ceiling NOT a wire limit; UI surface must
+  allow without warnings unless cutoff goes below 50 Hz where
+  AC-mains harmonics start to bite).  TX BW lives front-and-
+  center in the **Mode+Filter panel** alongside RX BW with a
+  bidirectional 🔗 Lock button (single toggle = "they track each
+  other in both directions"), mirroring old-Lyra's
+  `ModeFilterPanel` (`lyra/ui/panels.py:1009-1041`).  Per-mode
+  `_tx_bw_by_mode` dict + SSB preset list extends old-Lyra's
+  `[..., 6000, 8000]` to `[..., 6000, 8000, 10000]` (additive —
+  8K stays for bandplan-constrained operators, 10K is the new
+  ultra-wide ESSB option).  See lyra-cpp `docs/architecture/
+  tx1_ssb_design.md` §9.2.A for the full pattern spec.
 * EQ band range extends to 8 kHz so upper-band "shine" lands
   above standard SSB cutoff
 * Combinator crossovers operator-tunable; default ESSB-friendly
